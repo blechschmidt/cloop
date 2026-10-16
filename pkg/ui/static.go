@@ -122,6 +122,10 @@ var bundleFiles = []string{
 	// requests and API tokens waiting on this user. The inbox it opens is
 	// deferred/approvals.js.
 	"assets/js/33-approvals.js",
+	// The hub health indicator in the header (Task 20434): lit for an
+	// administrator while a hub doctor check fails. The panel it opens is
+	// deferred/hubhealth.js, in Settings.
+	"assets/js/34-hubhealth.js",
 	// Last, and it closes the IIFE 00-core.js opened. A fragment appended
 	// after the close lands at global scope, where none of the shared helpers
 	// are visible — see TestDashboard_MainIIFEClosesInLastFragment. Numbered
@@ -174,6 +178,10 @@ var deferredScripts = []struct{ token, path string }{
 	// limits, access, enrollment and upgrades — fetched on the first open of
 	// any of them through panelAct (Task 20386).
 	{"execadmin.js", "assets/js/deferred/execadmin.js"},
+	// Settings → Hub health (Task 20434): the hub doctor's findings, fetched
+	// when an administrator's Settings opens or the header's indicator is
+	// pressed.
+	{"hubhealth.js", "assets/js/deferred/hubhealth.js"},
 }
 
 // pageScripts are scripts a page loads with a script element of its own

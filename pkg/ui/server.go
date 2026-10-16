@@ -511,6 +511,11 @@ type Server struct {
 	diskWasLow  bool
 	diskChecked bool
 
+	// hubHealth caches this member's run of the hub doctor's checks, for
+	// Settings → Hub health and the header's indicator (Task 20434). See
+	// hubhealth.go.
+	hubHealth hubHealthState
+
 	// MaxWebSocketConns caps the total number of concurrent WebSocket
 	// connections accepted across every remote IP. Zero substitutes
 	// config.WebSocketConnsDefault (256). Each accepted upgrade spawns
@@ -1473,6 +1478,9 @@ func (s *Server) Run(ctx context.Context) error {
 	// Every member watches its own state volume against the free-space floor
 	// (Task 20381): each one's disk is its own. See diskfloor.go.
 	go s.watchHubDisk(watcherCtx)
+	// Every member tells its dashboards when the configuration its Hub health
+	// report was computed under changes (Task 20434). See hubhealth.go.
+	go s.watchHubHealthConfig(watcherCtx)
 	// Every member re-reads the project memberships on its own, so a removed
 	// member's streams close here too when the change came from somewhere the
 	// bus does not reach (Task 20366).

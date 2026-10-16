@@ -382,6 +382,15 @@ import (
 // Timeline tab moved onto DEFERRED_TABS to pay for it, markup and code
 // (deferred/timeline.js): 2,472 B. Measured after: 142,064 B. The ceiling
 // stays: 1,936 B of slack.
+//
+// Task 20434 put the hub-health indicator beside it — shown to an
+// administrator while one of the hub doctor's checks fails, so it too has to be
+// on screen before anything is opened. The Settings panel it opens is a
+// deferred script (deferred/hubhealth.js), and what stays resident is the
+// badge's refresh: 450 B wire, 381 B of app.js (34-hubhealth.js, the realtime
+// case and the reconnect refresh) and 69 B of index.html (the badge and the
+// panel's <meta>). The set measured 142,920 B at HEAD; 143,370 B after. The
+// ceiling stays: 630 B of slack.
 const eagerWireBudgetBytes = 144_000
 
 // eagerAsset is one member of the first-paint set.

@@ -275,6 +275,12 @@ var routesSource string
 //go:embed device_forwarders.go
 var deviceForwardersSource string
 
+// hubHealthSource is pkg/ui/hubhealth.go (Task 20434): the hub_health nudge
+// the header's indicator and the Hub health panel re-read the report on.
+//
+//go:embed hubhealth.go
+var hubHealthSource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
@@ -302,7 +308,8 @@ func allUISources() string {
 		"\n" + adoptAPISource +
 		"\n" + streamCredentialsSource +
 		"\n" + approvalsAPISource +
-		"\n" + deviceForwardersSource
+		"\n" + deviceForwardersSource +
+		"\n" + hubHealthSource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

@@ -1872,8 +1872,23 @@
       }).catch(err => toast('Retire failed: ' + ((err && err.message) || err), 'err'));
     }
 
+    // loadHubHealth draws Settings → Hub health (Task 20434), whose panel is
+    // a deferred script of its own: an administrator's Settings is the only
+    // place it is ever drawn.
+    function loadHubHealth() {
+      // Not before /api/me has said: canGlobal assumes everything until it
+      // has, and a viewer's page must not ask for what it would be refused.
+      // The header's indicator draws the section once it knows.
+      if (!h.known() || !canGlobal('config.write')) return;
+      h.panel('hubhealth').then(p => p.load()).catch(() => {
+        const b = document.getElementById('hubHealthBody');
+        if (b) b.textContent = 'The Hub health panel did not load. Open Settings again to retry.';
+      });
+    }
+
     // open runs on every visit to the tab, as switchTab's list used to.
     function open() {
+      loadHubHealth();
       loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadSCIM(); loadStaticToken(); loadTelemetryPolicy();
       loadNotifications();
       loadCIPanel();
@@ -1895,6 +1910,17 @@
     }, 'settings', `
       <div class="section">
         <div class="section-title">Configuration</div>
+
+        <div class="settings-section" id="hubHealthSection" data-global-perm="config.write" data-perm-hide>
+          <h3>Hub health <span id="hubHealthStatus"></span></h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            What <code>cloop hub doctor</code> checks, run by this hub on itself against the configuration it
+            runs under: identity, transport, the sealing key, authorization, image trust, executors, the git
+            proxy and the Kubernetes monitor, egress, storage, the audit trail and admission. A report is at
+            most a minute old, and is made again once the configuration changes.
+          </p>
+          <div id="hubHealthBody"></div>
+        </div>
 
         <div class="settings-section">
           <h3>Default Provider</h3>

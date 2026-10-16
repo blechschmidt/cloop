@@ -45,6 +45,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/feature"
+	"github.com/blechschmidt/cloop/pkg/hubdoctor"
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -357,6 +358,18 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		}}
 		srv.suggestJobs = map[string]*suggestJob{primary: {gen: 1, done: true, result: r, ledger: suggest.NewLedger(r)}}
 	}
+	// A failing hub health check carrying the fixture's content (Task 20434):
+	// Settings → Hub health draws it, and the header's indicator is lit on
+	// every tab.
+	srv.hubHealth.extra = []hubdoctor.Check{{ID: "sweep.fixture", Title: "Reachability of " + s.Device,
+		Run: func(_ context.Context, add func(hubdoctor.Finding)) {
+			add(hubdoctor.Finding{Check: "executors.health", Title: "Executor " + s.Device,
+				Severity:    hubdoctor.SeverityFail,
+				Message:     layoutLong("unreachable:", s.URL, "from", s.RepoPath, "for", s.TaskTitle),
+				Remediation: layoutLong("Restart `cloop executor agent` on", s.Device, "or re-enroll it; see", s.URL),
+				Details: map[string]any{"workspace": s.RepoPath, "contacts": []string{s.Email, s.URL},
+					"image": s.Image}})
+		}}}
 	installQuotas(t, srv, quota.Config{Defaults: quota.Limits{quota.ResProjects: 10}})
 	withControlPlaneDir(t, primary)
 	ts := httptest.NewServer(srv.Handler())

@@ -678,8 +678,10 @@ async function openTab(name) {
 
 const TAB_READY = {
   // The header's approvals badge (Task 20427) counts the fixture's pending
-  // request, so every tab is measured with it showing.
-  'overview': `${hasContent('#goalText', F.project)} && document.getElementById('approvalsBadge').style.display !== 'none'`,
+  // request, and its hub health indicator (Task 20434) the fixture's failing
+  // check, so every tab is measured with both showing.
+  'overview': `${hasContent('#goalText', F.project)} && document.getElementById('approvalsBadge').style.display !== 'none'
+    && document.getElementById('hubHealthBadge').style.display !== 'none'`,
   'tasks': hasContent('#taskListFull', F.taskTitle),
   'queue': hasContent('#queueTable', F.taskTitle),
   'kanban': hasContent('#kanbanBoard', F.riskTaskTitle),
@@ -700,7 +702,8 @@ const TAB_READY = {
   'audit': `document.querySelectorAll('#auditBody .audit-row').length > 0`,
   'quotas': hasContent('#quotaBody', F.email),
   'telemetry': hasContent('#telemetryBody', F.resultMarker),
-  'settings': `${hasContent('#usbList', 'YubiHSM')} && !${hasContent('#buildInfoBody', 'Loading')}`,
+  'settings': `${hasContent('#usbList', 'YubiHSM')} && !${hasContent('#buildInfoBody', 'Loading')}
+    && ${hasContent('#hubHealthBody', F.deviceName)}`,
 };
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────

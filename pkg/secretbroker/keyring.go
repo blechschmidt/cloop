@@ -372,6 +372,17 @@ func PinRoots(current, previous Root) (unpin func()) {
 	return func() { pinnedRoots.Store(prev) }
 }
 
+// PinnedRoots returns the roots PinRoots pinned, and whether any are: what a
+// serving hub's own diagnosis opens its keyring with, rather than resolving
+// a KMS client of its own (Task 20434).
+func PinnedRoots() (current, previous Root, ok bool) {
+	p := pinnedRoots.Load()
+	if p == nil {
+		return Root{}, Root{}, false
+	}
+	return p.current, p.previous, true
+}
+
 // SetRootResolver installs fn as the source of the roots keyrings open with
 // when nothing is pinned, and returns a function that undoes it. A command
 // that reads secrets.kms installs one; fn is called on every such open and

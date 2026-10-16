@@ -44,6 +44,28 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Settings → Hub health: the hub doctor's checks, run by the hub on itself.**
+  `cloop hub doctor` ran only in a shell on the hub host, in its directory, with
+  both configuration files in reach, so an administrator of a Helm or compose
+  deployment never saw a hub CA nearing expiry, audit forwarding falling
+  behind, a lagging edge device or an API token waiting for approval, and
+  nothing said when one started failing. `GET /api/hub/health` (config.write)
+  now runs the same checks inside the serving hub, against the configuration
+  it runs under, overlay included, and names the cluster member that answered.
+  It never runs `--smoke` or `--probe-network-policy`; it answers from what the
+  hub already knows where the shell's doctor asks from outside — the executors
+  it reconciled and its supervisor's record of each, its own sign-in instead of
+  an unauthenticated request to its listener, the KMS clients it pinned — gives
+  every check its own deadline and recovers its panics (`doctor.unfinished`,
+  `doctor.panic`), caches a report for about a minute, makes its six heaviest
+  checks at most every 15 minutes, and computes everything again when the
+  configuration changes. Every value a check wrote is redacted — the exact
+  credentials the configuration and environment hold, then the credential-shape
+  registry — before the Settings panel shows it as text, grouped by severity
+  with its remedy and its runbook section. Administrators get a header
+  indicator while any check fails, refreshed by a `hub_health` push and when
+  the report it read expires, with no poll of its own. Probes now honour
+  `HTTPS_PROXY`, for `cloop hub doctor` too (Task 20434).
 - **The secret store's sealing keys can be held by an external key-management
   service, so a copy of the database and the key file is no longer enough.**
   With `secrets.kms`, every key-encryption key is random and the database keeps

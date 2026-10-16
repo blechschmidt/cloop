@@ -1380,5 +1380,7 @@ func (s *Server) routeTable() []routeSpec {
 	// The review gate's settings (Task 20357), beside the other per-project
 	// run options under /api/options.
 	table = append(table, s.reviewGateRoutes()...)
+	// The hub doctor's checks, run by the hub on itself (Task 20434).
+	table = append(table, s.hubHealthRoutes()...)
 	return append(table, s.iconRoutes()...)
 }

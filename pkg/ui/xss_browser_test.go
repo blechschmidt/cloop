@@ -267,9 +267,12 @@ func TestHostileStrings_EveryControlInBrowser(t *testing.T) {
 			vps = append(vps, v)
 		}
 	}
+	// max_presses bounds one scenario. Settings is the longest: Hub health
+	// (Task 20434) put a dozen controls at its top — a rerun button and a link
+	// per finding — and at 80 the crawl stopped short of the tab's last ones.
 	got := runXSSCrawl(t, node, chrome, ts.URL, map[string]any{
 		"mode": "xss", "viewports": vps, "tabs": layoutTabs, "allow": layoutScrollAllowlist,
-		"fixture": fx, "hostile": hostile("typed"), "max_presses": 80,
+		"fixture": fx, "hostile": hostile("typed"), "max_presses": 120,
 	})
 	pressed, controls := 0, 0
 	for _, s := range got.Scenarios {

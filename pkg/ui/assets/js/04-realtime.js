@@ -322,6 +322,11 @@ function handleRealtimeMsg(type, data, scope) {
       // /api/me decides who sees the banner, so the push only says re-read.
       refreshPermissions();
       break;
+    case 'hub_health':
+      // A hub health report found something the last one did not, or the
+      // configuration it read changed (Task 20434). Carries nothing.
+      refreshHubHealth();
+      break;
     case 'provider_call':
       // pkg/provideraudit pushes one envelope per Provider.Complete with the
       // summary fields (no prompt/response — those come from the detail
@@ -494,8 +499,9 @@ function connectWS() {
     // socket belonged to, so a reconnect for a since-abandoned project must
     // still notice a redeploy.
     if (window.refreshBuildInfo) window.refreshBuildInfo();
-    // What a missed broadcast moved (Task 20427).
+    // What a missed broadcast moved (Tasks 20427, 20434).
     refreshApprovals();
+    refreshHubHealth();
     // A socket for a project the user has already navigated away from must not
     // hydrate the log panel: pUrl() would resolve against the *current*
     // selection, pulling the new project's log on the old project's event.
@@ -580,6 +586,7 @@ function connectSSE() {
     // have missed precisely the case it was written for.
     if (window.refreshBuildInfo) window.refreshBuildInfo();
     refreshApprovals();
+    refreshHubHealth();
     if (!_scopeAccepts(scope)) return;
     api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {

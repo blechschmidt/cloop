@@ -908,6 +908,7 @@ function refreshPermissions() {
       myOIDC = !!me.oidc_enabled;
       applyPermissionGating();
       renderHubDisk(me.hub_disk);
+      hubHealthPerms();
       // The Members card's controls depend on the role just read (Task 20366).
       if (activeTab === 'overview') loadProjectMembers();
       // The same answer re-arms the silent sign-in renewal (32-renew.js): every
