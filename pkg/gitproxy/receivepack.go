@@ -34,14 +34,22 @@ type RefUpdate struct {
 	Ref string
 }
 
+// isZeroSHA reports whether s is the all-zero object name, in SHA-1's 40 hex
+// digits or SHA-256's 64. Comparing against the 40-digit constant alone read a
+// SHA-256 delete as an update, which a policy that allows updates and no
+// deletes then allowed.
+func isZeroSHA(s string) bool {
+	return (len(s) == 40 || len(s) == 64) && strings.Trim(s, "0") == ""
+}
+
 // IsCreate reports whether the ref does not exist yet.
-func (u RefUpdate) IsCreate() bool { return u.Old == zeroSHA && u.New != zeroSHA }
+func (u RefUpdate) IsCreate() bool { return isZeroSHA(u.Old) && !isZeroSHA(u.New) }
 
 // IsDelete reports whether the push removes the ref.
-func (u RefUpdate) IsDelete() bool { return u.New == zeroSHA }
+func (u RefUpdate) IsDelete() bool { return isZeroSHA(u.New) }
 
 // IsUpdate reports whether an existing ref moves to a new commit.
-func (u RefUpdate) IsUpdate() bool { return u.Old != zeroSHA && u.New != zeroSHA }
+func (u RefUpdate) IsUpdate() bool { return !isZeroSHA(u.Old) && !isZeroSHA(u.New) }
 
 // Action names the authority this update needs, for policy and for audit rows.
 func (u RefUpdate) Action() string {
@@ -200,7 +208,7 @@ func parseCommand(line string) (RefUpdate, error) {
 	if !validObjectName(u.Old) || !validObjectName(u.New) {
 		return RefUpdate{}, fmt.Errorf("%w: command line has a malformed object name", errBadPktLine)
 	}
-	if u.Old == zeroSHA && u.New == zeroSHA {
+	if isZeroSHA(u.Old) && isZeroSHA(u.New) {
 		// Deleting a ref that does not exist. Harmless upstream, but it is not
 		// a shape any of the three authorities describes, so it is not one this
 		// proxy will pass along.

@@ -12,6 +12,10 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **The git proxy reads a SHA-256 push's all-zero object id as zero.** It
+  compared against SHA-1's forty zeros only, so a SHA-256 repository's delete
+  read as an update — which a session that may update and not delete then
+  allowed — and its create as an update too (Task 20436).
 - **A sandboxed run's Claude credential can stay on the hub: the model relay.**
   With `executors.model_relay` on — it is off by default — a `claudecode` or
   `anthropic` run on a container, a Pod, an enrolled device or a virtual
