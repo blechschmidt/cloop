@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -431,7 +432,12 @@ func TestHubHealth_FollowsTheOverlay(t *testing.T) {
 	}
 }
 
-// healthProbeExecutor counts the liveness probes made of it directly.
+// healthProbeExecutor counts the liveness probes the hub-health report makes
+// of it, and only those. The package's tests share executor.DefaultRegistry,
+// and the process's fleet supervisor (startExecutorSupervisor), started by
+// whichever test's hub came first, probes everything registered there on a
+// schedule of its own: in CI it probed these between a test's setup and its
+// assertions, once each.
 type healthProbeExecutor struct {
 	stubExecutor
 	id     string
@@ -440,8 +446,27 @@ type healthProbeExecutor struct {
 
 func (e *healthProbeExecutor) ID() string { return e.id }
 func (e *healthProbeExecutor) HealthCheck(context.Context) error {
-	e.probes.Add(1)
+	if probedByHubHealthReport() {
+		e.probes.Add(1)
+	}
 	return nil
+}
+
+// probedByHubHealthReport reports whether the report's own probe — the
+// function Server.hubHealthProbe returns — is on the calling goroutine's
+// stack.
+func probedByHubHealthReport() bool {
+	pc := make([]uintptr, 64)
+	frames := runtime.CallersFrames(pc[:runtime.Callers(2, pc)])
+	for {
+		f, more := frames.Next()
+		if strings.Contains(f.Function, ".(*Server).hubHealthProbe.") {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
 }
 
 // TestHubHealth_ExecutorsFromTheSupervisorsRecord: the report's liveness
