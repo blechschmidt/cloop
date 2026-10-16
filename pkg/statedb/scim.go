@@ -16,6 +16,7 @@
 package statedb
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -970,10 +971,15 @@ type SCIMDirectoryGroup struct {
 }
 
 // LoadSCIMDirectory reads the whole directory at one version.
+//
+// A read-only transaction: one snapshot for the version and the rows, without
+// the writer's lock a plain Begin takes under the connection policy's
+// immediate mode — which every reader of the directory, the hub's health
+// report among them, would otherwise contend for with the SCIM writes.
 func (d *DB) LoadSCIMDirectory() (SCIMDirectory, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	tx, err := d.conn.Begin()
+	tx, err := d.conn.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return SCIMDirectory{}, fmt.Errorf("statedb: load scim directory: %w", classifyDriverErr(err))
 	}

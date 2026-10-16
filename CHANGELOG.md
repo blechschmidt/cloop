@@ -85,6 +85,16 @@ schema and the hub's HTTP API may change in any release.
   labels the hub records for the executor it dry-runs, and
   `cloop egress test --to executor:<id>` tests with them (Task 20432).
 
+### Fixed
+
+- **Reading the provisioned directory no longer takes the database's write
+  lock.** The SCIM directory was read inside a plain transaction, which the
+  connection policy begins `IMMEDIATE`, so every reader of it — the hub's
+  version checks, `cloop hub doctor`'s `scim.directory` — queued behind and
+  blocked the hub's writers for the length of the read. It is now a read-only
+  transaction: the same consistent snapshot, without the writer's lock
+  (Task 20434).
+
 ## [0.0.6] - 2026-10-16
 
 The release that carries the security fixes `main` has made since 0.0.5 — GitHub
