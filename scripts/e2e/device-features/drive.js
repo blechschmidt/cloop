@@ -17,6 +17,9 @@
 //   upgrade <executor-id>                              press Upgrade, accept what it offers, report the toast
 //   start [project-path]                               press Start run on its Tasks tab
 //   tasks [project-path]                               list the Tasks tab, completed included
+//   blocked <task-id> [shots-dir]                      the firewall card's Recently blocked list,
+//                                                      its first Propose allow rule pressed, and the
+//                                                      task's Network section (Task 20437)
 //   debug                                              list the project grid
 // Prints one JSON document on stdout describing what the page showed.
 
@@ -356,6 +359,57 @@ async function stepUpgradeDialog(cdp, exID, accept) {
   result.toast = toast;
 }
 
+// shot saves a PNG of the element sel, for the record.
+async function shot(cdp, sel, file) {
+  if (!file) return;
+  const r = await cdp.eval(`(() => { const e = document.querySelector(${JSON.stringify(sel)});
+    if (!e) return null; e.scrollIntoView({block: 'start'}); window.scrollBy(0, -140); const b = e.getBoundingClientRect();
+    return {x: b.left + window.scrollX, y: b.top + window.scrollY, width: b.width, height: b.height}; })()`);
+  if (!r || !r.width) return;
+  const png = await cdp.send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true,
+    clip: {x: r.x, y: r.y, width: r.width, height: Math.min(r.height, 4000), scale: 1}});
+  fs.writeFileSync(file, Buffer.from(png.data, 'base64'));
+}
+
+// stepBlocked reads what the project's runs were refused, as the dashboard
+// shows it (Task 20437): the firewall card's list, the hub's answer to its first
+// Propose allow rule — a save checked against the governing rules like any
+// other — and the task's Network section.
+async function stepBlocked(cdp, taskID, shots) {
+  await openProject(cdp, PROJECT);
+  await waitFor(cdp, `document.querySelectorAll('#pfwBlocked li').length > 0
+    || ((document.getElementById('pfwBlocked') || {}).textContent || '').length > 20`, 'the Recently blocked list');
+  result.blocked = await cdp.eval(`[...document.querySelectorAll('#pfwBlocked li')]
+    .map(e => e.textContent.replace(/\\s+/g, ' ').trim())`);
+  result.blocked_note = await text(cdp, '#pfwBlocked .form-hint');
+  await shot(cdp, '#projectFirewallPanel', shots && path.join(shots, 'firewall-card-recently-blocked.png'));
+  if (await cdp.eval(`!!document.querySelector('#pfwBlocked button[data-net="propose"]')`)) {
+    cdp.events.length = 0;
+    const clicking = click(cdp, '#pfwBlocked button[data-net="propose"]').catch(() => {});
+    const deadline = Date.now() + 15000;
+    let dlg = null;
+    while (!dlg && Date.now() < deadline) {
+      dlg = cdp.events.find(e => e.method === 'Page.javascriptDialogOpening');
+      if (!dlg) await sleep(100);
+    }
+    if (!dlg) throw new Error('Propose allow rule opened no confirmation');
+    result.proposal = dlg.params.message;
+    await cdp.send('Page.handleJavaScriptDialog', {accept: true});
+    await clicking;
+    await waitFor(cdp, `((document.getElementById('pfwBlockedNote') || {}).textContent || '').length > 0
+      || (window.__toastLog || []).some(t => t.startsWith('Allowed '))`, 'the hub to answer the proposal');
+    result.proposal_refusal = await text(cdp, '#pfwBlockedNote');
+    result.toasts = await toasts(cdp);
+    await shot(cdp, '#projectFirewallPanel', shots && path.join(shots, 'firewall-card-proposal-answer.png'));
+  }
+  await cdp.eval(`window.switchTab('tasks')`);
+  await cdp.eval(`window.openTaskDetails(${Number(taskID)})`);
+  await waitFor(cdp, `document.querySelectorAll('#td-net li').length > 0
+    || ((document.getElementById('td-net') || {}).textContent || '').length > 20`, "the task's Network section");
+  result.network = await cdp.eval(`((document.getElementById('td-net') || {}).innerText || '').trim()`);
+  await shot(cdp, '#td-net', shots && path.join(shots, 'task-details-network.png'));
+}
+
 async function main() {
   const {cdp, kill, dir} = await launchChrome();
   try {
@@ -368,6 +422,7 @@ async function main() {
       case 'upgrade-dialog': await stepUpgradeDialog(cdp, ARGS[0], false); break;
       case 'upgrade': await stepUpgradeDialog(cdp, ARGS[0], true); break;
       case 'start': await stepStart(cdp, ARGS[0] || PROJECT); break;
+      case 'blocked': await stepBlocked(cdp, ARGS[0] || '1', ARGS[1]); break;
       case 'tasks':
         // The task list as the Tasks tab shows it, completed tasks included.
         await openProject(cdp, ARGS[0] || PROJECT);
