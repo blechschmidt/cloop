@@ -109,6 +109,13 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A refusal Claude Code words as a failed sign-in is no longer retried as
+  one.** Claude Code prints "Failed to authenticate" for a `403` as for a
+  `401`, so the `claudecode` provider refreshed the credential and launched the
+  CLI a second time for refusals a refresh cannot change — the model relay's
+  spent budget among them — and reported them as authentication failures
+  "retried once after refreshing credentials". A `403` is now reported once,
+  as the refusal it is (Task 20435).
 - **Reading the provisioned directory no longer takes the database's write
   lock.** The SCIM directory was read inside a plain transaction, which the
   connection policy begins `IMMEDIATE`, so every reader of it — the hub's

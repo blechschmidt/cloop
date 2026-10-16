@@ -721,6 +721,10 @@ func TestClassifyCLIError(t *testing.T) {
 		// is transient and a retry is exactly right.
 		{"401 with html body", "Failed to authenticate. API Error: 401 <html><head><title>502 Bad Gateway</title></head></html>", cliErrorAuth},
 		{"403 scope", "API Error: 403 oauth_scope_insufficient", cliErrorOther},
+		// Claude Code words a 403 as an authentication failure too; a fresh
+		// credential cannot change the model relay's budget refusal.
+		{"403 worded as an authentication failure", "Failed to authenticate. API Error: 403 the daily token " +
+			"budget (daily_token_budget) of 100000 tokens for local is spent", cliErrorOther},
 		{"429", "API Error: 429 rate limited", cliErrorOther},
 		{"502", "API Error: 502 Bad Gateway", cliErrorOther},
 		{"html page", "<!doctype html><html></html>", cliErrorOther},

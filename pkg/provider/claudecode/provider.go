@@ -569,13 +569,19 @@ const (
 // classifyCLIError inspects the combined stdout/stderr for a recognised
 // API-side failure and reports which kind it is.
 //
-// Auth markers are tested first and deliberately win over the others: the CLI
-// has been observed emitting "Failed to authenticate. API Error: 401" with an
-// upstream HTML 502 body attached, and that is a transient auth failure worth
-// retrying, not an HTML error page worth giving up on.
+// Auth markers deliberately win over the others: the CLI has been observed
+// emitting "Failed to authenticate. API Error: 401" with an upstream HTML 502
+// body attached, and that is a transient auth failure worth retrying, not an
+// HTML error page worth giving up on. A 403 is the exception: the CLI words it
+// "Failed to authenticate" too, and refreshing cannot change a refusal.
 func classifyCLIError(output string) cliErrorKind {
 	lower := strings.ToLower(output)
 	switch {
+	// Claude Code words a 403 "Failed to authenticate" as well, but a refusal
+	// is not a lost refresh race: a fresh credential is refused the same way.
+	// The hub's model relay refuses a spent budget with one (Task 20435).
+	case strings.Contains(lower, "api error: 403") && !strings.Contains(lower, "api error: 401"):
+		return cliErrorOther
 	case strings.Contains(lower, "failed to authenticate"),
 		strings.Contains(lower, "invalid authentication credentials"),
 		strings.Contains(lower, "authentication_error"),
