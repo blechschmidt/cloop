@@ -895,6 +895,31 @@ func RequestingExecutor(ctx context.Context, fallback string) string {
 	return fallback
 }
 
+// dispatchRunKey carries WithDispatchRun's run id on a context.
+type dispatchRunKey struct{}
+
+// WithDispatchRun marks ctx as a dispatch of run runID — the Spec's
+// LabelRunID — so what a credential source mints for it names the run: a
+// workspace's git proxy session, whose pushes are scanned for the credentials
+// that run was given (Task 20436).
+func WithDispatchRun(ctx context.Context, runID string) context.Context {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, dispatchRunKey{}, runID)
+}
+
+// DispatchRun returns the run id WithDispatchRun put on ctx, or "".
+func DispatchRun(ctx context.Context) string {
+	if ctx != nil {
+		if id, ok := ctx.Value(dispatchRunKey{}).(string); ok {
+			return id
+		}
+	}
+	return ""
+}
+
 // --- audit ------------------------------------------------------------------
 
 // WorkspaceEventPhase distinguishes the two rows one provisioning produces.

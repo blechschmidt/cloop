@@ -239,6 +239,11 @@ func (s *Source) ForWorkspace(ctx context.Context, projectID string, w executor.
 		// bound the project to.
 		ExecutorID: executor.RequestingExecutor(ctx, s.ExecutorID),
 		Actor:      s.Actor,
+		// The run the dispatch is for, when the driver said: the session's
+		// pushes — the run's write-back among them — are scanned for the
+		// credentials that run was given (Task 20436), and a restore finds
+		// them by it.
+		RunID: executor.DispatchRun(ctx),
 		// The inner lease stands behind the session's upstream credential, so
 		// it goes when the session does and not a moment before.
 		OnEnd: release,

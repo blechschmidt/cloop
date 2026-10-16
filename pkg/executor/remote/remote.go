@@ -819,13 +819,15 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// holds the material, and a lease left open here is a credential the broker
 	// believes is still out in the world. The release is deferred rather than
 	// called at each exit because there are six of them below.
-	leaseCtx := ctx
+	// Named with its run, so the pinned session minted for the workspace scans
+	// the run's write-back push for what the run was given (Task 20436).
+	leaseCtx := executor.WithDispatchRun(ctx, spec.Labels[executor.LabelRunID])
 	if virtual != nil {
 		// Leased as the virtual executor, which is what the grant chosen
 		// before this dispatch was matched against. Leased as this device, a
 		// grant issued to the virtual executor was chosen and then missing
 		// from the lease (Task 20349).
-		leaseCtx = executor.WithRequestingExecutor(ctx, virtual.ID)
+		leaseCtx = executor.WithRequestingExecutor(leaseCtx, virtual.ID)
 	}
 	access, releaseCred, credErr := e.leaseWorkspace(leaseCtx, spec)
 	// Given back as soon as the agent has the material — unless a push

@@ -302,7 +302,11 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 	if e.opts.Workspace != nil {
 		var err error
 		var access executor.WorkspaceAccess
-		access, release, err = e.opts.Workspace.ForWorkspace(ctx, projectPath, spec.Workspace)
+		// Named with its run, so the session the workspace is fetched — and
+		// written back — through scans its pushes for what the run was given
+		// (Task 20436).
+		runCtx := executor.WithDispatchRun(ctx, spec.Labels[executor.LabelRunID])
+		access, release, err = e.opts.Workspace.ForWorkspace(runCtx, projectPath, spec.Workspace)
 		cred = access.Credential
 		st.routed = access.Apply(spec.Workspace)
 		if release == nil {

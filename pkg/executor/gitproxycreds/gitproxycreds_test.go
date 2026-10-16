@@ -843,3 +843,24 @@ func TestReapedSessionReleasesTheInnerLease(t *testing.T) {
 		t.Fatalf("reaping the session released the inner lease %d times, want 1", inner.releases)
 	}
 }
+
+// TestTheWorkspaceSessionNamesItsRun: a driver that says which run it is
+// dispatching gets a session that names the run, so the run's write-back push
+// is scanned for the credentials that run was given (Task 20436).
+func TestTheWorkspaceSessionNamesItsRun(t *testing.T) {
+	reg := newRegistry(t, time.Time{})
+	src := newSource(t, &fakeInner{access: patAccess()}, reg, 0)
+	ctx := executor.WithDispatchRun(context.Background(), "run_20436")
+	_, release, err := src.ForWorkspace(ctx, "proj-1", gitWorkspace())
+	if err != nil {
+		t.Fatalf("ForWorkspace = %v", err)
+	}
+	defer release()
+	sessions := reg.Sessions()
+	if len(sessions) != 1 || sessions[0].RunID != "run_20436" {
+		t.Fatalf("sessions = %+v, want one naming run_20436", sessions)
+	}
+	if executor.DispatchRun(context.Background()) != "" || executor.DispatchRun(executor.WithDispatchRun(ctx, " ")) != "run_20436" {
+		t.Fatal("WithDispatchRun keeps or drops the wrong id")
+	}
+}
