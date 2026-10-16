@@ -264,7 +264,7 @@ docs-check:
 ## against *cloop* (the callback route, the role ladder, the config keys),
 ## which Terraform cannot check and Go can. These gate it against itself.
 TF ?= terraform
-TF_MODULES := deploy/terraform/azure-entra-id
+TF_MODULES := deploy/terraform/azure-entra-id deploy/terraform/azure-entra-id/modules/key-vault-kms
 
 terraform-validate:
 	@command -v $(TF) >/dev/null 2>&1 || { \

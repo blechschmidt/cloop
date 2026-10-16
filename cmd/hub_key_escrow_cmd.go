@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/keyescrow"
 	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -259,6 +261,7 @@ func runEscrowExport(w io.Writer, o escrowOptions) error {
 			"  everything onto this key and retires them, after which only this escrow recovers the hub\n",
 			hub.ByPrevious, rootkey.EnvPrevious)
 	}
+	printKMSHeld(w, hub)
 	fmt.Fprintln(w)
 	dim.Fprintln(w, "Keep the file where you keep root credentials, off this host, and the passphrase")
 	dim.Fprintln(w, "somewhere else again. Rehearse recovery with:")
@@ -332,6 +335,8 @@ func runEscrowVerify(w io.Writer, o escrowOptions) int {
 	case len(hub.Missing) > 0:
 		fail.Fprintf(w, "WRONG HUB      it does not open this hub's sealing keys %s\n", strings.Join(hub.Missing, ", "))
 		code = 1
+	case hub.Keys == 0 && len(hub.KMSHeld) > 0:
+		color.New(color.Faint).Fprintln(w, "               no sealing key of this hub derives from a passphrase")
 	case hub.Keys == 0:
 		color.New(color.Faint).Fprintln(w, "               this hub has no sealing key yet")
 	case hub.ByPrevious > 0:
@@ -341,6 +346,7 @@ func runEscrowVerify(w io.Writer, o escrowOptions) int {
 	default:
 		pass.Fprintf(w, "OPENS THE HUB  it derives all %d of this hub's live sealing keys\n", hub.Keys)
 	}
+	printKMSHeld(w, hub)
 	switch rec := hub.Record; {
 	case !hub.Recorded:
 		warn.Fprintln(w, "NOT ON RECORD  the hub records no escrow (pass --record to record this one)")
@@ -353,7 +359,7 @@ func runEscrowVerify(w io.Writer, o escrowOptions) int {
 	}
 
 	if o.Record {
-		if code != 0 || hub.Keys == 0 {
+		if code != 0 || (hub.Keys == 0 && len(hub.KMSHeld) == 0) {
 			fail.Fprintln(w, "Not recorded: only an escrow proven to open this hub's sealing keys is recorded.")
 			return 1
 		}
@@ -519,6 +525,10 @@ type escrowHub struct {
 	Keys       int
 	Missing    []string
 	ByPrevious int
+	// KMSHeld counts the live keys held by a KMS, by its name (Task 20433):
+	// no passphrase opens them, so an escrow of one does not recover them —
+	// they are neither missing nor opened.
+	KMSHeld map[string]int
 	// Record is the escrow the hub records, when Recorded.
 	Record   keyescrow.Record
 	Recorded bool
@@ -542,10 +552,17 @@ func escrowKeyOpensHub(dbPath string, key, previous []byte) (escrowHub, error) {
 	}
 	records := make([]secretbroker.KEKRecord, 0, len(facts.KEKs))
 	for _, row := range facts.KEKs {
-		records = append(records, secretbroker.KEKRecord{ID: row.ID, Salt: row.Salt, State: row.State, CheckValue: row.CheckValue})
+		records = append(records, secretstore.KEKFromRow(row))
 	}
-	for _, c := range secretbroker.CheckKeys([]string{string(key), string(previous)}, records) {
+	for _, c := range secretbroker.CheckKeys([]secretbroker.Root{secretbroker.PassphraseRoot(string(key)), secretbroker.PassphraseRoot(string(previous))}, records) {
 		if c.Retired {
+			continue
+		}
+		if c.KMS != "" {
+			if out.KMSHeld == nil {
+				out.KMSHeld = map[string]int{}
+			}
+			out.KMSHeld[c.KMS]++
 			continue
 		}
 		out.Keys++
@@ -560,6 +577,25 @@ func escrowKeyOpensHub(dbPath string, key, previous []byte) (escrowHub, error) {
 	// The record is informational; the key check above is the answer.
 	out.Record, out.Recorded, _ = keyescrow.ReadRecord(conn)
 	return out, nil
+}
+
+// printKMSHeld says which of the hub's keys an escrow of CLOOP_SECRET_KEY does
+// not recover because a KMS holds them (Task 20433), and what does.
+func printKMSHeld(w io.Writer, hub escrowHub) {
+	if len(hub.KMSHeld) == 0 {
+		return
+	}
+	names := make([]string, 0, len(hub.KMSHeld))
+	for name := range hub.KMSHeld {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		color.New(color.FgYellow, color.Bold).Fprintf(w, "KMS-HELD       %d sealing key(s) are held by the KMS %s: this "+
+			"escrow does not recover them —\n               only access to that KMS key does. It still recovers "+
+			"the audit checkpoint key,\n               backup sidecar seals and any key that derives from %s\n",
+			hub.KMSHeld[name], name, keyescrow.EnvKey)
+	}
 }
 
 // recordEscrow records f as the hub's escrow, and says so in the audit trail.

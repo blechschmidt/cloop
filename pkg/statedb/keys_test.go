@@ -214,11 +214,11 @@ func TestSealedCompareAndSwapComparesBytes(t *testing.T) {
 
 // TestRetirementLeavesNothingOfTheKeyInTheFile. Blanking a column leaves the
 // bytes it held in the page's free space unless secure_delete zeroes them, and
-// a copy of the file would still give up a retired key's salt — and, with
-// CLOOP_SECRET_KEY, the key (Task 20433). After retiring, and the last handle
-// closing (which checkpoints and removes the log), neither the salt nor the
-// check value is anywhere in the file; a live key's salt, which retirement
-// does not touch, still is — the positive control.
+// a copy of the file would still give up a retired key's salt — or the KMS
+// ciphertext the KMS would still unwrap (Task 20433). After retiring, and the
+// last handle closing (which checkpoints and removes the log), neither is
+// anywhere in the file; the KMS wrapping of a live key, which retirement does
+// not touch, still is — the positive control.
 func TestRetirementLeavesNothingOfTheKeyInTheFile(t *testing.T) {
 	path := freshPath(t)
 	db, err := Open(path)
@@ -227,13 +227,15 @@ func TestRetirementLeavesNothingOfTheKeyInTheFile(t *testing.T) {
 	}
 	const (
 		retiredSalt = "5a17c0ffee5a17c0ffee5a17c0ffee5a17c0ffee5a17c0ffee5a17c0ffee5a17"
-		liveSalt    = "11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae11ae"
+		liveSalt    = "11ve11ve11ve11ve"
 	)
+	retiredCT := []byte("vault:v1:retired-kms-ciphertext-that-must-not-survive")
+	liveCT := []byte("vault:v1:live-kms-ciphertext-that-stays")
 	for _, row := range []KEKRow{
 		{ID: "kek_retired", Salt: retiredSalt, State: "active", CheckValue: []byte("check-of-the-retired-key"),
-			CreatedAt: "2026-01-01T00:00:00Z"},
+			CreatedAt: "2026-01-01T00:00:00Z", Wrap: "kms", KMSKeyID: "transit/cloop:v1", KMSCiphertext: retiredCT},
 		{ID: "kek_live", Salt: liveSalt, State: "primary", CheckValue: []byte("check-of-the-live-key"),
-			CreatedAt: "2026-01-02T00:00:00Z"},
+			CreatedAt: "2026-01-02T00:00:00Z", Wrap: "kms", KMSKeyID: "transit/cloop:v1", KMSCiphertext: liveCT},
 	} {
 		if err := db.PutKEK(row); err != nil {
 			t.Fatal(err)
@@ -250,12 +252,12 @@ func TestRetirementLeavesNothingOfTheKeyInTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for what, b := range map[string][]byte{"the retired salt": []byte(retiredSalt),
-		"the retired check value": []byte("check-of-the-retired-key")} {
+		"the retired KMS ciphertext": retiredCT, "the retired check value": []byte("check-of-the-retired-key")} {
 		if bytes.Contains(data, b) {
 			t.Errorf("%s is still in the file after retirement", what)
 		}
 	}
-	if !bytes.Contains(data, []byte(liveSalt)) {
-		t.Error("the live key's salt is not in the file: the scan is not reading what it should")
+	if !bytes.Contains(data, liveCT) {
+		t.Error("the live key's KMS ciphertext is not in the file: the scan is not reading what it should")
 	}
 }

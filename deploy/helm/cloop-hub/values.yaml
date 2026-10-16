@@ -320,6 +320,129 @@ secrets:
   #  - secretRef:
   #      name: cloop-provider-keys
 
+# ── Key-management service ──────────────────────────────────────────────────
+# Hold the secret store's key-encryption keys in an external key-management
+# service instead of deriving them from CLOOP_SECRET_KEY (secrets.kms,
+# Task 20433). Each key is then random, and the hub's database keeps only the
+# KMS's ciphertext of it: a copy of the volume and of the Secret above opens
+# nothing without the KMS, every unwrap is a call the KMS logs, and taking the
+# hub's access away is done at the KMS. docs/operations/runbook.md, "Keys in a
+# KMS", has the procedure; the summary:
+#
+#   1. Turn this on with movingFromPassphrase: true and roll the Pods. Every
+#      replica opens the store with both roots; the primary key stays the
+#      passphrase's until step 2, so the change can be backed out.
+#   2. In a Pod: cloop hub key rotate --retire-previous
+#   3. Set movingFromPassphrase: false and roll the Pods.
+#
+# CLOOP_SECRET_KEY stays: it still seals the audit checkpoints, backup sidecars
+# and the escrow. A hub whose KMS cannot be reached refuses to start, after
+# waiting startupTimeout for it — it never falls back to the passphrase.
+kms:
+  enabled: false
+
+  # kmsv2: a Kubernetes KMS v2 plugin — the one Azure Key Vault, AWS KMS,
+  #        Google Cloud KMS and Vault each publish for the API server's own
+  #        encryption at rest — run as a sidecar below.
+  # transit: HashiCorp Vault or OpenBao Transit, reached over HTTPS.
+  provider: kmsv2
+
+  # secrets.kms.name: what the key registry and cluster members call this KMS.
+  # Empty derives one from the socket or the Transit key; set it to keep the
+  # name when the endpoint moves.
+  name: ""
+  # Per call, and how long a starting hub waits for the KMS to answer. Empty
+  # means 5s and 30s. A plugin sidecar that authenticates to a cloud KMS at
+  # start may need longer than 30s on a cold node.
+  timeout: ""
+  startupTimeout: ""
+
+  # Step 1 of moving onto the KMS (above): CLOOP_SECRET_KEY opens the keys it
+  # derives beside the KMS until `cloop hub key rotate --retire-previous`.
+  # Renders secrets.previous_root: passphrase.
+  movingFromPassphrase: false
+
+  # Moving off this KMS, or from it to another: the KMS being replaced, as a
+  # block of cloop's own configuration (secrets.kms_previous — snake_case keys,
+  # docs/reference/configuration.md). Its socket or files must be reachable in
+  # the Pod as well; plugin.extraContainers can run a second sidecar.
+  previous: {}
+
+  kmsv2:
+    # The directory the plugin and the hub share (an emptyDir only this Pod's
+    # containers can reach), and the socket's name in it. The plugin must be
+    # told to listen at <socketDir>/<socketName> — through plugin.args.
+    socketDir: /var/run/kmsplugin
+    socketName: socket.sock
+
+  # The plugin sidecar. Off means the socket is provided some other way.
+  plugin:
+    enabled: true
+    # Required: the vendor's KMS v2 plugin image, pinned by digest. For Azure
+    # Key Vault, mcr.microsoft.com/oss/azure/kms/keyvault (the AKS KMS plugin):
+    #   image: mcr.microsoft.com/oss/azure/kms/keyvault:v0.8.0@sha256:…
+    #   args:
+    #     - --listen-addr=unix:///var/run/kmsplugin/socket.sock
+    #     - --keyvault-name=<vault>
+    #     - --key-name=<key>
+    #     - --key-version=<version>
+    #     - --config-file-path=/etc/kubernetes/azure.json
+    #     - --healthz-port=8787
+    #   volumeMounts: [{name: azure-config, mountPath: /etc/kubernetes, readOnly: true}]
+    #   volumes: [{name: azure-config, secret: {secretName: kms-azure-json}}]
+    # deploy/terraform/azure-entra-id creates the Key Vault key and grants the
+    # hub's identity wrap and unwrap on it (key_vault_kms). Other vendors'
+    # plugins take their own flags; the socket path is the one requirement.
+    image: ""
+    imagePullPolicy: IfNotPresent
+    args: []
+    env: []
+    envFrom: []
+    volumeMounts: []
+    # Pod volumes for the plugin's own files (its cloud credentials, say).
+    volumes: []
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 200m, memory: 128Mi}
+    # The restricted profile, like the hub's. Loosen only what your plugin's
+    # documentation says it needs.
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: [ALL]
+    # Further containers beside the plugin — a second plugin for
+    # kms.previous, say.
+    extraContainers: []
+
+  transit:
+    # https://vault.example.com:8200. Plain http is refused off loopback.
+    address: ""
+    mount: transit
+    key: ""
+    namespace: ""
+    # A ConfigMap holding the CA Vault's certificate chains to, when it is
+    # not one the image trusts.
+    caConfigMap:
+      name: ""
+      key: ca.crt
+    # Authenticate with a token from a Secret you keep renewed (a Vault Agent,
+    # an external-secrets controller)...
+    tokenSecret:
+      name: ""
+      key: token
+    # ...or with Vault's Kubernetes auth method: the chart projects a service
+    # account token for this audience — not the API server's — and the hub
+    # logs in as role with it. Bind the role to this release's ServiceAccount.
+    kubernetes:
+      role: ""
+      mount: kubernetes
+      audience: vault
+    # The policy the hub's identity needs on the key, and nothing more:
+    #   path "transit/encrypt/<key>" { capabilities = ["update"] }
+    #   path "transit/decrypt/<key>" { capabilities = ["update"] }
+    #   path "transit/keys/<key>"    { capabilities = ["read"] }
+
 # ── Storage ─────────────────────────────────────────────────────────────────
 persistence:
   enabled: true

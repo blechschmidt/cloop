@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/dbbackup"
 	"github.com/blechschmidt/cloop/pkg/dbmaintain"
 	"github.com/blechschmidt/cloop/pkg/dbverify"
+	"github.com/blechschmidt/cloop/pkg/kms"
 	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -419,7 +420,9 @@ restore depends on, and refuses — changing nothing — on any "no":
      digest recomputed is refused.
   3. The sealing keys: the CLOOP_SECRET_KEY this hub will run with derives
      every key the backup's secrets, sessions and hub CA keys are sealed
-     under. A refusal names each key it cannot open and what it seals.
+     under — or, for keys held by a KMS (secrets.kms), that KMS unwraps them:
+     a backup of a hub on a KMS restores only where its KMS key answers. A
+     refusal names each key it cannot open and what it seals.
 
 Each refusal names the flag that overrides it. --accept-secret-loss restores
 a backup whose keys this CLOOP_SECRET_KEY cannot derive: those keys are
@@ -456,6 +459,20 @@ Exit codes:
 		o := dbRestoreOptions{Backup: args[0], Key: roots.Current.Value, Previous: roots.Previous.Value,
 			Stderr: os.Stderr}
 		o.Workdir, _ = os.Getwd()
+		// The KMS the restored hub's keys are held by, when its secrets
+		// section names one (Task 20433): read as the hub on --port reads
+		// it, and asked by the preflight before anything is swapped.
+		port, _ := cmd.Flags().GetInt("port")
+		if cfg, _, cerr := config.LoadUIInstance(o.Workdir, port); cerr == nil && cfg != nil && cfg.Secrets.UsesKMS() {
+			hr, rerr := kms.Resolve(cfg.Secrets, roots)
+			if rerr != nil {
+				return fmt.Errorf("the secrets section: %w", rerr)
+			}
+			defer hr.Close()
+			for _, p := range hr.Providers {
+				o.KMS = append(o.KMS, p)
+			}
+		}
 		o.Force, _ = cmd.Flags().GetBool("force")
 		o.SkipChecksum, _ = cmd.Flags().GetBool("skip-checksum")
 		o.AllowUnsealed, _ = cmd.Flags().GetBool("allow-unsealed")
@@ -485,6 +502,7 @@ func init() {
 	dbRestoreCmd.Flags().Bool("allow-unsealed", false, "Accept a sidecar whose seal cannot be checked here (unsealed, or sealed under another key); the digest is still checked")
 	dbRestoreCmd.Flags().Bool("accept-secret-loss", false, "Restore although CLOOP_SECRET_KEY cannot open the backup's sealing keys; retires them, losing what they seal (recorded)")
 	dbRestoreCmd.Flags().String("checkpoints", "", "Audit checkpoint file to read superseded checkpoints from and append the restore record to (default: audit.checkpoints.file)")
+	dbRestoreCmd.Flags().Int("port", defaultUIPort, "The hub whose per-instance overlay to merge over config.yaml when reading secrets.kms, the KMS a backup's keys may be held by")
 	dbCmd.AddCommand(dbVerifyCmd)
 	dbCmd.AddCommand(dbMaintainCmd)
 	dbCmd.AddCommand(dbBackupCmd)

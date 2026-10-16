@@ -1,6 +1,7 @@
 {{- $gp := include "cloop-hub.gitProxy" . | fromJson }}
 {{- $kg := include "cloop-hub.kubeGuard" . | fromJson }}
 {{- $mt := include "cloop-hub.monitorTLS" . | fromJson }}
+{{- $kms := include "cloop-hub.kms" . | fromJson }}
 {{- /*
 Refuse to render a hub that cannot run anything.
 
@@ -247,6 +248,64 @@ data:
         role_mappings: {{ toJson .Values.oidc.roleMappings }}
         session_ttl_hours: {{ .Values.oidc.sessionTTLHours }}
         cookie_secure: always
+
+    {{- if or $kms.enabled $kms.previous }}
+
+    # Where the secret store's key-encryption keys come from (Task 20433).
+    # With a KMS they are random and held only as its ciphertext; the hub
+    # refuses to start while it cannot reach the KMS, and never falls back to
+    # CLOOP_SECRET_KEY.
+    secrets:
+      {{- if $kms.enabled }}
+      kms:
+        provider: {{ $kms.provider | quote }}
+        {{- with $kms.name }}
+        name: {{ . | quote }}
+        {{- end }}
+        {{- with $kms.timeout }}
+        timeout: {{ . | quote }}
+        {{- end }}
+        {{- with $kms.startupTimeout }}
+        startup_timeout: {{ . | quote }}
+        {{- end }}
+        {{- if eq $kms.provider "kmsv2" }}
+        kmsv2:
+          # Shared with the plugin sidecar through an emptyDir only this Pod's
+          # containers can reach.
+          endpoint: {{ printf "unix://%s/%s" (trimSuffix "/" $kms.kmsv2.socketDir) $kms.kmsv2.socketName | quote }}
+        {{- else }}
+        transit:
+          address: {{ $kms.transit.address | quote }}
+          mount: {{ $kms.transit.mount | quote }}
+          key: {{ $kms.transit.key | quote }}
+          {{- with $kms.transit.namespace }}
+          namespace: {{ . | quote }}
+          {{- end }}
+          {{- if $kms.transit.caConfigMap.name }}
+          ca_file: /etc/cloop/kms-ca/ca.crt
+          {{- end }}
+          {{- if $kms.transit.tokenSecret.name }}
+          token_file: /etc/cloop/kms-token/token
+          {{- else }}
+          kubernetes:
+            role: {{ $kms.transit.kubernetes.role | quote }}
+            mount: {{ $kms.transit.kubernetes.mount | quote }}
+            # A projected token for Vault's audience, not the API server's.
+            token_file: /var/run/secrets/cloop-kms/token
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- if $kms.movingFromPassphrase }}
+      # A move onto the KMS in progress: CLOOP_SECRET_KEY opens what it
+      # derives until `cloop hub key rotate --retire-previous`.
+      previous_root: passphrase
+      {{- end }}
+      {{- with $kms.previous }}
+      # The KMS being replaced (values.kms.previous).
+      kms_previous:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
 
     rate_limit:
       requests_per_second: 20

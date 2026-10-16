@@ -451,6 +451,9 @@ func brokerUnavailableReason(err error) (reason, remediation string) {
 				"It is the passphrase every stored payload is sealed with; without it cloop can neither store " +
 				"nor open a credential. Egress grants need no key and keep working."
 	}
+	if reason, remedy, ok := kmsStoreReason(err); ok {
+		return reason, remedy
+	}
 	return "the secret store is unavailable: " + err.Error(),
 		"Check the hub's log for the underlying error."
 }

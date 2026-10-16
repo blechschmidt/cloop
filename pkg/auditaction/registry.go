@@ -1631,15 +1631,30 @@ var registry = []Entry{
 		Action: ActionSealingKeyRootChanged,
 		Home:   HomeControlPlane,
 		Entity: "sealing_key",
-		Trigger: "`cloop hub key rotate --retire-previous` finishes a change of CLOOP_SECRET_KEY: every hub member " +
-			"held the new root and an escrow of it was on record, every sealed row was rewrapped onto a key of " +
-			"it, and every key of the previous root was retired. Written when the run ends, finished or not.",
+		Trigger: "`cloop hub key rotate --retire-previous` finishes a change of root — of CLOOP_SECRET_KEY, onto " +
+			"a KMS or off one: every hub member held the new root (and, for a passphrase root, an escrow of it " +
+			"was on record), every sealed row was rewrapped onto a key of it, and every key of the previous root " +
+			"was retired. Written when the run ends, finished or not.",
 		Payload: []string{"root", "previous_root", "minted", "to_key", "rewrapped", "skipped", "failed",
 			"retired", "remaining", "members", "escrow_id", "complete", "via"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note: "Roots are named by fingerprint, the name every checkpoint and escrow carries, never by value. " +
+		Note: "Roots are named by fingerprint, the name every checkpoint and escrow carries, never by value, " +
+			"and a KMS root by its name (Task 20433), so moving onto a KMS or off one is recorded here too. " +
 			"The rotation and each retirement are recorded as sealing_key.rotated and sealing_key.retired as well.",
+	},
+	{
+		Action: ActionSealingKeyKMSRewrapped,
+		Home:   HomeControlPlane,
+		Entity: "sealing_key",
+		Trigger: "A key-encryption key held by a KMS is wrapped again under the key the KMS now encrypts " +
+			"under — by the hub's cluster leader when the KMS reports a rotation of its key, or by " +
+			"`cloop hub key rewrap`. Nothing sealed under the key changes.",
+		Payload:   []string{"key_id", "kms", "from_kms_key", "to_kms_key", "via"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Carries KMS key ids, never a ciphertext. Once no live key names the KMS's old key version " +
+			"in `cloop hub key list`, that version holds nothing of the hub's and can be disabled in the KMS.",
 	},
 	{
 		Action: ActionSealingKeyEscrowed,

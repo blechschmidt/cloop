@@ -32,6 +32,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -63,6 +64,12 @@ type PreflightOptions struct {
 	// under it. Both are as good as the current root's, because the restored
 	// hub opens them.
 	Previous string
+	// KMS are the key-management services the restored hub will run with
+	// (Task 20433): secrets.kms and, during a change of root,
+	// secrets.kms_previous. A backup's KMS-held keys open through one of
+	// them and nothing else — no key file, no escrow — so restoring a backup
+	// of a hub on a KMS needs access to that KMS key.
+	KMS []secretbroker.KMS
 	// SkipChecksum, AllowUnsealed and AcceptSecretLoss are RestoreOptions'.
 	SkipChecksum     bool
 	AllowUnsealed    bool
@@ -100,6 +107,9 @@ type KeyVerdict struct {
 	Lost bool `json:"lost,omitempty"`
 	// Why says why it does not open, when it does not.
 	Why string `json:"why,omitempty"`
+	// KMS names the KMS the key is held by (Task 20433); "" for a key
+	// derived from a passphrase. Read from the backup's own registry.
+	KMS string `json:"kms,omitempty"`
 }
 
 // Refusal is one reason a restore is refused.
@@ -328,35 +338,44 @@ func (p *Preflight) checkSidecar(path string, opts PreflightOptions) {
 // checkKeys judges every sealing key the backup depends on against the roots
 // the restored hub will run with — the check secretbroker.OpenKeyring makes
 // when the hub starts, made before the swap instead of after it. Either root
-// will do: the restored hub derives from both while a change of root is in
+// will do: the restored hub opens with both while a change of root is in
 // progress, and `cloop hub key rotate --retire-previous` moves what the
-// previous one derives.
+// previous one opens. A key held by a KMS is asked of the KMSs the restored
+// hub will run with (Task 20433), and the report says so whether it opens or
+// not: such a backup restores only where that KMS key answers.
 func (p *Preflight) checkKeys(facts statedb.SealedFacts, opts PreflightOptions) {
 	records := make([]secretbroker.KEKRecord, 0, len(facts.KEKs))
 	for _, row := range facts.KEKs {
-		records = append(records, secretbroker.KEKRecord{
-			ID: row.ID, Salt: row.Salt, State: row.State, CheckValue: row.CheckValue, Root: row.Root,
-		})
+		records = append(records, secretstore.KEKFromRow(row))
 	}
-	roots := []string{opts.Key, opts.Previous}
-	opens := map[string]bool{}
+	roots := secretbroker.PassphraseRoots(opts.Key, opts.Previous)
+	for _, k := range opts.KMS {
+		if k != nil {
+			roots = append(roots, secretbroker.KMSRoot(k))
+		}
+	}
+	checks := map[string]secretbroker.KeyCheck{}
 	for _, c := range secretbroker.CheckKeys(roots, records) {
-		opens[c.ID] = c.Opens
+		checks[c.ID] = c
 	}
-	// With a primary the key derives, the hub starts and any other live key
+	// With a primary the roots open, the hub starts and any other live key
 	// matters only for what is sealed under it. Without one, OpenKeyring
-	// derives the whole registry and refuses to start on any live key it
+	// opens the whole registry and refuses to start on any live key it
 	// cannot — sealed rows or none — so each of them is lost with the rest.
 	primaryOpens := false
 	for _, rec := range records {
-		if rec.State == secretbroker.KEKStatePrimary && !rec.Retired() && opens[rec.ID] {
+		if rec.State == secretbroker.KEKStatePrimary && !rec.Retired() && checks[rec.ID].Opens {
 			primaryOpens = true
 		}
 	}
 
-	var lost []string
+	var lost, lostKMS []string
+	kmsHeld := map[string]int{} // KMS name -> keys it holds
+	kmsUnreachable := false
 	for _, mk := range manifestKeys(facts) {
 		v := KeyVerdict{ManifestKey: mk}
+		c := checks[mk.ID]
+		v.KMS = c.KMS
 		rows := mk.Total()
 		switch mk.State {
 		case KeyStateLegacy:
@@ -381,51 +400,107 @@ func (p *Preflight) checkKeys(facts statedb.SealedFacts, opts PreflightOptions) 
 					"they were lost before this restore", rows, mk.ID)
 			}
 		default:
-			v.Opens = opens[mk.ID]
+			if v.KMS != "" {
+				kmsHeld[v.KMS]++
+			}
+			v.Opens = c.Opens
 			if v.Opens {
 				break
 			}
-			v.Why = "the key does not derive it"
-			if opts.Key == "" {
+			v.Why = c.Why
+			switch {
+			case v.Why != "":
+			case opts.Key == "":
 				v.Why = "there is no " + EnvKey + " to derive it from"
+			default:
+				v.Why = "the key does not derive it"
 			}
+			kmsUnreachable = kmsUnreachable || c.KMSUnreachable
 			// A live key nothing is sealed under still stops the hub
-			// starting when the primary cannot be derived: OpenKeyring will
-			// not fork a registry it cannot derive.
+			// starting when the primary cannot be opened: OpenKeyring will
+			// not fork a registry it cannot open.
 			if rows > 0 || mk.State == secretbroker.KEKStatePrimary || !primaryOpens {
 				v.Lost = true
 			}
 		}
 		if v.Lost {
-			lost = append(lost, describeKey(v))
+			if v.KMS != "" {
+				lostKMS = append(lostKMS, describeKey(v))
+			} else {
+				lost = append(lost, describeKey(v))
+			}
 		}
 		p.Keys = append(p.Keys, v)
 	}
 	sort.Slice(p.Keys, func(i, j int) bool { return p.Keys[i].ID < p.Keys[j].ID })
-	if len(lost) == 0 {
+
+	// Whether or not they open here, KMS-held keys tie this backup to a KMS
+	// key: say so, where an operator deciding what to keep will read it.
+	names := make([]string, 0, len(kmsHeld))
+	for name := range kmsHeld {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		p.note("%d sealing key(s) in this backup are held by the KMS %s: it restores only where that KMS key "+
+			"answers — no key file or escrow opens them — so keep the KMS key, and the versions they were "+
+			"wrapped under, for as long as you keep the backup", kmsHeld[name], name)
+	}
+	if len(lost) == 0 && len(lostKMS) == 0 {
 		return
 	}
 
-	if opts.Key == "" {
+	noRoots := opts.Key == "" && len(opts.KMS) == 0
+	if noRoots {
 		// Not a loss to accept: a variable missing from this shell says
 		// nothing about whether the hub's key is lost, and with no key every
 		// key would be abandoned — including ones the hub's own key opens.
-		p.refuse(ErrSecretLoss, "", "there is no %s here to open the backup's sealing keys %s: load the hub's "+
+		all := append(append([]string(nil), lost...), lostKMS...)
+		msg := fmt.Sprintf("there is no %s here to open the backup's sealing keys %s: load the hub's "+
 			"environment, or recover the key from escrow (`cloop hub key escrow import`). If it is lost for good, "+
-			"set a new %s and restore with %s", EnvKey, strings.Join(lost, ", "), EnvKey, OverrideAcceptSecretLoss)
+			"set a new %s and restore with %s", EnvKey, strings.Join(all, ", "), EnvKey, OverrideAcceptSecretLoss)
+		if len(lostKMS) > 0 {
+			msg += ". Keys held by a KMS open only through it: configure secrets.kms as the hub does — " +
+				"`cloop db restore --port <n>` reads that hub's overlay — where the KMS answers"
+		}
+		p.refuse(ErrSecretLoss, "", "%s", msg)
 		return
 	}
-	msg := fmt.Sprintf("the %s here (key %s) cannot open the backup's sealing keys %s", EnvKey,
-		orNone(p.KeyFingerprint), strings.Join(lost, ", "))
-	if p.PreviousKeyFingerprint != "" {
-		msg = fmt.Sprintf("neither the %s here (key %s) nor %s (key %s) can open the backup's sealing keys %s",
-			EnvKey, orNone(p.KeyFingerprint), rootkey.EnvPrevious, p.PreviousKeyFingerprint, strings.Join(lost, ", "))
+
+	var parts []string
+	if len(lost) > 0 {
+		msg := fmt.Sprintf("the %s here (key %s) cannot open the backup's sealing keys %s", EnvKey,
+			orNone(p.KeyFingerprint), strings.Join(lost, ", "))
+		if p.PreviousKeyFingerprint != "" {
+			msg = fmt.Sprintf("neither the %s here (key %s) nor %s (key %s) can open the backup's sealing keys %s",
+				EnvKey, orNone(p.KeyFingerprint), rootkey.EnvPrevious, p.PreviousKeyFingerprint, strings.Join(lost, ", "))
+		}
+		parts = append(parts, msg)
 	}
-	msg += ": every secret, session and hub CA key sealed under them would be unreadable, and the hub would " +
-		"refuse to start on them. Restore the key they were sealed under (`cloop hub key escrow import`) — or, " +
-		"when the hub's key was changed since the backup was taken, restore with the old key as " +
-		rootkey.EnvPrevious + " and run the restored hub with it until `cloop hub key rotate --retire-previous` " +
-		"has moved them"
+	if len(lostKMS) > 0 {
+		msg := "the backup's sealing keys " + strings.Join(lostKMS, ", ") + " are held by a KMS, and a restore " +
+			"needs access to it"
+		switch {
+		case len(opts.KMS) == 0:
+			msg += ": no KMS is configured here — configure secrets.kms as the hub does (`cloop db restore " +
+				"--port <n>` reads that hub's overlay)"
+		case kmsUnreachable:
+			msg += ": the KMS cannot be reached from here, so the keys may be perfectly good — restore " +
+				"where it answers"
+		default:
+			msg += ": the KMS configured here refused to unwrap them — it is not the KMS key they were " +
+				"wrapped by, or this identity may not decrypt with it"
+		}
+		parts = append(parts, msg)
+	}
+	msg := strings.Join(parts, "; and ") + ": every secret, session and hub CA key sealed under them would be " +
+		"unreadable, and the hub would refuse to start on them."
+	if len(lost) > 0 {
+		msg += " Restore the key they were sealed under (`cloop hub key escrow import`) — or, " +
+			"when the hub's key was changed since the backup was taken, restore with the old key as " +
+			rootkey.EnvPrevious + " and run the restored hub with it until `cloop hub key rotate --retire-previous` " +
+			"has moved them"
+	}
 	if opts.AcceptSecretLoss {
 		p.note("%s — proceeding under %s: those keys are retired in the restored database, and the backup file keeps them",
 			msg, OverrideAcceptSecretLoss)

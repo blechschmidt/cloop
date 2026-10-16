@@ -3,6 +3,9 @@
 {{- $kg := include "cloop-hub.kubeGuard" . | fromJson }}
 {{- $mt := include "cloop-hub.monitorTLS" . | fromJson }}
 {{- $extraCA := dig "configMap" "" (default dict .Values.extraCACerts) }}
+{{- $kms := include "cloop-hub.kms" . | fromJson }}
+{{- $kmsSocket := and $kms.enabled (eq $kms.provider "kmsv2") }}
+{{- $kmsTransit := and $kms.enabled (eq $kms.provider "transit") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -215,6 +218,28 @@ spec:
             - name: root-key
               mountPath: /etc/cloop/root-key
               readOnly: true
+            {{- if $kmsSocket }}
+            # The KMS v2 plugin's socket, shared with the sidecar below
+            # (Task 20433).
+            - name: kms-socket
+              mountPath: {{ $kms.kmsv2.socketDir }}
+            {{- end }}
+            {{- if $kmsTransit }}
+            {{- if $kms.transit.tokenSecret.name }}
+            - name: kms-token
+              mountPath: /etc/cloop/kms-token
+              readOnly: true
+            {{- else }}
+            - name: kms-sa-token
+              mountPath: /var/run/secrets/cloop-kms
+              readOnly: true
+            {{- end }}
+            {{- if $kms.transit.caConfigMap.name }}
+            - name: kms-ca
+              mountPath: /etc/cloop/kms-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- with .Values.livenessProbe }}
@@ -229,6 +254,43 @@ spec:
           startupProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- if and $kmsSocket $kms.plugin.enabled }}
+        # The KMS v2 plugin (Task 20433): it holds the credentials to the
+        # vendor's KMS, and the hub holds none — it asks the plugin over the
+        # socket to wrap and unwrap its key-encryption keys. A sidecar rather
+        # than a node-level plugin so its socket is reachable by this Pod's
+        # containers alone. The hub waits kms.startupTimeout for it to answer.
+        - name: kms-plugin
+          image: {{ $kms.plugin.image | quote }}
+          imagePullPolicy: {{ $kms.plugin.imagePullPolicy }}
+          {{- with $kms.plugin.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $kms.plugin.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $kms.plugin.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml $kms.plugin.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: kms-socket
+              mountPath: {{ $kms.kmsv2.socketDir }}
+            {{- with $kms.plugin.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $kms.plugin.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- with $kms.plugin.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
         - name: state
           {{- if .Values.persistence.enabled }}
@@ -289,6 +351,47 @@ spec:
             # not tolerated by the hub, which refuses to start without the
             # file CLOOP_SECRET_KEY_FILE names.
             optional: true
+        {{- if $kmsSocket }}
+        # Where the KMS v2 plugin listens and the hub dials (Task 20433).
+        - name: kms-socket
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- with $kms.plugin.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- end }}
+        {{- if $kmsTransit }}
+        {{- if $kms.transit.tokenSecret.name }}
+        # A Vault token you keep renewed; the hub re-reads it on every call.
+        - name: kms-token
+          secret:
+            secretName: {{ $kms.transit.tokenSecret.name }}
+            items:
+              - {key: {{ $kms.transit.tokenSecret.key }}, path: token}
+            defaultMode: 0440
+        {{- else }}
+        # A service account token for Vault's Kubernetes auth method, with
+        # Vault's audience: it is no credential to the API server, and the
+        # hub needs none (automountServiceAccountToken above).
+        - name: kms-sa-token
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  audience: {{ $kms.transit.kubernetes.audience | quote }}
+                  expirationSeconds: 3600
+                  path: token
+        {{- end }}
+        {{- if $kms.transit.caConfigMap.name }}
+        - name: kms-ca
+          configMap:
+            name: {{ $kms.transit.caConfigMap.name }}
+            items:
+              - {key: {{ $kms.transit.caConfigMap.key }}, path: ca.crt}
+            defaultMode: 0444
+        {{- end }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

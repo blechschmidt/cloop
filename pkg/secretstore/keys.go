@@ -15,7 +15,10 @@ package secretstore
 // material without CLOOP_SECRET_KEY, which this package never reads.
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -29,6 +32,7 @@ import (
 var (
 	_ secretbroker.KeyStore      = (*Store)(nil)
 	_ secretbroker.KeyAttributor = (*Store)(nil)
+	_ secretbroker.KEKRewrapper  = (*Store)(nil)
 	_ secretbroker.RotationStore = (*Store)(nil)
 	_ secretbroker.SealedSet     = (*Store)(nil)
 )
@@ -39,16 +43,45 @@ var (
 
 // PutKEK persists a key-encryption key record.
 func (s *Store) PutKEK(k secretbroker.KEKRecord) error {
-	return translateKeyErr(s.db.PutKEK(statedb.KEKRow{
-		ID:         k.ID,
-		Salt:       k.Salt,
-		State:      k.State,
-		CheckValue: k.CheckValue,
-		CreatedAt:  formatTime(k.CreatedAt),
-		CreatedBy:  k.CreatedBy,
-		RetiredAt:  formatTime(k.RetiredAt),
-		Root:       k.Root,
-	}))
+	row, err := fromKEK(k)
+	if err != nil {
+		return err
+	}
+	return translateKeyErr(s.db.PutKEK(row))
+}
+
+// fromKEK converts a record to its row. A KMS-held key's annotations are
+// stored as a JSON object of base64 values: opaque to SQL, and not secret.
+func fromKEK(k secretbroker.KEKRecord) (statedb.KEKRow, error) {
+	ann, err := encodeAnnotations(k.KMSAnnotations)
+	if err != nil {
+		return statedb.KEKRow{}, err
+	}
+	return statedb.KEKRow{
+		ID:             k.ID,
+		Salt:           k.Salt,
+		State:          k.State,
+		CheckValue:     k.CheckValue,
+		CreatedAt:      formatTime(k.CreatedAt),
+		CreatedBy:      k.CreatedBy,
+		RetiredAt:      formatTime(k.RetiredAt),
+		Root:           k.Root,
+		Wrap:           k.Wrap,
+		KMSKeyID:       k.KMSKeyID,
+		KMSCiphertext:  k.KMSCiphertext,
+		KMSAnnotations: ann,
+	}, nil
+}
+
+// RewrapKEK replaces a KMS-held key's wrapping under compare-and-swap
+// (Task 20433).
+func (s *Store) RewrapKEK(id string, expect []byte, next secretbroker.KEKRecord) (bool, error) {
+	row, err := fromKEK(next)
+	if err != nil {
+		return false, err
+	}
+	ok, err := s.db.RewrapKEK(id, expect, row)
+	return ok, translateKeyErr(err)
 }
 
 // ListKEKs returns every KEK, retired ones included.
@@ -103,7 +136,52 @@ func toKEK(row statedb.KEKRow) secretbroker.KEKRecord {
 		CreatedBy:  row.CreatedBy,
 		RetiredAt:  parseTime(row.RetiredAt),
 		Root:       row.Root,
+		Wrap:       row.Wrap,
+		KMSKeyID:   row.KMSKeyID,
+		// A column that does not decode leaves the annotations empty, and the
+		// KMS then refuses to unwrap the key — naming it — rather than this
+		// adapter refusing to list the registry at all.
+		KMSCiphertext:  row.KMSCiphertext,
+		KMSAnnotations: decodeAnnotations(row.KMSAnnotations),
 	}
+}
+
+// KEKFromRow converts a registry row read without a Store — a backup's, by a
+// restore's preflight or an escrow check — to the record the keyring judges.
+func KEKFromRow(row statedb.KEKRow) secretbroker.KEKRecord { return toKEK(row) }
+
+func encodeAnnotations(m map[string][]byte) (string, error) {
+	if len(m) == 0 {
+		return "", nil
+	}
+	enc := make(map[string]string, len(m))
+	for k, v := range m {
+		enc[k] = base64.StdEncoding.EncodeToString(v)
+	}
+	b, err := json.Marshal(enc)
+	if err != nil {
+		return "", fmt.Errorf("secretstore: encode KMS annotations: %w", err)
+	}
+	return string(b), nil
+}
+
+func decodeAnnotations(s string) map[string][]byte {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var enc map[string]string
+	if err := json.Unmarshal([]byte(s), &enc); err != nil {
+		return nil
+	}
+	out := make(map[string][]byte, len(enc))
+	for k, v := range enc {
+		b, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil
+		}
+		out[k] = b
+	}
+	return out
 }
 
 // PutRotation records rotation progress.

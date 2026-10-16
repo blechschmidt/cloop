@@ -881,6 +881,11 @@ type Server struct {
 	// alone would reap their workloads. See cluster.go.
 	Cluster *hubcluster.Node
 
+	// kms is the key-management service the sealing keys are wrapped by, as
+	// `cloop ui` resolved it (SetKMS, Task 20433); nil without one. See
+	// kms.go.
+	kms *hubKMS
+
 	// clusterMu guards the cluster-relay state below. A leaf lock: nothing is
 	// called while holding it.
 	clusterMu sync.Mutex
@@ -1523,6 +1528,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// monitor sessions. See kubeshare.go.
 	s.runLeaderDuty(watcherCtx, "kube-share-renewal", s.watchKubeShareRenewals)
 	go s.watchKubeGuardUpstreams(watcherCtx)
+	// Every member polls the KMS its sealing keys are wrapped by, which keeps
+	// the KMS metrics current, and the leader rewraps keys after a rotation
+	// of the KMS key (Task 20433). See kms.go.
+	go s.watchKMS(watcherCtx)
 	s.startSessionJanitor(watcherCtx)
 	// Sweeps lapsed secret leases off live agents. Without it a lease TTL
 	// binds only the hub: an executor handed a fifteen-minute credential

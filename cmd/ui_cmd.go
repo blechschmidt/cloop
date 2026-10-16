@@ -19,6 +19,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/sameorigin"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -143,8 +144,19 @@ but not for anything reachable from a network.`,
 			return fmt.Errorf("the hub's root key: %w", err)
 		}
 		defer rootkey.Pin(roots)()
-		rootFingerprints := announceRoots(roots)
-		if err := checkHubRoots(workdir, roots); err != nil {
+		// And the KMS the sealing keys are wrapped by, when secrets.kms
+		// names one (Task 20433): reached before anything is served, and a
+		// start refused when it does not answer — never a fall back to the
+		// root key. The roots are pinned for every keyring this process
+		// opens, for the reason the root key is.
+		hubRoots, err := resolveHubRoots(cmd.Context(), cfg, roots)
+		if err != nil {
+			return err
+		}
+		defer hubRoots.Close()
+		defer secretbroker.PinRoots(hubRoots.Current, hubRoots.Previous)()
+		rootFingerprints := announceRoots(roots, hubRoots)
+		if err := checkHubRoots(workdir, hubRoots); err != nil {
 			return err
 		}
 
@@ -230,6 +242,7 @@ but not for anything reachable from a network.`,
 
 		srv := ui.NewInCluster(workdir, uiPort, token, node)
 		srv.Lease = lease
+		srv.SetKMS(hubRoots.Providers)
 		srv.ListenHost = listenReq.Listen
 		srv.AllowUnauthenticatedNetwork = listenReq.AllowUnauthenticatedNetwork
 		srv.Projects = projectPaths

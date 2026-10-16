@@ -1601,7 +1601,69 @@ them hold different keys:
 prints the source and the key's fingerprint, and advertises the fingerprint to
 its cluster peers; a changed file takes effect at a restart. It refuses to start
 when a live sealing key derives from neither configured root. See
-[the root key](../operations/runbook.md#the-root-key) in the runbook.
+[the root key](../operations/runbook.md#the-root-key) in the runbook. With
+[`secrets.kms`](#sealing-keys-in-a-kms-secrets) the secret store's keys come from
+a KMS instead, and the root key seals the rest.
+
+### Sealing keys in a KMS: `secrets`
+
+By default every key-encryption key (KEK) is derived from `CLOOP_SECRET_KEY` and
+a salt stored beside it, so the database and the key file together open every
+sealed credential — offline, for as long as anybody keeps the copy. With
+`secrets.kms` a KEK is random instead, and the database keeps only the
+ciphertext an external key-management service made of it: opening the store is
+a call to the KMS, which logs it and whose owner can refuse it (Task 20433).
+
+```yaml
+secrets:
+  kms:
+    provider: kmsv2                 # or transit
+    name: azure-prod                # optional; derived from the endpoint or key
+    timeout: 5s                     # per call (100ms–1m)
+    startup_timeout: 30s            # how long `cloop ui` waits for the KMS (0s–10m)
+    kmsv2:
+      endpoint: unix:///var/run/kmsplugin/socket.sock
+  # previous_root: passphrase       # while moving from CLOOP_SECRET_KEY onto the KMS
+  # kms_previous: { … }             # while moving off this KMS, or from one KMS to another
+```
+
+| Key | Meaning |
+| --- | --- |
+| `kms.provider` | `kmsv2` — a [Kubernetes KMS v2](https://kubernetes.io/docs/tasks/administer-cluster/kms-provider/) plugin over a unix socket: Azure Key Vault, AWS KMS, Google Cloud KMS and Vault through the plugins their vendors publish for the API server. `transit` — HashiCorp Vault or OpenBao Transit over HTTPS |
+| `kms.name` | what the key registry records as each key's root and what a hub cluster member advertises. Defaults to `kmsv2:<socket path>` or `transit:<host>/<mount>/<key>`; set it when the endpoint may move |
+| `kms.kmsv2.endpoint` | the plugin's socket: `unix:///abs/path` or `/abs/path`. Nothing else — a KMS reached over a network would put the keys it unwraps on that network. A socket in a directory every user shares (`/tmp`, `/dev/shm`) is refused: whoever bound it first would be sent every key the hub wraps |
+| `kms.transit.address` | `https://vault.example.com:8200`; plain `http` only to a loopback host. A redirect to another server is not followed |
+| `kms.transit.mount`, `key`, `namespace` | the Transit mount (`transit`), key name, and Vault Enterprise / OpenBao namespace |
+| `kms.transit.token_file` | a Vault token, re-read on every call (a Vault Agent sink renews it in place); a file other users can write is refused |
+| `kms.transit.kubernetes.role`, `mount`, `token_file` | Vault's Kubernetes auth method instead: logs in as `role` with the service account token at `token_file` (default the Pod's), and again when the lease runs out |
+| `kms.transit.ca_file` | a PEM bundle trusted beside the system roots |
+| `previous_root` | `passphrase` while moving from `CLOOP_SECRET_KEY` onto `secrets.kms`: the passphrase still opens the keys it derives, and mints nothing |
+| `kms_previous` | a second KMS block: the KMS a change of root is moving off. Its `name` must differ from `kms.name` |
+
+The keyring holds a current root and, during a change of root, a previous one:
+
+| Configured | Current root | Previous root |
+| --- | --- | --- |
+| nothing | `CLOOP_SECRET_KEY` | — |
+| `CLOOP_SECRET_KEY_PREVIOUS` | `CLOOP_SECRET_KEY` | `CLOOP_SECRET_KEY_PREVIOUS` |
+| `secrets.kms` | the KMS | — |
+| `secrets.kms`, `previous_root: passphrase` | the KMS | `CLOOP_SECRET_KEY` |
+| `secrets.kms_previous` | `CLOOP_SECRET_KEY` | the KMS |
+| `secrets.kms`, `secrets.kms_previous` | the new KMS | the old one |
+
+At most one previous root: two are refused, and so is
+`CLOOP_SECRET_KEY_PREVIOUS` beside a KMS root. `cloop hub key rotate
+--retire-previous` finishes every one of these changes — see
+[keys in a KMS](../operations/runbook.md#keys-in-a-kms).
+
+Hub-scope: `cloop ui` reads it with its per-instance overlay merged, the `cloop
+hub key` commands and `cloop db restore` with the overlay of the hub their
+`--port` names. Every member of a hub cluster opens one store, so `config.yaml`
+is the usual place for it. **Nothing falls back.** `cloop ui` refuses to start
+on a section it does not accept, and — after waiting `startup_timeout` — on a
+KMS it cannot reach; a key no configured root opens refuses the start as it
+always has. `CLOOP_SECRET_KEY` is not needed for the store with a KMS current,
+but still seals the audit checkpoints, backup sidecars and the escrow.
 
 ### State file integrity (optional HMAC)
 

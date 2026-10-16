@@ -4,9 +4,10 @@
 //
 // # Why one resolver
 //
-// Every key-encryption key the secret broker seals under, every audit
-// checkpoint seal, every backup sidecar seal, the key escrow and the legacy
-// .cloop/secrets.enc derive from this one value. It used to be read by a dozen
+// Every key-encryption key the secret broker seals under — unless secrets.kms
+// holds them in a key-management service instead (pkg/kms, Task 20433) — every
+// audit checkpoint seal, every backup sidecar seal, the key escrow and the
+// legacy .cloop/secrets.enc derive from this one value. It used to be read by a dozen
 // direct os.Getenv calls, each its own idea of where the key lives, so the key
 // could live in exactly one place: the process environment. That is the worst
 // of the places on offer. An environment variable is in /proc/<pid>/environ for

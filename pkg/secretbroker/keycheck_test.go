@@ -23,7 +23,7 @@ func TestCheckKeysAnswersWhatOpenKeyringWould(t *testing.T) {
 	}
 	records, _ := store.ListKEKs()
 
-	got := CheckKeys([]string{pass}, records)
+	got := CheckKeys(passRoots(pass), records)
 	if len(got) != 3 {
 		t.Fatalf("%d verdicts for 3 records", len(got))
 	}
@@ -39,12 +39,12 @@ func TestCheckKeysAnswersWhatOpenKeyringWould(t *testing.T) {
 		}
 	}
 
-	for _, c := range CheckKeys([]string{"another-passphrase-entirely-0123456789"}, records) {
+	for _, c := range CheckKeys(passRoots("another-passphrase-entirely-0123456789"), records) {
 		if c.Opens {
 			t.Errorf("another passphrase opens %s", c.ID)
 		}
 	}
-	for _, c := range CheckKeys([]string{""}, records) {
+	for _, c := range CheckKeys(passRoots(""), records) {
 		if c.Opens {
 			t.Errorf("no passphrase opens %s", c.ID)
 		}
@@ -61,7 +61,7 @@ func TestCheckKeysAnswersWhatOpenKeyringWould(t *testing.T) {
 		}
 	}
 	opened := 0
-	for _, c := range CheckKeys([]string{pass}, tampered) {
+	for _, c := range CheckKeys(passRoots(pass), tampered) {
 		if c.Opens {
 			opened++
 		}
@@ -86,17 +86,27 @@ func TestLegacyKeyOpensASampleOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	saltHex := encodeHex(salt)
-	if !LegacyKeyOpens([]string{pass}, saltHex, sample) {
+	if !LegacyKeyOpens(passRoots(pass), saltHex, sample) {
 		t.Fatal("the passphrase that sealed it does not open it")
 	}
 	for name, ok := range map[string]bool{
-		"another passphrase": LegacyKeyOpens([]string{"not-the-legacy-passphrase-012345"}, saltHex, sample),
-		"no passphrase":      LegacyKeyOpens([]string{""}, saltHex, sample),
-		"a corrupt salt":     LegacyKeyOpens([]string{pass}, "zz", sample),
-		"no sample":          LegacyKeyOpens([]string{pass}, saltHex, nil),
+		"another passphrase": LegacyKeyOpens(passRoots("not-the-legacy-passphrase-012345"), saltHex, sample),
+		"no passphrase":      LegacyKeyOpens(passRoots(""), saltHex, sample),
+		"a corrupt salt":     LegacyKeyOpens(passRoots(pass), "zz", sample),
+		"no sample":          LegacyKeyOpens(passRoots(pass), saltHex, nil),
 	} {
 		if ok {
 			t.Errorf("%s opens it", name)
 		}
 	}
+}
+
+// passRoots is positional: an empty passphrase is a zero Root, skipped, so
+// KeyCheck.Root indexes the slice the test wrote.
+func passRoots(ps ...string) []Root {
+	out := make([]Root, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, PassphraseRoot(p))
+	}
+	return out
 }

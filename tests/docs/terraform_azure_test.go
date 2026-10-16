@@ -27,6 +27,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/provision"
@@ -518,4 +520,64 @@ func yamlKeys(rt reflect.Type) map[string]bool {
 		}
 	}
 	return out
+}
+
+// TestAzureKMSModuleRendersRealKeys joins the Key Vault KMS module
+// (modules/key-vault-kms, Task 20433) to the two things it writes for: the
+// hub's secrets section and the cloop-hub chart's kms values. Each rendered
+// key must be a real yaml key of config.SecretsConfig, or a real key of the
+// chart's values.yaml — an unknown one is ignored silently by both, and the
+// hub would start sealing under CLOOP_SECRET_KEY with the module's output
+// applied. As above, the keys are listed rather than parsed out of the HCL, and
+// each must still appear in outputs.tf.
+func TestAzureKMSModuleRendersRealKeys(t *testing.T) {
+	outputs := azureModuleFile(t, "modules/key-vault-kms/outputs.tf")
+
+	// secrets.kms.* — config.SecretsConfig.
+	secrets := yamlKeys(reflect.TypeOf(config.SecretsConfig{}))
+	kmsKeys := yamlKeys(reflect.TypeOf(config.KMSConfig{}))
+	v2Keys := yamlKeys(reflect.TypeOf(config.KMSv2Config{}))
+	for path, known := range map[string]map[string]bool{
+		"kms": secrets, "provider": kmsKeys, "name": kmsKeys, "kmsv2": kmsKeys, "endpoint": v2Keys,
+	} {
+		if !known[path] {
+			t.Errorf("the module renders secrets `%s:` but cloop's config has no such yaml key", path)
+		}
+		if !strings.Contains(outputs, path+" ") && !strings.Contains(outputs, path+"=") {
+			t.Errorf("modules/key-vault-kms/outputs.tf no longer renders `%s` — this check asserts nothing", path)
+		}
+	}
+
+	// kms.* — the chart's values.yaml.
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "helm", "cloop-hub", "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		t.Fatalf("values.yaml: %v", err)
+	}
+	for _, path := range []string{"kms.enabled", "kms.provider", "kms.name", "kms.kmsv2.socketDir",
+		"kms.kmsv2.socketName", "kms.plugin.image", "kms.plugin.args", "kms.plugin.volumeMounts", "kms.plugin.volumes"} {
+		var cur any = values
+		found := true
+		for _, part := range strings.Split(path, ".") {
+			m, ok := cur.(map[string]any)
+			if !ok {
+				found = false
+				break
+			}
+			if cur, ok = m[part]; !ok {
+				found = false
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the module renders chart value %s, which values.yaml does not have", path)
+		}
+		last := path[strings.LastIndex(path, ".")+1:]
+		if !strings.Contains(outputs, last) {
+			t.Errorf("modules/key-vault-kms/outputs.tf no longer renders `%s` — this check asserts nothing", last)
+		}
+	}
 }

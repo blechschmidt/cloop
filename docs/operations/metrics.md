@@ -336,7 +336,8 @@ flavour of emergency:
 | --- | --- |
 | `key_unknown` | ciphertext names a key-encryption key the hub has never seen |
 | `key_retired` | it names a KEK that has been retired |
-| `key_unavailable` | the KEK is known but cannot be opened — usually a wrong or missing passphrase |
+| `key_unavailable` | the KEK is known but cannot be opened — usually a wrong or missing passphrase, or a KMS that refused to unwrap it |
+| `kms_unavailable` | the KEK is held by a key-management service that cannot be reached right now; the key may be perfectly good |
 | `seal_failed` | authenticated decryption failed: the ciphertext or its associated data has been altered |
 
 None of these is self-healing. See the [runbook](runbook.md) for recovery.
@@ -357,6 +358,42 @@ rotation run from the command line, and are exported by the
 rotated reports `cloop_secret_kek_rotation_active 0` and no progress. A rotation
 whose process was killed stays at 1 until the next one starts — which is
 exactly the stalled state the alert above is for.
+
+### The key-management service
+
+A hub whose sealing keys are held by an external KMS (`secrets.kms`, Task 20433)
+records every call it makes to it:
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_kms_requests_total` | counter | `backend`, `operation`, `result` |
+| `cloop_kms_request_duration_seconds` | histogram | `backend`, `operation` |
+
+`backend` is `kmsv2` (a Kubernetes KMS v2 plugin) or `transit` (Vault or
+OpenBao). `operation` is `status`, `encrypt`, `decrypt` or `login` (Vault's
+Kubernetes auth method). `result` is `ok`, `unavailable` (the KMS could not be
+reached, or says it is not serving — a sealed Vault, an unhealthy plugin),
+`timeout`, `denied` (the KMS refused the hub's identity), `invalid` (it refused
+the request — a ciphertext it does not hold, another key's) or `error`. Both are
+per process: each member counts the calls it made, and the sum is the cluster's.
+
+Every member polls its KMS's status once a minute, every ten seconds while it is
+unhealthy, so these move even on a hub whose keys are all held in memory and
+whose KMS is otherwise asked nothing. A KMS that stops answering does not stop a
+serving hub — the keys it already opened keep working — but no member started
+after that point can open the store, and a key minted elsewhere meanwhile cannot
+be opened anywhere it was not minted. Alert on it before that matters:
+
+```promql
+# The KMS is failing: any non-ok status poll over five minutes.
+sum by (backend, result) (increase(cloop_kms_requests_total{operation="status",result!="ok"}[5m])) > 0
+
+# The KMS is slow: the 99th percentile of its calls over a second.
+histogram_quantile(0.99, sum by (le, backend) (rate(cloop_kms_request_duration_seconds_bucket[10m]))) > 1
+```
+
+`denied` is the one that will not fix itself: the hub's identity lost its access
+to the KMS key, which is what revoking it looks like from the hub's side.
 
 ## Sign-in, sessions and API tokens
 

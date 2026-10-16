@@ -153,6 +153,20 @@ chart with those sections deleted to keep the two in step.
 {{- toJson (mergeOverwrite $d (deepCopy (default dict .Values.executor.monitorTLS))) -}}
 {{- end -}}
 
+{{/*
+The kms block with every default filled in, so a release upgraded with
+--reuse-values from a chart that had no kms section renders as one with it off
+(Task 20433). mergeOverwrite is a deep merge: a values file that sets only
+kms.transit.address keeps every other transit default.
+*/}}
+{{- define "cloop-hub.kms" -}}
+{{- $d := dict "enabled" false "provider" "kmsv2" "name" "" "timeout" "" "startupTimeout" "" "movingFromPassphrase" false "previous" (dict)
+  "kmsv2" (dict "socketDir" "/var/run/kmsplugin" "socketName" "socket.sock")
+  "plugin" (dict "enabled" true "image" "" "imagePullPolicy" "IfNotPresent" "args" (list) "env" (list) "envFrom" (list) "volumeMounts" (list) "volumes" (list) "resources" (dict) "securityContext" (dict "allowPrivilegeEscalation" false "readOnlyRootFilesystem" true "capabilities" (dict "drop" (list "ALL"))) "extraContainers" (list))
+  "transit" (dict "address" "" "mount" "transit" "key" "" "namespace" "" "caConfigMap" (dict "name" "" "key" "ca.crt") "tokenSecret" (dict "name" "" "key" "token") "kubernetes" (dict "role" "" "mount" "kubernetes" "audience" "vault")) -}}
+{{- toJson (mergeOverwrite $d (deepCopy (default dict .Values.kms))) -}}
+{{- end -}}
+
 {{/* "true" when either monitor is on. */}}
 {{- define "cloop-hub.monitorsEnabled" -}}
 {{- $gp := include "cloop-hub.gitProxy" . | fromJson -}}

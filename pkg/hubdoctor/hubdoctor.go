@@ -428,7 +428,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	// Beside the transport checks: whether a hub that cannot tell people
 	// apart is reachable from the network (Task 20393).
 	checkExposure(ctx, dir, cfg, opts, add)
-	checkSecretKey(dir, cfg, add)
+	checkSecretKey(ctx, dir, cfg, opts, add)
 	checkRBAC(cfg, add)
 	// Beside the policy it feeds: provisioned groups are a claim source the
 	// policy's bindings may name (Task 20415).

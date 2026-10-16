@@ -249,6 +249,7 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		// the file's own text is judged here.
 		checkAuditForward(rawCfg, add)
 		checkNotifications(rawCfg, add)
+		checkSecrets(rawCfg, add)
 
 		// 2f. Hooks referencing non-executable scripts
 		checkHookScripts(cfg, add)
@@ -536,6 +537,20 @@ func checkNotifications(cfg *config.Config, add func(Finding)) {
 			Severity: SeverityError,
 			Field:    "config.notifications",
 			Message:  err.Error(),
+		})
+	}
+}
+
+// checkSecrets runs the validator `cloop ui` refuses to start on, for the
+// secrets section — the KMS the sealing keys are held by (Task 20433). Load
+// keeps the section as written, so this is where a mistake shows before a
+// restart does.
+func checkSecrets(cfg *config.Config, add func(Finding)) {
+	if err := config.ValidateSecrets(cfg.Secrets); err != nil {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.secrets",
+			Message:  err.Error() + " — `cloop ui` refuses to start on it",
 		})
 	}
 }

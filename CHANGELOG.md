@@ -43,6 +43,25 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **The secret store's sealing keys can be held by an external key-management
+  service, so a copy of the database and the key file is no longer enough.**
+  With `secrets.kms`, every key-encryption key is random and the database keeps
+  only the ciphertext the KMS made of it: opening the store is a call to the KMS,
+  which logs it and whose owner can revoke the hub's access. Two backends: a
+  Kubernetes KMS v2 plugin over a unix socket — Azure Key Vault, AWS KMS, Google
+  Cloud KMS and Vault through their vendors' plugins, run by the Helm chart as a
+  sidecar (`kms.*` values) — and Vault or OpenBao Transit. Moving onto a KMS,
+  off it or between two is a change of root, finished by `cloop hub key rotate
+  --retire-previous` with every cluster member able to open the store
+  throughout; a rotation of the KMS key is followed by rewrapping each key in
+  place, by the cluster leader or `cloop hub key rewrap`. A hub that cannot reach
+  its KMS refuses to start — never falling back to the passphrase — and `cloop
+  hub doctor` reports `secrets.kms.*`; KMS calls are measured
+  (`cloop_kms_requests_total`, `cloop_kms_request_duration_seconds`). Restore
+  preflight and the key escrow say when a backup's keys need the KMS, and the
+  Azure Terraform module gains `modules/key-vault-kms`, a wrap-and-unwrap key
+  with the hub identity's permission on it alone (Task 20433).
+
 - **Device labels can be changed on the hub, and the credentials they no longer
   qualify for are taken back from running work.** **Labels** on a device's card
   (`PUT /api/executors/{id}/labels`, audited as `executor.labels`) replaces the

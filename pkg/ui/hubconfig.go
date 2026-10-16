@@ -14,8 +14,10 @@ package ui
 //     container and Kubernetes drivers, git_proxy, kube_guard,
 //     auto_install_harness, the failover cap, the budget for remote
 //     executors' returned work), sandbox.image_policy, ui.*,
-//     stt, retention and audit (the janitor), backup, and the hub's own
-//     github.token. They are read through loadHubConfig or
+//     stt, retention and audit (the janitor), backup, the hub's own
+//     github.token, and secrets (the KMS its sealing keys are held by,
+//     which `cloop ui` resolves at startup). They are read through
+//     loadHubConfig or
 //     controlPlaneConfig, which merge this hub's overlay over config.yaml.
 //
 //   - Project-scope settings say what one project asked for: its provider and

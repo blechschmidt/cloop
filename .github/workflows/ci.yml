@@ -2087,6 +2087,27 @@ jobs:
             --set executor.gitProxy.advertiseURL=https://git-proxy.example.com \
             --set executor.monitorTLS.existingSecret=monitor-tls \
             --set executor.monitorTLS.publiclyTrusted=true
+          # Sealing keys held by a KMS (Task 20433): a KMS v2 plugin sidecar
+          # mid-way through a move onto it, and Vault Transit both ways it
+          # authenticates.
+          helm lint deploy/helm/cloop-hub \
+            --set secrets.existingSecret=external \
+            --set executor.kubernetes.enabled=true \
+            --set kms.enabled=true --set kms.plugin.image=example.com/kms-plugin:v1 \
+            --set 'kms.plugin.args[0]=--listen-addr=unix:///var/run/kmsplugin/socket.sock' \
+            --set kms.movingFromPassphrase=true
+          helm lint deploy/helm/cloop-hub \
+            --set secrets.existingSecret=external \
+            --set executor.kubernetes.enabled=true \
+            --set kms.enabled=true --set kms.provider=transit \
+            --set kms.transit.address=https://vault.example.com:8200 --set kms.transit.key=cloop \
+            --set kms.transit.kubernetes.role=cloop-hub
+          helm lint deploy/helm/cloop-hub \
+            --set secrets.existingSecret=external \
+            --set executor.kubernetes.enabled=true \
+            --set kms.enabled=true --set kms.provider=transit \
+            --set kms.transit.address=https://vault.example.com:8200 --set kms.transit.key=cloop \
+            --set kms.transit.tokenSecret.name=vault-token
 
       - name: The monitors render what the hub and the Pods need
         # Rendering is not the same as rendering right. Each of these is read
@@ -2263,6 +2284,24 @@ jobs:
             --set executor.monitorTLS.auto=true --set executor.monitorTLS.existingSecret=t
           refuses "auto described as publicly trusted" "${mon[@]}" \
             --set executor.monitorTLS.auto=true --set executor.monitorTLS.publiclyTrusted=true
+          # Sealing keys in a KMS (Task 20433). Each refused combination is a
+          # hub that would seal under CLOOP_SECRET_KEY while the release
+          # reports a KMS, or one that cannot reach its KMS at all.
+          kms=(--set secrets.existingSecret=x --set executor.kubernetes.enabled=true --set kms.enabled=true)
+          refuses "a plugin sidecar with no image" "${kms[@]}"
+          refuses "a KMS whose config never reaches the hub" "${kms[@]}" \
+            --set kms.plugin.image=example.com/p:v1 --set config.fromConfigMap=false
+          refuses "an unknown KMS provider" "${kms[@]}" --set kms.provider=hsm
+          refuses "Transit with no address" "${kms[@]}" --set kms.provider=transit \
+            --set kms.transit.key=k --set kms.transit.tokenSecret.name=t
+          refuses "Transit with no way to authenticate" "${kms[@]}" --set kms.provider=transit \
+            --set kms.transit.address=https://v:8200 --set kms.transit.key=k
+          refuses "Transit with two ways to authenticate" "${kms[@]}" --set kms.provider=transit \
+            --set kms.transit.address=https://v:8200 --set kms.transit.key=k \
+            --set kms.transit.tokenSecret.name=t --set kms.transit.kubernetes.role=r
+          refuses "moving from the passphrase with no KMS to move onto" \
+            --set secrets.existingSecret=x --set executor.kubernetes.enabled=true \
+            --set kms.movingFromPassphrase=true
 
       - name: Create a kind cluster
         # kubectl needs a cluster even for --dry-run=client: it resolves REST
@@ -2443,6 +2482,20 @@ jobs:
                  "did not pass — it was skipped, so the chart's Role was never compared with the driver"
             exit 1
           }
+
+      - name: The chart's KMS renders what the hub accepts
+        # kms_test in pkg/kms renders the chart for each shape of the kms
+        # values and reads the result as the hub does: config.ValidateSecrets
+        # accepts the secrets section, kms.Resolve builds the intended roots,
+        # and the plugin listens in the directory the hub dials. As with the
+        # executor Role below, CLOOP_REQUIRE_HELM turns a skip into a failure.
+        env:
+          CLOOP_REQUIRE_HELM: "1"
+        run: |
+          set -euo pipefail
+          go test ./pkg/kms/ -count=1 -v -run '^TestHelmChartRendersAKMSTheHubAccepts$' 2>&1 | tee /tmp/kms-chart.log
+          grep -qE '^--- PASS: TestHelmChartRendersAKMSTheHubAccepts \(' /tmp/kms-chart.log || {
+            echo "::error::TestHelmChartRendersAKMSTheHubAccepts did not pass — it was skipped"; exit 1; }
 
       - name: Prepare the Kubernetes end-to-end test
         # What both runs of tests/kube below take: the cluster's kubeconfig, and
@@ -2642,5 +2695,62 @@ jobs:
           # A skip is a pass to go test; here it would mean nothing was proven.
           grep -qE '^--- PASS: TestKubeShareWithAnExecPlugin \(' "$RUNNER_TEMP/kube-share.log" || {
             echo "::error::go test succeeded but TestKubeShareWithAnExecPlugin did not pass — it was skipped"
+            exit 1
+          }
+
+  kms-transit:
+    name: KMS Transit (${{ matrix.server }})
+    runs-on: ubuntu-latest
+    # The secret store's Vault / OpenBao Transit backend (Task 20433), against
+    # the real servers. pkg/kms's other tests run against kmstest.Transit, a
+    # fake that answers the API the way the hub uses it; the claims worth
+    # checking here are the server's: that the three capabilities the runbook
+    # tells an operator to grant are enough and nothing they deny gets
+    # through, that a key rotated with the server's own endpoint is followed,
+    # and that its ciphertexts and key versions are what the client parses.
+    # Both servers, because "Vault or OpenBao" is a claim about each.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: vault
+            image: hashicorp/vault:1.18.0
+          - server: openbao
+            image: openbao/openbao:2.1.0
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start a ${{ matrix.server }} dev server
+        run: |
+          set -euo pipefail
+          docker run -d --name kms --cap-add IPC_LOCK -p 127.0.0.1:8200:8200 "${{ matrix.image }}" \
+            server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8200/v1/sys/health >/dev/null && exit 0
+            sleep 1
+          done
+          docker logs kms
+          exit 1
+
+      - name: Transit against the real server
+        env:
+          CLOOP_KMS_VAULT_ADDR: http://127.0.0.1:8200
+          CLOOP_KMS_VAULT_TOKEN: root
+          CLOOP_KMS_VAULT_REQUIRED: "1"
+        run: |
+          set -o pipefail
+          go test ./pkg/kms/ -run TestTransitAgainstARealVault -count=1 -v 2>&1 | tee "$RUNNER_TEMP/kms.log"
+          # A skip is a pass to go test; here it would mean nothing was proven.
+          grep -qE '^--- PASS: TestTransitAgainstARealVault \(' "$RUNNER_TEMP/kms.log" || {
+            echo "::error::go test succeeded but TestTransitAgainstARealVault did not pass — it was skipped"
             exit 1
           }

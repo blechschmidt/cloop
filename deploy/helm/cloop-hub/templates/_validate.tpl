@@ -42,6 +42,41 @@ Everything here fails the render rather than warning. A warning during
 {{- end }}
 {{- end }}
 
+{{/* --- kms (Task 20433) ---------------------------------------------- */}}
+{{- $kms := include "cloop-hub.kms" . | fromJson }}
+{{- if $kms.enabled }}
+{{- if not .Values.config.fromConfigMap }}
+{{- fail "kms.enabled is true but config.fromConfigMap is false, so secrets.kms never reaches the hub: it would seal under CLOOP_SECRET_KEY while this chart reports a KMS.\nSet config.fromConfigMap=true." }}
+{{- end }}
+{{- if eq $kms.provider "kmsv2" }}
+{{- if and $kms.plugin.enabled (not $kms.plugin.image) }}
+{{- fail "kms.provider is kmsv2 and kms.plugin.enabled is true, but kms.plugin.image is empty: set the vendor's KMS v2 plugin image (pinned by digest) and the args that make it listen at kms.kmsv2.socketDir/kms.kmsv2.socketName — or set kms.plugin.enabled=false if the socket is provided another way." }}
+{{- end }}
+{{- if not (hasPrefix "/" $kms.kmsv2.socketDir) }}
+{{- fail "kms.kmsv2.socketDir must be an absolute path." }}
+{{- end }}
+{{- else if eq $kms.provider "transit" }}
+{{- if or (not $kms.transit.address) (not $kms.transit.key) }}
+{{- fail "kms.provider is transit: kms.transit.address and kms.transit.key are both required." }}
+{{- end }}
+{{- if and $kms.transit.tokenSecret.name $kms.transit.kubernetes.role }}
+{{- fail "kms.transit.tokenSecret.name and kms.transit.kubernetes.role both say how the hub authenticates to Vault; keep one." }}
+{{- end }}
+{{- if not (or $kms.transit.tokenSecret.name $kms.transit.kubernetes.role) }}
+{{- fail "kms.provider is transit and neither kms.transit.tokenSecret.name nor kms.transit.kubernetes.role is set: the hub would have no Vault token." }}
+{{- end }}
+{{- else }}
+{{- fail (printf "kms.provider must be kmsv2 or transit (got %q)." $kms.provider) }}
+{{- end }}
+{{- if and $kms.movingFromPassphrase $kms.previous }}
+{{- fail "kms.movingFromPassphrase and kms.previous both name a previous root; a change of root moves from one root to one other." }}
+{{- end }}
+{{- else if or $kms.movingFromPassphrase $kms.previous }}
+{{- if $kms.movingFromPassphrase }}
+{{- fail "kms.movingFromPassphrase is set and kms.enabled is false: the passphrase is the only root, so there is nothing to move onto." }}
+{{- end }}
+{{- end }}
+
 {{/* --- oidc ---------------------------------------------------------- */}}
 {{- if .Values.oidc.enabled }}
 {{- if not .Values.oidc.issuer }}

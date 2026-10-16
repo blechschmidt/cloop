@@ -403,7 +403,12 @@ Keep the sidecar with the backup: restoring without one needs
 `--skip-checksum`, which checks nothing.
 
 A backup contains **sealed** secrets. It is not plaintext, but it is one half of
-a plaintext secret store; the other half is `hub.env` — or its escrow.
+a plaintext secret store; the other half is `hub.env` — or its escrow. On a hub
+whose keys are [held by a KMS](#keys-in-a-kms) the other half is the KMS key
+instead, and a backup restores only where that key answers: the report says
+`sealing keys: … held by the KMS …`, and the KMS key — and every version of it
+the backup's keys were wrapped under — has to be kept for as long as the backup
+is.
 
 Nightly, with retention:
 
@@ -418,7 +423,10 @@ Every key-encryption key derives from `CLOOP_SECRET_KEY`, so rotating them does
 nothing for the one value whose loss is unrecoverable: lose the key file and
 every sealed secret, session and hub CA key goes with it. Escrow it once the hub
 has started, and again after every [change of root](#changing-cloop_secret_key-itself)
-— the change refuses to finish until the new key is escrowed:
+— the change refuses to finish until the new key is escrowed. (On a hub whose
+keys are [held by a KMS](#keys-in-a-kms) no escrow opens them, and the commands
+list those keys as `KMS-HELD`; the escrow still recovers the audit checkpoint
+key and the backup sidecar seals, so keep making one.)
 
 ```console
 $ cloop hub key escrow export --output /mnt/root-credentials/cloop-hub.escrow
@@ -1870,8 +1878,13 @@ the moment it is promoted, and it adopts that key on first use.
 
 Rotation never destroys a key. Retirement does, and it is irreversible: it
 blanks the KEK's salt so the key cannot be derived from `CLOOP_SECRET_KEY`
-again, at all. Anything still sealed under it is then unrecoverable, which is
-why retirement **refuses** while any row references the key.
+again, at all — and for a key [held by a KMS](#keys-in-a-kms) destroys the KMS's
+ciphertext of it, so not even the KMS can give it back. The blanked bytes are
+zeroed in the file, not left in SQLite's free space (secure delete); what the
+write-ahead log holds of the old page lasts until the log is reused, and a
+backup taken before the retirement keeps everything. Anything still sealed under
+the key is then unrecoverable, which is why retirement **refuses** while any row
+references the key.
 
 ```console
 $ cloop hub key status                   # must report zero unrotated rows
@@ -1968,6 +1981,125 @@ re-mint the credentials at their sources as well:
 
 Session refresh tokens need no re-mint: sign everyone out (`cloop hub session
 revoke --all`) and the next sign-in issues new ones.
+
+#### Keys in a KMS
+
+Everything above derives each KEK from `CLOOP_SECRET_KEY`, so the database and
+the key file together open every credential — offline, from a backup, a volume
+snapshot or a Pod's mounted Secret, for as long as anybody keeps the copy. With
+[`secrets.kms`](../reference/configuration.md#sealing-keys-in-a-kms-secrets) a
+KEK is random instead and the database keeps only the ciphertext a
+key-management service made of it (Task 20433). Opening the store is then a
+call to the KMS: the KMS logs it, and its owner can take the hub's access away.
+The unwrapped KEKs live in the hub's memory and nowhere else.
+
+Two kinds of KMS:
+
+* **A Kubernetes KMS v2 plugin** (`provider: kmsv2`), over a unix socket — the
+  protocol the API server's own encryption at rest speaks, so Azure Key Vault,
+  AWS KMS, Google Cloud KMS and Vault are reached through the plugins their
+  vendors already ship. In the Helm chart it is a sidecar (`kms.*` values) on an
+  emptyDir only the Pod's containers reach; on a host, a service whose socket
+  lives in a directory only it and the hub can write — a socket in `/tmp` or
+  `/dev/shm` is refused.
+* **Vault or OpenBao Transit** (`provider: transit`), over HTTPS, authenticated
+  by a token file (a Vault Agent sink) or Vault's Kubernetes auth method. The
+  hub needs exactly this policy on its key:
+
+  ```hcl
+  path "transit/encrypt/cloop" { capabilities = ["update"] }
+  path "transit/decrypt/cloop" { capabilities = ["update"] }
+  path "transit/keys/cloop"    { capabilities = ["read"] }
+  ```
+
+On Azure, `deploy/terraform/azure-entra-id/modules/key-vault-kms` creates the
+Key Vault key (wrap and unwrap only, HSM-protected by default) and grants the
+hub's identity *Key Vault Crypto Service Encryption User* on that one key; its
+`helm_values_yaml` output is the chart's `kms` block for the AKS KMS plugin.
+
+**Moving onto a KMS** is a [change of root](#changing-cloop_secret_key-itself),
+with the KMS as the new root and `CLOOP_SECRET_KEY` as the previous one:
+
+1. **Add the KMS beside the passphrase** on every member and restart them one at
+   a time:
+
+   ```yaml
+   secrets:
+     kms:
+       provider: kmsv2
+       kmsv2: {endpoint: unix:///var/run/kmsplugin/socket.sock}
+     previous_root: passphrase
+   ```
+
+   (With the chart: `kms.enabled=true`, the plugin's image and args, and
+   `kms.movingFromPassphrase=true`.) Each member reaches the KMS before it
+   serves — waiting up to `startup_timeout` for a sidecar still starting — and
+   prints it:
+
+   ```console
+   KMS: kmsv2:/var/run/kmsplugin/socket.sock, the KMS v2 plugin at unix:///var/run/kmsplugin/socket.sock, key key-3 (answered in 4ms)
+   Sealing keys: held by the KMS kmsv2:/var/run/kmsplugin/socket.sock
+   Previous root: 7246e27af489f0e0, from the file /etc/cloop/root-key/cloop-secret-key (CLOOP_SECRET_KEY_FILE), named by secrets.previous_root — a change of root is in progress; …
+   ```
+
+   Nothing moves yet: the primary stays the passphrase's key, so a member
+   restarted and one not yet restarted seal under one key, and the step is
+   backed out by restarting with the old configuration. `cloop hub doctor`
+   reports `secrets.kms.reachable` for each member's KMS.
+
+2. **Retire the passphrase's keys**, in a shell with the same `secrets` section:
+
+   ```console
+   $ cloop hub key rotate --retire-previous
+   Change of root 7246e27af489f0e0 → kmsv2:/var/run/kmsplugin/socket.sock
+     ready   member hub_cb87… (pid 4121 on hub-1): root kmsv2:/var/run/kmsplugin/socket.sock, previous 7246e27af489f0e0
+     ready   the KMS kmsv2:/var/run/kmsplugin/socket.sock answers, encrypting under key-3; no escrow is needed for it — a restore
+             of this hub needs access to that KMS key instead
+     minted kek_9c21… from the new root and made it primary
+   ```
+
+   It refuses, changing nothing, until every live member advertises the KMS as
+   its root and the KMS answers. No escrow is required: none opens what a KMS
+   holds. Then it mints a KEK under the KMS — proving the KMS unwraps it before
+   anything is recorded — rewraps every secret, session refresh token and hub CA
+   key onto it, and retires every passphrase-derived KEK.
+
+3. **Drop `previous_root`** from every member and restart them. `cloop hub
+   doctor` warns (`secrets.kms.previous`) until you do.
+
+From then on a copy of the database and the key file opens nothing. **Backups
+taken before step 2 still open with `CLOOP_SECRET_KEY`** — they hold the
+passphrase-derived KEKs, salts and all. Destroy them, or keep them as safe as the
+key. Moving between two KMSs is the same procedure with the old one as
+`secrets.kms_previous`; moving back to the passphrase is `secrets.kms_previous`
+with no `secrets.kms`, and then the new passphrase has to be escrowed before the
+retire step will run.
+
+**A rotation of the KMS key** needs nothing from the hub but to be noticed. Every
+member polls its KMS once a minute; when the key it encrypts under differs from
+the one a KEK was wrapped under — a new Key Vault key version the plugin was
+pointed at, a rotated Transit key — the cluster leader wraps that KEK again under
+the new key, proves it unwraps, swaps it into the record and records
+`sealing_key.kms_rewrapped`. `cloop hub key rewrap` does it now. One row per KEK
+changes and no secret does. Disable the old KMS key version only once `cloop hub
+key list` names it on no live key, and never purge it while a backup from
+before the rewrap is still kept.
+
+**When the KMS does not answer**, nothing falls back to the passphrase:
+
+* A hub starting refuses to start, after `startup_timeout`, naming the KMS and
+  what it said; `cloop hub doctor` reports `secrets.kms.reachable` failing.
+* A serving hub keeps working with the KEKs it already holds in memory, logs the
+  outage once, and polls every ten seconds until the KMS is back. A KEK it has
+  not opened — one minted by another member meanwhile — cannot be opened, and
+  the reads that need it fail as `kms_unavailable`
+  ([metrics](metrics.md#the-key-management-service)).
+
+**Revoking the hub's access at the KMS** (removing the role assignment, revoking
+the Vault policy) stops every new hub process, every restore and every offline
+copy from opening the store. A process already serving keeps the KEKs it holds
+in memory until it exits: to cut a running hub off, revoke and then restart its
+members.
 
 #### Upgrading a hub that predates envelope encryption
 

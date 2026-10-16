@@ -18,10 +18,19 @@ terraform {
       source  = "hashicorp/azuread"
       version = ">= 3.0, < 4.0"
     }
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 4.0, < 6.0"
+    }
   }
 }
 
 provider "azuread" {}
+
+# For the Key Vault key below; the sign-in application needs none of it.
+provider "azurerm" {
+  features {}
+}
 
 # The hub's SCIM credential, once the hub is up and has minted one:
 #
@@ -157,4 +166,38 @@ output "scim_base_address" {
 output "discovery_url" {
   description = "curl this from the hub before blaming cloop for a failed sign-in."
   value       = module.cloop_sso.discovery_url
+}
+
+# The secret store's key-encryption keys held by Key Vault instead of derived
+# from CLOOP_SECRET_KEY (Task 20433): an HSM key in a vault the platform team
+# already runs — soft delete and purge protection on — and wrap and unwrap on
+# that key alone for the identity the hub's KMS plugin sidecar authenticates
+# as. A copy of the hub's volume and Secret then opens nothing without this
+# key, and removing the role assignment takes the hub's access away.
+data "azurerm_key_vault" "platform" {
+  name                = "platform-kv"
+  resource_group_name = "platform"
+}
+
+# The user-assigned identity the hub's Pods run with (the KMS plugin reads its
+# client ID from azure.json).
+data "azurerm_user_assigned_identity" "cloop_hub" {
+  name                = "cloop-hub"
+  resource_group_name = "cloop"
+}
+
+module "cloop_kms" {
+  source = "../../modules/key-vault-kms"
+
+  key_vault_id        = data.azurerm_key_vault.platform.id
+  principal_object_id = data.azurerm_user_assigned_identity.cloop_hub.principal_id
+
+  # A new key version yearly. The hub follows it once the plugin is pointed at
+  # it: `cloop hub key rewrap`, or the cluster leader within a minute.
+  rotate_after_days = 365
+}
+
+output "cloop_kms_helm_values" {
+  description = "The cloop-hub chart's kms values for the key: pin the plugin image, create the kms-azure-json Secret, and helm upgrade with them."
+  value       = module.cloop_kms.helm_values_yaml
 }

@@ -218,7 +218,7 @@ func TestRootChangeAcrossARollingRestart(t *testing.T) {
 	if stale.ProcessState.Success() {
 		t.Error("a member on the old root alone exited successfully")
 	}
-	if b, _ := os.ReadFile(logPath); !strings.Contains(string(b), "derive from no root this hub holds") {
+	if b, _ := os.ReadFile(logPath); !strings.Contains(string(b), "open with no root this hub holds") {
 		t.Errorf("the refused member's log does not say why:\n%s", b)
 	}
 }

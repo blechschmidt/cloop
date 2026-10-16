@@ -60,6 +60,9 @@
 //	github.token           the token the hub hands a host-run pull request
 //	notifications          the webhooks the hub tells approvers through
 //	                       (Task 20427)
+//	secrets                the KMS the secret store's keys are held by
+//	                       (secrets.kms, Task 20433), resolved once at
+//	                       startup like the root key
 //	orchestrator.min_free_disk_mb
 //	                       the free-space floor: the hub's doctor and admin
 //	                       banner hold its state volume to it, and the hub

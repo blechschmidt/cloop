@@ -497,6 +497,10 @@ const (
 	// being finished: every sealed row moved onto a key of the new root, and
 	// every key of the previous root retired (Task 20425).
 	ActionSealingKeyRootChanged Action = "sealing_key.root_changed"
+	// ActionSealingKeyKMSRewrapped records a key-encryption key held by a KMS
+	// being wrapped again under the KMS's current key, after a rotation of
+	// the KMS key (Task 20433).
+	ActionSealingKeyKMSRewrapped Action = "sealing_key.kms_rewrapped"
 
 	// ── hub_ca ─────────────────────────────────────────────────────────────
 

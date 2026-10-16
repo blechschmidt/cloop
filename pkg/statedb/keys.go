@@ -43,8 +43,16 @@ type KEKRow struct {
 	CreatedBy  string
 	RetiredAt  string
 	// Root is the fingerprint of the root secret the key derives from
-	// (migration 0073); '' until a process holding that root attributes it.
+	// (migration 0073), or the name of the KMS holding it; '' until a process
+	// holding that root attributes it.
 	Root string
+	// Wrap, KMSKeyID, KMSCiphertext and KMSAnnotations are a KMS-held key's
+	// (migration 0079): Wrap is 'kms' for one, and KMSAnnotations the JSON
+	// object of base64 values the column holds.
+	Wrap           string
+	KMSKeyID       string
+	KMSCiphertext  []byte
+	KMSAnnotations string
 }
 
 // RotationRow is one row of key_rotations.
@@ -168,10 +176,13 @@ func (d *DB) PutKEK(row KEKRow) error {
 
 	// An empty root never blanks a recorded one: a record put back by a
 	// caller that read it before it was attributed would otherwise undo the
-	// attribution.
+	// attribution. How a key is held never changes after it is minted, so an
+	// update leaves wrap alone, and a KMS wrapping changes only through
+	// RewrapKEK's compare-and-swap.
 	if _, err := d.conn.Exec(
-		`INSERT INTO broker_keks(id, salt, state, check_value, created_at, created_by, retired_at, root)
-		 VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO broker_keks(id, salt, state, check_value, created_at, created_by, retired_at, root,
+		                         wrap, kms_key_id, kms_ciphertext, kms_annotations)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   salt=excluded.salt, state=excluded.state, check_value=excluded.check_value,
 		   created_at=excluded.created_at, created_by=excluded.created_by,
@@ -180,6 +191,7 @@ func (d *DB) PutKEK(row KEKRow) error {
 		 WHERE broker_keks.state <> 'retired'`,
 		row.ID, row.Salt, defaultString(row.State, "active"), row.CheckValue,
 		row.CreatedAt, row.CreatedBy, row.RetiredAt, row.Root,
+		row.Wrap, row.KMSKeyID, nullableBlob(row.KMSCiphertext), row.KMSAnnotations,
 	); err != nil {
 		return fmt.Errorf("statedb: put sealing key %s: %w", row.ID, classifyDriverErr(err))
 	}
@@ -190,20 +202,47 @@ func (d *DB) PutKEK(row KEKRow) error {
 func (d *DB) ListKEKs() ([]KEKRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return listKEKs(d.conn, true)
+	return listKEKs(d.conn, kekColumnsAll)
 }
 
-// listKEKs reads the registry through conn, newest first. withRoot is false
-// for a database that predates migration 0073 — a backup read by a restore's
-// preflight, which cannot assume this binary's schema — and every row then
-// reads as unattributed.
-func listKEKs(conn *sql.DB, withRoot bool) ([]KEKRow, error) {
-	root := "''"
-	if withRoot {
+// kekColumns says which of the columns later migrations added a database
+// holds, for a reader that cannot assume this binary's schema — a backup read
+// by a restore's preflight (Task 20410).
+type kekColumns struct {
+	root bool // migration 0073
+	kms  bool // migration 0079
+}
+
+var kekColumnsAll = kekColumns{root: true, kms: true}
+
+// kekSelect is the column list every KEK read scans, in kekScan's order. A
+// column the database predates reads as its default.
+func kekSelect(c kekColumns) string {
+	root, kms := "''", "'', '', NULL, ''"
+	if c.root {
 		root = "root"
 	}
+	if c.kms {
+		kms = "wrap, kms_key_id, kms_ciphertext, kms_annotations"
+	}
+	return `id, salt, state, check_value, created_at, created_by, retired_at, ` + root + `, ` + kms
+}
+
+type kekScanner interface{ Scan(dest ...any) error }
+
+func kekScan(sc kekScanner, row *KEKRow) error {
+	return sc.Scan(&row.ID, &row.Salt, &row.State, &row.CheckValue,
+		&row.CreatedAt, &row.CreatedBy, &row.RetiredAt, &row.Root,
+		&row.Wrap, &row.KMSKeyID, &row.KMSCiphertext, &row.KMSAnnotations)
+}
+
+// listKEKs reads the registry through conn, newest first. cols says which
+// later columns the database holds; one it predates reads as its default — a
+// key from before migration 0073 as unattributed, one from before 0079 as
+// derived.
+func listKEKs(conn *sql.DB, cols kekColumns) ([]KEKRow, error) {
 	rows, err := conn.Query(
-		`SELECT id, salt, state, check_value, created_at, created_by, retired_at, ` + root + `
+		`SELECT ` + kekSelect(cols) + `
 		 FROM broker_keks ORDER BY created_at DESC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("statedb: list sealing keys: %w", classifyDriverErr(err))
@@ -213,8 +252,7 @@ func listKEKs(conn *sql.DB, withRoot bool) ([]KEKRow, error) {
 	var out []KEKRow
 	for rows.Next() {
 		var row KEKRow
-		if err := rows.Scan(&row.ID, &row.Salt, &row.State, &row.CheckValue,
-			&row.CreatedAt, &row.CreatedBy, &row.RetiredAt, &row.Root); err != nil {
+		if err := kekScan(rows, &row); err != nil {
 			return nil, fmt.Errorf("statedb: scan sealing key: %w", classifyDriverErr(err))
 		}
 		out = append(out, row)
@@ -235,11 +273,8 @@ func (d *DB) PrimaryKEK() (KEKRow, bool, error) {
 	defer d.mu.Unlock()
 
 	var row KEKRow
-	err := d.conn.QueryRow(
-		`SELECT id, salt, state, check_value, created_at, created_by, retired_at, root
-		 FROM broker_keks WHERE state = 'primary'`,
-	).Scan(&row.ID, &row.Salt, &row.State, &row.CheckValue,
-		&row.CreatedAt, &row.CreatedBy, &row.RetiredAt, &row.Root)
+	err := kekScan(d.conn.QueryRow(
+		`SELECT `+kekSelect(kekColumnsAll)+` FROM broker_keks WHERE state = 'primary'`), &row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return KEKRow{}, false, nil
 	}
@@ -247,6 +282,33 @@ func (d *DB) PrimaryKEK() (KEKRow, bool, error) {
 		return KEKRow{}, false, fmt.Errorf("statedb: read primary sealing key: %w", classifyDriverErr(err))
 	}
 	return row, true, nil
+}
+
+// RewrapKEK replaces a KMS-held key's wrapping — its KMS key id, ciphertext,
+// annotations and root — and reports whether it did (Task 20433). It is a
+// compare-and-swap on the ciphertext the caller verified against: a member
+// that lost a race to rewrap the same key writes nothing, and the winner's
+// ciphertext, which the winner proved unwraps to the key, stands. A retired
+// key, or one not held by a KMS, is never written.
+func (d *DB) RewrapKEK(id string, expect []byte, next KEKRow) (bool, error) {
+	if id == "" || len(expect) == 0 || len(next.KMSCiphertext) == 0 {
+		return false, fmt.Errorf("statedb: rewrap sealing key: empty id or ciphertext")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.conn.Exec(
+		`UPDATE broker_keks SET kms_key_id = ?, kms_ciphertext = ?, kms_annotations = ?,
+		   root = CASE WHEN ? <> '' THEN ? ELSE root END
+		 WHERE id = ? AND wrap = 'kms' AND state <> 'retired' AND kms_ciphertext = ?`,
+		next.KMSKeyID, next.KMSCiphertext, next.KMSAnnotations, next.Root, next.Root, id, expect)
+	if err != nil {
+		return false, fmt.Errorf("statedb: rewrap sealing key %s: %w", id, classifyDriverErr(err))
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("statedb: rewrap sealing key %s: %w", id, classifyDriverErr(err))
+	}
+	return n > 0, nil
 }
 
 // SetKEKRoot records the root a key derives from, and reports whether it did
@@ -329,7 +391,8 @@ func (d *DB) PromoteKEK(id string, at time.Time) error {
 // ignored by a future code path or flipped back by a hand-edited database;
 // without the salt the key cannot be derived from the passphrase at all, so
 // retirement is a property of the cryptography rather than of the control
-// flow.
+// flow. A KMS-held key's ciphertext goes with it (Task 20433): with the KMS's
+// ciphertext gone, not even the KMS can give the key back.
 func (d *DB) RetireKEK(id string, at time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -367,7 +430,8 @@ func (d *DB) RetireKEK(id string, at time.Time) error {
 	}
 
 	if _, err := tx.Exec(
-		`UPDATE broker_keks SET state='retired', salt='', check_value=NULL, retired_at=? WHERE id = ?`,
+		`UPDATE broker_keks SET state='retired', salt='', check_value=NULL,
+		   kms_ciphertext=NULL, kms_annotations='', retired_at=? WHERE id = ?`,
 		formatTimeRFC(at), id,
 	); err != nil {
 		return fmt.Errorf("statedb: retire sealing key %s: %w", id, classifyDriverErr(err))
@@ -383,13 +447,14 @@ func (d *DB) RetireKEK(id string, at time.Time) error {
 //
 // Blanking a column does not, by itself, remove the bytes it held from the
 // file: SQLite rewrites the record and leaves the old one in the page's free
-// space, where a copy of the file still finds a retired key's salt. With
-// secure_delete the freed space is overwritten with zeros. It is a
-// per-connection setting, and the pool's other connections keep the default,
-// so the cost is paid by retirements alone; done puts the connection's setting
-// back and returns it to the pool. What the write-ahead log still holds of the
-// old page lasts until the log is reused, and a backup taken before the
-// retirement keeps everything — docs/security says so.
+// space, where a copy of the file still finds a retired key's salt — or a KMS
+// ciphertext the KMS would still unwrap. With secure_delete the freed space is
+// overwritten with zeros. It is a per-connection setting, and the pool's other
+// connections keep the default, so the cost is paid by retirements alone; done
+// puts the connection's setting back and returns it to the pool. What the
+// write-ahead log still holds of the old page lasts until the log is reused,
+// and a backup taken before the retirement keeps everything — docs/security
+// says so.
 func (d *DB) shreddingTx() (*sql.Tx, func(), error) {
 	ctx := context.Background()
 	conn, err := d.conn.Conn(ctx)
@@ -443,7 +508,8 @@ func (d *DB) AbandonKEKs(ids []string, at time.Time) ([]string, error) {
 	var done []string
 	for _, id := range ids {
 		res, err := tx.Exec(
-			`UPDATE broker_keks SET state='retired', salt='', check_value=NULL, retired_at=?
+			`UPDATE broker_keks SET state='retired', salt='', check_value=NULL,
+			   kms_ciphertext=NULL, kms_annotations='', retired_at=?
 			 WHERE id = ? AND state <> 'retired'`, formatTimeRFC(at), id)
 		if err != nil {
 			return nil, fmt.Errorf("statedb: abandon sealing key %s: %w", id, classifyDriverErr(err))
@@ -669,6 +735,14 @@ func (d *DB) replaceSealed(query, id string, expect, next SealedRow, what string
 }
 
 // defaultString returns fallback when s is empty.
+// nullableBlob is b for a column that holds NULL rather than an empty blob.
+func nullableBlob(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}
+
 func defaultString(s, fallback string) string {
 	if s == "" {
 		return fallback

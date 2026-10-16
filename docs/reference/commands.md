@@ -1376,33 +1376,43 @@ a device.
 
 Sealing-key inspection and online rotation. Stored credentials are sealed under
 a per-row data key (DEK); only the DEK is sealed under a key-encryption key
-(KEK) derived from `CLOOP_SECRET_KEY`, so rotating rewraps sixty bytes per row
-and never decrypts a payload.
+(KEK) — derived from `CLOOP_SECRET_KEY`, or random and held wrapped by a KMS
+([`secrets.kms`](configuration.md#sealing-keys-in-a-kms-secrets)) — so rotating
+rewraps sixty bytes per row and never decrypts a payload.
 
 ```bash
-cloop hub key status                       # which key seals what, and rotation progress
-cloop hub key list                         # keys, and whether each is still openable
+cloop hub key status                       # which key seals what, rotation progress, the KMS
+cloop hub key list                         # keys, whether each opens, and its KMS key version
 cloop hub key rotate --dry-run             # count what would move, write nothing
 cloop hub key rotate                       # mint a new KEK and rewrap onto it
 cloop hub key rotate --continue            # resume onto the current primary
-cloop hub key rotate --retire-previous     # finish changing CLOOP_SECRET_KEY itself
-cloop hub key retire <key-id> --yes        # destroy an old key's salt (irreversible)
+cloop hub key rotate --retire-previous     # finish a change of root: of CLOOP_SECRET_KEY, onto or off a KMS
+cloop hub key rewrap                       # follow a rotation of the KMS key
+cloop hub key retire <key-id> --yes        # destroy an old key's salt or KMS ciphertext (irreversible)
 ```
 
-The key is read as the hub reads it: `CLOOP_SECRET_KEY_FILE`, the systemd
+The roots are read as the hub reads them: `CLOOP_SECRET_KEY_FILE`, the systemd
 credential `cloop-secret-key`, or `CLOOP_SECRET_KEY`, with
 `CLOOP_SECRET_KEY_PREVIOUS` (or its file or credential) beside it during a change
-of root — see [the root key](configuration.md#the-root-key-cloop_secret_key).
+of root — see [the root key](configuration.md#the-root-key-cloop_secret_key) —
+and the KMS of the `secrets` section in `config.yaml`, with the overlay of the
+hub `--port` names merged.
 
 | Flag | Applies to | Default | Description |
 |------|-----------|---------|-------------|
 | `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
-| `--json` | `list`, `status`, `rotate` | `false` | Machine-readable output |
+| `--port` | all | `8080` | The hub whose per-instance overlay (`.cloop/config.ui-<port>.yaml`) to merge over `config.yaml` when reading `secrets.kms` |
+| `--json` | `list`, `status`, `rotate`, `rewrap` | `false` | Machine-readable output |
 | `--dry-run` | `rotate` | `false` | Report what would be rewrapped without writing |
 | `--continue` | `rotate` | `false` | Resume onto the current primary instead of minting a new key |
 | `--batch` | `rotate` | `128` | Rows read per round |
-| `--retire-previous` | `rotate` | `false` | Finish a change of root: refuses until every live hub member advertises the new key as its current root and an escrow of it is on record, then rewraps everything onto a key of `CLOOP_SECRET_KEY` and retires every key of `CLOOP_SECRET_KEY_PREVIOUS`. A plain `rotate` mid-change is refused |
+| `--retire-previous` | `rotate` | `false` | Finish a change of root: refuses until every live hub member advertises the new root as its current one and — for a new `CLOOP_SECRET_KEY` — an escrow of it is on record, or — for a KMS — the KMS answers; then rewraps everything onto a key of the current root and retires every key of the previous one. A plain `rotate` mid-change is refused |
 | `--yes` | `retire` | `false` | Confirm irreversible destruction of the key's salt |
+
+`rewrap` wraps every KEK the current KMS holds again under the KMS key it now
+encrypts under, after a rotation of the KMS key; one row per key changes and no
+secret does. A serving hub's cluster leader does the same within a minute of the
+KMS reporting the new key, and records `sealing_key.kms_rewrapped` either way.
 
 Rotation is safe to interrupt and safe to run against a serving hub; `retire` is
 a deliberate second step and refuses while any row still references the key. The
@@ -1416,10 +1426,12 @@ as `cloop hub token`.
 
 #### `cloop hub key escrow`
 
-Every key-encryption key derives from `CLOOP_SECRET_KEY`, so rotation cannot
-help if that value is lost. An escrow file holds it sealed under a passphrase
-you choose (argon2id, 64 MiB, then AES-256-GCM); the hub records only the
-escrow's id and the key's fingerprint.
+Every key-encryption key derives from `CLOOP_SECRET_KEY` — unless a KMS holds it
+— so rotation cannot help if that value is lost. An escrow file holds it sealed
+under a passphrase you choose (argon2id, 64 MiB, then AES-256-GCM); the hub
+records only the escrow's id and the key's fingerprint. Keys held by a KMS are
+neither opened nor recovered by an escrow: `export` and `verify` list them as
+`KMS-HELD`, and only access to that KMS key recovers them.
 
 ```bash
 cloop hub key escrow export --output /secure/cloop-hub.escrow   # seal the key in this environment
@@ -1468,7 +1480,10 @@ nothing — a backup that fails its integrity check, does not match its sidecar,
 carries a seal that does not verify, or holds secrets the `CLOOP_SECRET_KEY` it
 runs with cannot open, and any restore while a hub still serves the database;
 then it records itself as an `audit.restored` row and a sealed restore record
-the audit checkpoints accept.
+the audit checkpoints accept. A backup whose keys a KMS holds
+([`secrets.kms`](configuration.md#sealing-keys-in-a-kms-secrets)) restores only
+where that KMS answers: the preflight asks it, says so in its report either way,
+and refuses — naming the KMS — without it.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -1479,6 +1494,7 @@ the audit checkpoints accept.
 | `--allow-unsealed` | `false` | Accept a sidecar whose seal cannot be checked here; the digest is still checked |
 | `--accept-secret-loss` | `false` | Restore although the key cannot open the backup's sealing keys; retires them, losing what they seal (recorded). Needs a `CLOOP_SECRET_KEY` |
 | `--checkpoints` | `audit.checkpoints.file` | Where to look for superseded checkpoints and append the restore record |
+| `--port` | `8080` | The hub whose per-instance overlay to merge over `config.yaml` when reading `secrets.kms` |
 
 Exit codes: 0 restored and recorded, 1 refused or failed, 2 could not run, 3
 restored but not fully recorded. The procedure and a drill to rehearse it are in

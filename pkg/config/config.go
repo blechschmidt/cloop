@@ -392,6 +392,12 @@ type Config struct {
 	// `cloop ui` with its per-instance overlay merged in.
 	Notifications NotificationsConfig `yaml:"notifications,omitempty"`
 
+	// Secrets says where the secret store's key-encryption keys come from:
+	// CLOOP_SECRET_KEY, or a key in an external key-management service
+	// (Task 20433). Hub-scope: read by `cloop ui` with its per-instance
+	// overlay merged in. See secrets.go.
+	Secrets SecretsConfig `yaml:"secrets,omitempty"`
+
 	// envShadow records what the file held for each credential the
 	// environment overrode, so Save can write the file's own value back
 	// instead of committing a secret that was deliberately kept out of it.

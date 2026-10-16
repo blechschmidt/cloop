@@ -4269,10 +4269,22 @@ an honest one does not already do.
 
 Stored credentials are sealed under a per-row **data-encryption key** (DEK);
 only the DEK is sealed under a **key-encryption key** (KEK) derived from
-`CLOOP_SECRET_KEY`. That indirection buys rotation — rewrapping a DEK never
-touches a payload, so `cloop hub key rotate` runs against a serving hub — and it
-concentrates the risk: a leaked DEK decrypts its row forever, and unlike a
-credential there is nobody to rotate it at.
+`CLOOP_SECRET_KEY` — or, with `secrets.kms` (Task 20433), random and held only as
+the ciphertext an external key-management service made of it. That indirection
+buys rotation — rewrapping a DEK never touches a payload, so `cloop hub key
+rotate` runs against a serving hub — and it concentrates the risk: a leaked DEK
+decrypts its row forever, and unlike a credential there is nobody to rotate it
+at.
+
+A KMS-held KEK changes what a stolen copy is worth. The database and the key
+file no longer open anything: the KEK is unwrapped by asking the KMS (a
+Kubernetes KMS v2 plugin over a unix socket, or Vault/OpenBao Transit), the KMS
+logs the call, and its owner can refuse it. What comes back is checked against
+the key's check value before it is used, and lives in the hub's memory alone;
+retiring the key destroys the KMS's ciphertext along with the record. A KMS-held
+record carries a decoy salt, so a build from before KMS roots sees a live key it
+cannot derive and refuses to start, rather than reading an empty salt as a
+retired key and minting a passphrase key over the KMS's primary.
 
 Both halves of the envelope carry GCM associated data binding them to the
 *population and row* they belong to — `secrets\0sec_…`, `sessions\0sess_…`.
@@ -4321,6 +4333,15 @@ with every check upstream still passing.
 | A member without the new root fails loudly and drops nothing: its seals and reads fail naming the key, and it never writes an empty refresh token over one it could not open | `TestAMemberStillOnTheOldRootFailsLoudlyAfterTheChange`, `TestAMemberWithoutTheNewRootDropsNoRefreshToken` |
 | A backup from before the change restores with the old key as the previous one; checkpoints sealed on both sides of the change verify while it is configured | `TestABackupFromBeforeAChangeOfRootRestoresWithThePreviousRootSet`, `TestCheckpointsAcrossAChangeOfRootVerify` |
 | Derived keys are cached for the process, and a retired key's are wiped from it | `TestDerivedKeysAreCachedForTheProcess` |
+| Retiring a key zeroes the salt, check value and KMS ciphertext it blanks in the database file, rather than leaving them in SQLite's free space | `TestRetirementLeavesNothingOfTheKeyInTheFile` |
+| On the KMS path a plaintext KEK never reaches the database file, the WAL, the audit trail, the metrics, an error or any operator-facing rendering — minted, rotated, rewrapped after a rotation of the KMS key, retired, and with the KMS down | `TestPlaintextKMSKeysNeverReachDiskOrLogs` |
+| A copy of the database and of `CLOOP_SECRET_KEY`, taken after the store moved onto a KMS, opens nothing: the passphrase derives no KMS-held key, and nothing is tried in the KMS's place | `TestADatabaseAndKeyFileDoNotOpenAKMSHeldStore`, `TestAKMSHeldKeyIsUnderivableToAnOlderBuild` |
+| A KMS that cannot be reached, answers too slowly, or holds another key refuses the open — naming the key, the KMS and which of the three it was — and nothing is minted or derived instead; a fresh store whose KMS is down mints nothing | `TestKeyringRefusesWhenThePluginIsUnavailable`, `TestKeyringWithASlowPlugin`, `TestKeyringRefusesAnotherPluginsKey`, `TestUIRefusesToStartWithoutItsKMS` |
+| A new KMS-held key is proven to unwrap before it is recorded, so an identity that may encrypt and not decrypt mints nothing | `TestMintProvesTheKMSUnwrapsBeforeRecording`, `TestTransitAgainstARealVault` |
+| Members opening one KMS-held store at once all open it and share their unwraps; a rotation of the KMS key is followed by rewrapping each KEK in place, once, under compare-and-swap, with no sealed row changed | `TestConcurrentMembersOpenOneStore`, `TestRewrapFollowsAKMSKeyRotation`, `TestHubFollowsARotationOfItsKMSKey` |
+| Moving onto a KMS and back is a change of root: members on the old and new configuration open everything throughout, and the retire step shreds the old root's keys | `TestMoveOntoAKMSAndBack`, `TestMovingOntoAKMSThroughTheCLI` |
+| The hub sends a plaintext KEK only to a KMS it can trust to be the one configured: a plugin socket in a directory every user shares is refused, Transit is never plain HTTP off loopback, and a redirect that would carry the Vault token to another server is not followed | `TestKMSv2RefusesASocketAnyoneCouldHaveBound`, `TestTransitRefusesPlaintextOffTheHost`, `TestTransitRefusesARedirectToAnotherServer` |
+| A backup of a hub on a KMS restores only where the KMS answers, and the preflight says so | `TestABackupOfAKMSHubRestoresOnlyWithTheKMS` |
 | Session refresh tokens rotate alongside secrets rather than being silently skipped | `TestSessionRefreshTokensRotateAlongsideSecrets` |
 
 `TestPlaintextDataKeysNeverReachDiskOrLogs` cannot grep for a canary the way the
@@ -4394,24 +4415,34 @@ Every paragraph below cites the test or code that pins its residual, and
 cites nothing that exists. A fix that retires a residual changes the test that
 pinned it, so the fix cannot land until its paragraph is rewritten with it.
 
-**Changing the root key does not take back a database that already leaked.**
-`CLOOP_SECRET_KEY` itself changes online since Task 20425 — a rolling restart
-with the new key current and the old one previous, then `cloop hub key rotate
---retire-previous`, which rewraps every row onto a key of the new root and
-retires every key of the old (`TestRootChangeUnderConcurrentLoad`,
-`TestRetirePreviousMovesEverythingAndShredsTheOldRoot`). But a rewrap moves each
-row's DEK under the new root and keeps the DEK, and every payload's ciphertext,
-as it was (`TestRotationRewrapsWithoutChangingCiphertext`): someone holding the
-old key *and* a copy of the database from before the change unwraps the old
-DEKs, and those open today's payloads. The change ends the old key's use from
-now on; when the database leaked with it, the credentials are re-minted at their
-sources as well, as the
-[runbook](../operations/runbook.md#changing-cloop_secret_key-itself) says. And
-until the retire step has run, the old key still opens everything and the hub
-still seals under its primary — by design, so that a change can be backed out
-and members not yet restarted keep working
+**Moving the store onto a KMS stops future copies, not past ones; and a running
+hub holds its keys in memory.** With `secrets.kms` (Task 20433) a copy of the
+database and of the key file opens nothing — every key-encryption key is held
+by the KMS, and the passphrase derives none of them
+(`TestADatabaseAndKeyFileDoNotOpenAKMSHeldStore`). But the move, like every
+change of root (Task 20425: `TestRootChangeUnderConcurrentLoad`,
+`TestRetirePreviousMovesEverythingAndShredsTheOldRoot`), rewraps each row's DEK
+and keeps the DEK and every payload's ciphertext as they were
+(`TestRotationRewrapsWithoutChangingCiphertext`): someone holding
+`CLOOP_SECRET_KEY` *and* a copy of the database from before the retire step
+unwraps the old DEKs, and those open today's payloads. When the database leaked
+with the key, the credentials are re-minted at their sources as well, as the
+[runbook](../operations/runbook.md#changing-cloop_secret_key-itself) says, and a
+backup from before the move is as sensitive as the key. Three more limits are
+the KMS's: whoever holds the hub's KMS identity, or administers the KMS key,
+can unwrap the stored KEKs with a copy of the database, so that identity is
+guarded like the key it replaced; a process already serving keeps the KEKs it
+unwrapped in memory until it exits (`TestKMSHeldKeysAreHeldInMemory`), so revoking
+the hub's access at the KMS stops new processes, restores and offline copies at
+once and a running hub only at its restart; and a KMS that is down stops every
+member that has not yet opened the store — nothing falls back to the passphrase
+(`TestKeyringRefusesWhenThePluginIsUnavailable`). Without a KMS, the paragraph's
+first half is the whole story: the change of root ends the old key's use from
+now on, and until the retire step has run the old key still opens everything
+and the hub still seals under its primary — by design, so that a change can be
+backed out and members not yet restarted keep working
 (`TestANewRootBesideThePreviousOpensEverythingAndChangesNothing`): finish the
-change promptly once every member holds the new key.
+change promptly once every member holds the new root.
 
 **A compromised device can fill its own budget, and enough of them the
 hub's.** Returned work is bounded per handle, per executor and per process

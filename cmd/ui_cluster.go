@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/exposure"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
+	"github.com/blechschmidt/cloop/pkg/kms"
 	"github.com/blechschmidt/cloop/pkg/offboard"
 	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -209,43 +211,68 @@ func acquireExclusiveHub(workdir string, listen exposure.Plan) (*hublease.Lease,
 	return lease, nil
 }
 
-// announceRoots says where the root key came from, and returns the fingerprints
-// the member row advertises: rootkey.EndpointCurrent, and EndpointPrevious
-// during a change of root. Never the key itself.
-func announceRoots(roots rootkey.Roots) map[string]string {
+// announceRoots says where the hub's roots come from, and returns what the
+// member row advertises: rootkey.EndpointCurrent, the name of the root new
+// sealing keys come from — the root key's fingerprint, or the KMS's name
+// (Task 20433) — and EndpointPrevious during a change of root. Never a key.
+func announceRoots(keys rootkey.Roots, roots kms.Roots) map[string]string {
 	out := map[string]string{}
-	if !roots.Current.Set() {
-		return out
+	current, previous := "", ""
+	if !roots.Current.IsZero() {
+		name, err := secretbroker.RootName(roots.Current)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: name the root key: %v\n", err)
+			return out
+		}
+		current = name
+		if roots.Current.IsKMS() {
+			fmt.Printf("Sealing keys: held by the KMS %s\n", current)
+		} else {
+			fmt.Printf("Root key: %s, from %s\n", current, keys.Current.Describe())
+		}
 	}
-	current, previous, err := roots.Fingerprints()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: name the root key: %v\n", err)
-		return out
+	if !roots.Previous.IsZero() {
+		name, err := secretbroker.RootName(roots.Previous)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: name the previous root: %v\n", err)
+		} else {
+			previous = name
+			from := "the KMS of secrets.kms_previous"
+			switch {
+			case roots.Previous.IsKMS():
+			case roots.Current.IsKMS():
+				from = keys.Current.Describe() + ", named by secrets.previous_root"
+			default:
+				from = keys.Previous.Describe()
+			}
+			fmt.Printf("Previous root: %s, from %s — a change of root is in progress; finish it with "+
+				"`cloop hub key rotate --retire-previous` once every member runs on %s\n", previous, from, current)
+		}
 	}
-	out[rootkey.EndpointCurrent] = current
-	fmt.Printf("Root key: %s, from %s\n", current, roots.Current.Describe())
+	if current != "" {
+		out[rootkey.EndpointCurrent] = current
+	}
 	if previous != "" {
 		out[rootkey.EndpointPrevious] = previous
-		fmt.Printf("Previous root key: %s, from %s — a change of root is in progress; finish it with "+
-			"`cloop hub key rotate --retire-previous` once every member runs on %s\n",
-			previous, roots.Previous.Describe(), current)
 	}
 	return out
 }
 
 // checkHubRoots applies the rule a hub starts by (Task 20425), before it joins
 // the cluster or serves anything: every live sealing key in the control plane
-// derives from a root this process holds. A member started with a mistyped
-// key — or with only the old root after `cloop hub key rotate
-// --retire-previous` retired it — stops here, naming the keys, instead of
-// serving a dashboard on which every secret, session and hub CA key fails.
+// opens with a root this process holds — derives from its root key, or unwraps
+// through its KMS (Task 20433). A member started with a mistyped key — or with
+// only the old root after `cloop hub key rotate --retire-previous` retired it,
+// or with a KMS it cannot reach or that refuses it — stops here, naming the
+// keys and why, instead of serving a dashboard on which every secret, session
+// and hub CA key fails.
 //
 // Read-only: it mints nothing and attributes nothing, so a refused start leaves
-// the control plane as it found it. A hub with no key configured is the
+// the control plane as it found it. A hub with no root at all is the
 // documented degraded mode and is not refused; one with no database yet has no
 // registry to check.
-func checkHubRoots(workdir string, roots rootkey.Roots) error {
-	if !roots.Current.Set() {
+func checkHubRoots(workdir string, roots kms.Roots) error {
+	if roots.Current.IsZero() {
 		return nil
 	}
 	dbPath := state.DBPath(workdir)
@@ -262,21 +289,26 @@ func checkHubRoots(workdir string, roots rootkey.Roots) error {
 		return nil
 	}
 	kr, err := secretbroker.OpenKeyring(store, secretbroker.WithoutKeyCreation(),
-		secretbroker.WithKeyringRoots(roots.Current.Value, roots.Previous.Value))
+		secretbroker.WithKeyringRootSet(roots.Current, roots.Previous))
 	if err != nil {
-		return fmt.Errorf("the hub's root key: %w", err)
+		return fmt.Errorf("the hub's roots: %w", err)
 	}
 	bad := kr.Underivable()
 	if len(bad) == 0 {
 		return nil
 	}
-	current, previous, _ := roots.Fingerprints()
-	held := rootkey.EnvKey + " " + current
-	if previous != "" {
-		held += ", " + rootkey.EnvPrevious + " " + previous
+	reasons := kr.UnderivableReasons()
+	named := make([]string, 0, len(bad))
+	sentinel := secretbroker.ErrKeyUnavailable
+	for _, id := range bad {
+		named = append(named, id+" "+reasons[id])
+		if errors.Is(kr.UnderivableErr(id), secretbroker.ErrKMSUnavailable) {
+			sentinel = secretbroker.ErrKMSUnavailable
+		}
 	}
-	return fmt.Errorf("%w: the sealing key(s) %s derive from no root this hub holds (%s). It is the wrong key, "+
-		"or this member was not given the root a change of root moved everything onto: start it with the key "+
-		"every other member runs on (`cloop hub key list` names the keys each root opens)",
-		secretbroker.ErrKeyUnavailable, strings.Join(bad, ", "), held)
+	return fmt.Errorf("%w: the sealing key(s) %s open with no root this hub holds (%s). It is the wrong key, "+
+		"this member was not given the root a change of root moved everything onto, or its KMS cannot be "+
+		"reached or refuses it: start it with the roots every other member runs on (`cloop hub key list` names "+
+		"the keys each root opens; `cloop hub doctor` reports the KMS under secrets.kms)",
+		sentinel, strings.Join(named, "; "), strings.Join(kr.RootLabels(), ", "))
 }

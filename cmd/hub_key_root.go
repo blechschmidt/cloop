@@ -76,14 +76,21 @@ type rootChangeReadiness struct {
 	// Escrow is the escrow on record; EscrowReady says it holds the new root.
 	Escrow      *keyescrow.Record `json:"escrow,omitempty"`
 	EscrowReady bool              `json:"escrow_ready"`
+	// CurrentKMS: the new root is a KMS (Task 20433), so no escrow is
+	// required; KMSKey is the key it reported when checked.
+	CurrentKMS bool   `json:"current_kms,omitempty"`
+	KMSKey     string `json:"kms_key,omitempty"`
 	// Problems say what is not ready, one line each; none when it is.
 	Problems []string `json:"problems,omitempty"`
 }
 
 // checkRootChangeReady reads the members and the escrow record of the control
 // plane db holds and judges them against the new root, current, at now.
-func checkRootChangeReady(db *statedb.DB, current, previous string, now time.Time) (rootChangeReadiness, error) {
-	r := rootChangeReadiness{Current: current, Previous: previous}
+// currentKMS says the new root is a KMS (Task 20433): an escrow of
+// CLOOP_SECRET_KEY recovers nothing it holds, so none is required — the KMS
+// key's own durability is what a restore depends on, and it must answer.
+func checkRootChangeReady(db *statedb.DB, current, previous string, currentKMS bool, now time.Time) (rootChangeReadiness, error) {
+	r := rootChangeReadiness{Current: current, Previous: previous, CurrentKMS: currentKMS}
 	rows, err := db.ListHubMembers()
 	if err != nil {
 		return r, fmt.Errorf("read the hub members: %w", err)
@@ -101,15 +108,22 @@ func checkRootChangeReady(db *statedb.DB, current, previous string, now time.Tim
 		}
 		m.Current, m.Previous = meta[rootkey.EndpointCurrent], meta[rootkey.EndpointPrevious]
 		m.Ready = m.Current == current
+		restartNew := fmt.Sprintf("restart it on this build with the new key as %s", rootkey.EnvKey)
+		restart := fmt.Sprintf("restart it with the new key as %s and the old one as %s", rootkey.EnvKey, rootkey.EnvPrevious)
+		if currentKMS || strings.Contains(previous, ":") {
+			// A KMS root (Task 20433): what a member needs is the secrets
+			// section, not a key.
+			restart = "restart it with the secrets section this shell has — secrets.kms, and the root being " +
+				"replaced as secrets.previous_root or secrets.kms_previous"
+			restartNew = restart + ", on this build"
+		}
 		switch {
 		case m.Current == "":
 			r.Problems = append(r.Problems, fmt.Sprintf("hub member %s (pid %d on %s) advertises no root key: it "+
-				"predates this release or runs without a key — restart it on this build with the new key as %s",
-				m.ID, m.PID, m.Hostname, rootkey.EnvKey))
+				"predates this release or runs without a key — %s", m.ID, m.PID, m.Hostname, restartNew))
 		case !m.Ready:
 			r.Problems = append(r.Problems, fmt.Sprintf("hub member %s (pid %d on %s) runs on root key %s, not the "+
-				"new %s: restart it with the new key as %s and the old one as %s", m.ID, m.PID, m.Hostname,
-				m.Current, current, rootkey.EnvKey, rootkey.EnvPrevious))
+				"new %s: %s", m.ID, m.PID, m.Hostname, m.Current, current, restart))
 		}
 		r.Members = append(r.Members, m)
 	}
@@ -124,6 +138,14 @@ func checkRootChangeReady(db *statedb.DB, current, previous string, now time.Tim
 			"new key", r.Exclusive))
 	}
 
+	if currentKMS {
+		// Recorded for the report; not a condition. The keys move onto the
+		// KMS, and no escrow of a passphrase opens them.
+		if rec, ok, err := keyescrow.LoadRecord(db); err == nil && ok {
+			r.Escrow = &rec
+		}
+		return r, nil
+	}
 	rec, ok, err := keyescrow.LoadRecord(db)
 	switch {
 	case err != nil:
@@ -147,17 +169,32 @@ func checkRootChangeReady(db *statedb.DB, current, previous string, now time.Tim
 // runRetirePrevious is `cloop hub key rotate --retire-previous`.
 func runRetirePrevious(w io.Writer, workdir string, h *hubKeyring, dryRun, asJSON bool) error {
 	if !h.keyring.HasPrevious() {
-		return fmt.Errorf("%w: --retire-previous finishes a change of root, and this shell holds only one key — "+
-			"give it the old key as %s (or %s) beside the new one", secretbroker.ErrNoPreviousRoot,
-			rootkey.EnvPrevious, rootkey.EnvPreviousFile)
+		return fmt.Errorf("%w: --retire-previous finishes a change of root, and this shell holds only one root — "+
+			"give it the one being replaced beside the new: the old key as %s (or %s), secrets.previous_root: "+
+			"passphrase when moving onto a KMS, or secrets.kms_previous when moving off one",
+			secretbroker.ErrNoPreviousRoot, rootkey.EnvPrevious, rootkey.EnvPreviousFile)
 	}
 	current, previous, err := h.keyring.RootFingerprints()
 	if err != nil {
 		return err
 	}
-	ready, err := checkRootChangeReady(h.db, current, previous, time.Now())
+	currentKMS := h.keyring.CurrentKMS() != nil
+	ready, err := checkRootChangeReady(h.db, current, previous, currentKMS, time.Now())
 	if err != nil {
 		return err
+	}
+	if currentKMS {
+		// The keys are about to move onto the KMS: it has to answer now, not
+		// half way through the rewrap.
+		if rep, ok := h.keyring.CurrentKMS().(secretbroker.KMSKeyReporter); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			key, kerr := rep.CurrentKeyID(ctx)
+			cancel()
+			if kerr != nil {
+				ready.Problems = append(ready.Problems, "the KMS "+current+" does not answer: "+kerr.Error())
+			}
+			ready.KMSKey = key
+		}
 	}
 
 	bold := color.New(color.Bold)
@@ -270,8 +307,19 @@ func runRetirePrevious(w io.Writer, workdir string, h *hubKeyring, dryRun, asJSO
 	}
 	color.New(color.FgGreen).Fprintf(w, "\nEvery row is sealed under %s, and the previous root's %d key(s) are retired: %s.\n",
 		report.Rotation.TargetKeyID, len(report.Keys), orDash(strings.Join(report.Keys, ", ")))
-	dim.Fprintf(w, "%s opens nothing any more. Remove it from every member and restart them; until then\n"+
-		"`cloop hub doctor` warns that it is set.\n", rootkey.EnvPrevious)
+	switch {
+	case h.keyring.PreviousIsKMS():
+		dim.Fprintf(w, "The KMS %s holds nothing of this hub's any more. Remove secrets.kms_previous from every\n"+
+			"member and restart them; until then `cloop hub doctor` warns that it is set.\n", previous)
+	case currentKMS:
+		dim.Fprintf(w, "%s derives nothing in the secret store any more. Remove secrets.previous_root from every\n"+
+			"member and restart them; until then `cloop hub doctor` warns that it is set. A backup taken before\n"+
+			"this step still opens with %s — retire or destroy those, or keep them as safe as the key.\n",
+			rootkey.EnvKey, rootkey.EnvKey)
+	default:
+		dim.Fprintf(w, "%s opens nothing any more. Remove it from every member and restart them; until then\n"+
+			"`cloop hub doctor` warns that it is set.\n", rootkey.EnvPrevious)
+	}
 	return nil
 }
 
@@ -281,7 +329,7 @@ func printRootReadiness(w io.Writer, r rootChangeReadiness) {
 	dim := color.New(color.Faint)
 	if len(r.Members) == 0 && r.Exclusive == "" {
 		dim.Fprintln(w, "  no hub member is serving: the change runs offline, and a member started later must "+
-			"hold the new key")
+			"hold the new root")
 	}
 	for _, m := range r.Members {
 		mark := "ready  "
@@ -295,6 +343,11 @@ func printRootReadiness(w io.Writer, r rootChangeReadiness) {
 		fmt.Fprintln(w)
 	}
 	switch {
+	case r.CurrentKMS && r.KMSKey != "":
+		fmt.Fprintf(w, "  ready   the KMS %s answers, encrypting under %s; no escrow is needed for it — a restore\n"+
+			"          of this hub needs access to that KMS key instead\n", r.Current, r.KMSKey)
+	case r.CurrentKMS:
+		fmt.Fprintf(w, "  NOT     the KMS %s does not answer\n", r.Current)
 	case r.Escrow == nil:
 		fmt.Fprintln(w, "  NOT     no escrow on record")
 	case r.EscrowReady:

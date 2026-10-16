@@ -63,7 +63,15 @@ CLOOP_SECRET_KEY itself changes online too: restart every hub member with the
 new key as CLOOP_SECRET_KEY and the old one as CLOOP_SECRET_KEY_PREVIOUS,
 escrow the new key, and run ` + "`cloop hub key rotate --retire-previous`" + `. The
 key is read from CLOOP_SECRET_KEY_FILE, the systemd credential
-cloop-secret-key, or the environment — the commands here read it as the hub does.`,
+cloop-secret-key, or the environment — the commands here read it as the hub does.
+
+With secrets.kms configured, a KEK is random instead and held only wrapped by
+an external key-management service — a Kubernetes KMS v2 plugin, or Vault /
+OpenBao Transit — so a copy of the database and the key file opens nothing
+without the KMS. Moving onto a KMS, off one, or from one to another is the same
+change of root, finished by ` + "`--retire-previous`" + `; ` + "`rewrap`" + ` follows a rotation of
+the KMS key. These commands read secrets.kms from config.yaml with the overlay
+of the hub --port names merged, as that hub does.`,
 }
 
 var hubKeyListCmd = &cobra.Command{
@@ -95,16 +103,14 @@ single credential.`,
 			return nil
 		}
 
-		current, previous, ferr := h.keyring.RootFingerprints()
-		if ferr == nil {
-			fmt.Printf("Root key %s", current)
-			if previous != "" {
-				fmt.Printf(", previous %s (a change of root is in progress)", previous)
-			}
-			fmt.Print("\n\n")
+		labels := h.keyring.RootLabels()
+		fmt.Printf("Root %s", labels[0])
+		if len(labels) > 1 {
+			fmt.Printf(", previous %s (a change of root is in progress)", labels[1])
 		}
+		fmt.Print("\n\n")
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tSTATE\tOPENABLE\tROOT\tCREATED\tBY")
+		fmt.Fprintln(w, "ID\tSTATE\tOPENABLE\tROOT\tKMS KEY\tCREATED\tBY")
 		for _, k := range keys {
 			state := k.State
 			if k.Primary {
@@ -121,13 +127,17 @@ single credential.`,
 			if k.DerivedBy == secretbroker.RootPrevious {
 				root += " (previous)"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				k.ID, state, openable, root, shortTime(k.CreatedAt), orDash(k.CreatedBy))
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				k.ID, state, openable, root, orDash(k.KMSKeyID), shortTime(k.CreatedAt), orDash(k.CreatedBy))
 		}
 		_ = w.Flush()
 		if bad := h.keyring.Underivable(); len(bad) > 0 {
-			color.Red("\n%d live key(s) derive from no root this shell holds: %s. A hub with these roots "+
-				"refuses to start.", len(bad), strings.Join(bad, ", "))
+			color.Red("\n%d live key(s) open with no root this shell holds. A hub with these roots refuses to start:",
+				len(bad))
+			reasons := h.keyring.UnderivableReasons()
+			for _, id := range bad {
+				color.Red("  %s %s", id, reasons[id])
+			}
 		}
 
 		if h.keyring.HasLegacy() {
@@ -188,14 +198,38 @@ var hubKeyStatusCmd = &cobra.Command{
 			_ = w.Flush()
 		}
 
+		if k := h.keyring.CurrentKMS(); k != nil {
+			bold.Println("\nKMS")
+			fmt.Printf("  %s\n", k.Name())
+			if rep, ok := k.(secretbroker.KMSKeyReporter); ok {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				cur, kerr := rep.CurrentKeyID(ctx)
+				cancel()
+				switch stale := h.keyring.StaleKMSKeys(cur); {
+				case kerr != nil:
+					color.Red("  does not answer: %v\n", kerr)
+				case len(stale) > 0:
+					color.Yellow("  encrypts under %s; %d key(s) are wrapped under an older KMS key — the hub's "+
+						"leader rewraps them within a minute, or run 'cloop hub key rewrap'\n", cur, len(stale))
+				case h.keyring.KMSHeldKeys() == 0:
+					fmt.Printf("  encrypts under %s, and holds no sealing key yet — the change of root below "+
+						"mints the first\n", cur)
+				default:
+					color.Green("  encrypts under %s, and every key it holds is wrapped under it\n", cur)
+				}
+			}
+			dim.Println("  A restore of this hub needs access to this KMS key: no key file or escrow opens what it holds.")
+		}
+
 		if st.ChangingRoot {
 			bold.Println("\nChange of root")
+			prev := h.keyring.RootLabels()[1]
 			if st.PreviousRootRows > 0 {
-				color.Yellow("  %d row(s) still sealed under keys of %s — finish with "+
-					"'cloop hub key rotate --retire-previous'\n", st.PreviousRootRows, rootkey.EnvPrevious)
+				color.Yellow("  %d row(s) still sealed under keys of the previous root, %s — finish with "+
+					"'cloop hub key rotate --retire-previous'\n", st.PreviousRootRows, prev)
 			} else {
-				color.Yellow("  %s is set; finish with 'cloop hub key rotate --retire-previous', then remove it "+
-					"from every member\n", rootkey.EnvPrevious)
+				color.Yellow("  the previous root %s is configured; finish with 'cloop hub key rotate "+
+					"--retire-previous', then remove it from every member\n", prev)
 			}
 		}
 
@@ -423,10 +457,81 @@ func refuseRotationMidChange(kr *secretbroker.Keyring, resume, dryRun bool) erro
 	if resume || dryRun || !kr.HasPrevious() || kr.PrimaryFromCurrent() {
 		return nil
 	}
-	return fmt.Errorf("a change of root is in progress — %s is set and the primary key derives from it — "+
-		"so a key minted here would come from the new root without checking that every hub member holds "+
-		"it: finish the change with 'cloop hub key rotate --retire-previous', which checks first",
-		rootkey.EnvPrevious)
+	return fmt.Errorf("a change of root is in progress — the previous root %s is configured and the primary "+
+		"key comes from it — so a key minted here would come from the new root without checking that every hub "+
+		"member holds it: finish the change with 'cloop hub key rotate --retire-previous', which checks first",
+		kr.RootLabels()[1])
+}
+
+var hubKeyRewrapCmd = &cobra.Command{
+	Use:   "rewrap",
+	Short: "Rewrap KMS-held keys onto the KMS key's current version, after a rotation of the KMS key",
+	Long: `Follow a rotation of the KMS key secrets.kms names.
+
+A key-encryption key held by a KMS records the KMS key (and version) that
+wrapped it. When the KMS rotates its key — a new Key Vault key version, a
+rotated Transit key, a KMS v2 plugin reporting a new key id — every such KEK is
+wrapped again under the key the KMS now encrypts under: the KEK itself, held in
+memory, is encrypted once more, proven to unwrap, and swapped into its record
+under compare-and-swap. One row per key changes; no secret, session or hub CA
+key does. Afterwards the KMS's old key version holds nothing of this hub's and
+can be disabled.
+
+A serving hub's cluster leader does this on its own within a minute of the KMS
+reporting the new key. This command does it now, for a hub that is not serving
+or an operator who wants it done before disabling the old version.`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		workdir, _ := cmd.Flags().GetString("workdir")
+		asJSON, _ := cmd.Flags().GetBool("json")
+		h, err := openHubKeyring(workdir, false)
+		if err != nil {
+			return err
+		}
+		defer h.close()
+		if h.keyring.CurrentKMS() == nil {
+			return fmt.Errorf("the store's current root is %s, not a KMS: there is no KMS key to follow "+
+				"(secrets.kms configures one)", h.keyring.RootLabels()[0])
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		rep, rerr := h.keyring.RewrapKMS(ctx)
+		for _, k := range rep.Keys {
+			if k.ToKey == "" {
+				continue
+			}
+			appendKeyAuditEvent(workdir, auditaction.ActionSealingKeyKMSRewrapped, k.ID, map[string]any{
+				"key_id": k.ID, "kms": rep.KMS, "from_kms_key": k.FromKey, "to_kms_key": k.ToKey, "via": "cli",
+			})
+		}
+		if asJSON {
+			if perr := printJSON(rep); perr != nil {
+				return perr
+			}
+			return rerr
+		}
+		fmt.Printf("KMS %s encrypts under %s\n", rep.KMS, orDash(rep.CurrentKey))
+		if len(rep.Keys) == 0 && rerr == nil {
+			color.Green("Every key it holds is wrapped under it already.")
+			return nil
+		}
+		for _, k := range rep.Keys {
+			switch {
+			case k.Error != "":
+				color.Red("  %s  %s: %s", k.ID, k.FromKey, k.Error)
+			case k.Skipped:
+				fmt.Printf("  %s  rewrapped by another process meanwhile\n", k.ID)
+			default:
+				fmt.Printf("  %s  %s → %s\n", k.ID, k.FromKey, k.ToKey)
+			}
+		}
+		if rerr != nil {
+			return rerr
+		}
+		color.Green("Rewrapped %d key(s). Once 'cloop hub key list' names the old KMS key on no live key, "+
+			"it can be disabled in the KMS.", rep.Rewrapped)
+		return nil
+	},
 }
 
 // ---------------------------------------------------------------------------
@@ -583,25 +688,30 @@ func orDash(s string) string {
 }
 
 func init() {
-	for _, c := range []*cobra.Command{hubKeyListCmd, hubKeyStatusCmd, hubKeyRotateCmd, hubKeyRetireCmd} {
+	for _, c := range []*cobra.Command{hubKeyListCmd, hubKeyStatusCmd, hubKeyRotateCmd, hubKeyRetireCmd, hubKeyRewrapCmd} {
 		c.Flags().String("workdir", "", "hub directory holding .cloop/state.db (default: current directory)")
 	}
-	for _, c := range []*cobra.Command{hubKeyListCmd, hubKeyStatusCmd, hubKeyRotateCmd} {
+	for _, c := range []*cobra.Command{hubKeyListCmd, hubKeyStatusCmd, hubKeyRotateCmd, hubKeyRewrapCmd} {
 		c.Flags().Bool("json", false, "emit machine-readable JSON")
 	}
+	hubKeyCmd.PersistentFlags().Int("port", defaultUIPort,
+		"the hub whose per-instance overlay (.cloop/config.ui-<port>.yaml) to merge over config.yaml when reading "+
+			"secrets.kms — as that hub reads it")
 	hubKeyRotateCmd.Flags().Bool("dry-run", false, "report what would be rewrapped without writing")
 	hubKeyRotateCmd.Flags().Bool("continue", false,
 		"resume onto the current primary key instead of minting a new one")
 	hubKeyRotateCmd.Flags().Int("batch", secretbroker.DefaultRotationBatch,
 		"rows to read per round")
 	hubKeyRotateCmd.Flags().Bool("retire-previous", false,
-		"finish a change of root: rewrap everything onto a key of "+rootkey.EnvKey+" and retire every key of "+
-			rootkey.EnvPrevious+", once every hub member holds the new key and it is escrowed")
+		"finish a change of root: rewrap everything onto a key of the current root ("+rootkey.EnvKey+" or "+
+			"secrets.kms) and retire every key of the previous one, once every hub member holds the new root "+
+			"(and a new "+rootkey.EnvKey+" is escrowed)")
 	hubKeyRetireCmd.Flags().Bool("yes", false, "confirm irreversible destruction of the key's salt")
 
 	hubKeyCmd.AddCommand(hubKeyListCmd)
 	hubKeyCmd.AddCommand(hubKeyStatusCmd)
 	hubKeyCmd.AddCommand(hubKeyRotateCmd)
 	hubKeyCmd.AddCommand(hubKeyRetireCmd)
+	hubKeyCmd.AddCommand(hubKeyRewrapCmd)
 	hubCmd.AddCommand(hubKeyCmd)
 }

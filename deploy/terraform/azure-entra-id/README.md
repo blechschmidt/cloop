@@ -371,6 +371,60 @@ quarantine.
 
 ---
 
+## Key Vault for the sealing keys (`modules/key-vault-kms`)
+
+A hub can hold the key-encryption keys of its secret store in Key Vault instead
+of deriving them from `CLOOP_SECRET_KEY` (`secrets.kms`, Task 20433): each key is
+random, the hub's database keeps only the ciphertext Key Vault's `wrapKey` made of
+it, and a copy of the database and of the key file opens nothing without the
+vault. The hub reaches the vault through the AKS KMS plugin — the Kubernetes KMS
+v2 plugin the API server's own encryption at rest uses — run as a sidecar by the
+Helm chart.
+
+[`modules/key-vault-kms`](modules/key-vault-kms) creates what that needs, in a vault
+you already run:
+
+* **The key** — RSA 3072, HSM-protected by default (`hsm = false` for a Standard
+  vault), whose operations are `wrapKey` and `unwrapKey` and nothing else, with an
+  optional rotation policy (`rotate_after_days`).
+* **The hub identity's permission** — *Key Vault Crypto Service Encryption User*
+  (read the key's metadata, wrap, unwrap) for `principal_object_id`, scoped to
+  that one key; or, on a vault that still uses access policies
+  (`authorization = "access_policy"`), get, wrapKey and unwrapKey on its keys.
+  Never decrypt, never secrets. Removing it is how the hub's access is revoked.
+
+```hcl
+module "cloop_kms" {
+  source = "github.com/blechschmidt/cloop//deploy/terraform/azure-entra-id/modules/key-vault-kms"
+
+  key_vault_id        = azurerm_key_vault.platform.id
+  principal_object_id = azurerm_user_assigned_identity.cloop_hub.principal_id
+}
+
+output "cloop_kms_helm_values" {
+  value = module.cloop_kms.helm_values_yaml
+}
+```
+
+It is a module of its own because Key Vault is an Azure Resource Manager resource:
+it needs the `azurerm` provider, and putting it in this module would make every
+caller configure `azurerm` — subscription and all — whether it wants a KMS or not.
+See [examples/complete](examples/complete) for both together.
+
+Outputs: `helm_values_yaml` (the chart's `kms` block — pin the plugin image, and
+create the `kms-azure-json` Secret holding the plugin's `azure.json`),
+`cloop_secrets_yaml` (the `secrets` section for a hub installed without the
+chart), `kms_plugin_args`, `key_id`, `key_version`, `key_name`, `key_vault_name`
+and `key_resource_id`.
+
+Two things are the vault's, not the module's, and both matter: **soft delete and
+purge protection**, because a purged key takes every secret the hub sealed with
+it and no restore of the database brings them back; and **keeping old key
+versions** until `cloop hub key list` names them on no live key — the hub
+rewraps onto a new version as soon as the plugin is pointed at it, but a backup
+from before that still needs the old one. Moving a running hub onto the key is
+in the [runbook](../../../docs/operations/runbook.md#keys-in-a-kms).
+
 ## Inputs
 
 | Name | Type | Default | |

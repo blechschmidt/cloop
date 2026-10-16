@@ -334,6 +334,9 @@ type RestoreOptions struct {
 	// sidecar may derive from it instead, and checkpoints sealed under it are
 	// read as the hub's own. Nothing is sealed under it.
 	Previous string
+	// KMS are the key-management services the restored hub will run with
+	// (Task 20433); the backup's KMS-held keys must open through one of them.
+	KMS []secretbroker.KMS
 
 	// SkipChecksum restores without checking the sidecar at all — no digest,
 	// no seal. For a backup whose sidecar was lost; nothing then vouches that
@@ -421,6 +424,7 @@ func Restore(backupPath, dstPath string, opts RestoreOptions) (*RestoreReport, e
 	pre, err := Inspect(backupPath, PreflightOptions{
 		Key:              opts.Key,
 		Previous:         opts.Previous,
+		KMS:              opts.KMS,
 		SkipChecksum:     opts.SkipChecksum,
 		AllowUnsealed:    opts.AllowUnsealed,
 		AcceptSecretLoss: opts.AcceptSecretLoss,

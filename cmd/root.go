@@ -3,10 +3,13 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/janitor"
+	"github.com/blechschmidt/cloop/pkg/kms"
 	"github.com/blechschmidt/cloop/pkg/migrate"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/workspace"
 	"github.com/fatih/color"
@@ -83,7 +86,41 @@ func loadCommandConfig(cmd *cobra.Command, dir string) (*config.Config, error) {
 		cfg, _, err := config.LoadUIInstance(dir, port)
 		return cfg, err
 	}
+	// The commands that open the hub's secret store for an operator read the
+	// overlay of the hub their --port names, because secrets.kms — the KMS
+	// the store's keys are wrapped by — is hub-scope (Task 20433).
+	if readsHubOverlay(cmd) {
+		if port, err := cmd.Flags().GetInt("port"); err == nil {
+			cfg, _, err := config.LoadUIInstance(dir, port)
+			return cfg, err
+		}
+	}
 	return config.Load(dir)
+}
+
+// readsHubOverlay reports whether cmd reads the per-instance overlay of the
+// hub its --port names: `cloop hub key` and everything under it, and `cloop db
+// restore`.
+func readsHubOverlay(cmd *cobra.Command) bool {
+	if cmd == dbRestoreCmd {
+		return true
+	}
+	for c := cmd; c != nil; c = c.Parent() {
+		if c == hubKeyCmd {
+			return true
+		}
+	}
+	return false
+}
+
+// installKeyringRoots makes every keyring this command opens use the roots its
+// secrets section names (Task 20433), when it names any beyond the root key.
+// The KMS is built, and asked, only when a keyring is opened.
+func installKeyringRoots(cfg *config.Config) {
+	if cfg == nil || (!cfg.Secrets.UsesKMS() && strings.TrimSpace(cfg.Secrets.PreviousRoot) == "") {
+		return
+	}
+	secretbroker.SetRootResolver(kms.Resolver(cfg.Secrets))
 }
 
 func Execute() {
@@ -144,6 +181,8 @@ func init() {
 		// init(); this adds the isolated backends the operator opted into.
 		if cwd, err := os.Getwd(); err == nil {
 			if cfg, cfgErr := loadCommandConfig(cmd, cwd); cfgErr == nil {
+				installKeyringRoots(cfg)
+
 				// Bound plan-history at write time (Task 20229). Applied for
 				// every command, not just the server, because the writer that
 				// grew .cloop/plan-history to 2 GB is the orchestrator — which

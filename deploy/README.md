@@ -292,6 +292,12 @@ cloop hub key escrow export --output /secure/cloop-hub.escrow
 `cloop hub doctor` warns until an escrow is recorded, and `cloop hub key escrow
 verify` rehearses recovery. See the [runbook](../docs/operations/runbook.md#escrowing-the-sealing-key).
 
+With [`secrets.kms`](../docs/reference/configuration.md#sealing-keys-in-a-kms-secrets)
+the secret store's keys are held by a key-management service instead, and a copy
+of the database and of this key opens nothing; the key still seals audit
+checkpoints, backup sidecars and the escrow. See
+[keys in a KMS](../docs/operations/runbook.md#keys-in-a-kms).
+
 ---
 
 ## Container image
@@ -622,6 +628,54 @@ than failing on the missing keys.
 renews an `existingSecret`, restart the hub (or let a reloader do it); a
 changed `caBundle` rolls the Pods by itself.
 
+### Sealing keys in a KMS
+
+`kms.enabled=true` holds the secret store's key-encryption keys in an external
+key-management service instead of deriving them from `CLOOP_SECRET_KEY` (Task
+20433): each key is random, the database keeps only the KMS's ciphertext of it,
+and a copy of the volume and of the Secret opens nothing without the KMS.
+
+**A KMS v2 plugin sidecar** (`kms.provider: kmsv2`, the default) — the plugin the
+API server uses for encryption at rest: Azure Key Vault, AWS KMS, Google Cloud KMS
+or Vault. The chart runs it as a second container sharing an in-memory emptyDir
+with the hub at `kms.kmsv2.socketDir`; only this Pod's containers can reach the
+socket, and the hub holds no cloud credential — the plugin does. Azure:
+
+```yaml
+kms:
+  enabled: true
+  movingFromPassphrase: true        # step 1 of the move; false after the retire step
+  plugin:
+    image: mcr.microsoft.com/oss/azure/kms/keyvault:v0.8.0@sha256:<digest>
+    args:
+      - --listen-addr=unix:///var/run/kmsplugin/socket.sock
+      - --keyvault-name=<vault>
+      - --key-name=<key>
+      - --key-version=<version>
+      - --config-file-path=/etc/kubernetes/azure.json
+      - --healthz-port=8787
+    volumeMounts: [{name: azure-config, mountPath: /etc/kubernetes, readOnly: true}]
+    volumes: [{name: azure-config, secret: {secretName: kms-azure-json}}]
+```
+
+`deploy/terraform/azure-entra-id/modules/key-vault-kms` creates the key and grants
+the plugin's identity wrap and unwrap on it, and renders these values
+(`helm_values_yaml`). The plugin image is not pinned for you: choose the version
+you run, by digest.
+
+**Vault or OpenBao Transit** (`kms.provider: transit`): `kms.transit.address`,
+`key`, and either `tokenSecret.name` (a Secret you keep renewed, mounted as a
+file) or `kubernetes.role` (Vault's Kubernetes auth method; the chart projects a
+service account token with the audience `kubernetes.audience`, not the API
+server's). `caConfigMap` adds a private CA.
+
+A hub that cannot reach its KMS refuses to start after `kms.startupTimeout`
+(default 30s) and never falls back to the passphrase; the move onto a KMS, the
+`cloop hub key rotate --retire-previous` step and moving back are in the
+[runbook](../docs/operations/runbook.md#keys-in-a-kms). `kms.previous` takes a
+`secrets.kms_previous` block for moving off a KMS, and
+`kms.plugin.extraContainers` a second plugin for it.
+
 ### Notable values
 
 | Value | Default | Notes |
@@ -633,6 +687,7 @@ changed `caBundle` rolls the Pods by itself.
 | `secrets.existingSecret` | — | The production path. |
 | `secrets.create` | `false` | Evaluation only — values land in the release manifest and in `helm get manifest`. |
 | `persistence.enabled` | `true` | `false` means an emptyDir: every restart discards all projects, tasks and sealed secrets. |
+| `kms.enabled` | `false` | Hold the secret store's keys in a KMS (above). The chart refuses a plugin sidecar with no image, Transit with no way to authenticate, and a KMS whose config cannot reach the hub. |
 
 ### Refusals
 

@@ -69,11 +69,15 @@ func ReadSealedFacts(conn *sql.DB, legacySaltKey string) (SealedFacts, error) {
 	if ok, err := tableExists(conn, "broker_keks"); err != nil {
 		return f, err
 	} else if ok {
-		withRoot, err := hasColumn(conn, "broker_keks", "root")
-		if err != nil {
+		var cols kekColumns
+		var err error
+		if cols.root, err = hasColumn(conn, "broker_keks", "root"); err != nil {
 			return f, fmt.Errorf("statedb: %w", err)
 		}
-		if f.KEKs, err = listKEKs(conn, withRoot); err != nil {
+		if cols.kms, err = hasColumn(conn, "broker_keks", "wrap"); err != nil {
+			return f, fmt.Errorf("statedb: %w", err)
+		}
+		if f.KEKs, err = listKEKs(conn, cols); err != nil {
 			return f, err
 		}
 	}

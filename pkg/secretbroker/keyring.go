@@ -73,8 +73,18 @@ package secretbroker
 // and the root column of broker_keks only records the answer (by fingerprint,
 // for `cloop hub key list` and the doctor). A key minted before the column
 // existed is attributed once, by the first process whose root derives it.
+//
+// # KMS roots (Task 20433)
+//
+// A root may also be a key-management service: a KEK of a KMS root is random,
+// and its record keeps the KMS's ciphertext of it instead of a salt. Opening
+// it is asking the KMS to unwrap it, checked against the same check value.
+// Everything above holds for it unchanged — current and previous, the rule a
+// keyring opens by, the change of root — which is how a store moves onto a KMS
+// and off one; kms.go has what is particular to it.
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
@@ -83,6 +93,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
@@ -152,7 +163,7 @@ func AADFor(set, rowID string) string { return set + "\x00" + rowID }
 
 // KEKRecord is one key-encryption key as stored. It never contains key
 // material: `Salt` plus the passphrase derives the key, and the salt alone is
-// useless.
+// useless; a KMS-held key's ciphertext opens only through the KMS (kms.go).
 type KEKRecord struct {
 	ID    string
 	Salt  string // hex-encoded KDF salt; emptied on retirement
@@ -163,9 +174,21 @@ type KEKRecord struct {
 	CreatedBy  string
 	RetiredAt  time.Time
 	// Root is the fingerprint of the root secret the key derives from
-	// (pkg/rootkey); "" for a key nobody has attributed yet. A record, not an
-	// authority: which root opens a key is decided by deriving it.
+	// (pkg/rootkey), or the name of the KMS holding it; "" for a derived key
+	// nobody has attributed yet. A record, not an authority: which root opens
+	// a key is decided by opening it.
 	Root string
+
+	// Wrap says how the key is held: "" — derived from a passphrase root and
+	// Salt, which is then a real salt; WrapKMS — random, held wrapped by the
+	// KMS Root names, with a decoy Salt no passphrase derives it from.
+	Wrap string
+	// KMSKeyID, KMSCiphertext and KMSAnnotations are a KMS-held key's
+	// wrapping, as the KMS returned it (Task 20433). Retirement destroys the
+	// ciphertext along with the salt.
+	KMSKeyID       string
+	KMSCiphertext  []byte
+	KMSAnnotations map[string][]byte
 }
 
 // Which configured root derives a key, as KeyInfo reports it.
@@ -175,7 +198,9 @@ const (
 )
 
 // Retired reports whether the KEK has been shredded.
-func (k KEKRecord) Retired() bool { return k.State == KEKStateRetired || k.Salt == "" }
+func (k KEKRecord) Retired() bool {
+	return k.State == KEKStateRetired || k.Salt == "" || (k.Wrap == WrapKMS && len(k.KMSCiphertext) == 0)
+}
 
 // KeyStore is the persistence a Keyring needs on top of the broker's Store.
 //
@@ -229,16 +254,19 @@ type Keyring struct {
 	// error instead of a GCM tag mismatch.
 	keks    map[string][]byte
 	records map[string]KEKRecord
-	// rootOf records which root derived each key in keks: an index into
+	// rootOf records which root opened each key in keks: an index into
 	// roots, so 0 is the current root and 1 the previous.
 	rootOf  map[string]int
 	primary string
 
-	// roots are what keys derive from, current first. Fixed for the life of
-	// the keyring: a hub resolves its roots once (pkg/rootkey.Pin), and a
-	// keyring that changed roots under work in flight would answer the same
-	// question two ways.
-	roots []string
+	// roots are what keys derive from or are unwrapped by, current first.
+	// Fixed for the life of the keyring: a hub resolves its roots once
+	// (pkg/rootkey.Pin, PinRoots), and a keyring that changed roots under work
+	// in flight would answer the same question two ways.
+	roots []Root
+
+	// ctx bounds the KMS calls opening a key makes (WithKeyringContext).
+	ctx context.Context
 
 	// legacySalt is the pre-envelope construction's store-wide salt; nil on a
 	// hub that never had one. Its cipher is derived per root, on first use,
@@ -246,10 +274,12 @@ type Keyring struct {
 	legacySalt []byte
 	legacy     map[int]*Cipher
 
-	// underivable names the live keys no configured root derives. A keyring
-	// opened to serve refuses to exist with any (see OpenKeyring); a
-	// read-only one reports them, which is what `cloop hub key list` is for.
-	underivable []string
+	// underivable names the live keys no configured root opens, and
+	// underivableWhy what opening each said. A keyring opened to serve refuses
+	// to exist with any (see OpenKeyring); a read-only one reports them, which
+	// is what `cloop hub key list` is for.
+	underivable    []string
+	underivableWhy map[string]error
 
 	// lastReload throttles the self-healing registry re-read on the
 	// unknown-key path. Without it, a genuinely unknown key id — a row from
@@ -269,29 +299,121 @@ const reloadInterval = time.Second
 type KeyringOption func(*keyringConfig)
 
 type keyringConfig struct {
-	roots      []string
+	roots      []Root
 	rootsGiven bool
 	clock      func() time.Time
 	actor      string
 	create     bool
+	ctx        context.Context
 }
 
 // WithKeyringPassphrase gives the keyring one root, p, instead of resolving
 // the hub's (pkg/rootkey). Tests use it; so does any caller that holds the key
 // some other way — a backup's preflight, an escrow being checked.
 func WithKeyringPassphrase(p string) KeyringOption {
-	return func(c *keyringConfig) { c.roots, c.rootsGiven = []string{p}, true }
+	return func(c *keyringConfig) { c.roots, c.rootsGiven = []Root{PassphraseRoot(p)}, true }
 }
 
-// WithKeyringRoots gives the keyring a current root and a previous one ("" for
-// none) instead of resolving them.
+// WithKeyringRoots gives the keyring a current passphrase root and a previous
+// one ("" for none) instead of resolving them.
 func WithKeyringRoots(current, previous string) KeyringOption {
 	return func(c *keyringConfig) {
-		c.roots, c.rootsGiven = []string{current}, true
+		c.roots, c.rootsGiven = []Root{PassphraseRoot(current)}, true
 		if previous != "" {
+			c.roots = append(c.roots, PassphraseRoot(previous))
+		}
+	}
+}
+
+// WithKeyringRootSet gives the keyring a current root and a previous one (the
+// zero Root for none), either of which may be a KMS (Task 20433).
+func WithKeyringRootSet(current, previous Root) KeyringOption {
+	return func(c *keyringConfig) {
+		c.roots, c.rootsGiven = []Root{current}, true
+		if !previous.IsZero() {
 			c.roots = append(c.roots, previous)
 		}
 	}
+}
+
+// WithKeyringContext bounds the KMS calls opening the keyring makes. Without
+// it they are bounded by each KMS's own timeout.
+func WithKeyringContext(ctx context.Context) KeyringOption {
+	return func(c *keyringConfig) {
+		if ctx != nil {
+			c.ctx = ctx
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The process's roots
+// ---------------------------------------------------------------------------
+
+// RootResolver supplies the roots a keyring opens with when it is given none:
+// the current root and the previous one (the zero Root for none).
+type RootResolver func() (current, previous Root, err error)
+
+type rootSet struct{ current, previous Root }
+
+var (
+	pinnedRoots  atomic.Pointer[rootSet]
+	rootResolver atomic.Pointer[RootResolver]
+)
+
+// PinRoots makes every keyring this process opens without a root option open
+// with current and previous, and returns a function that undoes it. `cloop ui`
+// pins the roots it resolved at startup — the root key (pkg/rootkey) and the
+// KMS of secrets.kms (pkg/kms) — for the reason it pins the root key: its
+// cluster peers are told the roots it started with, and a configuration that
+// changed under it would change the roots under work in flight.
+func PinRoots(current, previous Root) (unpin func()) {
+	prev := pinnedRoots.Swap(&rootSet{current: current, previous: previous})
+	return func() { pinnedRoots.Store(prev) }
+}
+
+// SetRootResolver installs fn as the source of the roots keyrings open with
+// when nothing is pinned, and returns a function that undoes it. A command
+// that reads secrets.kms installs one; fn is called on every such open and
+// must be cheap after its first call. With none installed, the roots are the
+// root key's (rootkey.Resolve).
+func SetRootResolver(fn RootResolver) (restore func()) {
+	var p *RootResolver
+	if fn != nil {
+		p = &fn
+	}
+	prev := rootResolver.Swap(p)
+	return func() { rootResolver.Store(prev) }
+}
+
+// processRoots resolves the roots a keyring given none opens with.
+func processRoots() ([]Root, error) {
+	if p := pinnedRoots.Load(); p != nil {
+		return rootList(p.current, p.previous), nil
+	}
+	if fn := rootResolver.Load(); fn != nil {
+		cur, prev, err := (*fn)()
+		if err != nil {
+			return nil, err
+		}
+		return rootList(cur, prev), nil
+	}
+	roots, err := rootkey.Resolve()
+	if err != nil {
+		// A source that is configured and wrong is never "no key": the
+		// operator meant to give the hub one, and carrying on without
+		// would degrade quietly into sealing nothing.
+		return nil, fmt.Errorf("%w: %v", ErrRootConfig, err)
+	}
+	return PassphraseRoots(roots.Values()...), nil
+}
+
+func rootList(current, previous Root) []Root {
+	out := []Root{current}
+	if !previous.IsZero() {
+		out = append(out, previous)
+	}
+	return out
 }
 
 // WithKeyringClock overrides the time source.
@@ -335,24 +457,21 @@ func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: nil key store", ErrInvalidSecret)
 	}
-	cfg := keyringConfig{clock: time.Now, create: true}
+	cfg := keyringConfig{clock: time.Now, create: true, ctx: context.Background()}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 	if !cfg.rootsGiven {
-		roots, err := rootkey.Resolve()
+		roots, err := processRoots()
 		if err != nil {
-			// A source that is configured and wrong is never "no key": the
-			// operator meant to give the hub one, and carrying on without
-			// would degrade quietly into sealing nothing.
-			return nil, fmt.Errorf("%w: %v", ErrRootConfig, err)
+			return nil, err
 		}
-		cfg.roots = roots.Values()
+		cfg.roots = roots
 	}
-	if len(cfg.roots) == 0 || cfg.roots[0] == "" {
-		return nil, fmt.Errorf("%w: set it to seal and open secret payloads", ErrNoKey)
+	if len(cfg.roots) == 0 || cfg.roots[0].IsZero() {
+		return nil, fmt.Errorf("%w: set it, or secrets.kms, to seal and open secret payloads", ErrNoKey)
 	}
-	if len(cfg.roots) > 1 && subtle.ConstantTimeCompare([]byte(cfg.roots[0]), []byte(cfg.roots[1])) == 1 {
+	if len(cfg.roots) > 1 && sameRoot(cfg.roots[0], cfg.roots[1]) {
 		cfg.roots = cfg.roots[:1]
 	}
 
@@ -362,7 +481,8 @@ func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 		records: make(map[string]KEKRecord),
 		rootOf:  make(map[string]int),
 		legacy:  make(map[int]*Cipher),
-		roots:   append([]string(nil), cfg.roots...),
+		roots:   append([]Root(nil), cfg.roots...),
+		ctx:     cfg.ctx,
 		clock:   cfg.clock,
 	}
 
@@ -382,18 +502,21 @@ func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 		kr.records[rec.ID] = rec
 	}
 
-	// Every live key must derive from a configured root (Task 20425).
+	// Every live key must open with a configured root (Task 20425): derive
+	// from a passphrase root, or unwrap through a KMS root (Task 20433).
 	var undecipherable []string
+	why := map[string]error{}
 	for _, rec := range records {
 		if rec.Retired() {
 			continue
 		}
-		key, idx, derr := kr.deriveAny(rec)
+		key, idx, derr := kr.openAny(rec)
 		if derr != nil {
-			// Recorded, live, and derived by no root this process holds.
+			// Recorded, live, and opened by no root this process holds.
 			// Keep the record so reads can name the key precisely, and
 			// remember it: the rule below turns on whether any such key exists.
 			undecipherable = append(undecipherable, rec.ID)
+			why[rec.ID] = derr
 			continue
 		}
 		kr.keks[rec.ID] = key
@@ -422,12 +545,13 @@ func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 	// wrong primary, not after.
 	if len(undecipherable) > 0 {
 		if cfg.create {
-			return nil, kr.refusal(undecipherable)
+			return nil, kr.refusal(undecipherable, why)
 		}
 		// A read-only caller — `cloop hub key list`, the doctor — is asking
 		// precisely which keys open, and is answered rather than refused. It
 		// never seals: see the !cfg.create case below.
 		kr.underivable = undecipherable
+		kr.underivableWhy = why
 	}
 
 	if cfg.create {
@@ -471,46 +595,125 @@ func OpenKeyring(store KeyStore, opts ...KeyringOption) (*Keyring, error) {
 	}
 }
 
-// refusal is the error a serving keyring is refused with when live keys derive
-// from no configured root. It names the roots the registry records for them
-// and the ones this process holds, by fingerprint, so "the key is wrong" and
-// "this member was not given the new root" read differently.
-func (k *Keyring) refusal(ids []string) error {
+// refusal is the error a serving keyring is refused with when live keys open
+// with no configured root. It names the roots the registry records for them,
+// what opening each said — a KMS that cannot be reached reads differently from
+// one that refused, and both from a key no root of this kind exists for — and
+// the roots this process holds, by fingerprint or KMS name, so "the key is
+// wrong" and "this member was not given the new root" read differently.
+func (k *Keyring) refusal(ids []string, why map[string]error) error {
+	const shown = 8
 	named := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if fp := k.records[id].Root; fp != "" {
-			named = append(named, id+" (root "+fp+")")
-		} else {
-			named = append(named, id)
+	kmsDown := false
+	for i, id := range ids {
+		if i == shown {
+			named = append(named, fmt.Sprintf("and %d more", len(ids)-shown))
+			break
 		}
+		named = append(named, id+k.reasonFor(id, why[id]))
+		kmsDown = kmsDown || errors.Is(why[id], ErrKMSUnavailable)
 	}
-	return fmt.Errorf("%w: %d live sealing key(s) — %s — derive from no root this process holds (%s); "+
+	sentinel := ErrKeyUnavailable
+	if kmsDown {
+		// Wraps ErrKeyUnavailable too: callers that test for an unopenable
+		// key still see one.
+		sentinel = ErrKMSUnavailable
+	}
+	return fmt.Errorf("%w: %d live sealing key(s) — %s — open with no root this process holds (%s); "+
 		"refusing to mint a new key, which would fork the registry and leave existing secrets unreadable",
-		ErrKeyUnavailable, len(ids), strings.Join(named, ", "), k.describeRoots())
+		sentinel, len(ids), strings.Join(named, ", "), k.describeRoots())
 }
 
-// describeRoots names the configured roots for a message: by variable and
-// fingerprint, never by value.
-func (k *Keyring) describeRoots() string {
-	names := []string{rootkey.EnvKey, rootkey.EnvPrevious}
-	parts := make([]string, 0, len(k.roots))
-	for i, r := range k.roots {
-		fp, err := rootkey.Fingerprint(r)
-		if err != nil {
-			fp = "unknown"
+// reasonFor is " (root X: what opening it said)" for a key a configured root
+// could not open, kept short: the reason of a KMS error can be long.
+func (k *Keyring) reasonFor(id string, err error) string {
+	return reasonForRec(k.records[id], err)
+}
+
+// reasonForRec is reasonFor for a record the caller holds, for paths that do
+// not hold the keyring's lock.
+func reasonForRec(rec KEKRecord, err error) string {
+	id := rec.ID
+	var parts []string
+	if rec.Root != "" {
+		parts = append(parts, "root "+rec.Root)
+	}
+	if err != nil {
+		msg := err.Error()
+		for _, p := range []string{ErrKMSUnavailable.Error() + ": ", ErrKeyUnavailable.Error() + ": ",
+			"sealing key " + id + ": ", "sealing key " + id + " "} {
+			msg = strings.TrimPrefix(msg, p)
 		}
-		parts = append(parts, fmt.Sprintf("%s %s", names[i], fp))
+		if len(msg) > 240 {
+			msg = msg[:240] + "…"
+		}
+		parts = append(parts, msg)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ": ") + ")"
+}
+
+// describeRoots names the configured roots for a message: a passphrase by
+// the setting it came from and its fingerprint, never its value; a KMS by the
+// setting and its name.
+func (k *Keyring) describeRoots() string {
+	parts := make([]string, 0, len(k.roots))
+	for i := range k.roots {
+		parts = append(parts, k.rootLabel(i))
 	}
 	return strings.Join(parts, ", ")
 }
 
-// deriveAny derives rec from the first configured root that opens it, and says
-// which. The current root is tried first; no key derives from both, since each
-// is salted on its own and the previous root may not equal the current.
-func (k *Keyring) deriveAny(rec KEKRecord) ([]byte, int, error) {
+// rootLabel names root i as an operator configured it.
+func (k *Keyring) rootLabel(i int) string {
+	r := k.roots[i]
+	if r.IsKMS() {
+		if i == 0 {
+			return "secrets.kms " + r.KMS.Name()
+		}
+		return "secrets.kms_previous " + r.KMS.Name()
+	}
+	fp, err := rootkey.Fingerprint(r.Passphrase)
+	if err != nil {
+		fp = "unknown"
+	}
+	switch {
+	case i == 0:
+		return rootkey.EnvKey + " " + fp
+	case k.roots[0].IsKMS():
+		// Moving onto a KMS: the passphrase being replaced is the hub's
+		// CLOOP_SECRET_KEY, named the previous root by secrets.previous_root.
+		return rootkey.EnvKey + " " + fp + " (secrets.previous_root)"
+	default:
+		return rootkey.EnvPrevious + " " + fp
+	}
+}
+
+// sameRoot reports whether two roots are one: equal passphrases, or KMSs of
+// one name.
+func sameRoot(a, b Root) bool {
+	switch {
+	case a.IsKMS() && b.IsKMS():
+		return a.KMS.Name() == b.KMS.Name()
+	case a.IsKMS() || b.IsKMS():
+		return false
+	}
+	return a.Passphrase != "" && subtle.ConstantTimeCompare([]byte(a.Passphrase), []byte(b.Passphrase)) == 1
+}
+
+// openAny opens rec with the first configured root that can, and says which.
+// A derived key is tried against the passphrase roots, current first — no key
+// derives from both, since each is salted on its own and the previous root may
+// not equal the current. A KMS-held key is tried against the KMS roots, the one
+// its record names first.
+func (k *Keyring) openAny(rec KEKRecord) ([]byte, int, error) {
 	var lastErr error
-	for i, root := range k.roots {
-		key, err := cachedDeriveKEK(root, rec)
+	tried := false
+	for _, i := range k.rootOrder(rec) {
+		tried = true
+		key, err := cachedOpenKEK(k.ctx, k.roots[i], rec)
 		if err == nil {
 			return key, i, nil
 		}
@@ -519,14 +722,54 @@ func (k *Keyring) deriveAny(rec KEKRecord) ([]byte, int, error) {
 			break // a corrupt record: no root does better
 		}
 	}
+	if !tried {
+		return nil, -1, k.noRootFor(rec)
+	}
 	return nil, -1, lastErr
+}
+
+// rootOrder lists the indexes of the roots that could open rec, in the order
+// to try them.
+func (k *Keyring) rootOrder(rec KEKRecord) []int {
+	var named, rest []int
+	for i, r := range k.roots {
+		if !r.opens(rec) {
+			continue
+		}
+		if r.IsKMS() && r.KMS.Name() == rec.Root {
+			named = append(named, i)
+			continue
+		}
+		rest = append(rest, i)
+	}
+	return append(named, rest...)
+}
+
+// noRootFor says why no configured root is even of the kind that opens rec.
+func (k *Keyring) noRootFor(rec KEKRecord) error {
+	if rec.Wrap == WrapKMS {
+		return fmt.Errorf("%w: sealing key %s is held by the KMS %s, and this process has no KMS configured "+
+			"to unwrap it (secrets.kms, or secrets.kms_previous while moving off it)", ErrKeyUnavailable, rec.ID,
+			orUnnamed(rec.Root))
+	}
+	return fmt.Errorf("%w: sealing key %s derives from a passphrase root%s, and this process holds none "+
+		"(%s, or secrets.previous_root: passphrase while moving onto a KMS)", ErrKeyUnavailable, rec.ID,
+		recordedRoot(rec), rootkey.EnvKey)
+}
+
+func orUnnamed(s string) string {
+	if s == "" {
+		return "(unnamed)"
+	}
+	return s
 }
 
 // attribute records, once, which root each unattributed live key derives from
 // (Task 20425). Keys minted before broker_keks.root existed have none; the
 // first process holding the root that derives them writes it back. Best
 // effort, on purpose: the derivation is the authority on which root opens a
-// key, so a failed write costs nothing but a retry by the next opener.
+// key, so a failed write costs nothing but a retry by the next opener. A
+// KMS-held key is named at mint and never needs this.
 func (k *Keyring) attribute() {
 	ks, ok := k.store.(KeyAttributor)
 	if !ok {
@@ -535,13 +778,14 @@ func (k *Keyring) attribute() {
 	k.mu.RLock()
 	pending := map[string]int{}
 	for id, rec := range k.records {
-		if idx, derived := k.rootOf[id]; derived && rec.Root == "" && !rec.Retired() {
+		if idx, derived := k.rootOf[id]; derived && rec.Root == "" && !rec.Retired() && rec.Wrap == "" &&
+			!k.roots[idx].IsKMS() {
 			pending[id] = idx
 		}
 	}
 	k.mu.RUnlock()
 	for id, idx := range pending {
-		fp, err := rootkey.Fingerprint(k.roots[idx])
+		fp, err := rootkey.Fingerprint(k.roots[idx].Passphrase)
 		if err != nil {
 			continue
 		}
@@ -600,45 +844,58 @@ type metaStore interface {
 	Meta(key string) (string, bool, error)
 }
 
-// mintKEK creates, seals a check value for, and persists a new KEK derived
-// from the current root, then promotes it to primary. The previous root never
-// mints: it is there to open what it sealed until that has been rewrapped.
+// mintKEK creates, seals a check value for, and persists a new KEK of the
+// current root — derived from its passphrase, or random and wrapped by its KMS
+// (kms.go) — then promotes it to primary. The previous root never mints: it is
+// there to open what it sealed until that has been rewrapped.
 func (k *Keyring) mintKEK(actor string) (KEKRecord, []byte, error) {
 	root := k.roots[0]
-	fingerprint, err := rootkey.Fingerprint(root)
-	if err != nil {
-		return KEKRecord{}, nil, fmt.Errorf("secretbroker: name the root of a new sealing key: %w", err)
-	}
-	salt := make([]byte, saltSize)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return KEKRecord{}, nil, fmt.Errorf("secretbroker: generate key salt: %w", err)
-	}
 	id, err := newID(kekIDPrefix)
 	if err != nil {
 		return KEKRecord{}, nil, err
 	}
-	key := deriveKey(root, salt)
-
-	check, err := sealWith(key, kekCheckAAD(id), []byte(kekCheckPlaintext))
-	if err != nil {
-		return KEKRecord{}, nil, err
-	}
-	rec := KEKRecord{
-		ID:         id,
-		Salt:       encodeHex(salt),
-		State:      KEKStateActive,
-		CheckValue: check,
-		CreatedAt:  k.now(),
-		CreatedBy:  actor,
-		Root:       fingerprint,
+	var (
+		rec KEKRecord
+		key []byte
+	)
+	if root.IsKMS() {
+		if rec, key, err = kmsMint(k.ctx, root.KMS, id, actor, k.now()); err != nil {
+			return KEKRecord{}, nil, err
+		}
+	} else {
+		fingerprint, err := rootkey.Fingerprint(root.Passphrase)
+		if err != nil {
+			return KEKRecord{}, nil, fmt.Errorf("secretbroker: name the root of a new sealing key: %w", err)
+		}
+		salt := make([]byte, saltSize)
+		if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+			return KEKRecord{}, nil, fmt.Errorf("secretbroker: generate key salt: %w", err)
+		}
+		key = deriveKey(root.Passphrase, salt)
+		check, err := sealWith(key, kekCheckAAD(id), []byte(kekCheckPlaintext))
+		if err != nil {
+			zero(key)
+			return KEKRecord{}, nil, err
+		}
+		rec = KEKRecord{
+			ID:         id,
+			Salt:       encodeHex(salt),
+			State:      KEKStateActive,
+			CheckValue: check,
+			CreatedAt:  k.now(),
+			CreatedBy:  actor,
+			Root:       fingerprint,
+		}
 	}
 	if err := k.store.PutKEK(rec); err != nil {
+		zero(key)
 		return KEKRecord{}, nil, fmt.Errorf("secretbroker: persist sealing key: %w", err)
 	}
 	if err := k.store.PromoteKEK(rec.ID, k.now()); err != nil {
+		zero(key)
 		return KEKRecord{}, nil, fmt.Errorf("secretbroker: promote sealing key: %w", err)
 	}
-	// Every other keyring this process opens finds it derived already.
+	// Every other keyring this process opens finds it opened already.
 	rememberKEK(root, rec, key)
 	rec.State = KEKStatePrimary
 	return rec, key, nil
@@ -666,11 +923,16 @@ type KeyInfo struct {
 	CreatedBy string    `json:"created_by,omitempty"`
 	RetiredAt time.Time `json:"retired_at,omitempty"`
 	// Root is the fingerprint the registry records for the root the key
-	// derives from; "" when nobody has attributed it.
+	// derives from, or the name of the KMS holding it; "" when nobody has
+	// attributed it.
 	Root string `json:"root,omitempty"`
-	// DerivedBy says which of this process's roots derives it, RootCurrent
+	// DerivedBy says which of this process's roots opens it, RootCurrent
 	// or RootPrevious; "" when neither does.
 	DerivedBy string `json:"derived_by,omitempty"`
+	// Wrap is WrapKMS for a key held by a KMS, and KMSKeyID the KMS key that
+	// wraps it (Task 20433). The ciphertext is never reported.
+	Wrap     string `json:"wrap,omitempty"`
+	KMSKeyID string `json:"kms_key_id,omitempty"`
 }
 
 // Keys returns every known KEK, primary first, then newest.
@@ -703,6 +965,8 @@ func (k *Keyring) Keys() []KeyInfo {
 			CreatedBy: rec.CreatedBy,
 			RetiredAt: rec.RetiredAt,
 			Root:      rec.Root,
+			Wrap:      rec.Wrap,
+			KMSKeyID:  rec.KMSKeyID,
 		}
 		if key != nil && derived {
 			info.DerivedBy = rootSlot(idx)
@@ -722,9 +986,21 @@ func (k *Keyring) Keys() []KeyInfo {
 }
 
 // HasLegacy reports whether pre-envelope material can still be opened on this
-// hub. False with legacy rows present means those rows are unreadable, which
-// `cloop hub key status` reports rather than leaving to be discovered.
-func (k *Keyring) HasLegacy() bool { return k.legacySalt != nil }
+// hub: the legacy salt is there, and a passphrase root to derive its key from
+// — a KMS never sealed anything that way. False with legacy rows present
+// means those rows are unreadable, which `cloop hub key status` reports rather
+// than leaving to be discovered.
+func (k *Keyring) HasLegacy() bool {
+	if k.legacySalt == nil {
+		return false
+	}
+	for _, r := range k.roots {
+		if !r.IsKMS() && r.Passphrase != "" {
+			return true
+		}
+	}
+	return false
+}
 
 // rootSlot names a root by its index in roots.
 func rootSlot(idx int) string {
@@ -780,27 +1056,96 @@ func (k *Keyring) PreviousRootKeys() []string {
 	return out
 }
 
-// Underivable names the live keys no configured root derives. Only a
-// read-only keyring can have any (WithoutKeyCreation); one opened to serve is
-// refused instead.
+// Underivable names the live keys no configured root opens. Only a read-only
+// keyring can have any (WithoutKeyCreation); one opened to serve is refused
+// instead.
 func (k *Keyring) Underivable() []string {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	return append([]string(nil), k.underivable...)
 }
 
-// RootFingerprints names the roots this keyring derives from; previous is ""
-// when there is none. Each costs a key derivation the first time in a process.
+// UnderivableReasons says, for each key Underivable names, why no configured
+// root opened it — a KMS that cannot be reached, one that refused, no root of
+// the key's kind — as a message naming the key, never quoting key material.
+func (k *Keyring) UnderivableReasons() map[string]string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	out := make(map[string]string, len(k.underivable))
+	for _, id := range k.underivable {
+		out[id] = strings.TrimPrefix(k.reasonFor(id, k.underivableWhy[id]), " ")
+	}
+	return out
+}
+
+// UnderivableErr is the error opening the key id said, for a key Underivable
+// names; nil otherwise.
+func (k *Keyring) UnderivableErr(id string) error {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return k.underivableWhy[id]
+}
+
+// RootFingerprints names the roots this keyring opens with: a passphrase root
+// by its fingerprint, a KMS root by its name. previous is "" when there is
+// none. A fingerprint costs a key derivation the first time in a process.
 func (k *Keyring) RootFingerprints() (current, previous string, err error) {
-	if current, err = rootkey.Fingerprint(k.roots[0]); err != nil {
+	if current, err = rootName(k.roots[0]); err != nil {
 		return "", "", err
 	}
 	if k.HasPrevious() {
-		if previous, err = rootkey.Fingerprint(k.roots[1]); err != nil {
+		if previous, err = rootName(k.roots[1]); err != nil {
 			return "", "", err
 		}
 	}
 	return current, previous, nil
+}
+
+// RootName names r as the registry and a hub cluster member do: the
+// fingerprint of a passphrase, or the name of a KMS.
+func RootName(r Root) (string, error) { return rootName(r) }
+
+func rootName(r Root) (string, error) {
+	if r.IsKMS() {
+		return r.KMS.Name(), nil
+	}
+	return rootkey.Fingerprint(r.Passphrase)
+}
+
+// CurrentKMS is the current root's KMS, nil when the current root is a
+// passphrase.
+func (k *Keyring) CurrentKMS() KMS {
+	if len(k.roots) == 0 {
+		return nil
+	}
+	return k.roots[0].KMS
+}
+
+// PreviousIsKMS reports whether the previous root is a KMS.
+func (k *Keyring) PreviousIsKMS() bool { return k.HasPrevious() && k.roots[1].IsKMS() }
+
+// RootLabels names the configured roots as an operator configured them,
+// current first: "CLOOP_SECRET_KEY de46…", "secrets.kms kmsv2:/run/kms.sock".
+func (k *Keyring) RootLabels() []string {
+	out := make([]string, 0, len(k.roots))
+	for i := range k.roots {
+		out = append(out, k.rootLabel(i))
+	}
+	return out
+}
+
+// liveIDs lists the ids of every key not retired.
+func (k *Keyring) liveIDs() []string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	ids := make([]string, 0, len(k.records))
+	for id, rec := range k.records {
+		if !rec.Retired() {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // ---------------------------------------------------------------------------
@@ -848,17 +1193,22 @@ func (k *Keyring) currentPrimary() (string, []byte, error) {
 		return rec.ID, cached, nil
 	}
 
-	// A key minted by another process. Deriving it costs one KDF pass, once
-	// per process.
-	key, idx, derr := k.deriveAny(rec)
+	// A key minted by another process. Deriving it costs one KDF pass, and
+	// unwrapping it one KMS call, once per process.
+	key, idx, derr := k.openAny(rec)
 	if derr != nil {
 		// The member was not given the root new material is now sealed
 		// under — started before a change of root reached it, or with the
-		// wrong key. Sealing anything else instead would leave material its
-		// peers cannot open, so it seals nothing, loudly.
-		return "", nil, fmt.Errorf("%w: the primary sealing key %s%s derives from no root this process holds "+
-			"(%s): restart this hub member with the key every other member runs on", ErrKeyUnavailable,
-			rec.ID, recordedRoot(rec), k.describeRoots())
+		// wrong key — or its KMS cannot be reached. Sealing anything else
+		// instead would leave material its peers cannot open, so it seals
+		// nothing, loudly.
+		sentinel := ErrKeyUnavailable
+		if errors.Is(derr, ErrKMSUnavailable) {
+			sentinel = ErrKMSUnavailable
+		}
+		return "", nil, fmt.Errorf("%w: the primary sealing key %s%s opens with no root this process holds "+
+			"(%s): restart this hub member with the roots every other member runs on", sentinel,
+			rec.ID, reasonForRec(rec, derr), k.describeRoots())
 	}
 	k.mu.Lock()
 	k.records[rec.ID] = rec
@@ -922,10 +1272,14 @@ func (k *Keyring) OpenEnvelope(aad string, env Envelope) ([]byte, error) {
 			hubmetrics.UnsealFailures.Inc("key_unavailable")
 			return nil, fmt.Errorf("%w: no legacy sealing key on this hub", ErrKeyUnavailable)
 		}
-		// Either root may have sealed it: the pre-envelope construction has
-		// no check value to say which, and GCM refuses the wrong one.
-		var err error
-		for i := range k.roots {
+		// Either passphrase root may have sealed it: the pre-envelope
+		// construction has no check value to say which, and GCM refuses the
+		// wrong one. A KMS never sealed anything this way.
+		err := fmt.Errorf("%w: no passphrase root to open pre-envelope material with", ErrKeyUnavailable)
+		for i, root := range k.roots {
+			if root.IsKMS() {
+				continue
+			}
 			var out []byte
 			if out, err = k.legacyCipher(i).Unseal(env.Ciphertext); err == nil {
 				return out, nil
@@ -935,7 +1289,7 @@ func (k *Keyring) OpenEnvelope(aad string, env Envelope) ([]byte, error) {
 		return nil, err
 	}
 
-	kek, rec, known := k.lookup(env.KeyID)
+	kek, rec, known, openErr := k.lookupErr(env.KeyID)
 	if kek == nil && !known {
 		// Another process may have minted this key since we loaded — a
 		// `cloop hub key rotate` run against a hub that is still serving is
@@ -943,7 +1297,7 @@ func (k *Keyring) OpenEnvelope(aad string, env Envelope) ([]byte, error) {
 		// from silently breaking reads in every long-lived process until it
 		// restarts.
 		if k.reloadThrottled() {
-			kek, rec, known = k.lookup(env.KeyID)
+			kek, rec, known, openErr = k.lookupErr(env.KeyID)
 		}
 	}
 
@@ -958,10 +1312,16 @@ func (k *Keyring) OpenEnvelope(aad string, env Envelope) ([]byte, error) {
 			hubmetrics.UnsealFailures.Inc("key_retired")
 			return nil, fmt.Errorf("%w: sealing key %s was retired at %s; this material cannot be recovered",
 				ErrKeyRetired, env.KeyID, formatOrUnknown(rec.RetiredAt))
+		case known && errors.Is(openErr, ErrKMSUnavailable):
+			// The key is fine; the KMS holding it does not answer. Nothing
+			// opens it until it does — no other root is tried in its place.
+			hubmetrics.UnsealFailures.Inc("kms_unavailable")
+			return nil, fmt.Errorf("%w: sealing key %s%s (%s)", ErrKMSUnavailable, env.KeyID,
+				reasonForRec(rec, openErr), k.describeRoots())
 		case known:
 			hubmetrics.UnsealFailures.Inc("key_unavailable")
-			return nil, fmt.Errorf("%w: sealing key %s%s exists but derives from no root this process holds (%s)",
-				ErrKeyUnavailable, env.KeyID, recordedRoot(rec), k.describeRoots())
+			return nil, fmt.Errorf("%w: sealing key %s%s exists but opens with no root this process holds (%s)",
+				ErrKeyUnavailable, env.KeyID, reasonForRec(rec, openErr), k.describeRoots())
 		default:
 			hubmetrics.UnsealFailures.Inc("key_unknown")
 			return nil, fmt.Errorf("%w: no sealing key %s in this hub's registry", ErrKeyUnknown, env.KeyID)
@@ -1062,6 +1422,7 @@ func (k *Keyring) AddKey(actor string) (KeyInfo, error) {
 	return KeyInfo{
 		ID: rec.ID, State: KEKStatePrimary, Primary: true, Openable: true,
 		CreatedAt: rec.CreatedAt, CreatedBy: rec.CreatedBy, Root: rec.Root, DerivedBy: RootCurrent,
+		Wrap: rec.Wrap, KMSKeyID: rec.KMSKeyID,
 	}, nil
 }
 
@@ -1104,6 +1465,9 @@ func (k *Keyring) RetireKey(id string) error {
 	if rec, ok := k.records[id]; ok {
 		rec.State = KEKStateRetired
 		rec.Salt = ""
+		rec.CheckValue = nil
+		rec.KMSCiphertext = nil
+		rec.KMSAnnotations = nil
 		rec.RetiredAt = at
 		k.records[id] = rec
 	}
@@ -1111,39 +1475,44 @@ func (k *Keyring) RetireKey(id string) error {
 	return nil
 }
 
-// lookup returns the derived key, the record, and whether the id is known,
-// deriving the key on first use.
+// lookup returns the opened key, the record, and whether the id is known,
+// opening the key on first use.
 //
 // Lazy derivation is what keeps a hub that has rotated several times from
 // paying a KDF pass per key on every keyring construction. It is safe because
-// deriving verifies against the key check value: a key that does not belong to
-// this passphrase comes back nil here exactly as it would have from an eager
-// pass.
+// opening verifies against the key check value: a key that does not belong to
+// this root comes back nil here exactly as it would have from an eager pass.
 func (k *Keyring) lookup(id string) ([]byte, KEKRecord, bool) {
+	key, rec, known, _ := k.lookupErr(id)
+	return key, rec, known
+}
+
+// lookupErr is lookup, and what opening the key said when it did not open.
+func (k *Keyring) lookupErr(id string) ([]byte, KEKRecord, bool, error) {
 	k.mu.RLock()
 	key, has := k.keks[id]
 	rec, known := k.records[id]
 	k.mu.RUnlock()
 	if has || !known || rec.Retired() {
-		return key, rec, known
+		return key, rec, known, nil
 	}
 
-	derived, idx, err := k.deriveAny(rec)
+	opened, idx, err := k.openAny(rec)
 	if err != nil {
-		return nil, rec, known
+		return nil, rec, known, err
 	}
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	// Another goroutine may have derived it while we were not holding the
+	// Another goroutine may have opened it while we were not holding the
 	// lock; keep the first one so callers holding a []byte keep a live slice.
 	if existing, ok := k.keks[id]; ok {
-		zero(derived)
-		return existing, k.records[id], true
+		zero(opened)
+		return existing, k.records[id], true, nil
 	}
-	k.keks[id] = derived
+	k.keks[id] = opened
 	k.rootOf[id] = idx
-	return derived, k.records[id], true
+	return opened, k.records[id], true, nil
 }
 
 // reloadThrottled re-reads the registry at most once per reloadInterval and
@@ -1189,7 +1558,7 @@ func (k *Keyring) reload() error {
 		if key, _, ok := k.lookup(rec.ID); ok && key != nil {
 			continue
 		}
-		if key, idx, derr := k.deriveAny(rec); derr == nil {
+		if key, idx, derr := k.openAny(rec); derr == nil {
 			fresh[rec.ID] = key
 			freshRoot[rec.ID] = idx
 		}
@@ -1238,7 +1607,7 @@ func (k *Keyring) reload() error {
 // ---------------------------------------------------------------------------
 
 // deriveKEK derives a KEK from a root and verifies it against the record's
-// check value. Callers go through cachedDeriveKEK (keycache.go).
+// check value. Callers go through cachedOpenKEK (keycache.go).
 //
 // Verification is what separates "this key is not for this root" from "this
 // ciphertext is corrupt" at load time rather than at lease time.
@@ -1303,7 +1672,7 @@ func (k *Keyring) legacyCipher(i int) *Cipher {
 	if c != nil {
 		return c
 	}
-	c = &Cipher{key: cachedLegacyKey(k.roots[i], k.legacySalt)}
+	c = &Cipher{key: cachedLegacyKey(k.roots[i].Passphrase, k.legacySalt)}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if existing := k.legacy[i]; existing != nil {

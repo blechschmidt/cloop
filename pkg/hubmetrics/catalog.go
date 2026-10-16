@@ -168,9 +168,30 @@ var (
 var (
 	UnsealFailures = Default.MustRegister(Definition{
 		Name:   "cloop_secret_unseal_failures_total",
-		Help:   "Envelope opens that failed, by reason (key_unknown, key_retired, key_unavailable, seal_failed). Any non-zero rate means secrets are unreadable.",
+		Help:   "Envelope opens that failed, by reason (key_unknown, key_retired, key_unavailable, kms_unavailable, seal_failed). Any non-zero rate means secrets are unreadable.",
 		Type:   TypeCounter,
 		Labels: []string{"reason"},
+	})
+
+	// Calls to the external key-management service the sealing keys are
+	// wrapped by (Task 20433). backend is config.KMSProvider* (2 values),
+	// operation pkg/kms Op* (4) and result pkg/kms Result* (6). Per process:
+	// each member counts the calls it made, and the sum is the cluster's.
+	KMSRequests = Default.MustRegister(Definition{
+		Name:   "cloop_kms_requests_total",
+		Help:   "Calls this hub process made to the key-management service its sealing keys are wrapped by, by backend (kmsv2, transit), operation (status, encrypt, decrypt, login) and result (ok, unavailable, timeout, denied, invalid, error).",
+		Type:   TypeCounter,
+		Labels: []string{"backend", "operation", "result"},
+	})
+
+	// Buckets from 5 ms, a plugin answering from the same Pod, to 10 s, past
+	// any configured timeout's default: a call slower than that has failed.
+	KMSRequestDuration = Default.MustRegister(Definition{
+		Name:    "cloop_kms_request_duration_seconds",
+		Help:    "Latency of calls to the key-management service, by backend and operation, whatever their result.",
+		Type:    TypeHistogram,
+		Labels:  []string{"backend", "operation"},
+		Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
 	})
 
 	// Both read the rotation history `cloop hub key rotate` writes to the

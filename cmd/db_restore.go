@@ -19,6 +19,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/dbbackup"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
 // Exit codes of `cloop db restore`.
@@ -45,8 +46,11 @@ type dbRestoreOptions struct {
 	// stderr copy goes when the configuration asks for one.
 	Key      string
 	Previous string
-	Stderr   io.Writer
-	Now      func() time.Time
+	// KMS are the key-management services of the hub's secrets section
+	// (Task 20433), through which a backup's KMS-held keys open.
+	KMS    []secretbroker.KMS
+	Stderr io.Writer
+	Now    func() time.Time
 }
 
 // runDBRestore is `cloop db restore`. It writes its report to w and returns
@@ -80,6 +84,7 @@ func runDBRestore(w io.Writer, o dbRestoreOptions) int {
 	pre, err := dbbackup.Inspect(o.Backup, dbbackup.PreflightOptions{
 		Key:              o.Key,
 		Previous:         o.Previous,
+		KMS:              o.KMS,
 		SkipChecksum:     o.SkipChecksum,
 		AllowUnsealed:    o.AllowUnsealed,
 		AcceptSecretLoss: o.AcceptSecretLoss,
@@ -117,6 +122,7 @@ func runDBRestore(w io.Writer, o dbRestoreOptions) int {
 		Force:            o.Force,
 		Key:              o.Key,
 		Previous:         o.Previous,
+		KMS:              o.KMS,
 		SkipChecksum:     o.SkipChecksum,
 		AllowUnsealed:    o.AllowUnsealed,
 		AcceptSecretLoss: o.AcceptSecretLoss,
