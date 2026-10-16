@@ -54,7 +54,34 @@ func checkExecutors(ctx context.Context, dir string, cfg *config.Config, opts Op
 		QuietWhenHealthy: true,
 		Logf:             func(string, ...any) {},
 	})
-	for _, d := range report.Diagnostics {
+	reportExecutors(ctx, dir, report.Diagnostics, opts, add)
+}
+
+// checkExecutorsLive is checkExecutors for a hub diagnosing itself (Task
+// 20434). It reads what this process already has rather than building it
+// again: the reconciliation the hub published when it brought its configured
+// drivers up, and the registry those drivers — and the devices that dialled in
+// since — are in. Reconciling here would replace the drivers the hub is
+// dispatching to, and applying the configuration's ratchets would change the
+// policy it runs under; a report must do neither.
+func checkExecutorsLive(ctx context.Context, dir string, _ *config.Config, opts Options, add addFn) {
+	report, ok := reconcile.LastReport()
+	if !ok {
+		add(Finding{
+			Check: "executors.configured", Title: "Configured executors", Severity: SeverityWarn,
+			Message: "this hub process has not reconciled its configured executors, so what it built from " +
+				"executors.container and executors.kubernetes is not known",
+			Remediation: "Restart the hub, which reconciles them at startup, or run `cloop hub doctor` on its host " +
+				"to see what the configuration would bring up",
+		})
+	}
+	reportExecutors(ctx, dir, report.Diagnostics, opts, add)
+}
+
+// reportExecutors reports reconciliation's diagnostics, the dispatch verdict
+// and a probe of each executor in this process's registry.
+func reportExecutors(ctx context.Context, dir string, diagnostics []reconcile.Diagnostic, opts Options, add addFn) {
+	for _, d := range diagnostics {
 		add(diagnosticFinding(d))
 	}
 
@@ -190,7 +217,19 @@ func executorFinding(ctx context.Context, ex executor.Executor, opts Options) Fi
 
 	probeCtx, cancel := context.WithTimeout(ctx, opts.timeout())
 	defer cancel()
-	if err := ex.HealthCheck(probeCtx); err != nil {
+	// A serving hub answers from what it already knows (Self.Probe), and the
+	// finding says where that answer came from.
+	var err error
+	if self := opts.Self; self != nil && self.Probe != nil {
+		var source string
+		source, err = self.Probe(probeCtx, ex)
+		if source != "" {
+			details["probed"] = source
+		}
+	} else {
+		err = ex.HealthCheck(probeCtx)
+	}
+	if err != nil {
 		// A device that failed enrolment has a specific fix, and it is rarely
 		// the generic "restart the agent" one: an expired token needs a new
 		// token, and a replayed one may need a revocation. Prefer the sentinel's

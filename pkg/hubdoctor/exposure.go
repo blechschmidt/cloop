@@ -100,40 +100,45 @@ func (o Options) listeners(port int) ([]netip.AddrPort, error) {
 }
 
 func checkExposure(ctx context.Context, dir string, cfg *config.Config, opts Options, add addFn) {
+	token := opts.staticToken()
 	req := exposure.Request{
 		Listen:                      cfg.UI.Listen,
 		Source:                      "ui.listen",
 		Port:                        opts.Port,
 		SSO:                         cfg.UI.OIDC.Enabled,
-		StaticToken:                 os.Getenv(envUIToken) != "",
+		StaticToken:                 token.set,
 		AllowUnauthenticatedNetwork: cfg.UI.AllowUnauthenticatedNetwork,
 		TLS:                         strings.TrimSpace(cfg.UI.TLS.CertFile) != "",
+	}
+	if self := opts.Self; self != nil {
+		// As the process runs, not as the file would restart it.
+		req.SSO, req.TLS = self.SSO, self.TLS
 	}
 	req.ExternalURL, req.ExternalURLKey = cfg.UI.PublicURL()
 	plan, planErr := exposure.Decide(req)
 	where := configFileFor(dir, opts.Port)
 
 	if opts.Port <= 0 {
-		add(predictedExposure(plan, planErr, req, where,
+		add(predictedExposure(plan, planErr, req, token, where,
 			"with this configuration, `cloop ui`", map[string]any{}))
 		return
 	}
 	socks, err := opts.listeners(opts.Port)
 	if err != nil {
-		add(predictedExposure(plan, planErr, req, where,
+		add(predictedExposure(plan, planErr, req, token, where,
 			fmt.Sprintf("the sockets on :%d could not be read (%v); with this configuration, `cloop ui --port %d`",
 				opts.Port, err, opts.Port),
 			map[string]any{"port": opts.Port, "observed": false}))
 		return
 	}
 	if len(socks) == 0 {
-		add(predictedExposure(plan, planErr, req, where,
+		add(predictedExposure(plan, planErr, req, token, where,
 			fmt.Sprintf("nothing listens on :%d now; started with this configuration, `cloop ui --port %d`",
 				opts.Port, opts.Port),
 			map[string]any{"port": opts.Port, "observed": true, "listening": []string{}}))
 		return
 	}
-	add(observedExposure(ctx, plan, planErr, req, where, socks, opts))
+	add(observedExposure(ctx, plan, planErr, req, token, where, socks, opts))
 }
 
 // configFileFor names the file an operator should edit for the hub on port:
@@ -150,7 +155,7 @@ func configFileFor(dir string, port int) string {
 
 // observedExposure judges the process actually listening on the port.
 func observedExposure(ctx context.Context, plan exposure.Plan, planErr error, req exposure.Request,
-	where string, socks []netip.AddrPort, opts Options) Finding {
+	token staticTokenFact, where string, socks []netip.AddrPort, opts Options) Finding {
 	scope, widest := socketScope(socks)
 	shown := describeSockets(socks)
 	details := map[string]any{"port": opts.Port, "observed": true, "listening": shownList(socks)}
@@ -158,8 +163,10 @@ func observedExposure(ctx context.Context, plan exposure.Plan, planErr error, re
 		details["this_build_would_bind"] = plan.String()
 	}
 
+	// A hub diagnosing itself knows its answer, and asking its own listener
+	// without a credential would count against the address it asked from.
 	var probe probeResult
-	if scope != exposure.ScopeLoopback && !opts.Offline {
+	if scope != exposure.ScopeLoopback && !opts.Offline && opts.Self == nil {
 		probe = probeHub(ctx, opts, widest)
 		details["probe"] = probe.describe()
 	}
@@ -167,8 +174,10 @@ func observedExposure(ctx context.Context, plan exposure.Plan, planErr error, re
 	// Sign-in, from the hub's own answer when it gave one; otherwise from
 	// the configuration, and the message says which.
 	open := !req.SSO && !req.StaticToken
-	evidence := "(by its configuration: ui.oidc " + onOff(req.SSO) + ", " + envUIToken + " " +
-		setOrNot(req.StaticToken) + " in this shell)"
+	evidence := "(by its configuration: ui.oidc " + onOff(req.SSO) + ", " + token.state() + ")"
+	if opts.Self != nil {
+		evidence = "(as this hub runs: single sign-on " + onOff(req.SSO) + ", " + token.state() + ")"
+	}
 	switch probe.Kind {
 	case probeOpen:
 		open, evidence = true, "("+probe.describe()+")"
@@ -228,10 +237,9 @@ func observedExposure(ctx context.Context, plan exposure.Plan, planErr error, re
 // predictedExposure judges what `cloop ui` would do with this configuration,
 // for a port nothing is listening on (or that cannot be observed). prefix
 // says which of those it is, and ends with the subject of "would".
-func predictedExposure(plan exposure.Plan, planErr error, req exposure.Request, where, prefix string,
-	details map[string]any) Finding {
-	cred := "ui.oidc is " + onOff(req.SSO) + " and " + envUIToken + " is " + setOrNot(req.StaticToken) +
-		" in this shell"
+func predictedExposure(plan exposure.Plan, planErr error, req exposure.Request, token staticTokenFact,
+	where, prefix string, details map[string]any) Finding {
+	cred := "ui.oidc is " + onOff(req.SSO) + " and " + token.isState()
 	var refusal *exposure.RefusalError
 	switch {
 	case errors.As(planErr, &refusal):

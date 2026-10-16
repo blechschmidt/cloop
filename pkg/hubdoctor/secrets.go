@@ -97,9 +97,22 @@ func checkSecretKey(ctx context.Context, dir string, cfg *config.Config, opts Op
 	if cfg != nil {
 		sc = cfg.Secrets
 	}
-	hubRoots, kerr := kms.Resolve(sc, roots)
-	if kerr == nil {
-		defer hubRoots.Close()
+	// A serving hub's own roots, when it pinned some: resolving secrets.kms
+	// again would open a KMS client of the doctor's — and log in to Vault —
+	// on every report. Those are the hub's to close, not this check's.
+	var (
+		hubRoots kms.Roots
+		kerr     error
+		pinned   bool
+	)
+	if self := opts.Self; self != nil && self.KMS != nil {
+		hubRoots, pinned = self.KMS()
+	}
+	if !pinned {
+		hubRoots, kerr = kms.Resolve(sc, roots)
+		if kerr == nil {
+			defer hubRoots.Close()
+		}
 	}
 	if cfg != nil {
 		checkSecretsKMS(ctx, cfg, opts, hubRoots, kerr, add)

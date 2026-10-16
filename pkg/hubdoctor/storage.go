@@ -43,6 +43,20 @@ func checkStorage(dir string, wal walSample, add addFn) {
 		})
 		return
 	}
+	checkSchemaVersion(dbPath, add)
+	checkWAL(wal, add)
+}
+
+// checkIntegrity runs quick_check and foreign_key_check over state.db. A step
+// of its own because it reads the whole file — half a gigabyte on a hub with a
+// long audit trail, seconds once it has left the page cache — so a hub
+// diagnosing itself every minute makes it less often than the rest (see
+// steps.go). A missing database is checkStorage's to report.
+func checkIntegrity(dir string, add addFn) {
+	dbPath := state.DBPath(dir)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return
+	}
 
 	// quick_check rather than the full integrity_check: this is a
 	// pre-flight, and the thorough variant on a large database takes long
@@ -78,9 +92,6 @@ func checkStorage(dir string, wal walSample, add addFn) {
 			Message: "quick_check and foreign_key_check both passed",
 		})
 	}
-
-	checkSchemaVersion(dbPath, add)
-	checkWAL(wal, add)
 }
 
 // checkSchemaVersion compares what is applied against what this binary carries.

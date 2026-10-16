@@ -50,11 +50,14 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/diskusage"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
+	"github.com/blechschmidt/cloop/pkg/kms"
 )
 
 // Severity is how much a finding matters. The three values are ordered, and
@@ -110,6 +113,9 @@ type Finding struct {
 	Message     string         `json:"message"`
 	Remediation string         `json:"remediation,omitempty"`
 	Details     map[string]any `json:"details,omitempty"`
+	// AsOf is when the check was made, for a finding a live run carried over
+	// from an earlier one (liveEvery); zero means now. Run never sets it.
+	AsOf time.Time `json:"as_of,omitzero"`
 }
 
 // Report is the whole diagnosis.
@@ -332,6 +338,64 @@ type Options struct {
 	// per-user Claude homes, for the leftover-homes check (Task 20422).
 	// Empty is claudecodeauth.HomeRootPath, from this process's environment.
 	ClaudeHomesRoot string
+
+	// Self is what the hub being diagnosed knows about itself, when it is the
+	// process diagnosing (Live, Task 20434). Nil is an operator's shell, which
+	// knows the configuration and its own environment and has to ask the rest.
+	Self *Self
+}
+
+// Self is a serving hub's own answers to questions the doctor otherwise asks
+// from outside. Each one replaces a probe that, made by the hub on itself
+// every minute, would cost more than it tells.
+type Self struct {
+	// SSO, StaticToken and TLS say how the hub's listener admits a request as
+	// the process runs now: single sign-on in force, a static admin token
+	// configured, TLS served. The exposure check judges from them instead of
+	// asking the listener without a credential — which a hub with a static
+	// token and no SSO counts as a failed sign-in, five of which lock the
+	// asking address out.
+	SSO, StaticToken, TLS bool
+
+	// KMS returns the roots the hub resolved at startup, which every keyring
+	// it opens uses, and whether it pinned any. The sealing-key checks use
+	// them instead of resolving secrets.kms again, which would open a new KMS
+	// client — for Vault, a new login and a new token — on every report.
+	KMS func() (kms.Roots, bool)
+
+	// Probe answers an executor's liveness from what the hub already knows:
+	// what its supervisor last observed, or the hub member a device is
+	// connected to. err nil is reachable; source says where the answer came
+	// from. It replaces a probe of every executor on every member — leases a
+	// Kubernetes credential, asks a device another member holds — per report.
+	Probe func(ctx context.Context, ex executor.Executor) (source string, err error)
+}
+
+// staticTokenFact is whether the hub has a static token, and how a finding
+// names where that was learned.
+type staticTokenFact struct {
+	set          bool
+	subject, src string // "CLOOP_UI_TOKEN", "in this shell"
+}
+
+func (f staticTokenFact) state() string   { return f.subject + " " + setOrNot(f.set) + " " + f.src }
+func (f staticTokenFact) isState() string { return f.subject + " is " + setOrNot(f.set) + " " + f.src }
+
+func (o Options) staticToken() staticTokenFact {
+	if o.Self != nil {
+		return staticTokenFact{set: o.Self.StaticToken, subject: "the static token", src: "on this hub"}
+	}
+	return staticTokenFact{set: os.Getenv(envUIToken) != "", subject: envUIToken, src: "in this shell"}
+}
+
+// envSource names the environment the doctor reads CLOOP_UI_TOKEN and the
+// root key from: the operator's shell, or the hub's own when it diagnoses
+// itself.
+func (o Options) envSource() string {
+	if o.Self != nil {
+		return "in this hub's environment"
+	}
+	return "in this shell"
 }
 
 func (o Options) globalBudget() (globalbudget.GlobalBudgetConfig, error) {
@@ -378,9 +442,11 @@ func (o Options) client() *http.Client {
 	if o.HTTPClient != nil {
 		return o.HTTPClient
 	}
+	// The environment's proxy, as the hub's own clients use: a hub that
+	// reaches its issuer through HTTPS_PROXY must not be told it cannot.
 	return &http.Client{
 		Timeout:   o.timeout(),
-		Transport: &http.Transport{DisableKeepAlives: true},
+		Transport: &http.Transport{DisableKeepAlives: true, Proxy: http.ProxyFromEnvironment},
 	}
 }
 
@@ -409,81 +475,34 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 	wal := sampleWAL(dir)
 
 	if cfg == nil {
-		add(Finding{
-			Check:       "config.present",
-			Title:       "Hub configuration",
-			Severity:    SeverityFail,
-			Message:     "no configuration could be loaded, so nothing below could be checked against it",
-			Remediation: "Run `cloop hub bootstrap --external-url https://<your-host>` in this directory",
-		})
+		add(configAbsent())
 		return rep
 	}
 	rep.StrictMode = !cfg.Executors.HostProcessAllowed()
 
-	checkExecutionPolicy(cfg, add)
-	// What loading changed comes first: every check below reads the result.
-	checkLoadRepairs(cfg, add)
-	checkOIDC(ctx, cfg, opts, add)
-	checkTLS(cfg, opts, add)
-	// Beside the transport checks: whether a hub that cannot tell people
-	// apart is reachable from the network (Task 20393).
-	checkExposure(ctx, dir, cfg, opts, add)
-	checkSecretKey(ctx, dir, cfg, opts, add)
-	checkRBAC(cfg, add)
-	// Beside the policy it feeds: provisioned groups are a claim source the
-	// policy's bindings may name (Task 20415).
-	checkSCIM(dir, cfg, add)
-	// After the policy it would bypass: whether the static admin token is
-	// still accepted beside an enforced one, and how long it has gone unused
-	// (Task 20406).
-	checkStaticToken(dir, cfg, opts, add)
-	// Beside it: the API tokens the enforced policy suspends because they were
-	// minted while there was none (Task 20422).
-	checkUnapprovedTokens(dir, cfg, opts, add)
-	// What an offboarding could not reach: the Claude Code homes of
-	// identities the control plane denies, still on this host (Task 20422).
-	checkClaudeLeftovers(dir, opts, add)
-	checkImagePolicy(ctx, dir, cfg, opts, add)
-	checkExecutors(ctx, dir, cfg, opts, add)
-	checkEdgeLag(dir, add)
-	checkRollbackProtection(dir, add)
-	checkRunBuilds(add)
-	// After checkExecutors, and not optional about the ordering: the probe
-	// needs a driver in the registry holding a live cluster credential, and
-	// reconciliation is what puts one there.
-	checkNetworkPolicyEnforcement(ctx, dir, cfg, opts, add)
-	// Beside the other egress-confinement checks: an allowlist that contains
-	// a cloud metadata service without naming it (Task 20397).
-	checkMetadataExposure(dir, cfg, add)
-	checkGitProxy(ctx, dir, cfg, opts, add)
-	// Which GitHub grants a strict hub with no proxy hands into sandboxes as
-	// the credential itself (Task 20409).
-	checkForgeCredentials(dir, cfg, add)
-	checkBranchRestrictedGrants(dir, cfg, add)
-	checkKubeGuard(ctx, dir, cfg, opts, add)
-	checkEgressBroker(ctx, dir, cfg, opts, add)
-	// Beside the storage the projects live in: whether any registered
-	// project's directory overlaps what the hub must never bind (Task 20418).
-	checkProjectConfinement(dir, cfg, add)
-	checkStorage(dir, wal, add)
-	checkFreeSpace(dir, cfg, opts, add)
-	checkConfigDrift(dir, add)
-	checkRetention(dir, cfg, add)
-	// Beside retention, which is the other half of what the trail keeps:
-	// whether it is complete, and whether shortening it would be noticed
-	// (Task 20404).
-	checkAuditTrail(dir, cfg, opts, add)
-	// Beside it: whether the trail's content leaves the box, and whether
-	// every sink it goes to keeps up (Task 20426).
-	checkAuditForward(dir, cfg, opts, add)
-	checkAdmission(dir, cfg, opts, add)
-	// Last, and after checkExecutors for the same reason the NetworkPolicy
-	// probe is: it dispatches to the registry reconciliation builds. Running
-	// it last also means an operator watching a terminal has read every
-	// configuration verdict before the slow part starts.
-	checkSmoke(ctx, dir, cfg, opts, rep, add)
-
+	// The operator's diagnosis: executors reconciled from the file, as a hub
+	// starting in this directory would, and the two probes that start work
+	// when they are asked for. See steps.go for why these are passed in.
+	set := stepSet{
+		executors:     checkExecutors,
+		networkPolicy: checkNetworkPolicyEnforcement,
+		smoke:         checkSmoke,
+	}
+	for _, s := range steps(dir, cfg, opts, wal, rep, set) {
+		s.run(ctx, add)
+	}
 	return rep
+}
+
+// configAbsent is the one finding a diagnosis without a configuration makes.
+func configAbsent() Finding {
+	return Finding{
+		Check:       "config.present",
+		Title:       "Hub configuration",
+		Severity:    SeverityFail,
+		Message:     "no configuration could be loaded, so nothing below could be checked against it",
+		Remediation: "Run `cloop hub bootstrap --external-url https://<your-host>` in this directory",
+	}
 }
 
 // checkExecutionPolicy reports the setting every other executor finding is

@@ -113,8 +113,8 @@ func checkStaticToken(dir string, cfg *config.Config, opts Options, add addFn) {
 		parts := make([]string, 0, len(accepted))
 		details := map[string]any{"accepted": len(accepted)}
 		for i, t := range accepted {
-			parts = append(parts, fmt.Sprintf("%s (%s; %s)", statictoken.Short(t.fingerprint), staticTokenWhere(t),
-				staticTokenUnused(t, now)))
+			parts = append(parts, fmt.Sprintf("%s (%s; %s)", statictoken.Short(t.fingerprint),
+				staticTokenWhere(t, opts.envSource()), staticTokenUnused(t, now)))
 			if i == 0 {
 				details["fingerprint"] = statictoken.Short(t.fingerprint)
 				if t.use != nil && !t.use.LastUsedAt.IsZero() {
@@ -141,7 +141,8 @@ func checkStaticToken(dir string, cfg *config.Config, opts Options, add addFn) {
 	default:
 		add(Finding{
 			Check: "ui.static_token", Title: title, Severity: SeverityPass,
-			Message: "no static token is accepted: CLOOP_UI_TOKEN is not set in this shell and no running hub reports holding one",
+			Message: "no static token is accepted: CLOOP_UI_TOKEN is not set " + opts.envSource() +
+				" and no running hub reports holding one",
 		})
 	}
 }
@@ -173,13 +174,14 @@ func readStaticTokenState(dir string) (map[string]statedb.RetiredStaticTokenRow,
 	return retired, uses, nil
 }
 
-// staticTokenWhere says how the doctor knows of t.
-func staticTokenWhere(t *acceptedStaticToken) string {
+// staticTokenWhere says how the doctor knows of t; env names the environment
+// it read CLOOP_UI_TOKEN from.
+func staticTokenWhere(t *acceptedStaticToken, env string) string {
 	switch {
 	case t.use != nil && t.fromEnv:
-		return "held by a running hub, and CLOOP_UI_TOKEN in this shell"
+		return "held by a running hub, and CLOOP_UI_TOKEN " + env
 	case t.fromEnv:
-		return "CLOOP_UI_TOKEN in this shell"
+		return "CLOOP_UI_TOKEN " + env
 	}
 	return "held by a running hub"
 }
