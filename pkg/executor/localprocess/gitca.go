@@ -45,7 +45,9 @@ func withGitCA(spec executor.Spec) ([]string, string, error) {
 		removeGitCA(dir)
 		return nil, "", err
 	}
-	return env, dir, nil
+	// For a harness whose model calls go to the hub's relay (Task 20435):
+	// Node's own trust, which is process-wide; see executor.GitCA.
+	return append(env, spec.GitCA.NodeEnv(path)...), dir, nil
 }
 
 // removeGitCA removes a directory withGitCA made. A certificate is public, so

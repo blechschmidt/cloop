@@ -103,3 +103,46 @@ func TestACurrentAgentIsSentTheCA(t *testing.T) {
 		t.Fatalf("this build speaks v%d, below the v%d its own hub needs", remote.ProtocolVersion, remote.MinGitCAVersion)
 	}
 }
+
+// relaySpec is a workload whose harness talks to the hub's model relay on the
+// git proxy's listener (Task 20435): nothing git, the CA for Node.
+func relaySpec(t *testing.T) executor.Spec {
+	spec := plainSpec(t.TempDir())
+	spec.Env = append(spec.Env, "ANTHROPIC_BASE_URL=https://hub.internal:8443/_anthropic")
+	spec.GitCA = proxyGitCA(t)
+	spec.GitCA.Node = true
+	return spec
+}
+
+// TestAnAgentBeforeNodeCAIsRefusedARelayedRun: the hub decides before dispatch
+// not to relay a run to a device that cannot hand its harness the CA; should a
+// spec asking for it reach the driver anyway, it is refused naming the
+// upgrade, never sent with the field silently ignored.
+func TestAnAgentBeforeNodeCAIsRefusedARelayedRun(t *testing.T) {
+	old := remote.MinNodeCAVersion - 1
+	ex, _ := deviceAt(t, executor.SandboxSettings{Mode: executor.SandboxModeHost}, old)
+	_, err := ex.Start(context.Background(), relaySpec(t))
+	if !errors.Is(err, remote.ErrNodeCAUnsupported) {
+		t.Fatalf("Start on a v%d agent = %v, want ErrNodeCAUnsupported", old, err)
+	}
+	if !strings.Contains(err.Error(), executor.AgentUpgradePath(old, remote.MinNodeCAVersion)) {
+		t.Errorf("refusal does not name the upgrade: %v", err)
+	}
+}
+
+// TestACurrentAgentIsSentTheCAForNode: the bundle travels with Node set, even
+// though nothing in the workload is git.
+func TestACurrentAgentIsSentTheCAForNode(t *testing.T) {
+	ex, p := deviceAt(t, executor.SandboxSettings{Mode: executor.SandboxModeHost}, remote.ProtocolVersion)
+	sent := answerStart(t, p)
+	if _, err := ex.Start(context.Background(), relaySpec(t)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := (<-sent).Spec.GitCA
+	if got == nil || !got.Node {
+		t.Fatalf("the start frame carried %+v, want the CA with Node set", got)
+	}
+	if remote.ProtocolVersion < remote.MinNodeCAVersion {
+		t.Fatalf("this build speaks v%d, below the v%d its own hub needs", remote.ProtocolVersion, remote.MinNodeCAVersion)
+	}
+}

@@ -26,6 +26,19 @@ package executor
 // A CA certificate — public by construction — and the URLs it is for. Never a
 // private key: Validate refuses any PEM block that is not a certificate, so a
 // mistake upstream cannot ship the CA's key to a sandbox inside this struct.
+//
+// # Node, which has no per-URL trust
+//
+// Since Task 20435 the same bundle may also be handed to Node.js, which is
+// what Claude Code runs on, so a harness talking to the hub's model relay on
+// the git proxy's listener verifies it. Node takes extra CAs from
+// NODE_EXTRA_CA_CERTS, a file it reads at start, and trusts them for every TLS
+// connection the process makes — there is no per-URL form. So a bundle asks
+// for it explicitly (Node), only the hub sets that, only for a run whose model
+// calls go to a relay this CA certifies, and the file it names holds the hub's
+// CA and nothing else: Validate refuses a Node bundle of more than one
+// certificate. The CA issues leaves for the proxy's advertised names alone
+// (pkg/hubca), and its key never leaves the hub.
 
 import (
 	"crypto/x509"
@@ -61,6 +74,24 @@ type GitCA struct {
 	URLs []string `json:"urls"`
 	// PEM holds one or more CA certificates. Public.
 	PEM []byte `json:"pem"`
+	// Node asks the driver to also name the bundle in NODE_EXTRA_CA_CERTS
+	// (NodeCAEnvKey), for a harness on Node.js that talks to the hub's model
+	// relay (Task 20435). Node trusts it for every host, not the URLs above;
+	// see the file's comment.
+	Node bool `json:"node,omitempty"`
+}
+
+// NodeCAEnvKey is the variable Node.js reads extra CA certificates from.
+const NodeCAEnvKey = "NODE_EXTRA_CA_CERTS"
+
+// NodeEnv is what a driver adds to the workload's environment for a bundle it
+// placed at path: NODE_EXTRA_CA_CERTS naming it, when the bundle asks for
+// that; nothing otherwise.
+func (c *GitCA) NodeEnv(path string) []string {
+	if c == nil || !c.Node || path == "" {
+		return nil
+	}
+	return []string{NodeCAEnvKey + "=" + path}
 }
 
 // Validate checks the bundle as a driver is about to write it: every URL an
@@ -116,6 +147,11 @@ func (c *GitCA) Validate() error {
 	if n == 0 {
 		return fmt.Errorf("%w: git_ca PEM holds no certificate", ErrInvalidSpec)
 	}
+	if c.Node && n != 1 {
+		// Node trusts the file for every host it reaches: it holds the hub's
+		// CA and nothing else.
+		return fmt.Errorf("%w: git_ca for Node holds %d certificates; it must hold exactly the hub's CA", ErrInvalidSpec, n)
+	}
 	return nil
 }
 
@@ -125,7 +161,7 @@ func (c *GitCA) Clone() *GitCA {
 	if c == nil {
 		return nil
 	}
-	return &GitCA{URLs: append([]string(nil), c.URLs...), PEM: append([]byte(nil), c.PEM...)}
+	return &GitCA{URLs: append([]string(nil), c.URLs...), PEM: append([]byte(nil), c.PEM...), Node: c.Node}
 }
 
 // ConfigPairs is the git configuration that trusts the bundle at path for
@@ -225,11 +261,15 @@ func WithGitConfig(env []string, pairs [][2]string) ([]string, error) {
 
 // NeedsGitCA reports whether the workload will speak to a URL the bundle
 // covers: its lease rewrites GitHub to a covered proxy (CLOOP_GIT_PROXY_URL),
-// or its workspace is fetched from one. A driver that cannot deliver the
+// its workspace is fetched from one, or its harness's model calls go to the
+// hub's relay on it (Node, Task 20435). A driver that cannot deliver the
 // bundle refuses exactly the workloads for which this is true.
 func (s Spec) NeedsGitCA(workspaceRepo string) bool {
 	if s.GitCA == nil {
 		return false
+	}
+	if s.GitCA.Node {
+		return true
 	}
 	if workspaceRepo != "" && s.GitCA.Covers(workspaceRepo) {
 		return true

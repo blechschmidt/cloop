@@ -203,13 +203,16 @@ func podGitCA(ca *executor.GitCA, bundle GitCABundle) *executor.GitCA {
 			covered[u] = true
 		}
 	}
-	out := &executor.GitCA{PEM: append([]byte(nil), ca.PEM...)}
+	out := &executor.GitCA{PEM: append([]byte(nil), ca.PEM...), Node: ca.Node}
 	for _, u := range ca.URLs {
 		if !covered[u] {
 			out.URLs = append(out.URLs, u)
 		}
 	}
-	if len(out.URLs) == 0 {
+	// A bundle the harness's Node trusts for the hub's model relay (Task
+	// 20435) stays, whatever git takes from the operator's: the operator's
+	// bundle is git's, and Node reads only NODE_EXTRA_CA_CERTS.
+	if len(out.URLs) == 0 && !out.Node {
 		return nil
 	}
 	return out

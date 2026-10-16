@@ -245,7 +245,16 @@ const (
 	// ignore forwarded_devices and start the sandbox without the hardware, so
 	// a dispatch whose project holds a forwarder binding is refused there and
 	// names the upgrade. See MinForwardedDeviceVersion.
-	ProtocolVersion = 22
+	//
+	// v23 makes the agent honour Spec.GitCA.Node (Task 20435): its inner
+	// drivers also name the hub's CA in NODE_EXTRA_CA_CERTS, so a harness on
+	// Node.js — Claude Code — verifies the hub's model relay on the git
+	// proxy's listener. No frame changes; the field rides inside the Spec.
+	// Gated on the hub side: an older agent ignores it and the harness would
+	// refuse the relay's certificate, so the hub relays no run to such a
+	// device — the run gets its credential the way it did before the relay,
+	// and its journal says why. See MinNodeCAVersion.
+	ProtocolVersion = 23
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -469,6 +478,16 @@ const MinGitCAVersion = 21
 // SupportsGitCA reports whether an agent speaking this protocol version
 // honours Spec.GitCA.
 func SupportsGitCA(version int) bool { return version >= MinGitCAVersion }
+
+// MinNodeCAVersion is the first protocol whose agents hand the hub's CA to a
+// harness on Node.js (Spec.GitCA.Node, Task 20435), which a run relayed
+// through the hub's model relay on the git proxy's listener needs. A run on
+// an older device is not relayed: it keeps the credential delivery it had.
+const MinNodeCAVersion = 23
+
+// SupportsNodeCA reports whether an agent speaking this protocol version
+// honours Spec.GitCA.Node.
+func SupportsNodeCA(version int) bool { return version >= MinNodeCAVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.

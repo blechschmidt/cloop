@@ -861,6 +861,11 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 				"to have this workload's git trust the certificate the hub issued its git proxy "+
 					"(executors.git_proxy.tls: auto)",
 				"Or give executors.git_proxy a cert_file and key_file the device's sandbox images already trust."))
+		} else if spec.GitCA.Node && !SupportsNodeCA(sess.Version()) {
+			return executor.Handle{}, fmt.Errorf("%w: %s", ErrNodeCAUnsupported, executor.NeedsProtocol(
+				e.subject(), sess.Version(), MinNodeCAVersion,
+				"to have this workload's harness trust the hub's model relay (executors.model_relay)",
+				"Or turn the relay off for this hub; the run then gets its Claude credential as before."))
 		}
 	}
 

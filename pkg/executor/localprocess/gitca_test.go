@@ -83,3 +83,44 @@ eval f=\$GIT_CONFIG_VALUE_$((GIT_CONFIG_COUNT-1)); head -1 "$f"`},
 		})
 	}
 }
+
+// TestHostProcessHandsTheHubCAToNodeOnlyWhenAsked: a harness whose model calls
+// go to the hub's relay (Task 20435) gets NODE_EXTRA_CA_CERTS naming the very
+// file its git trusts for the proxy — holding the hub's CA and nothing else —
+// and a workload whose bundle did not ask gets no Node trust at all.
+func TestHostProcessHandsTheHubCAToNodeOnlyWhenAsked(t *testing.T) {
+	for _, node := range []bool{true, false} {
+		ca := testGitCA(t)
+		ca.Node = node
+		spec := executor.Spec{
+			WorkDir: t.TempDir(),
+			Argv: []string{"/bin/sh", "-c", `echo "node=${NODE_EXTRA_CA_CERTS:-unset}"
+[ -n "$NODE_EXTRA_CA_CERTS" ] && grep -c "BEGIN CERTIFICATE" "$NODE_EXTRA_CA_CERTS"
+eval f=\$GIT_CONFIG_VALUE_$((GIT_CONFIG_COUNT-1)); echo "git=$f"`},
+			Env:   []string{"PATH=" + os.Getenv("PATH")},
+			GitCA: ca,
+		}
+		res, err := executor.Run(context.Background(), New("test"), spec)
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		out := string(res.Output)
+		nodePath := regexp.MustCompile(`node=(\S+)`).FindStringSubmatch(out)
+		gitPath := regexp.MustCompile(`git=(\S+)`).FindStringSubmatch(out)
+		if nodePath == nil || gitPath == nil {
+			t.Fatalf("output:\n%s", out)
+		}
+		if !node {
+			if nodePath[1] != "unset" {
+				t.Errorf("a bundle that did not ask for Node set NODE_EXTRA_CA_CERTS=%s", nodePath[1])
+			}
+			continue
+		}
+		if nodePath[1] != gitPath[1] {
+			t.Errorf("Node was handed %s, git %s", nodePath[1], gitPath[1])
+		}
+		if !strings.Contains(out, "\n1\n") {
+			t.Errorf("the Node file does not hold exactly one certificate:\n%s", out)
+		}
+	}
+}

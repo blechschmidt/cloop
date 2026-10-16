@@ -756,6 +756,12 @@ func buildPod(req podRequest) (*pod, error) {
 	if err != nil {
 		return nil, err
 	}
+	// And Node's trust in the hub's CA, for a harness whose model calls go
+	// to the hub's relay (Task 20435): a path, not a credential, so a plain
+	// value like the git pairs.
+	if req.GitCA != nil && req.GitCA.Node {
+		env = append(env, envVar{Name: executor.NodeCAEnvKey, Value: executor.SandboxGitCAFile})
+	}
 
 	runAsUser := req.RunAsUser
 	if runAsUser <= 0 {

@@ -114,6 +114,13 @@ var (
 	// proxy exists to rule out.
 	ErrGitCAUnsupported = errors.New("remote: agent cannot trust the hub's git proxy certificate")
 
+	// ErrNodeCAUnsupported: the workload's harness would talk to the hub's
+	// model relay over TLS the hub's CA certifies, and this agent predates
+	// handing that CA to Node.js (MinNodeCAVersion). The hub decides before
+	// dispatch not to relay such a run; this is the driver's backstop, never
+	// a silent drop that would leave the harness refusing the relay.
+	ErrNodeCAUnsupported = errors.New("remote: agent cannot hand the hub's CA to the harness's Node.js")
+
 	// ErrForwardedDevicesUnsupported: the run's project holds a device
 	// forwarder binding (Task 20430), and this executor cannot attach the
 	// device into a sandbox — its agent predates the device channel

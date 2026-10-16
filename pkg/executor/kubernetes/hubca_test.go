@@ -149,3 +149,45 @@ func TestStart_LeaseSecretCarriesTheHubCA(t *testing.T) {
 		t.Errorf("the Pod does not project the lease Secret's CA: %+v", created.Spec.Volumes)
 	}
 }
+
+// TestBuildPod_HubCAForNodeReachesTheHarness: a harness whose model calls go
+// to the hub's relay (Task 20435) is told, by a plain variable, to have Node
+// trust the very file its git trusts for the proxy — and a git-only bundle
+// sets no Node trust. The operator's bundle naming the proxy's URL keeps git's
+// answer and leaves Node's.
+func TestBuildPod_HubCAForNodeReachesTheHarness(t *testing.T) {
+	for _, node := range []bool{true, false} {
+		ca := hubGitCA(t)
+		ca.Node = node
+		req := workspaceRequest()
+		req.GitCA = podGitCA(ca, GitCABundle{})
+		req.LeaseSecretName = "cloop-lease-k-abc123"
+		p, err := buildPod(req)
+		if err != nil {
+			t.Fatalf("buildPod: %v", err)
+		}
+		var got *envVar
+		for _, c := range p.Spec.Containers {
+			for i := range c.Env {
+				if c.Env[i].Name == executor.NodeCAEnvKey {
+					got = &c.Env[i]
+				}
+			}
+		}
+		switch {
+		case node && (got == nil || got.Value != executor.SandboxGitCAFile || got.ValueFrom != nil):
+			t.Errorf("the harness's Node trust = %+v, want a plain %s", got, executor.SandboxGitCAFile)
+		case !node && got != nil:
+			t.Errorf("a git-only bundle set %s", executor.NodeCAEnvKey)
+		}
+	}
+	bundle, err := GitCABundle{ConfigMap: "proxy-ca", URLs: []string{"https://cloop-cloop-hub.cloop.svc:8443"}}.Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := hubGitCA(t)
+	ca.Node = true
+	if kept := podGitCA(ca, bundle); kept == nil || !kept.Node || len(kept.URLs) != 0 {
+		t.Fatalf("under a bundle naming the proxy's URL, Node's CA = %+v; want it kept for Node with no git URL", kept)
+	}
+}

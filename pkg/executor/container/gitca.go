@@ -66,7 +66,9 @@ func (e *Executor) stageGitCA(spec executor.Spec) (executor.Spec, *mount, string
 		removeGitCA(dir)
 		return spec, nil, "", err
 	}
-	spec.Env = env
+	// For a harness whose model calls go to the hub's relay (Task 20435):
+	// Node's own trust, which is process-wide; see executor.GitCA.
+	spec.Env = append(env, spec.GitCA.NodeEnv(executor.SandboxGitCAFile)...)
 	return spec, &mount{HostPath: dir, TargetPath: executor.SandboxGitCADir, ReadOnly: true}, dir, nil
 }
 
