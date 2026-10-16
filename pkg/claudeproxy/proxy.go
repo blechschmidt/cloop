@@ -89,7 +89,59 @@ type Options struct {
 	// Credentials naming a session this registry knows — right or wrong
 	// token, live or expired — are always decided here.
 	Fallback func(w http.ResponseWriter, r *http.Request, sessionID string) bool
+
+	// Admit, when set, is asked before a Messages API request is relayed —
+	// after the policy accepted it, before its request is counted — and a
+	// denial it returns refuses the request as the policy's do. A run relay
+	// holds the identity paying for the run to its daily budgets here (Task
+	// 20435). Counting tokens and listing models spend nothing and are not
+	// asked about.
+	Admit func(s *Session, model string) *Denial
+
+	// OnSpend, when set, is told what each relayed response spent, as the
+	// upstream reported it, once the response has been relayed — on the
+	// request's goroutine, after the session's counters include it.
+	OnSpend func(s *Session, sp Spend)
+
+	// ExplainClosed answers a token whose session this registry closed —
+	// revoked, its lease ended, its run over — with a 403 naming why, rather
+	// than the 401 an unknown token gets (Task 20435). Measured against
+	// Claude Code, a 401 is retried 11 times over about three minutes before
+	// the harness gives up, and a 403 ends it at once. Only the holder of the
+	// session's token learns the reason: the token must hash to the closed
+	// session's.
+	ExplainClosed bool
+
+	// UserAgent replaces the client's User-Agent upstream. Empty uses
+	// "cloop-ci-proxy/1".
+	UserAgent string
+
+	// Unauthenticated is the message a request with no usable token gets.
+	// Empty uses the CI relay's, which tells a pipeline to federate again.
+	Unauthenticated string
+
+	// SessionUpstreams says every session carries the credential it relays
+	// with (MintRequest.Upstream) and the proxy holds none of its own (Task
+	// 20435): a run relay spends the credential the run's grant holds. The
+	// proxy's Upstream may then be empty, and a session without a credential
+	// of its own is refused rather than relayed with something else.
+	SessionUpstreams bool
 }
+
+// Spend is what one relayed response spent, as the upstream reported it.
+type Spend struct {
+	// Model is the model the upstream answered with, else the one asked for.
+	Model string
+	// Status is the upstream's HTTP status.
+	Status int
+	// Input, Output, CacheRead and CacheWrite are the response's token
+	// counts; CacheWrite1h is the part of CacheWrite written to the
+	// one-hour cache, which the API prices higher than the five-minute one.
+	Input, Output, CacheRead, CacheWrite, CacheWrite1h int64
+}
+
+// Tokens is every token the response accounts for.
+func (sp Spend) Tokens() int64 { return sp.Input + sp.Output + sp.CacheRead + sp.CacheWrite }
 
 // Proxy relays requests from CI sessions to the Anthropic API.
 type Proxy struct {
@@ -99,6 +151,12 @@ type Proxy struct {
 	client   *http.Client
 	now      func() time.Time
 	fallback func(w http.ResponseWriter, r *http.Request, sessionID string) bool
+
+	admit         func(s *Session, model string) *Denial
+	onSpend       func(s *Session, sp Spend)
+	explainClosed bool
+	userAgent     string
+	unauth        string
 }
 
 // New returns a Proxy serving sessions from reg.
@@ -106,7 +164,11 @@ func New(reg *Registry, opts Options) (*Proxy, error) {
 	if reg == nil {
 		return nil, errors.New("claudeproxy: nil registry")
 	}
-	if err := opts.Upstream.Validate(); err != nil {
+	if opts.SessionUpstreams {
+		if opts.Upstream.Configured() {
+			return nil, errors.New("claudeproxy: a proxy whose sessions carry their own credentials holds none")
+		}
+	} else if err := opts.Upstream.Validate(); err != nil {
 		return nil, err
 	}
 	rt := opts.Transport
@@ -122,11 +184,24 @@ func New(reg *Registry, opts Options) (*Proxy, error) {
 	if now == nil {
 		now = time.Now
 	}
+	ua := strings.TrimSpace(opts.UserAgent)
+	if ua == "" {
+		ua = "cloop-ci-proxy/1"
+	}
+	unauth := strings.TrimSpace(opts.Unauthenticated)
+	if unauth == "" {
+		unauth = "the CI session token was not accepted; federate again to obtain a fresh one"
+	}
 	return &Proxy{
-		reg:      reg,
-		up:       opts.Upstream,
-		prefix:   strings.TrimSuffix(opts.PathPrefix, "/"),
-		fallback: opts.Fallback,
+		reg:           reg,
+		up:            opts.Upstream,
+		prefix:        strings.TrimSuffix(opts.PathPrefix, "/"),
+		fallback:      opts.Fallback,
+		admit:         opts.Admit,
+		onSpend:       opts.OnSpend,
+		explainClosed: opts.ExplainClosed,
+		userAgent:     ua,
+		unauth:        unauth,
 		// No client timeout: a streamed agent turn legitimately runs for
 		// minutes, and the request context already cancels when the pipeline
 		// gives up.
@@ -141,12 +216,24 @@ func (p *Proxy) Registry() *Registry { return p.reg }
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.fallback != nil {
-		if id, ok := sessionIDOf(p.presentedToken(r)); ok && !p.reg.Known(id) && p.fallback(w, r, id) {
+		if id, ok := p.reg.sessionIDOf(p.presentedToken(r)); ok && !p.reg.Known(id) && p.fallback(w, r, id) {
 			return
 		}
 	}
 	sess, err := p.authenticate(r)
 	if err != nil {
+		if p.explainClosed {
+			if why, ok := p.reg.ClosedReason(p.presentedToken(r)); ok {
+				id, _ := p.reg.sessionIDOf(p.presentedToken(r))
+				p.reg.emit(Event{
+					Kind: EventRejected, SessionID: id, Method: r.Method, Path: p.apiPath(r),
+					Status: http.StatusForbidden, Detail: "session ended: " + why, At: p.now(),
+				})
+				writeAPIError(w, http.StatusForbidden, "permission_error",
+					"this run's model relay session has ended: "+why)
+				return
+			}
+		}
 		p.reg.emit(Event{
 			Kind: EventRejected, Method: r.Method, Path: p.apiPath(r),
 			Detail: "no usable session token", At: p.now(),
@@ -154,8 +241,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// The WWW-Authenticate header is what makes an SDK's error message
 		// say "authentication" rather than "unexpected response".
 		w.Header().Set("WWW-Authenticate", `Bearer realm="cloop-ci"`)
-		writeAPIError(w, http.StatusUnauthorized, "authentication_error",
-			"the CI session token was not accepted; federate again to obtain a fresh one")
+		writeAPIError(w, http.StatusUnauthorized, "authentication_error", p.unauth)
 		return
 	}
 
@@ -181,6 +267,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body, model = rewritten, req.Model
 	}
 
+	// The run's spend is admitted before its request is counted, for the
+	// reason the budget is claimed last: a request refused for its payer's
+	// budget consumed nothing.
+	if p.admit != nil && apiPath == "/v1/messages" {
+		if d := p.admit(sess, model); d != nil {
+			p.denied(w, sess, r, apiPath, model, d)
+			return
+		}
+	}
+
 	// Budget is claimed only once every other check has passed, so a request
 	// the policy was going to refuse does not consume a unit of a pipeline's
 	// allowance.
@@ -198,13 +294,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// reached. Once it has answered, the request was spent whatever the
 		// status.
 		sess.releaseRequest()
-		p.reg.emit(Event{
-			Kind: EventRelayDenied, SessionID: sess.ID, RuleID: sess.RuleID, RuleName: sess.RuleName,
-			Project: sess.Project, Repository: sess.Repository, Ref: sess.Ref,
-			Workflow: sess.Workflow, Actor: sess.Actor, RunID: sess.RunID,
-			Method: r.Method, Path: apiPath, Model: model,
-			Detail: "upstream unreachable: " + err.Error(), At: p.now(),
-		})
+		ev := sess.sessionEvent(EventRelayDenied, p.now())
+		ev.Method, ev.Path, ev.Model = r.Method, apiPath, model
+		ev.Detail = "upstream unreachable: " + err.Error()
+		p.reg.emit(ev)
 		writeAPIError(w, http.StatusBadGateway, "api_error",
 			"the cloop hub could not reach the Anthropic API")
 	}
@@ -290,13 +383,10 @@ func (p *Proxy) denied(w http.ResponseWriter, sess *Session, r *http.Request,
 	apiPath, model string, d *Denial) {
 
 	sess.denied.Add(1)
-	p.reg.emit(Event{
-		Kind: EventRelayDenied, SessionID: sess.ID, RuleID: sess.RuleID, RuleName: sess.RuleName,
-		Project: sess.Project, Repository: sess.Repository, Ref: sess.Ref,
-		Workflow: sess.Workflow, Actor: sess.Actor, RunID: sess.RunID,
-		Method: r.Method, Path: apiPath, Model: model,
-		Reason: d.Reason, Status: d.Status, Detail: d.Message, At: p.now(),
-	})
+	ev := sess.sessionEvent(EventRelayDenied, p.now())
+	ev.Method, ev.Path, ev.Model = r.Method, apiPath, model
+	ev.Reason, ev.Status, ev.Detail = d.Reason, d.Status, d.Message
+	p.reg.emit(ev)
 	status := d.Status
 	if status == 0 {
 		status = http.StatusForbidden
@@ -319,7 +409,14 @@ func (p *Proxy) denied(w http.ResponseWriter, sess *Session, r *http.Request,
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session,
 	apiPath, model string, body []byte) error {
 
-	target := p.up.Base() + apiPath
+	up := p.up
+	if sess.upstream != nil {
+		up = *sess.upstream
+	}
+	if !up.Configured() {
+		return errNoCredential
+	}
+	target := up.Base() + apiPath
 	if q := r.URL.RawQuery; q != "" {
 		target += "?" + q
 	}
@@ -344,13 +441,16 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session,
 	// The hub identifies itself, replacing whatever the runner sent. The
 	// session ID is included so an upstream rate-limit or abuse report can be
 	// traced back to one pipeline without the hub having to keep a second log.
-	req.Header.Set("User-Agent", "cloop-ci-proxy/1 (session "+sess.ID+")")
+	req.Header.Set("User-Agent", p.userAgent+" (session "+sess.ID+")")
 
 	// The one place the credential is attached.
-	if k := strings.TrimSpace(p.up.APIKey); k != "" {
+	if k := strings.TrimSpace(up.APIKey); k != "" {
 		req.Header.Set("X-Api-Key", k)
 	} else {
-		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(p.up.AuthToken))
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(up.AuthToken))
+		if up.OAuth {
+			req.Header.Set("Anthropic-Beta", withBeta(req.Header.Get("Anthropic-Beta"), OAuthBeta))
+		}
 	}
 
 	resp, err := p.client.Do(req)
@@ -387,19 +487,46 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, sess *Session,
 	sess.cacheRead.Add(u.cacheRead)
 	sess.cacheWrite.Add(u.cacheWrite)
 
+	if p.onSpend != nil {
+		spent := Spend{
+			Model: u.model, Status: resp.StatusCode,
+			Input: u.input, Output: u.output, CacheRead: u.cacheRead,
+			CacheWrite: u.cacheWrite, CacheWrite1h: u.cacheWrite1h,
+		}
+		if spent.Model == "" {
+			spent.Model = model
+		}
+		p.onSpend(sess, spent)
+	}
+
 	detail := ""
 	if copyErr != nil {
 		detail = "client disconnected: " + copyErr.Error()
 	}
-	p.reg.emit(Event{
-		Kind: EventRelayAllowed, SessionID: sess.ID, RuleID: sess.RuleID, RuleName: sess.RuleName,
-		Project: sess.Project, Repository: sess.Repository, Ref: sess.Ref,
-		Workflow: sess.Workflow, Actor: sess.Actor, RunID: sess.RunID,
-		Method: r.Method, Path: apiPath, Model: model, Status: resp.StatusCode,
-		InputTokens: u.input + u.cacheRead + u.cacheWrite, OutputTokens: u.output,
-		Detail: detail, At: p.now(),
-	})
+	ev := sess.sessionEvent(EventRelayAllowed, p.now())
+	ev.Method, ev.Path, ev.Model, ev.Status = r.Method, apiPath, model, resp.StatusCode
+	ev.InputTokens, ev.OutputTokens = u.input+u.cacheRead+u.cacheWrite, u.output
+	ev.Detail = detail
+	p.reg.emit(ev)
 	return nil
+}
+
+// errNoCredential is forward's answer for a session with no credential to
+// relay with: neither its own nor the proxy's.
+var errNoCredential = errors.New("no upstream credential is held for this session")
+
+// withBeta adds beta to an anthropic-beta header value, a comma-separated
+// list, unless it is already named there.
+func withBeta(header, beta string) string {
+	for _, b := range strings.Split(header, ",") {
+		if strings.EqualFold(strings.TrimSpace(b), beta) {
+			return header
+		}
+	}
+	if strings.TrimSpace(header) == "" {
+		return beta
+	}
+	return header + "," + beta
 }
 
 // streamBody copies the upstream response to the client, flushing as it goes
@@ -464,6 +591,11 @@ type usageTotals struct {
 	output     int64
 	cacheRead  int64
 	cacheWrite int64
+	// cacheWrite1h is the part of cacheWrite the response says went to the
+	// one-hour cache (usage.cache_creation.ephemeral_1h_input_tokens).
+	cacheWrite1h int64
+	// model is the model the response says answered, "" when it does not.
+	model string
 }
 
 // usageMeter extracts token counts from a response as it streams past.
@@ -533,17 +665,24 @@ func (m *usageMeter) scanSSELine(line []byte) {
 		Type    string     `json:"type"`
 		Usage   *usageJSON `json:"usage"`
 		Message *struct {
+			Model string     `json:"model"`
 			Usage *usageJSON `json:"usage"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(data), &ev); err != nil {
 		return
 	}
+	if ev.Message != nil && ev.Message.Model != "" {
+		m.totals.model = ev.Message.Model
+	}
 	if ev.Message != nil && ev.Message.Usage != nil {
 		u := ev.Message.Usage
 		m.totals.input = u.Input
 		m.totals.cacheRead = u.CacheRead
 		m.totals.cacheWrite = u.CacheWrite
+		if c := u.CacheCreation; c != nil {
+			m.totals.cacheWrite1h = c.Ephemeral1h
+		}
 		if u.Output > m.totals.output {
 			m.totals.output = u.Output
 		}
@@ -558,6 +697,9 @@ func (m *usageMeter) scanSSELine(line []byte) {
 		if ev.Usage.CacheWrite > 0 {
 			m.totals.cacheWrite = ev.Usage.CacheWrite
 		}
+		if c := ev.Usage.CacheCreation; c != nil && c.Ephemeral1h > 0 {
+			m.totals.cacheWrite1h = c.Ephemeral1h
+		}
 		// Cumulative, not incremental: take the maximum rather than the sum.
 		if ev.Usage.Output > m.totals.output {
 			m.totals.output = ev.Usage.Output
@@ -570,6 +712,11 @@ type usageJSON struct {
 	Output     int64 `json:"output_tokens"`
 	CacheRead  int64 `json:"cache_read_input_tokens"`
 	CacheWrite int64 `json:"cache_creation_input_tokens"`
+	// CacheCreation splits CacheWrite by the cache it went to.
+	CacheCreation *struct {
+		Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 func (m *usageMeter) result() usageTotals {
@@ -579,6 +726,7 @@ func (m *usageMeter) result() usageTotals {
 		return m.totals
 	}
 	var doc struct {
+		Model string     `json:"model"`
 		Usage *usageJSON `json:"usage"`
 	}
 	if err := json.Unmarshal(m.buf, &doc); err == nil && doc.Usage != nil {
@@ -587,6 +735,10 @@ func (m *usageMeter) result() usageTotals {
 			output:     doc.Usage.Output,
 			cacheRead:  doc.Usage.CacheRead,
 			cacheWrite: doc.Usage.CacheWrite,
+			model:      doc.Model,
+		}
+		if c := doc.Usage.CacheCreation; c != nil {
+			m.totals.cacheWrite1h = c.Ephemeral1h
 		}
 	}
 	return m.totals

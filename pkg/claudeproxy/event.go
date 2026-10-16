@@ -23,6 +23,16 @@ type Event struct {
 	Actor      string `json:"actor,omitempty"`
 	RunID      string `json:"run_id,omitempty"`
 
+	// What a run relay session stands on (Task 20435): the lease and grant
+	// its credential came from, the executor its run was dispatched to, the
+	// identity its spend is charged to, and the kind of credential it spends
+	// ("oauth_token", "api_key") — never the credential.
+	LeaseID      string `json:"lease_id,omitempty"`
+	GrantID      string `json:"grant_id,omitempty"`
+	ExecutorID   string `json:"executor_id,omitempty"`
+	Payer        string `json:"payer,omitempty"`
+	UpstreamKind string `json:"upstream_kind,omitempty"`
+
 	// Request shape, for allowed and denied relays.
 	Method string `json:"method,omitempty"`
 	Path   string `json:"path,omitempty"`
@@ -38,6 +48,19 @@ type Event struct {
 
 	Detail string    `json:"detail,omitempty"`
 	At     time.Time `json:"at"`
+}
+
+// sessionEvent is an event of kind about s, carrying what identifies it: its
+// id, the pipeline or run it serves, and what it stands on.
+func (s *Session) sessionEvent(kind EventKind, at time.Time) Event {
+	return Event{
+		Kind: kind, SessionID: s.ID, RuleID: s.RuleID, RuleName: s.RuleName,
+		Project: s.Project, Subject: s.Subject, Repository: s.Repository, Ref: s.Ref,
+		Workflow: s.Workflow, Actor: s.Actor, RunID: s.RunID,
+		LeaseID: s.LeaseID, GrantID: s.GrantID, ExecutorID: s.ExecutorID, Payer: s.Payer,
+		UpstreamKind: s.UpstreamKind(),
+		At:           at,
+	}
 }
 
 // EventKind names what happened.

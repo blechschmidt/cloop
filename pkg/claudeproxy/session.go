@@ -58,8 +58,32 @@ type Session struct {
 	RunID      string
 	RunURL     string
 
-	IssuedAt  time.Time
+	// What a run relay session stands on (Task 20435): the secret lease and
+	// grant its upstream credential came from, the executor the run was
+	// dispatched to, and the identity its spend is charged to. Empty for a
+	// CI session.
+	LeaseID    string
+	GrantID    string
+	ExecutorID string
+	Payer      string
+
+	IssuedAt time.Time
+	// ExpiresAt is the deadline the session was minted or restored with.
+	// Extend moves the effective one; see Deadline.
 	ExpiresAt time.Time
+
+	// extendedTo is the deadline an extension set, unix nanos, 0 for none.
+	// Atomic because Authenticate reads it on every request while the run's
+	// keepalive writes it.
+	extendedTo atomic.Int64
+	// renewedAt is when an extension last moved the deadline, unix nanos.
+	renewedAt atomic.Int64
+
+	// upstream, when set, is the credential this session's requests are
+	// relayed with, in place of the proxy's own (Task 20435): a run relay
+	// spends the credential the run's grant holds. Never exported, never in
+	// a record or an event.
+	upstream *Upstream
 
 	// tokenHash authenticates. The token itself is returned once by Mint and
 	// is not retained: a registry that could produce its own session tokens
@@ -87,7 +111,35 @@ type Session struct {
 }
 
 // Expired reports whether the session has lapsed.
-func (s *Session) Expired(now time.Time) bool { return !now.Before(s.ExpiresAt) }
+func (s *Session) Expired(now time.Time) bool { return !now.Before(s.Deadline()) }
+
+// Deadline is when the session lapses: ExpiresAt, or a later deadline an
+// extension set.
+func (s *Session) Deadline() time.Time {
+	if n := s.extendedTo.Load(); n != 0 {
+		if t := time.Unix(0, n); t.After(s.ExpiresAt) {
+			return t
+		}
+	}
+	return s.ExpiresAt
+}
+
+// RenewedAt is when an extension last moved the deadline, zero for none.
+func (s *Session) RenewedAt() time.Time {
+	if n := s.renewedAt.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
+
+// UpstreamKind names the credential the session relays with — "api_key",
+// "oauth_token", "auth_token" — or "" for one relaying with its proxy's.
+func (s *Session) UpstreamKind() string {
+	if s == nil || s.upstream == nil {
+		return ""
+	}
+	return s.upstream.Kind()
+}
 
 // Closed reports whether the session was revoked.
 func (s *Session) Closed() bool { return s.closed.Load() }
@@ -139,6 +191,9 @@ func (s *Session) RemainingRequests() int64 {
 
 // Label is a credential-free description for audit entries.
 func (s *Session) Label() string {
+	if s.LeaseID != "" {
+		return strings.TrimSpace("run " + s.RunID + " of " + s.Project)
+	}
 	parts := make([]string, 0, 3)
 	if s.Repository != "" {
 		parts = append(parts, s.Repository)
@@ -207,6 +262,16 @@ type MintRequest struct {
 	// with the session for the hub that restores it (Task 20390). Opaque
 	// here, never read, never retained in memory past the record's write.
 	Claims json.RawMessage
+
+	// A run relay session's binding (Task 20435); see Session.
+	LeaseID    string
+	GrantID    string
+	ExecutorID string
+	Payer      string
+
+	// Upstream, when set, is the credential this session relays with in
+	// place of the proxy's. It must validate.
+	Upstream *Upstream
 }
 
 // Minted is the one-time result of creating a session.
@@ -224,6 +289,8 @@ type Minted struct {
 // Registry holds live sessions.
 type Registry struct {
 	baseURL string
+	// prefix starts every token this registry mints (TokenPrefix for CI).
+	prefix string
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -241,20 +308,46 @@ type Registry struct {
 
 	// closedHere are the sessions this registry closed, until each would
 	// have lapsed: Restore refuses them, so a session ended here is never
-	// brought back here even when its record's close failed to land.
+	// brought back here even when its record's close failed to land. Each
+	// keeps its token's hash and why it ended, for a proxy that explains a
+	// closed session to the holder of its token (Options.ExplainClosed).
 	// Guarded by mu.
-	closedHere map[string]time.Time
+	closedHere map[string]tombstone
+}
+
+// tombstone is what a registry remembers of a session it closed.
+type tombstone struct {
+	until  time.Time
+	hash   [sha256.Size]byte
+	reason string
 }
 
 // NewRegistry returns an empty registry. baseURL is the externally reachable
 // mount point of the proxy, handed to pipelines as ANTHROPIC_BASE_URL.
 func NewRegistry(baseURL string) *Registry {
+	return NewRegistryWithPrefix(baseURL, TokenPrefix)
+}
+
+// NewRegistryWithPrefix returns an empty registry whose tokens start with
+// prefix — a run relay's are not a CI pipeline's (Task 20435), and a secret
+// scanner tells them apart by it. The prefix must start "cloop_", end in an
+// underscore and hold nothing a token's id or secret could.
+func NewRegistryWithPrefix(baseURL, prefix string) *Registry {
+	if !strings.HasPrefix(prefix, "cloop_") || !strings.HasSuffix(prefix, "_") ||
+		strings.ContainsAny(prefix, ". \t\n") {
+		panic(fmt.Sprintf("claudeproxy: token prefix %q must start \"cloop_\", end in '_' and contain no '.' or space",
+			prefix))
+	}
 	return &Registry{
 		baseURL:  strings.TrimSuffix(baseURL, "/"),
+		prefix:   prefix,
 		sessions: map[string]*Session{},
 		now:      time.Now,
 	}
 }
+
+// Prefix is what every token this registry mints starts with.
+func (r *Registry) Prefix() string { return r.prefix }
 
 // SetClock overrides the registry clock. For tests.
 func (r *Registry) SetClock(now func() time.Time) {
@@ -274,6 +367,14 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		// than as a policy decision. Callers resolve the hub default first.
 		return nil, errors.New("claudeproxy: a session needs at least one permitted model")
 	}
+	var up *Upstream
+	if req.Upstream != nil {
+		if err := req.Upstream.Validate(); err != nil {
+			return nil, err
+		}
+		c := *req.Upstream
+		up = &c
+	}
 	ttl := clampDuration(req.TTL, MinTTL, MaxTTL)
 	if req.TTL <= 0 {
 		ttl = clampDuration(30*time.Minute, MinTTL, MaxTTL)
@@ -286,11 +387,11 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	if err != nil {
 		return nil, fmt.Errorf("claudeproxy: %w", err)
 	}
-	token := TokenPrefix + id + "." + secret
+	token := r.prefix + id + "." + secret
 	now := r.now()
 	s := &Session{
 		ID:         id,
-		Policy:     req.Policy,
+		Policy:     req.Policy.clone(),
 		RuleID:     req.RuleID,
 		RuleName:   req.RuleName,
 		Project:    req.Project,
@@ -301,8 +402,13 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		Actor:      req.Actor,
 		RunID:      req.RunID,
 		RunURL:     req.RunURL,
+		LeaseID:    req.LeaseID,
+		GrantID:    req.GrantID,
+		ExecutorID: req.ExecutorID,
+		Payer:      req.Payer,
 		IssuedAt:   now,
 		ExpiresAt:  now.Add(ttl),
+		upstream:   up,
 		tokenHash:  sha256.Sum256([]byte(token)),
 	}
 
@@ -349,13 +455,9 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		detail += "; not recorded durably, so it will not be restored if this hub process stops: " +
 			recordErr.Error()
 	}
-	r.emit(Event{
-		Kind: EventSessionMinted, SessionID: id, RuleID: s.RuleID, RuleName: s.RuleName,
-		Project: s.Project, Repository: s.Repository, Ref: s.Ref, Workflow: s.Workflow,
-		Actor: s.Actor, RunID: s.RunID, Subject: s.Subject,
-		Detail: detail,
-		At:     now,
-	})
+	ev := s.sessionEvent(EventSessionMinted, now)
+	ev.Detail = detail
+	r.emit(ev)
 	return &Minted{Session: s, Token: token, BaseURL: r.baseURL}, nil
 }
 
@@ -373,7 +475,7 @@ func (r *Registry) Known(id string) bool {
 
 // cannot tell an unknown session from an expired or revoked one by probing.
 func (r *Registry) Authenticate(token string) (*Session, error) {
-	id, ok := sessionIDOf(token)
+	id, ok := r.sessionIDOf(token)
 	if !ok {
 		return nil, ErrUnauthenticated
 	}
@@ -400,10 +502,30 @@ func (r *Registry) Authenticate(token string) (*Session, error) {
 	return s, nil
 }
 
-// sessionIDOf splits a token into its public id half without validating the
-// secret.
+// sessionIDOf splits a CI token into its public id half without validating
+// the secret.
 func sessionIDOf(token string) (string, bool) {
-	rest, ok := strings.CutPrefix(strings.TrimSpace(token), TokenPrefix)
+	return sessionIDWithPrefix(token, TokenPrefix)
+}
+
+// sessionIDOf splits a token this registry minted into its public id half
+// without validating the secret.
+func (r *Registry) sessionIDOf(token string) (string, bool) {
+	return sessionIDWithPrefix(token, r.prefix)
+}
+
+// SessionIDOf returns the id half of a token of the shape this registry mints,
+// without checking the secret half, and whether it has that shape.
+func (r *Registry) SessionIDOf(token string) (string, bool) {
+	id, ok := r.sessionIDOf(token)
+	if !ok || !validSessionID(id) {
+		return "", false
+	}
+	return id, true
+}
+
+func sessionIDWithPrefix(token, prefix string) (string, bool) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(token), prefix)
 	if !ok {
 		return "", false
 	}
@@ -488,6 +610,153 @@ func (r *Registry) CloseByRule(ruleID, reason string) int {
 	return len(hit)
 }
 
+// CloseForLease ends every session standing on lease leaseID — the lease was
+// released, revoked or lapsed, so what it fed ends with it (Task 20435) — and
+// returns how many were live.
+func (r *Registry) CloseForLease(leaseID, reason string) int {
+	return r.closeWhere(func(s *Session) bool { return leaseID != "" && s.LeaseID == leaseID }, reason)
+}
+
+// CloseForGrant ends every session standing on lease leaseID whose credential
+// came from grant grantID — the grant was revoked, or narrowed past what the
+// session holds, and taken back from that lease. An empty leaseID ends the
+// grant's sessions on every lease.
+func (r *Registry) CloseForGrant(leaseID, grantID, reason string) int {
+	return r.closeWhere(func(s *Session) bool {
+		return grantID != "" && s.GrantID == grantID && (leaseID == "" || s.LeaseID == leaseID)
+	}, reason)
+}
+
+// SuspendForLease suspends every session standing on lease leaseID — the
+// lease was taken over by the hub process that adopted its run, which
+// restores them — and returns the ids of the recorded ones it suspended. One
+// with no record is closed: nothing could restore it.
+func (r *Registry) SuspendForLease(leaseID, reason string) []string {
+	if leaseID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	var hit []*Session
+	for id, s := range r.sessions {
+		if s.LeaseID == leaseID {
+			hit = append(hit, s)
+			delete(r.sessions, id)
+		}
+	}
+	r.mu.Unlock()
+	var out []string
+	for _, s := range hit {
+		if r.suspend(s, reason) {
+			out = append(out, s.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// closeWhere ends every live session match selects.
+func (r *Registry) closeWhere(match func(*Session) bool, reason string) int {
+	r.mu.Lock()
+	var hit []*Session
+	for id, s := range r.sessions {
+		if match(s) {
+			hit = append(hit, s)
+			delete(r.sessions, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, s := range hit {
+		r.closeSession(s, reason)
+	}
+	return len(hit)
+}
+
+// LeaseSessions returns the live sessions standing on lease leaseID, sorted by
+// id.
+func (r *Registry) LeaseSessions(leaseID string) []*Session {
+	if leaseID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	var out []*Session
+	for _, s := range r.sessions {
+		if s.LeaseID == leaseID {
+			out = append(out, s)
+		}
+	}
+	r.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// ErrNotExtendable is what Extend answers for a session it cannot move: not
+// live here, already ended, or a deadline that does not move it forward.
+var ErrNotExtendable = errors.New("claudeproxy: session cannot be extended")
+
+// Extend moves a live session's deadline to until — never past MaxTTL from
+// now, and never backwards — and records the renewal with the Store when the
+// Store keeps renewals (SessionRenewer). A run relay session is minted for its
+// lease's deadline and moved with it, as the run's keepalive extends the lease
+// (Task 20435); a session whose lease is not extended lapses with it.
+func (r *Registry) Extend(id string, until time.Time) (time.Time, error) {
+	r.mu.Lock()
+	s := r.sessions[id]
+	r.mu.Unlock()
+	now := r.now()
+	if s == nil || s.Closed() || s.Expired(now) {
+		return time.Time{}, fmt.Errorf("%w: %s is not live here", ErrNotExtendable, id)
+	}
+	if limit := now.Add(MaxTTL); until.After(limit) {
+		until = limit
+	}
+	if !until.After(s.Deadline()) {
+		return s.Deadline(), nil
+	}
+	if s.durable && r.Store != nil {
+		if rs, ok := r.Store.(SessionRenewer); ok {
+			if err := rs.RenewSession(id, until, now); err != nil {
+				if errors.Is(err, ErrRecordGone) {
+					r.dropGone(s)
+					return time.Time{}, fmt.Errorf("%w: %s: %v", ErrNotExtendable, id, err)
+				}
+				// The record stays behind; the session moves on here. A
+				// process restoring it later bounds it from the record.
+			}
+		}
+	}
+	s.extendedTo.Store(until.UnixNano())
+	s.renewedAt.Store(now.UnixNano())
+	return until, nil
+}
+
+// ClosedReason reports why the session token names ended, when this registry
+// closed it and token is that session's: a run's sandbox presenting a session
+// its revocation ended learns why, where a caller merely holding the id learns
+// nothing (Task 20435).
+func (r *Registry) ClosedReason(token string) (string, bool) {
+	id, ok := r.sessionIDOf(token)
+	if !ok {
+		return "", false
+	}
+	now := r.now()
+	r.mu.Lock()
+	t, found := r.closedHere[id]
+	live := r.sessions[id]
+	r.mu.Unlock()
+	if !found || !now.Before(t.until) {
+		if live == nil || !live.Expired(now) {
+			return "", false
+		}
+		// Expired, and not yet reaped: as good as closed.
+		t = tombstone{hash: live.tokenHash, reason: "it expired"}
+	}
+	got := sha256.Sum256([]byte(token))
+	if subtle.ConstantTimeCompare(got[:], t.hash[:]) != 1 {
+		return "", false
+	}
+	return t.reason, true
+}
+
 func (r *Registry) closeSession(s *Session, reason string) {
 	if s.closed.Swap(true) {
 		return
@@ -496,14 +765,12 @@ func (r *Registry) closeSession(s *Session, reason string) {
 	r.tombstone(s)
 	r.closeRecord(s, reason)
 	u := s.Usage()
-	r.emit(Event{
-		Kind: EventSessionClosed, SessionID: s.ID, RuleID: s.RuleID, RuleName: s.RuleName,
-		Project: s.Project, Repository: s.Repository, Ref: s.Ref, Workflow: s.Workflow,
-		Actor: s.Actor, RunID: s.RunID, Subject: s.Subject,
-		Detail: fmt.Sprintf("%s: %d requests, %d denied, %d tokens",
-			reason, u.Requests, u.Denied, u.TotalTokens()),
-		At: r.now(),
-	})
+	ev := s.sessionEvent(EventSessionClosed, r.now())
+	ev.Detail = fmt.Sprintf("%s: %d requests, %d denied, %d tokens",
+		reason, u.Requests, u.Denied, u.TotalTokens())
+	ev.InputTokens = u.InputTokens + u.CacheRead + u.CacheWrite
+	ev.OutputTokens = u.OutputTokens
+	r.emit(ev)
 }
 
 // ReapExpired sweeps lapsed sessions and returns how many were removed.

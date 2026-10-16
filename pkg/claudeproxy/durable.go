@@ -78,11 +78,23 @@ type SessionRecord struct {
 	RunURL     string
 	// Claims is the verified assertion the session was minted for, as the
 	// hub chose to record it: opaque to this package, which never reads it.
-	// The hub holds a restored session to its rule against it.
+	// The hub holds a restored session to its rule against it. A run relay
+	// session's is the hub's account of the run it serves (Task 20435).
 	Claims json.RawMessage
+
+	// A run relay session's binding (Task 20435). UpstreamKind names the kind
+	// of credential it spends — never the credential, which the process
+	// restoring it re-derives from the lease.
+	LeaseID      string
+	GrantID      string
+	ExecutorID   string
+	Payer        string
+	UpstreamKind string
 
 	IssuedAt  time.Time
 	ExpiresAt time.Time
+	// RenewedAt is when an extension last moved ExpiresAt, zero for none.
+	RenewedAt time.Time
 
 	// Usage and LastUsed are what the session had spent when it was last
 	// checkpointed.
@@ -106,6 +118,14 @@ type SessionStore interface {
 	CloseSession(id, reason string, at time.Time, u Usage) error
 }
 
+// SessionRenewer is a SessionStore that records the extensions Extend makes
+// (Task 20435), so a process restoring a renewed session bounds its deadline
+// from the renewal rather than refusing it as one no mint could have set. An
+// answer of ErrRecordGone ends the session here, as a checkpoint's does.
+type SessionRenewer interface {
+	RenewSession(id string, expiresAt, renewedAt time.Time) error
+}
+
 // checkpoint is the account of a session last written to its Store.
 type checkpoint struct {
 	usage    Usage
@@ -115,24 +135,30 @@ type checkpoint struct {
 // record renders the session for its Store.
 func (s *Session) record(claims json.RawMessage) SessionRecord {
 	return SessionRecord{
-		ID:          s.ID,
-		TokenSHA256: hex.EncodeToString(s.tokenHash[:]),
-		Policy:      s.Policy.clone(),
-		RuleID:      s.RuleID,
-		RuleName:    s.RuleName,
-		Project:     s.Project,
-		Subject:     s.Subject,
-		Repository:  s.Repository,
-		Ref:         s.Ref,
-		Workflow:    s.Workflow,
-		Actor:       s.Actor,
-		RunID:       s.RunID,
-		RunURL:      s.RunURL,
-		Claims:      append(json.RawMessage(nil), claims...),
-		IssuedAt:    s.IssuedAt,
-		ExpiresAt:   s.ExpiresAt,
-		Usage:       s.Usage(),
-		LastUsed:    s.LastUsed(),
+		ID:           s.ID,
+		TokenSHA256:  hex.EncodeToString(s.tokenHash[:]),
+		Policy:       s.Policy.clone(),
+		RuleID:       s.RuleID,
+		RuleName:     s.RuleName,
+		Project:      s.Project,
+		Subject:      s.Subject,
+		Repository:   s.Repository,
+		Ref:          s.Ref,
+		Workflow:     s.Workflow,
+		Actor:        s.Actor,
+		RunID:        s.RunID,
+		RunURL:       s.RunURL,
+		Claims:       append(json.RawMessage(nil), claims...),
+		LeaseID:      s.LeaseID,
+		GrantID:      s.GrantID,
+		ExecutorID:   s.ExecutorID,
+		Payer:        s.Payer,
+		UpstreamKind: s.UpstreamKind(),
+		IssuedAt:     s.IssuedAt,
+		ExpiresAt:    s.Deadline(),
+		RenewedAt:    s.RenewedAt(),
+		Usage:        s.Usage(),
+		LastUsed:     s.LastUsed(),
 	}
 }
 
@@ -215,13 +241,9 @@ func (r *Registry) dropGone(s *Session) {
 	reason := "stopped serving here: its record was closed or taken over by another hub process"
 	s.closedReason.Store(&reason)
 	u := s.Usage()
-	r.emit(Event{
-		Kind: EventSessionSuspended, SessionID: s.ID, RuleID: s.RuleID, RuleName: s.RuleName,
-		Project: s.Project, Repository: s.Repository, Ref: s.Ref, Workflow: s.Workflow,
-		Actor: s.Actor, RunID: s.RunID, Subject: s.Subject,
-		Detail: fmt.Sprintf("%s: %d requests, %d denied, %d tokens", reason, u.Requests, u.Denied, u.TotalTokens()),
-		At:     r.now(),
-	})
+	ev := s.sessionEvent(EventSessionSuspended, r.now())
+	ev.Detail = fmt.Sprintf("%s: %d requests, %d denied, %d tokens", reason, u.Requests, u.Denied, u.TotalTokens())
+	r.emit(ev)
 }
 
 // DurableIDs returns the ids of the recorded sessions this registry serves.
@@ -269,15 +291,26 @@ func (r *Registry) tombstone(s *Session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closedHere == nil {
-		r.closedHere = map[string]time.Time{}
+		r.closedHere = map[string]tombstone{}
 	}
-	r.closedHere[s.ID] = s.ExpiresAt
+	until := s.Deadline()
+	if floor := r.now().Add(tombstoneMinTTL); until.Before(floor) {
+		// Kept past a short deadline — a run relay session's follows its
+		// lease, minutes away — so a workload still presenting the token of a
+		// session its revocation ended is told why for a while, rather than
+		// an unexplained 401 its harness retries for minutes.
+		until = floor
+	}
+	r.closedHere[s.ID] = tombstone{until: until, hash: s.tokenHash, reason: s.CloseReason()}
 }
+
+// tombstoneMinTTL is the least time a registry remembers a session it closed.
+const tombstoneMinTTL = time.Hour
 
 // pruneTombstonesLocked forgets the closed sessions that would have lapsed.
 func (r *Registry) pruneTombstonesLocked(now time.Time) {
-	for id, until := range r.closedHere {
-		if !now.Before(until) {
+	for id, t := range r.closedHere {
+		if !now.Before(t.until) {
 			delete(r.closedHere, id)
 		}
 	}
@@ -340,15 +373,21 @@ func (r *Registry) suspend(s *Session, reason string) bool {
 	// Its spend, as of now: the process restoring it counts on from here.
 	r.checkpoint(s)
 	u := s.Usage()
-	r.emit(Event{
-		Kind: EventSessionSuspended, SessionID: s.ID, RuleID: s.RuleID, RuleName: s.RuleName,
-		Project: s.Project, Repository: s.Repository, Ref: s.Ref, Workflow: s.Workflow,
-		Actor: s.Actor, RunID: s.RunID, Subject: s.Subject,
-		Detail: fmt.Sprintf("%s: %d requests, %d denied, %d tokens; its record is left for the hub "+
-			"process that receives its next request", reason, u.Requests, u.Denied, u.TotalTokens()),
-		At: r.now(),
-	})
+	ev := s.sessionEvent(EventSessionSuspended, r.now())
+	ev.Detail = fmt.Sprintf("%s: %d requests, %d denied, %d tokens; its record is left for the hub "+
+		"process that %s", reason, u.Requests, u.Denied, u.TotalTokens(), s.resumedBy())
+	r.emit(ev)
 	return true
+}
+
+// resumedBy says which hub process brings a suspended session back: a CI
+// session is restored by whichever receives its job's next call, a run relay
+// session by the process that adopts its run.
+func (s *Session) resumedBy() string {
+	if s.LeaseID != "" {
+		return "adopts its run"
+	}
+	return "receives its next request"
 }
 
 // RestoreRequest is a session to bring back.
@@ -362,6 +401,11 @@ type RestoreRequest struct {
 	// Detail, when set, is added to the restored row: what the caller
 	// narrowed.
 	Detail string
+	// Upstream is the credential a run relay session relays with, re-derived
+	// by the caller from the lease it took over (Task 20435) — never read
+	// from the record, which holds none. Required when the record names an
+	// upstream kind, and must be of that kind.
+	Upstream *Upstream
 }
 
 // Restore brings back a session another hub process minted, under the same id
@@ -379,6 +423,21 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 		return nil, err
 	}
 	rec := req.Record
+	var up *Upstream
+	switch {
+	case rec.UpstreamKind == "" && req.Upstream == nil:
+	case req.Upstream == nil:
+		return nil, fmt.Errorf("claudeproxy: restore %s: it relays with an %s, and none was given", v.id, rec.UpstreamKind)
+	case req.Upstream.Kind() != rec.UpstreamKind:
+		return nil, fmt.Errorf("claudeproxy: restore %s: it relays with an %s, not an %s", v.id,
+			rec.UpstreamKind, req.Upstream.Kind())
+	default:
+		if err := req.Upstream.Validate(); err != nil {
+			return nil, fmt.Errorf("claudeproxy: restore %s: %w", v.id, err)
+		}
+		c := *req.Upstream
+		up = &c
+	}
 	s := &Session{
 		ID:         v.id,
 		Policy:     rec.Policy.clone(),
@@ -392,9 +451,17 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 		Actor:      rec.Actor,
 		RunID:      rec.RunID,
 		RunURL:     rec.RunURL,
+		LeaseID:    rec.LeaseID,
+		GrantID:    rec.GrantID,
+		ExecutorID: rec.ExecutorID,
+		Payer:      rec.Payer,
 		IssuedAt:   rec.IssuedAt,
 		ExpiresAt:  rec.ExpiresAt,
+		upstream:   up,
 		durable:    r.Store != nil,
+	}
+	if !rec.RenewedAt.IsZero() {
+		s.renewedAt.Store(rec.RenewedAt.UnixNano())
 	}
 	copy(s.tokenHash[:], v.hash)
 	u := rec.Usage
@@ -418,7 +485,7 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrSessionExists, v.id)
 	}
-	if until, ok := r.closedHere[v.id]; ok && now.Before(until) {
+	if t, ok := r.closedHere[v.id]; ok && now.Before(t.until) {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrClosedHere, v.id)
 	}
@@ -435,17 +502,20 @@ func (r *Registry) Restore(req RestoreRequest) (*Session, error) {
 	detail := fmt.Sprintf("restored under rule %s; models=%s max_requests=%d (%d spent) until %s",
 		s.RuleName, strings.Join(s.Policy.Models, ","), s.Policy.MaxRequests, u.Requests,
 		s.ExpiresAt.UTC().Format(time.RFC3339))
+	if s.LeaseID != "" {
+		detail = fmt.Sprintf("restored with lease %s for run %s; models=%s (%d requests, %d tokens so far) until %s",
+			s.LeaseID, s.RunID, strings.Join(s.Policy.Models, ","), u.Requests, u.TotalTokens(),
+			s.ExpiresAt.UTC().Format(time.RFC3339))
+	}
 	if d := strings.TrimSpace(req.Detail); d != "" {
 		detail += "; " + d
 	}
 	if from := strings.TrimSpace(req.From); from != "" {
 		detail += " (held until then by " + from + ")"
 	}
-	r.emit(Event{
-		Kind: EventSessionRestored, SessionID: s.ID, RuleID: s.RuleID, RuleName: s.RuleName,
-		Project: s.Project, Repository: s.Repository, Ref: s.Ref, Workflow: s.Workflow,
-		Actor: s.Actor, RunID: s.RunID, Subject: s.Subject, Detail: detail, At: now,
-	})
+	ev := s.sessionEvent(EventSessionRestored, now)
+	ev.Detail = detail
+	r.emit(ev)
 	return s, nil
 }
 
@@ -488,25 +558,29 @@ func (r *Registry) checkRestore(rec SessionRecord) (restoreCheck, error) {
 		return restoreCheck{}, fmt.Errorf("%w: %s expired at %s", ErrSessionLapsed, id,
 			rec.ExpiresAt.UTC().Format(time.RFC3339))
 	}
-	// No session Mint issues outlives MaxTTL from its issue — nor from now,
-	// for an issue time in the future. A deadline beyond that was not
-	// written by Mint.
-	issued := rec.IssuedAt
-	if issued.IsZero() || issued.After(now) {
-		issued = now
+	// No session Mint issues outlives MaxTTL from its issue, and no
+	// extension moves one past MaxTTL from the renewal that moved it (Task
+	// 20435) — nor from now, for a time in the future. A deadline beyond that
+	// was not written by Mint or Extend.
+	since := rec.IssuedAt
+	if rec.RenewedAt.After(since) {
+		since = rec.RenewedAt
 	}
-	if rec.IssuedAt.IsZero() || rec.ExpiresAt.After(issued.Add(MaxTTL)) {
+	if since.IsZero() || since.After(now) {
+		since = now
+	}
+	if rec.IssuedAt.IsZero() || rec.ExpiresAt.After(since.Add(MaxTTL)) {
 		return restoreCheck{}, fmt.Errorf("claudeproxy: restore %s: a session issued %s cannot run until %s, "+
-			"beyond the %s any session is minted for", id, rec.IssuedAt.UTC().Format(time.RFC3339),
+			"beyond the %s any session is minted or renewed for", id, rec.IssuedAt.UTC().Format(time.RFC3339),
 			rec.ExpiresAt.UTC().Format(time.RFC3339), MaxTTL)
 	}
 	if r.Known(id) {
 		return restoreCheck{}, fmt.Errorf("%w: %s", ErrSessionExists, id)
 	}
 	r.mu.Lock()
-	until, closed := r.closedHere[id]
+	t, closed := r.closedHere[id]
 	r.mu.Unlock()
-	if closed && now.Before(until) {
+	if closed && now.Before(t.until) {
 		return restoreCheck{}, fmt.Errorf("%w: %s", ErrClosedHere, id)
 	}
 	return restoreCheck{id: id, hash: hash}, nil

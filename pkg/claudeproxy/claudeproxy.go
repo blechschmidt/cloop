@@ -21,6 +21,19 @@
 // out something narrower that points at a thing that reads every request, and
 // make the audit trail a record of decisions rather than of deliveries.
 //
+// # Runs, not only pipelines
+//
+// Since Task 20435 the same engine relays a sandboxed run's model calls (the
+// hub's executors.model_relay). The shape is the same; three things differ.
+// A run relay session carries its own upstream credential — the one the
+// run's grant holds, which the hub withholds from the sandbox — rather than
+// spending the proxy's (Options.SessionUpstreams). It stands on the run's
+// secret lease and grant, is extended with the lease (Registry.Extend) and
+// ends with it (CloseForLease, CloseForGrant). And its spend is the hub's to
+// meter and to cap: Options.Admit holds the identity paying for the run to
+// its budgets before a call is relayed, and Options.OnSpend books what the
+// upstream reported after. Its tokens start "cloop_relay_", not "cloop_ci_".
+//
 // # What it deliberately does not do
 //
 // It does not inspect or rewrite prompts, and it does not cache responses. A
@@ -83,7 +96,21 @@ type Upstream struct {
 
 	// AuthToken is sent as Authorization: Bearer.
 	AuthToken string
+
+	// OAuth marks AuthToken as a claude.ai OAuth token — what `claude
+	// setup-token` prints and CLAUDE_CODE_OAUTH_TOKEN carries — rather than a
+	// gateway's bearer. The relay then names the API's OAuth beta beside
+	// whatever betas the client asked for (OAuthBeta). Measured against the
+	// real API on 2026-10-16 (Task 20435), a token was accepted with and
+	// without it; the API's own documentation for OAuth callers asks for it,
+	// and a header the API ignores costs nothing where one it starts to
+	// require would cost every relayed run.
+	OAuth bool
 }
+
+// OAuthBeta is the anthropic-beta value the API documents for requests
+// authenticated with a claude.ai OAuth token.
+const OAuthBeta = "oauth-2025-04-20"
 
 // Configured reports whether there is a credential to relay with.
 func (u Upstream) Configured() bool {
@@ -97,6 +124,9 @@ func (u Upstream) Validate() error {
 	}
 	if strings.TrimSpace(u.APIKey) != "" && strings.TrimSpace(u.AuthToken) != "" {
 		return errors.New("claudeproxy: set exactly one of APIKey and AuthToken")
+	}
+	if u.OAuth && strings.TrimSpace(u.AuthToken) == "" {
+		return errors.New("claudeproxy: an OAuth upstream is an AuthToken")
 	}
 	base := u.Base()
 	parsed, err := url.Parse(base)
@@ -135,6 +165,22 @@ func (u Upstream) Redacted() string {
 		return u.Base() + " (api key)"
 	default:
 		return u.Base() + " (oauth token)"
+	}
+}
+
+// Kind names the credential for logs, audit rows and the dashboard: "api_key",
+// "oauth_token" or "auth_token" (a bearer that is not a claude.ai OAuth
+// token, as a gateway issues), "" with none.
+func (u Upstream) Kind() string {
+	switch {
+	case strings.TrimSpace(u.APIKey) != "":
+		return "api_key"
+	case strings.TrimSpace(u.AuthToken) == "":
+		return ""
+	case u.OAuth:
+		return "oauth_token"
+	default:
+		return "auth_token"
 	}
 }
 

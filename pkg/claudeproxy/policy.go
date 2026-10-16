@@ -231,5 +231,50 @@ func clampMaxTokens(body []byte, cap int) ([]byte, error) {
 		return nil, err
 	}
 	m["max_tokens"] = raw
+	if t, ok := m["thinking"]; ok {
+		thinking, err := clampThinkingBudget(t, cap)
+		if err != nil {
+			return nil, err
+		}
+		if thinking == nil {
+			delete(m, "thinking")
+		} else {
+			m["thinking"] = thinking
+		}
+	}
 	return json.Marshal(m)
+}
+
+// minThinkingBudget is the smallest thinking budget the API accepts.
+const minThinkingBudget = 1024
+
+// clampThinkingBudget keeps an extended-thinking budget below a clamped
+// max_tokens. The API refuses a request whose thinking.budget_tokens is not
+// below max_tokens, and Claude Code asks for a budget one under the
+// max_tokens it sends (measured through the CI relay: 31999 under 32000), so
+// clamping max_tokens alone turns a request with a large budget into a 400.
+// The budget becomes cap-1; where that is below the smallest budget the API
+// takes, thinking is dropped (nil) rather than the request refused. Anything
+// other than an enabled budget — adaptive thinking, disabled — is left alone.
+func clampThinkingBudget(raw json.RawMessage, cap int) (json.RawMessage, error) {
+	var t map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &t); err != nil {
+		// Not an object: not ours to interpret. The API judges it.
+		return raw, nil //nolint:nilerr // a field the policy does not read
+	}
+	var kind string
+	_ = json.Unmarshal(t["type"], &kind)
+	var budget int
+	if kind != "enabled" || json.Unmarshal(t["budget_tokens"], &budget) != nil || budget < cap {
+		return raw, nil
+	}
+	if cap-1 < minThinkingBudget {
+		return nil, nil
+	}
+	b, err := json.Marshal(cap - 1)
+	if err != nil {
+		return nil, err
+	}
+	t["budget_tokens"] = b
+	return json.Marshal(t)
 }
