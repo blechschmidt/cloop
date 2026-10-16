@@ -9,7 +9,9 @@ session token, and the proxy — holding the real forge credential — parses th
 push's ref-update list, checks every update against the session's policy, and
 only then presents the credential upstream. The branch allowlist stops being
 something the sandbox is asked to honour and becomes a property of the network
-path.
+path. And since Task 20436 it reads every push it allows on the way through,
+refusing one that carries a credential the run was given — see
+[the push scan](#the-push-scan).
 
 The proxy runs **inside the hub process** and is **off by default**. An
 unconfigured hub behaves exactly as [the hole it closes](#the-hole-it-closes)
@@ -29,6 +31,7 @@ put a sandbox on them, and where that integration is still incomplete are in
 - [The inversion](#the-inversion)
 - [The policy model](#the-policy-model)
 - [Session lifecycle](#session-lifecycle)
+- [The push scan](#the-push-scan)
 - [What it does not decide](#what-it-does-not-decide)
 - [Operating it](#operating-it)
 - [Audit events](#audit-events)
@@ -601,6 +604,60 @@ concluding from a counter that nothing was pushed.
 
 ---
 
+## The push scan
+
+A workload holds its leased credentials in plaintext — that is what delivering
+them means — and a push carrying one publishes it, possibly to a public
+repository. GitHub's push protection recognises vendor shapes where it is
+enabled; an internal API key granted as an env secret is none of them. So every
+push the policy allows is scanned on its way to the forge (Task 20436):
+
+- **For what.** The exact values the hub delivered to the session's run: env
+  values, a kubeconfig's bearer tokens and client keys, registry auth, egress
+  proxy credentials and the run's egress and model relay session tokens, the
+  git proxy session token a GitHub lease delivered, and — as defence in depth —
+  the PAT or App token the proxy presents upstream. Each as delivered,
+  base64-encoded (both alphabets, every alignment) and percent-encoded; nothing
+  shorter than eight bytes. `push_scan: shapes` adds pkg/redact's registry of
+  credential formats.
+- **Where.** Every object in the pack — commits, trees, blobs, tags, and the
+  bytes each delta inserts — plus the ref names and push options.
+- **When.** As the pack streams through: the proxy inflates it as it forwards
+  it, and holds back its trailing checksum until the scan ends. A clean push
+  then reaches the forge byte for byte. A refused one has its forge request
+  abandoned mid-body, so receive-pack never holds a whole pack and no ref
+  moves.
+- **What the sandbox hears.** Its git prints the refusal: each object, its
+  path where a tree in the pack names it, its commit, and the grant and secret
+  the value came from — never the value — and `! [remote rejected]` against
+  every ref. The same is a `gitproxy.push_secret_refused` audit row, a
+  `git_push_refused` row in the run's history, and a line in the task's
+  details.
+- **Within what.** `push_scan_max_object_mb`, `push_scan_max_push_mb` and
+  `push_scan_seconds` bound one push's cost. Past one, or for a pack the proxy
+  cannot read, the push is refused naming the limit or the fault: a scan that
+  gave up is not a scan that found nothing.
+
+```yaml
+executors:
+  git_proxy:
+    enabled: true
+    tls: auto
+    push_scan: values           # the default; shapes adds credential formats; off forwards unread
+    push_scan_max_object_mb: 1024
+    push_scan_max_push_mb: 4096
+    push_scan_seconds: 300
+```
+
+A project's own `.cloop/config.yaml` may set a stricter `push_scan` for its
+pushes, never a weaker one. The design, the reader, the numbers on a 100 MiB
+pack, and what the scan cannot see — a value split across a delta's copy and
+insert, one transformed in any way it does not decode, and after a hub restart
+everything `Broker.RedactionCredentials` does not re-derive — are in
+[git proxy architecture](architecture/git-proxy.md#the-push-scan).
+
+---
+
 ## What it does not decide
 
 A boundary is only useful if its edges are stated. Three things this proxy
@@ -976,8 +1033,9 @@ are safe to write to a log an operator reads. `Event.String()` renders one line.
 
 | Kind | Emitted when | Notes |
 | --- | --- | --- |
-| `push_denied` | a push was refused by policy | **The row that matters.** It is the evidence that the boundary held, and the only place a sandbox's attempt to reach a protected branch is written down. Nothing else in cloop would record it. Alert on it. |
-| `push_allowed` | every command in a push passed policy | Emitted *before* forwarding, so it describes what was **authorised**, not what the remote ultimately accepted. A `push_allowed` with no corresponding change on the forge means the forge refused it — branch protection, a non-fast-forward — not that the proxy did. |
+| `push_denied` | a push was refused by policy | **The row that matters.** It is the evidence that the boundary held, and the only place a sandbox's attempt to reach a protected branch is written down. Nothing else in cloop would record it. Alert on it. A push the [scan](#the-push-scan) could not finish — past a limit, or unreadable — is one too, with `Scan` set. |
+| `push_secret_refused` | a push carried a credential the run was given | `Findings` name each object, its path and commit, and the grant and secret; `Refs` have the run's values taken out. Never the value. |
+| `push_allowed` | every command in a push passed policy, and its pack carried none of the run's credentials | Emitted *before* the forge's verdict is forwarded, so it describes what was **authorised**, not what the remote ultimately accepted. Its `Detail` says how many objects the scan read. A `push_allowed` with no corresponding change on the forge means the forge refused it — branch protection, a non-fast-forward — not that the proxy did. |
 | `session_minted` | a session was created | `Detail` carries the allowlist and the expiry. |
 | `session_closed` | a session was revoked or reaped | `Detail` carries the reason and the session's push/fetch/denied counters. |
 | `fetch` | a read went through the proxy | |
@@ -1009,12 +1067,13 @@ for that reason.
 The hub forwards every event into the same hash-chained `audit_events` table as
 the credential broker, with `entity_type` `gitproxy`, the session id as the
 entity, and the event type prefixed: `gitproxy.push_denied`,
-`gitproxy.push_allowed`, `gitproxy.session_minted`, `gitproxy.session_closed`,
-`gitproxy.fetch`, `gitproxy.rejected`. The payload carries the session, the
-repository, the project and task ids, the ref names and the reason — the same
-fields `Event.String()` renders, and no others; `gitproxy.Event` has no field
-that could hold credential material or object content, which is what makes the
-table safe to export.
+`gitproxy.push_secret_refused`, `gitproxy.push_allowed`,
+`gitproxy.session_minted`, `gitproxy.session_closed`, `gitproxy.fetch`,
+`gitproxy.rejected`. The payload carries the session, the repository, the
+project and task ids, the ref names and the reason — the same fields
+`Event.String()` renders — and for a push the scan refused, the run and the
+findings; `gitproxy.Event` has no field that could hold credential material or
+object content, which is what makes the table safe to export.
 
 ```console
 $ cloop audit-log list --entity gitproxy --since 7d
@@ -1064,9 +1123,10 @@ Some sharper points:
   is a compromised credential store. What it does buy over the status quo is
   that there is now exactly one such store to protect, instead of one per
   running sandbox.
-- **What it still does not constrain.** The *content* of a push. A sandbox may
-  write anything it likes to a branch it is allowed to write to. That is what
-  `pkg/writeback`'s inspection is for — see
+- **What it constrains of a push's content.** Only that it carries none of the
+  run's own credentials, in the encodings the [push scan](#the-push-scan)
+  matches. Otherwise a sandbox may write anything it likes to a branch it is
+  allowed to write to. That is what `pkg/writeback`'s inspection is for — see
   [Result write-back](security/model.md#the-guarantee--test-table) — and the two
   are complementary: this proxy decides *where*, that one decides *what*.
 - **Fast-forward and branch protection.** Still the forge's job, as above. A

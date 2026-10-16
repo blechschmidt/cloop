@@ -33,6 +33,7 @@ Three facts carry most of it:
 - [One process, and why](#one-process-and-why)
 - [Two paths into one proxy](#two-paths-into-one-proxy)
 - [The policy a session carries](#the-policy-a-session-carries)
+- [The push scan](#the-push-scan)
 - [Executor by executor](#executor-by-executor)
 - [What the sandbox holds](#what-the-sandbox-holds)
 - [Which credential reaches the sandbox](#which-credential-reaches-the-sandbox)
@@ -394,6 +395,177 @@ Work that is committed but not pushed stays on this machine, where nobody will s
 transport, so a clone's `origin` still reads `https://github.com/acme/tool`; a
 workload that "fixed" it to point anywhere else would step outside the rewrite
 and find no credential.
+
+---
+
+## The push scan
+
+A workload holds its leased credentials in plaintext by design — the env
+secrets it was granted, the bearer token in its kubeconfig, its registry auth,
+its egress proxy's password. Committing one and pushing it publishes it,
+possibly to a public repository, and every proxied push crosses one choke point
+on its way. GitHub's push protection knows vendor shapes, and only where it is
+enabled; an internal API key granted as an env secret matches nothing it knows.
+So since Task 20436 the proxy reads every push the policy allows on its way to
+the forge, and refuses one that carries a credential its run was given.
+
+### What a push is scanned for
+
+The exact values the hub delivered to the session's run — which the hub knows,
+and no shape registry can:
+
+| Delivered as | Matched |
+| --- | --- |
+| An env secret | every value the grant delivers |
+| A kubeconfig | each user's bearer token, client key (as `client-key-data` and as its PEM, line by line), basic-auth password, auth-provider tokens, and an exec plugin's env values whose names say token, secret, password, key or credential — under the Kubernetes monitor, the monitor session's token the delivered kubeconfig carries |
+| A registry secret | each registry's `auth`, the password inside it, `password`, `identitytoken`, `registrytoken` |
+| An egress proxy secret | the proxy URL and its password |
+| The run's egress proxy session, its model relay session | the proxy URL and its password; the relay token |
+| A GitHub PAT or App grant | the git proxy session token the sandbox holds, and — defence in depth, since the sandbox never held it — the PAT or App token the hub presents upstream |
+
+Each value is matched as delivered, base64-encoded in both alphabets — at all
+three byte alignments, so a value inside a larger encoded blob, such as a
+`.dockerconfigjson` or a Kubernetes Secret manifest, is found as well as one
+encoded on its own — and percent-encoded as a query value, a path segment and
+URL userinfo. A value shorter than eight bytes is not matched at all: it would
+refuse pushes for no security benefit. pkg/secretbroker takes each delivered
+document apart (`Lease.CredentialValues`), because most of a document's bytes —
+a credential helper script, a gitconfig, a CA certificate — are no secret and
+turn up in every repository; certificates and server addresses are never
+matched.
+
+`executors.git_proxy.push_scan: shapes` adds pkg/redact's registry of
+credential formats — the same detectors `cloop audit` uses — on top. It is
+opt-in because repositories carry realistic fake keys in their test fixtures
+(this one does; see the GH013 refusals in its history), and a mode that refused
+those would be switched off.
+
+### How the pack is read
+
+`pkg/gitproxy/packscan.go` reads the pack as it streams: the header, then each
+object's varint header and zlib stream, inflated through a fixed buffer and
+forgotten — v2 and v3, SHA-1 and SHA-256, commits, trees, blobs and tags in
+full. For an `OFS_DELTA` or `REF_DELTA` it reads the delta's instructions and
+scans the bytes they insert; a copied range comes from an object that is either
+in the same pack, where it was scanned in its own right, or already on the
+forge, where it was published before this push. The ref names in the command
+section and any push options are scanned too: a branch named after a
+credential publishes it as surely as a file does.
+
+The reader follows index-pack's rules wherever they decide what the forge will
+see — the header widths, the bounds on a base offset, a zlib stream ending
+exactly where zlib says, the inflated size matching the header, patch_delta's
+rules for a delta's instructions — because a pack this reader read differently
+from git would be one in which it scanned bytes the forge does not store.
+Anything it cannot read is refused rather than forwarded.
+
+The matcher is one pass whatever the number of values: each pattern is anchored
+on its last eight bytes, which the stream keeps as one 64-bit word, tested
+against a filter at each position and compared in full only on a hit, over a
+rolling window as long as the longest pattern. A run of consecutive inserts is
+one stream; a copy ends it, because in the object git builds the copied bytes
+sit between the inserts on either side.
+
+### The decision comes before the forge's
+
+The forge receives the pack as the scan consumes it — never ahead of it — but
+not the pack's trailing checksum: the reader holds everything from the checksum
+on until the scan ends. A pack without it is one receive-pack does not accept,
+and git commits no ref without unpacking the pack first. A clean scan releases
+the checksum and the forge sees exactly the bytes git sent. A refusal closes the
+forge's request mid-body instead — over HTTP/1.1 the connection closes before
+the chunked body's terminator, over HTTP/2 the stream is reset — so the forge
+holds an incomplete pack in its quarantine, which it discards, and no ref moves.
+`TestPushScanRefusesALeasedValueInAFile` and its siblings prove it against a real
+`git-http-backend`: the ref did not move, and the objects the push carried are
+not in the repository. Bytes after the checksum are refused too, and stay held:
+git ignores them, and forwarding the checksum ahead of them would hand the forge
+a complete pack.
+
+The sandbox's git is told in its own vocabulary, through the side band where it
+asked for one:
+
+```text
+remote: cloop git proxy refused this push: it carries a credential this run was given.
+remote: - blob 6b937d358371 (deploy.env) in commit 40ee89e6633e: env ACME_API_KEY (secret "acme-api", grant gr_e2e)
+remote: Take the value out of these objects and rewrite the commits that carry it (git commit --amend, git rebase -i), then push again.
+remote: No ref was updated, and the forge never received a complete pack. The value itself is never shown, logged or recorded.
+ ! [remote rejected] HEAD -> cloop/task-1 (carries a credential this run was given: env ACME_API_KEY (secret "acme-api", grant gr_e2e))
+```
+
+A finding names the object id; its path where a tree in the same pack names it
+— the full path when every tree above it arrived whole, or the file name alone
+when the tree that names it arrived as a delta, which in an incremental push is
+usual; the commit that carries it; and the grant, the secret and the part of the
+delivery the value came from. A delta's own id would need its base, which may be
+on the forge, so a delta is named by its base instead. Nothing the report names
+is printed without the run's values taken out of it first: a directory, a tag or
+a branch can be named after one. Up to sixteen findings are reported; the scan
+stops looking after that.
+
+### Bounds
+
+The reader inflates as a stream with a window as long as the longest value, so
+memory does not grow with the push. What a push may cost is capped:
+`push_scan_max_object_mb` (1024) per object, `push_scan_max_push_mb` (4096) per
+push — which is what stops a pack built to inflate a thousandfold from holding a
+core — and `push_scan_seconds` (300) of scanning, counted net of the time spent
+waiting on the sandbox or the forge, so a slow link is not a reason to refuse.
+The clock is read on every read from the sandbox and before every object, not
+only when an object inflates to something: a pack of millions of empty objects,
+or one object of millions of empty deflate blocks, stops at the limit
+(`TestScanTimeLimitHoldsForObjectsThatInflateToNothing`,
+`TestScanTimeLimitHoldsInsideAnObjectOfEmptyBlocks`). The bytes read from the
+sandbox are held to the session's `max_pack_bytes` after a gzipped body is
+decoded, not only before. A push past any of them is refused, naming the limit
+and its setting: a scan that gave up is not a scan that found nothing. One
+session's pushes are scanned two at a time, so a sandbox pushing in parallel
+gets its scans in turn rather than every core of the hub. A push the sandbox
+or the forge abandons mid-scan — the forge answering an error before it has the
+pack, say — is neither allowed nor refused: a `gitproxy.rejected` row says it
+was not completed, and the sandbox gets the forge's own answer.
+
+On a ~100 MiB pack git wrote (449 objects, 180 MiB inflated: random binary
+blobs, source-like text, and a commit's worth of deltas), on one core of this
+hub's AMD EPYC, the scan takes 1.3 s in `values` mode and 4.0 s in `shapes`
+mode. Pushed through the proxy over TLS on both legs, the same pack takes
+0.48 s unscanned, 1.7 s with `values` and 4.5 s with `shapes`: scanning and
+forwarding overlap through a bounded queue, so a push costs about as long as
+the slower of the two. `BenchmarkPushScanPack` and
+`BenchmarkPushThroughTheProxy` in `pkg/gitproxy` measure it.
+
+### Which values a session has
+
+A session is minted for a run — the lease path's with the run's id since Task
+20383, the workspace path's since this task, through
+`executor.WithDispatchRun` — and the hub records the run's values when it
+dispatches it (`pkg/ui/gitproxy_pushscan.go`): every credential its lease
+delivered, and every value its spec declares sensitive. They live in that hub
+process's memory only — never logged, persisted, audited or echoed — until the
+run and every session naming it are over: a workspace's write-back push can
+come after the run's own lease is released.
+
+**After a restart** the process that adopts the run has no spec and no
+materials. It scans with what `Broker.RedactionCredentials` re-derives from the
+run's grants: the values of its env secrets and the token of each personal
+access token — the same values it scrubs the run's output with. What that does
+not cover, until the run ends: a GitHub App installation token the previous
+process minted (the session's own upstream token is still matched — the proxy
+holds it), a kubeconfig's or a registry secret's contents, an egress proxy
+secret's URL, and the tokens of the run's git proxy, Kubernetes monitor, egress
+and model relay sessions. A run dispatched after the restart is covered in full.
+
+### Configuration
+
+`executors.git_proxy.push_scan` is `values` — the default whenever the proxy
+runs — `shapes`, or `off`, which forwards packs unread as the proxy did before.
+A project's own `.cloop/config.yaml` may set a stricter mode for its pushes and
+never a weaker one: a project that says `off` on a hub that says `values` is
+scanned for values, and one that says nothing is scanned as the hub says. A
+workload whose sandbox shares the project directory may have written that file
+— which is why it can only tighten — so the hub reads the one key from a
+regular file only, without following a link or waiting on a FIFO, and takes a
+value it cannot read as `values`.
 
 ---
 
@@ -949,6 +1121,8 @@ named for adoption, since nothing presents it again. See
 | An App token's renewal failed for a reason that may pass — GitHub unreachable, rate limiting | a denied `secret.renew` saying it will retry | git carries on with the held token while it is valid; past its expiry, HTTP 502 naming why, until a retry succeeds | the same |
 | A repository outside the session's scope | HTTP 403, `session is scoped to …`; a `gitproxy.rejected` row | — | refused |
 | A ref outside the policy | `! [remote rejected] … (…)`; a `gitproxy.push_denied` row | refused | refused |
+| A push carrying a credential the run was given | `remote:` lines naming each object, its path and commit, and the grant and secret; `! [remote rejected] … (carries a credential this run was given: …)`; a `gitproxy.push_secret_refused` row; a `git_push_refused` row in the run's history and a line in the task's details | refused, no ref moves | refused, no ref moves |
+| A push past a `push_scan_*` limit, or one the proxy cannot read | `remote:` naming the limit and its setting, or what could not be read; a `gitproxy.push_denied` row with `scan` set; the same history row | refused | refused |
 | The hub restarted mid-run | `ui: restored git session … of lease …, held until then by …` when the run is adopted; a `gitproxy.session_restored` row | the session is gone: a later push gets a 401 | restored; a request made before the run was adopted waits up to 60 s for it |
 | A restored session was refused — its grant revoked or expired while the hub was down, its recorded scope wider than the grant or the proxy's policy now allows, its upstream not the forge this hub's proxy fronts, or this process runs no proxy | a `gitproxy.session_closed` row whose detail begins *not restored by the hub process that adopted its run* | — | git: HTTP 401 |
 
@@ -973,14 +1147,23 @@ Every decision the proxy makes is a row in `audit_events`, with `entity_type`
 [`gitproxy.fetch`](../reference/audit-events.md#gitproxy),
 [`gitproxy.push_allowed`](../reference/audit-events.md#gitproxy),
 [`gitproxy.push_denied`](../reference/audit-events.md#gitproxy),
+[`gitproxy.push_secret_refused`](../reference/audit-events.md#gitproxy),
 [`gitproxy.rejected`](../reference/audit-events.md#gitproxy),
 [`gitproxy.session_restored`](../reference/audit-events.md#gitproxy) and
 [`gitproxy.session_closed`](../reference/audit-events.md#gitproxy). The payload
 carries the session, the repository the request addressed, the project and task
 ids, the refs and the reason — never a credential, because `gitproxy.Event` has no
-field that could hold one. A request that presented no credential at all is
+field that could hold one. A push the scan refused carries the run's id and its
+`findings` — object, path, commit, grant, secret, field — and its refs with any
+of the run's values taken out. A request that presented no credential at all is
 counted rather than audited; see
 [audit events](../git-interception-proxy.md#audit-events).
+
+A push the scan refused is also filed where the people running the project
+look: a `git_push_refused` row in the run's history (the project's event
+journal), bound to the task that was running when exactly one was, and a line
+in that task's details — added to what the details show, not written into the
+stored task, whose annotations are the run's to write.
 
 Under `tls: auto` the certificates are on the trail too:
 [`hub_ca.minted`](../reference/audit-events.md#hub_ca) when a hub process mints
@@ -1012,8 +1195,10 @@ Three joins answer most questions:
 ### Metrics
 
 `cloop_gitproxy_pushes_total{result}`, `cloop_gitproxy_push_denials_total{reason}`
-and `cloop_gitproxy_anonymous_requests_total`, on the hub's `/metrics`. They count
-pushes only — a fetch, a session, and a refusal before any ref was decided (a
+and `cloop_gitproxy_anonymous_requests_total`, on the hub's `/metrics`, and for the
+push scan `cloop_gitproxy_push_scans_total{result}`,
+`cloop_gitproxy_push_scanned_bytes_total` and the `cloop_gitproxy_push_scan_seconds`
+histogram. They count pushes only — a fetch, a session, and a refusal before any ref was decided (a
 repository outside scope, a session that cannot push asking for the
 receive-pack advertisement) appear in the audit trail and in no counter. See
 [metrics](../operations/metrics.md#git-interception-proxy).
@@ -1063,6 +1248,7 @@ all of it is reconnaissance.
 | The hub wiring | TLS on the listener, fail-closed when required and absent, both halves of a session narrowed by the grant's branches | `pkg/ui` `gitproxy_test.go`, `gitguard_test.go` |
 | The lease delivery with real git | the rewrite, the helper's host check, no token on disk | `pkg/secretbroker` `guardedintegration_test.go` |
 | Conformance | a guarded PAT never reaches either delivery shape; a broken guard never delivers the token | `tests/security/gitguard_test.go` |
+| The push scan | packs `git pack-objects` writes — full and thin, OFS and REF deltas, SHA-1 and SHA-256 — scanned for a value in a blob, a commit message, an annotated tag, a delta's inserts, a ref name, a push option, in every encoding; the checksum held until the verdict; malformed packs, limits and the copy/insert residual pinned; a fuzz target holding the reader to never handing on a pack it refused; real `git` pushes refused with no ref moved and no object left on the forge, and a clean one forwarded byte for byte; the hub's values per run, project tightening, adoption, the journal and the task's details; and every credential kind a real lease delivers refused, encoded or not, before the forge holds a complete pack | `pkg/gitproxy` `packscan_test.go`, `pushscan_e2e_test.go`, `FuzzPackScan`; `pkg/secretbroker` `credentialvalues_test.go`; `pkg/ui` `gitproxy_pushscan_test.go`; `tests/security/pushscan_test.go` |
 | Workspace credentials in a Pod | the session id reaches the init container through the run's Secret, the helper is projected executable, and the lease behind the token lives as long as that Secret | `pkg/executor/kubernetes` `workspace_test.go`, `secretfiles_test.go` |
 | The proxy's CA in a Pod | the bundle is mounted in both containers and trusted for the proxy's URL only, joining any `GIT_CONFIG_COUNT` block already there; a real git fetch through a closed environment trusts a CA scoped to its remote and not one scoped elsewhere | `pkg/executor/kubernetes` `cabundle_test.go`; `pkg/executor/gitprovision` `TestProvisionTrustsACertificateScopedToTheRemote` |
 | The hub's own CA (`tls: auto`) | minted once by racing members, its key sealed and bound to its row, rewrapped by key rotation and counted by retirement; leaves for the advertised names, renewed by the leader with overlap and adopted by followers, a TLS connection open across a renewal kept; the hub serving it to both monitors and shipping it to each dispatch for the proxy's URL only; a Pod taking it from its lease Secret; an older agent refused with the upgrade named | `pkg/hubca`; `pkg/ui` `hubtls_test.go`; `pkg/executor/kubernetes` `hubca_test.go`; `pkg/executor/remote` `gitca_test.go`; `pkg/executor/localprocess` `gitca_test.go` |
@@ -1092,7 +1278,12 @@ read-only (`R1`–`R5`), a broad PAT narrowed only by the proxy (`W1`–`W3`), a
 device-provisioned workspace (`WS1`–`WS5`). A refusal only counts if the proxy
 made it, and every push re-reads the remote ref afterwards. Its first run, in
 Task 20346, passed all 132 checks across runc, gVisor, a firewall admitting only
-the proxy, a provisioned workspace and host mode.
+the proxy, a provisioned workspace and host mode. Its `scan` scenario (Task
+20436) pushes a leased env value from the sandbox to GitHub in a file, a commit
+message, an annotated tag and base64, then a clean commit: on its first run, from
+a runc container on sgx, every leaking push was refused by the push scan with no
+ref created on GitHub, the clean one landed, and the value appeared in no
+output, audit row, journal row or database.
 
 ### On a cluster
 
@@ -1188,6 +1379,25 @@ What remains is either deliberate or beyond what the hub can reach today:
    recorded upstream.** Turning the proxy *on*, or moving it, works for every
    checkout, because the forge URL is the new route's upstream; turning it
    *off* refuses such a checkout once, naming the directory to remove.
+6. **The push scan stops an accident and a naive leak, not a workload set on
+   publishing a value.** It matches the values the run was given in the
+   encodings listed under [the push scan](#the-push-scan) and nothing else, so
+   a value reversed, split across lines, hex-encoded, encrypted or compressed
+   inside a file passes; so does one shorter than eight bytes. A delta's copied
+   ranges are not re-read: a value whose first half sits in a delta's base —
+   on the forge, or earlier in the same pack — and whose second half the delta
+   inserts is in no single object or insert the proxy reads, and passes
+   (`TestScanResidualAValueSplitAcrossACopyAndAnInsertIsNotFound` pins the
+   boundary). An ordinary edit does not do that — git's delta encoder copies
+   runs of at least sixteen matching bytes, and a credential's bytes do not
+   already sit at the edit point — but a workload can build such a pack on
+   purpose. A workload that means to exfiltrate a credential has its network
+   for that anyway; what the scan closes is the one path every proxied push
+   crosses. After a hub restart an adopted run is scanned only for what
+   `Broker.RedactionCredentials` re-derives ([which values a session
+   has](#which-values-a-session-has)), and a push through a session no run of
+   this process names — none today, but a session minted by hand — is scanned
+   for its own upstream token alone. A hub with no git proxy scans nothing.
 
 ---
 

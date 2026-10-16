@@ -1688,9 +1688,30 @@ records it, because without the proxy nothing else is on the path.
 It is not a noisy signal to be tuned away. A well-behaved task never produces
 one, so each occurrence is either a workload doing something it was not asked to
 do or a policy narrower than the task it was minted for, and both want a human.
-Its sibling `gitproxy.push_allowed` is emitted *before* forwarding, so a
-`push_allowed` with no matching change on the forge means the forge refused it —
-branch protection, a non-fast-forward — not that the proxy did.
+Its sibling `gitproxy.push_allowed` is emitted *before* the forge's verdict is
+forwarded, so a `push_allowed` with no matching change on the forge means the
+forge refused it — branch protection, a non-fast-forward — not that the proxy did.
+
+### Alert on `gitproxy.push_secret_refused`
+
+```console
+$ cloop audit-log list --type gitproxy.push_secret_refused --since 7d
+```
+
+Every push the policy allows is scanned on its way to the forge for the
+credentials its run was given (`executors.git_proxy.push_scan`, `values` by
+default — see [the push scan](../architecture/git-proxy.md#the-push-scan)). A
+`push_secret_refused` row is a run that tried to publish one: its `findings` name
+each object, its path and commit, and the grant and secret the value came from,
+never the value. The forge got no complete pack and no ref moved, so nothing was
+published — but the agent will usually try again, so look at the run's history
+(a `git_push_refused` row) and the task's details, where the same refusal is a
+line. A grant whose env secret holds values that are not secret — a region, a
+hostname — refuses any push that mentions them; take those out of the secret, or
+narrow the grant with `--env-keys`. A push refused at a `push_scan_*` limit, or
+for a pack the proxy could not read, is a `gitproxy.push_denied` row with `scan`
+set (`limit`, `unreadable`); `cloop_gitproxy_push_scan_seconds` says how close
+pushes run to `push_scan_seconds`.
 
 ---
 

@@ -969,10 +969,14 @@ executors:
     session_minutes: 60                            # 0 means 60; ceiling is 720
     allowed_refs: ["refs/heads/cloop/**"]          # the default
     allow_delete: false
+    push_scan: values                              # the default; shapes or off
+    push_scan_max_object_mb: 1024                  # 0 means 1024; ceiling 65536
+    push_scan_max_push_mb: 4096                    # 0 means 4096; ceiling 1048576
+    push_scan_seconds: 300                         # 0 means 300; ceiling 3600
 ```
 
-`cloop hub bootstrap` writes exactly this, with `advertise_url` derived from
-`--external-url` (Task 20409).
+`cloop hub bootstrap` writes the first eight, with `advertise_url` derived from
+`--external-url` (Task 20409); the push scan's are the defaults.
 
 - **Off by default.** Interposing a proxy changes the URL sandboxes push to, so
   it is an operator's decision rather than something a config file acquires on
@@ -1029,10 +1033,24 @@ executors:
   branch list: with no proxy, such a grant is delivered read-only (`github_app`)
   or not at all (`github_pat`). See
   [limiting pushes to particular branches](../guides/secrets.md#limiting-pushes-to-particular-branches).
+- **Every push is scanned for the credentials its run was given** (Task 20436)
+  before the forge may accept it: `push_scan: values` matches the exact values
+  the run's lease and spec delivered — env values, kubeconfig tokens and client
+  keys, registry auth, egress and model relay credentials, GitHub tokens — as
+  delivered, base64- and percent-encoded; `shapes` adds pkg/redact's credential
+  formats; `off` forwards packs unread. A push carrying one is refused with no
+  ref moved, naming the objects and the grant and secret, never the value. A
+  project's own `.cloop/config.yaml` may set a stricter `push_scan`, never a
+  weaker one. A push past `push_scan_max_object_mb` or `push_scan_max_push_mb`
+  inflated, or `push_scan_seconds` of scanning (waiting on the network does not
+  count), is refused naming the setting: a scan that gave up is not one that
+  found nothing. An unreadable `push_scan` loads as `values`, never as `off`.
+  See [the push scan](../architecture/git-proxy.md#the-push-scan).
 - Every decision lands in the hash-chained audit log as
-  `gitproxy.push_denied`, `gitproxy.push_allowed`, `gitproxy.session_minted`,
+  `gitproxy.push_denied`, `gitproxy.push_secret_refused`,
+  `gitproxy.push_allowed`, `gitproxy.session_minted`,
   `gitproxy.session_renewed`, `gitproxy.session_closed`, `gitproxy.fetch` and
-  `gitproxy.rejected`. Alert on the first. Under `tls: auto`, `hub_ca.minted` and `hub_ca.leaf_issued` record
+  `gitproxy.rejected`. Alert on the first two. Under `tls: auto`, `hub_ca.minted` and `hub_ca.leaf_issued` record
   the CA and every certificate issued from it.
 
 The proxy runs inside the hub process — sessions are in memory, so the process

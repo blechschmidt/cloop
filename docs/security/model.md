@@ -4171,6 +4171,28 @@ not installed.
 | git is trusted in a work tree root owns — a Pod's emptyDir — by its exact path and in no other directory, so git's ownership check still refuses one another user owns | `pkg/executor/gitprovision: TestRootOwnedTrust`; `pkg/executor/kubernetes: TestBuildPod_HarnessGitTrustsTheWorkspace` |
 | Live, on CI's kind cluster, against the hub the Helm chart installs — on one replica and on a hub cluster of three: a Pod's workspace is provisioned through the proxy, its own git is held to the grant's repository and branches and the refusals are audited, no forge or cluster token is readable in the Pod or its object, and the run's Pod, Secrets and NetworkPolicy are deleted | `tests/kube: TestGitProxyAndKubeGuardOnKubernetes` |
 
+### Push scanning — `pushscan_test.go` and the package suites
+
+Every push the [git proxy](../git-interception-proxy.md#the-push-scan) allows is
+scanned on its way to the forge for the credentials its run was given (Task
+20436). The conformance row leases one credential of every kind that carries
+one through the real broker and pushes each, as delivered and encoded, through a
+real proxy at a forge that records whether it ever received a whole pack; the
+package rows prove the parts against packs and pushes real `git` makes. What the
+scan cannot see is under [what is not mitigated](#what-is-not-mitigated).
+
+| Guarantee | Test |
+| --- | --- |
+| A push carrying a credential its run's lease delivered — an env value, a kubeconfig token or client key, registry auth, an egress proxy password, a GitHub token; as delivered, base64- or percent-encoded — is refused before the forge holds a complete pack; the refusal names the grant and secret, and no response or audit row carries the value; a clean push reaches the forge byte for byte | `tests/security: TestAPushCarryingALeasedCredentialNeverReachesTheForge` |
+| End to end, with real `git` and `git-http-backend`: a value in a file, a commit message, an annotated tag, a push option, or a thin delta of a file the forge already has is refused, git's output says why without the value, the ref does not move, and no object the push carried is left in the repository; a clean push — with push options, or a delete that sends no pack — is forwarded byte-identical, and the same push carrying a value lands with the scan off | `pkg/gitproxy: TestPushScanRefusesALeasedValueInAFile`, `TestPushScanRefusesALeasedValueInACommitMessage`, `TestPushScanRefusesALeasedValueInAnAnnotatedTag`, `TestPushScanRefusesAThinDeltaOfAFileTheForgeHas`, `TestPushScanAcceptsACleanPushByteIdentical`, `TestPushScanOffForwardsThePackUnread`, `TestPushScanMatchesTheSessionsOwnUpstreamToken`, `TestPushScanReadsPushOptions`, `TestPushScanLetsADeleteThatSendsNoPackThrough` |
+| The pack reader reads what git writes — full and thin packs, OFS and REF deltas, SHA-256 — refuses what git would not read rather than forwarding it, holds the checksum until the verdict even when bytes follow it, names each limit's setting when it refuses at one — the time limit too for input that inflates to nothing, and the byte limit after a gzipped body is decoded — and never hands on a pack it refused (fuzzed) | `pkg/gitproxy: TestScanFindsAValueInAThinDelta`, `TestScanFindsAValueInAnOfsDelta`, `TestScanSHA256Repository`, `TestScanRefusesWhatGitWouldNotRead`, `TestScanHoldsTheChecksumBackUntilItEnds`, `TestScanRefusesBytesAfterTheChecksum`, `TestScanLimitsRefuseNamingTheirSetting`, `TestScanTimeLimitHoldsForObjectsThatInflateToNothing`, `TestScanTimeLimitHoldsInsideAnObjectOfEmptyBlocks`, `TestScanStopsReadingPastTheSessionsByteLimit`, `FuzzPackScan` |
+| A push the forge stops reading is neither allowed nor refused — the scan cannot have finished — and a transport that stops reading releases the scan instead of leaving it blocked; one session's pushes are scanned two at a time | `pkg/gitproxy: TestAPushTheForgeStoppedReadingIsNeitherAllowedNorRefused`, `TestAtMostTwoScansRunPerSession` |
+| Nothing a refusal names carries the value — not a path, a tag or a ref named after it | `pkg/gitproxy: TestScanFindsAValueInARefNameAndNeverNamesIt`, `TestScanFindsAValueInABlob` |
+| The values are every credential a lease delivered, taken out of its documents, and nothing public — no certificate, server address or constraint echo; an adopted run's are what the broker re-derives; a run's are kept while it or a session naming it lives, and held by no hub without a proxy | `pkg/secretbroker: TestCredentialValuesAreTheCredentialsALeaseDelivered`, `TestCredentialValuesUnderTheGitProxyIncludeTheSessionToken`, `TestRedactionCredentialsNameWhatRedactionValuesReturns`; `pkg/ui: TestPushScanCarriesTheRunsLeaseAndSpecValues`, `TestAnAdoptedRunScansWithWhatTheBrokerReDerives`, `TestAnAdoptedRunsPushesAreScannedForWhatItsLeaseCarries`, `TestNothingIsHeldWithoutAProxy`; a project config a sandbox replaced with a FIFO or a link stalls nothing and counts for nothing: `TestAProjectConfigTheWorkloadReplacedCannotStallTheProxy` |
+| A project may tighten the scan and never loosen it; an unreadable setting is repaired to the default, never to off | `pkg/ui: TestAProjectMayTightenThePushScanAndNeverLoosenIt`; `pkg/config: TestPushScanValidationAndRepair` |
+| A refusal reaches the run's history and the task's details, and neither carries the value | `pkg/ui: TestARefusedPushIsInTheRunsHistoryAndOnItsTask` |
+| The documented residual holds where the docs say: a value split across a delta's copy and insert is not found, and inserts on either side of a copy are not joined | `pkg/gitproxy: TestScanResidualAValueSplitAcrossACopyAndAnInsertIsNotFound`, `TestScanInsertsAcrossACopyAreNotJoined` |
+
 ### Model relay — `modelrelay_test.go`, `sessionrecords_test.go` and the package suites
 
 The [relay](../reference/configuration.md#the-model-relay-for-sandboxed-runs) is
@@ -4532,15 +4554,29 @@ assert that the kernel never paged one out of the heap of
 (encrypted swap, memory limits, no core dumps), not something a test in this
 repository can reach.
 
-**A workload can disclose its own credentials.** The suite asserts
-non-disclosure by *cloop's* surfaces (`TestLeakedCredentialNeverReachesTheRunRecord`).
-It cannot assert that a workload never prints its own token to stdout — the
-workload holds the plaintext by design. Task output is redacted of the values a
-lease delivered, not of a credential the workload obtained some other way or
-derived from a leased one; `cloop audit` reports the shapes it recognises in
-artifacts afterwards (`TestArtifactScanReportsShapesAndConfiguredValuesSeparately`),
-which is detection, not prevention. Scope grants so that the blast radius of
-such a disclosure is a single repo for a few hours. Behind the [model
+**A workload can disclose its own credentials — anywhere but in a push
+through the git proxy.** The suite asserts non-disclosure by *cloop's* surfaces
+(`TestLeakedCredentialNeverReachesTheRunRecord`). It cannot assert that a
+workload never prints its own token to stdout — the workload holds the
+plaintext by design. Task output is redacted of the values a lease delivered,
+not of a credential the workload obtained some other way or derived from a
+leased one; `cloop audit` reports the shapes it recognises in artifacts
+afterwards (`TestArtifactScanReportsShapesAndConfiguredValuesSeparately`), which
+is detection, not prevention. One path is prevention: on a hub that runs the
+git proxy, a push carrying a credential the run's lease delivered — any kind, as
+delivered, base64- or percent-encoded — is refused before the forge holds a
+complete pack, and no ref moves (`TestAPushCarryingALeasedCredentialNeverReachesTheForge`,
+`TestPushScanRefusesALeasedValueInAFile`). That stops an accident and a naive
+leak, not a workload set on publishing a value: one it transforms — reversed,
+hex-encoded, compressed into a file — passes, as does one split between a
+delta's copied and inserted bytes (`TestScanResidualAValueSplitAcrossACopyAndAnInsertIsNotFound`),
+and its network is still there to send it elsewhere. After a hub restart an
+adopted run is scanned only for its env secrets' values and its PATs — what
+`Broker.RedactionCredentials` re-derives — not for an App token, a kubeconfig,
+registry or egress secret, or a session token the previous process issued
+([which values a session has](../architecture/git-proxy.md#which-values-a-session-has)).
+A hub without the git proxy scans nothing. Scope grants so that the blast
+radius of a disclosure is a single repo for a few hours. Behind the [model
 relay](../reference/configuration.md#the-model-relay-for-sandboxed-runs) a
 sandboxed run's Claude OAuth token is no longer among them: the workload holds a
 session token instead, worth its run's model calls until the run's lease ends
