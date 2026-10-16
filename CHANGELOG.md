@@ -396,6 +396,17 @@ Members of one control plane can run both releases during the upgrade, but
   describing the code; `TestEveryResidualRiskCitesEvidence` now fails CI on a
   paragraph that cites nothing that exists, so the fix that retires a residual
   cannot land until its paragraph is rewritten (Task 20424).
+- **CI fails a feature or fix that has no changelog entry.** After 0.0.5 thirty
+  commits landed with `[Unreleased]` empty, the security fixes of Tasks 20422 to
+  20425 among them, so the Released installer workflow's 14-day gate on
+  unreleased security fixes read nothing and passed. CI's new **Every feature
+  and fix has a changelog entry** job (`scripts/changelog-coverage.py`, or `make
+  changelog-check` before pushing) lists the commits since the latest release
+  tag, merged ones included, and fails when a `feat`, `fix` or `perf` commit
+  names a task, `(Task N)`, that no line added to `CHANGELOG.md` since the tag
+  names in `[Unreleased]` or in the release being cut, or names no task and adds
+  no line itself. `docs`, `test`, `ci` and `release` commits are exempt (Task
+  20431).
 - **CI tests `pkg/orchestrator` in two shard jobs of its own**, as it does
   `pkg/ui`, after the package passed 60% of the race step's time budget (Task
   20428).

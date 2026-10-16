@@ -101,6 +101,35 @@ jobs:
           fi
           echo "go.mod and go.sum are tidy"
 
+  changelog:
+    name: Every feature and fix has a changelog entry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5 # observed locally: 0.1 s
+    # A fix reaches no device, installer or release-channel upgrade until a
+    # release carries it. The Released installer workflow fails "ship
+    # something" when an [Unreleased] Security entry has waited 14 days, but it
+    # ages only what is written: after v0.0.5 thirty commits landed with
+    # [Unreleased] empty, the security fixes of Tasks 20422 to 20425 among
+    # them, and that gate passed every day. So this fails the commit instead:
+    # a feat, fix or perf commit since the latest release tag that names a
+    # task no line added to CHANGELOG.md since the tag names (Task 20431). It
+    # reads git and nothing else.
+    #
+    # A pull request is checked out as a merge, and the script lists what a
+    # merge brings in, so a pull request's own commits are checked before it
+    # lands.
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # The whole history and its tags: the commits since the latest
+          # release are listed from them, and a shallow clone has neither.
+          fetch-depth: 0
+
+      - name: Every task a feat, fix or perf commit names since the last release has a CHANGELOG.md entry
+        run: python3 scripts/changelog-coverage.py
+
   vulnerability-scan:
     name: Vulnerability scan
     runs-on: ubuntu-latest

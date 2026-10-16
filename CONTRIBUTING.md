@@ -378,5 +378,14 @@ After every change, run:
 Commit messages follow conventional-commit style (`feat(...)`, `fix(...)`,
 `test(...)`, `docs(...)`).
 
+A `feat`, `fix` or `perf` commit changes what users run, so it needs an entry
+in `CHANGELOG.md` under `## [Unreleased]` that names its task, `(Task N)`, as
+its subject does. A commit that names no task must add its line itself. Put a
+security fix under **Security**: the *Released installer* workflow fails once
+one has waited 14 days for a release. CI's **Every feature and fix has a
+changelog entry** job checks every commit since the latest release tag; run it
+locally with `make changelog-check`. `docs`, `test`, `ci` and `release`
+commits are exempt.
+
 Pre-commit hooks must not be bypassed (`--no-verify` is forbidden) — fix the
 underlying issue instead.

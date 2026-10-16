@@ -1,6 +1,6 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench lint lint-tool lint-version clean \
         docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve docs-freshness \
-        release-dist \
+        release-dist changelog-check \
         terraform-test terraform-validate
 
 BINARY := cloop
@@ -317,6 +317,16 @@ docs-site: $(DOCS_VENV) docs-check docs-stage
 ## unauthenticated API limit.
 docs-freshness:
 	@python3 scripts/docs-freshness.py --max-lag-hours $(DOCS_MAX_LAG_HOURS)
+
+## changelog-check: fail when a feat, fix or perf commit since the latest release
+##                  tag names a task no line added to CHANGELOG.md names
+##
+## CI's changelog job, run locally before pushing. The release notes and the
+## Released installer workflow's 14-day gate on security fixes both read
+## CHANGELOG.md, and neither can see an entry nobody wrote. Needs the whole
+## history and the tags; reads git only.
+changelog-check:
+	@python3 scripts/changelog-coverage.py
 
 ## screenshots: rebuild docs/screenshots/ from a throwaway demo hub
 ##
