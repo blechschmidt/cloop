@@ -950,6 +950,10 @@ const OPENERS = {
     open: async () => { await onExecutors('openExecutorAudience'); },
     ready: visible('#execAudienceValue'),
   },
+  'executor-labels-overlay': {
+    open: async () => { await onExecutors('openExecutorLabels'); },
+    ready: visible('#execLabelsInput'),
+  },
   'secret-overlay': {
     open: async () => { await onSecrets('openSecretModal'); },
     ready: visible('#secretName'),

@@ -39,6 +39,11 @@ type BrokerSource struct {
 	ExecutorID string
 	// Actor is the audit-trail identity for the lease.
 	Actor string
+	// Records is the hub's record of its executors, which gives the lease the
+	// labels of the executor it is for — this one, or the virtual executor
+	// a dispatch names — for the label grants it holds (Task 20432). Nil
+	// leases by ID alone, which no label grant matches.
+	Records secretbroker.ExecutorRecords
 }
 
 // New returns a source, or an error when it would be unusable.
@@ -145,14 +150,23 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 	// leasing as the path the run was dispatched for found nothing, and a
 	// feature whose branch rides on a private upstream clone was refused
 	// with "no active GitHub grant named …" while that grant was in force.
-	lease, err := s.Broker.LeaseFor(ctx, secretbroker.Requester{
-		ExecutorID:    executorID,
+	//
+	// And as the executor the hub recorded, labels included, so a grant
+	// issued to label:region=eu reaches the fetch on an executor carrying it
+	// (Task 20432) — a virtual executor through its device's labels.
+	requester, err := secretbroker.RequesterFor(s.Records, executorID, secretbroker.RequestScope{
 		ProjectID:     executor.PolicyProjectPath(projectID),
 		GitHubProxied: proxied,
 		// Only a GitHub token is read out of this lease; a kubeconfig the
 		// same subjects hold is discarded, never handed on (Task 20420).
 		KubeInProcess: true,
-	}, s.Actor)
+	})
+	if err != nil {
+		return executor.WorkspaceAccess{}, noop, denied(fmt.Sprintf(
+			"the hub's record of executor %s, which decides the label grants it holds, could not be read: %v",
+			executorID, err))
+	}
+	lease, err := s.Broker.LeaseFor(ctx, requester, s.Actor)
 	if err != nil {
 		return executor.WorkspaceAccess{}, noop, fmt.Errorf("gitcreds: lease for %s: %w", projectID, err)
 	}

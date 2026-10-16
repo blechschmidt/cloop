@@ -247,6 +247,19 @@ func (d *DB) RenewProxySession(kind, id, holder string, expiresAt, renewedAt tim
 		kind, id, holder)
 }
 
+// RescopeProxySession replaces an open session's scope, provided holder holds
+// it, and reports whether it did. A relabeled egress session's record takes
+// its executor's new labels this way (Task 20432).
+func (d *DB) RescopeProxySession(kind, id, holder, scope string) (bool, error) {
+	if strings.TrimSpace(scope) == "" {
+		scope = "{}"
+	}
+	return d.execOne(`UPDATE proxy_sessions SET scope_json = ?, updated_at = ?
+		WHERE kind = ? AND session_id = ? AND holder = ? AND closed_at = ''`,
+		fmt.Sprintf("rescope proxy session %s/%s", kind, id),
+		scope, formatOptionalTime(time.Now().UTC()), kind, id, holder)
+}
+
 // CheckpointProxySession replaces an open session's counters, provided holder
 // holds it, and reports whether it did.
 func (d *DB) CheckpointProxySession(kind, id, holder, counters string) (bool, error) {

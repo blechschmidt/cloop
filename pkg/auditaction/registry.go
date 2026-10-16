@@ -486,6 +486,19 @@ var registry = []Entry{
 			"whole fleet — the one edit here that grants rather than revokes.",
 	},
 	{
+		Action:    ActionExecutorLabels,
+		Home:      HomeControlPlane,
+		Entity:    "executor",
+		Trigger:   "An admin replaces an enrolled device's labels, the ones label grants are matched against.",
+		Payload:   []string{"action", "executor_id", "from", "to", "leases", "sessions", "taken_back"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`from` and `to` are the device's labels before and after. `leases` and `sessions` count the " +
+			"live secret leases and egress sessions — the device's and its virtual executors' — that were " +
+			"re-judged by the new labels, and `taken_back` how many label grants they no longer matched; each " +
+			"of those has its own lease.revoke_sent or egress.close row naming the grant.",
+	},
+	{
 		Action:    ActionExecutorVirtual,
 		Home:      HomeControlPlane,
 		Entity:    "executor",

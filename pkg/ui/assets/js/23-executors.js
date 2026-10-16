@@ -354,6 +354,11 @@ function _renderExecutors(d) {
     if (invChips) {
       h += '<div class="exec-chips">' + invChips + '</div>';
     }
+    // The labels label grants are matched against (Task 20432).
+    if (ex.labels) {
+      h += '<div class="exec-chips">' + Object.keys(ex.labels).sort().map(k =>
+        '<span class="exec-chip">' + esc(k + '=' + ex.labels[k]) + '</span>').join('') + '</div>';
+    }
 
     h += '<div class="exec-meta">';
     h += '<span>Load: ' + (ex.running_known ? esc(ex.running) + ' running' : 'unknown') + '</span>';
@@ -435,7 +440,8 @@ function _renderExecutors(d) {
     if (ex.kind === 'remote') {
       h += '<button class="btn" style="padding:3px 9px;font-size:11.5px" '
         + 'data-action="openExecutorSandbox" data-arg="' + i + '" '
-        + 'title="Whether payloads run on this device&#39;s host or in a container on it, and under which runtime">Sandbox</button>';
+        + 'title="Whether payloads run on this device&#39;s host or in a container on it, and under which runtime">Sandbox</button>'
+        + '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="openExecutorLabels" data-arg="' + i + '">Labels</button>';
     }
     // Sub-executors with their own firewall and devices (Task 20345).
     if (ex.kind === 'remote' || ex.kind === 'virtual') {
@@ -495,6 +501,7 @@ ACTIONS.openExecutorVirtual  = execAct('openExecutorVirtual');
 ACTIONS.openExecutorFirewall = execAct('openExecutorFirewall');
 ACTIONS.openExecutorLimits   = execAct('openExecutorLimits');
 ACTIONS.openExecutorAudience = execAct('openExecutorAudience');
+ACTIONS.openExecutorLabels   = execAct('openExecutorLabels');
 ACTIONS.upgradeExecutor      = execAct('upgradeExecutor');
 ACTIONS.revokeExecutor       = execAct('revokeExecutor');
 ACTIONS.cordonExecutor       = execAct('cordonExecutor');

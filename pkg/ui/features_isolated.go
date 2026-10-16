@@ -474,10 +474,13 @@ func (s *Server) hubFeatureToken(ctx context.Context, dir, branch string) (cred 
 		}
 		if gerr == nil && grantName != "" {
 			ws.CredentialGrant = grantName
-			broker, closeDB, berr := openUIBroker(controlPlaneDir())
+			broker, brokerDB, closeDB, berr := openUIBrokerDB(controlPlaneDir())
 			if berr == nil {
 				src, serr := gitcreds.New(broker, ex.ID(), workspaceLeaseActor)
 				if serr == nil {
+					// As workspaceGrantFor chose the grant: the executor as
+					// the hub records it (Task 20432).
+					src.Records = hubExecutorRecords(brokerDB)
 					access, rel, lerr := src.ForProxiedWorkspace(ctx, parent, ws)
 					if errors.As(lerr, &grantErr) && grantErr.HostMismatch() {
 						rel()

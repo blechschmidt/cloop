@@ -93,6 +93,10 @@ type BrokerSource struct {
 	Context string
 	// Actor is recorded in the broker's audit trail.
 	Actor string
+	// Records is the hub's record of its executors, which gives the lease this
+	// executor's labels for the label grants it holds (Task 20432). Nil
+	// leases by ID alone, which no label grant matches.
+	Records secretbroker.ExecutorRecords
 }
 
 // NewBrokerSource validates and returns a broker-backed source.
@@ -123,13 +127,16 @@ func (s *BrokerSource) Describe() string {
 
 // Acquire implements CredentialSource.
 func (s *BrokerSource) Acquire(ctx context.Context, projectID string) (*Credentials, error) {
-	lease, err := s.Broker.LeaseFor(ctx, secretbroker.Requester{
-		ExecutorID: s.ExecutorID,
-		ProjectID:  projectID,
+	requester, err := secretbroker.RequesterFor(s.Records, s.ExecutorID, secretbroker.RequestScope{
+		ProjectID: projectID,
 		// The driver's own cluster credential: parsed here, used by this
 		// process to create Pods, and never handed to one (Task 20420).
 		KubeInProcess: true,
-	}, s.Actor)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes: lease kubeconfig: %w", err)
+	}
+	lease, err := s.Broker.LeaseFor(ctx, requester, s.Actor)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes: lease kubeconfig: %w", err)
 	}

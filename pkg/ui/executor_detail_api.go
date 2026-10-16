@@ -177,6 +177,9 @@ func (s *Server) handleExecutorDetail(w http.ResponseWriter, r *http.Request) {
 
 	view := s.buildExecutorView(r.Context(), id, live, row, bound,
 		executor.DefaultRegistry.DefaultID(), schedulerFor(db))
+	views := []executorView{view}
+	applyRecordedLabels(views, db)
+	view = views[0]
 
 	jsonOK(w, executorDetailView{
 		executorView: view,

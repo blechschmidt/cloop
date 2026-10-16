@@ -107,7 +107,7 @@ cloop secret grant <secret> --to <subject> [constraints] [--ttl 24h]
 | --- | --- |
 | `project:/srv/app` | that project path exactly (canonicalised; `/srv/app-staging` does **not** match) |
 | `executor:edge-01` | that executor id exactly |
-| `label:region=eu,gpu=true` | executors carrying **all** of those labels |
+| `label:region=eu,gpu=true` | executors the hub records with **all** of those labels — see [Label subjects](#label-subjects) |
 | `any` | every requester — legacy imports only |
 
 **Constraint flags**, by kind:
@@ -127,6 +127,51 @@ cloop secret grant <secret> --to <subject> [constraints] [--ttl 24h]
 | `--interfaces` | `host_interface` | interface-*name* globs from the inventory — **required** |
 
 `--scope` is a grouping label for operators and carries **no** authority.
+
+### Label subjects
+
+A grant to `label:region=eu,gpu=true` reaches every executor that carries both
+labels, on every path a credential takes: a run's lease, its egress proxy
+session, the workspace fetch, the Kubernetes driver's own cluster credential.
+Which labels an executor carries is the hub's own record of it, never what the
+executor says about itself:
+
+| Executor | Its labels |
+| --- | --- |
+| An enrolled device | The labels on its agent credential: chosen when the enrollment token was minted (`cloop executor enroll --label region=eu`, or the Enroll dialog), and changed since with the **Labels** button on its card (`PUT /api/executors/{id}/labels`, audited as `executor.labels`) |
+| A virtual executor | Its device's labels. Its own registry row carries only the hub's bookkeeping `parent=<device>`, which no selector reaches it by |
+| A configured container or Kubernetes executor | `executors.container.labels` or `executors.kubernetes.labels` in the hub's configuration, read when the hub starts |
+| The host-process executor, or one the hub has no record of | None — no label grant reaches it |
+
+The labels a device's agent advertises when it connects — what
+`cloop executor agent --label` sets on the device — **never count**: whoever
+controls the device chooses those, and a selector the device could satisfy by
+claiming `region=eu` would be no boundary at all.
+
+When an executor's labels change, what stood on a label grant is re-judged.
+Saving a device's labels re-checks every running lease and egress session on
+the device and on its virtual executors at once, and a credential from a label
+grant the new labels no longer match is taken back — from the hub's copy and
+every holder, as revoking the grant would (see [Revoking a grant](#revoking-a-grant)) —
+while the lease keeps its other grants. Every hub member re-checks the leases
+it holds once a minute, which is how an edit made on another member reaches
+them, and a hub restarted with other configured labels takes back what those
+no longer match from the runs it adopts. Leases and egress sessions record the
+labels they are judged by, so the process that adopts a run judges it the same
+way.
+
+The Secrets panel shows, under each label grant, the executors its selector
+reaches now — or that it reaches none, which is what a mistyped selector looks
+like — and the grant dialog says the same as the subject is typed.
+`cloop secret grant` prints it after a label grant, and
+`cloop secret lease --executor edge-01` names the labels the hub records for
+the executor it is dry-running.
+
+A label selector names a property of machines, so a grant to one reaches any
+executor that comes to carry the labels later — a device enrolled with them, or
+relabeled — as well as those that carry them now. Labels are refused where they
+are typed when no selector could name them: a key with a space, `,` or `=`, a
+value with `,`.
 
 One more constraint applies to `local_repo` and `host_device` only:
 `--writable`, which is the single constraint that *widens* rather than narrows —
@@ -574,10 +619,12 @@ $ cloop secret grant workspace-pat \
 Five things about that command are load-bearing:
 
 - **The subject is the executor**, not the project. Either works — the grant is
-  matched against a requester carrying both the executor id and the project path
-  — but the executor is the honest description of what is happening: a machine
-  is being authorised to fetch a repository. `label:` subjects do **not** work
-  on this path.
+  matched against a requester carrying the executor id, its recorded labels and
+  the project path — but the executor is the honest description of what is
+  happening: a machine is being authorised to fetch a repository. A
+  [label subject](#label-subjects) works here too, for a fleet: a grant to
+  `label:site=lab` lets every device labelled `site=lab`, and each virtual
+  executor on one, fetch the repositories it admits.
 - **`--repos` must admit the repository being cloned**, matched as `owner/name`
   against the same globs documented above. This is the check that keeps a
   workspace fetch inside its grant.
@@ -1929,6 +1976,13 @@ $ cloop egress test https://internal.example.com --to label:region=eu --timeout 
 
 This redeems a real session and issues the request through the same code path a
 container hits, so a pass means the policy genuinely allows it.
+
+`--to executor:edge-01` tests as that executor with the labels the hub records
+for it, which is how a run on it is judged. `--to label:region=eu` tests as a
+hypothetical executor carrying exactly those labels, and says so: whether any
+real executor carries them is the hub's record to say — `cloop egress grant`
+prints which do when it issues a label grant, and the Secrets panel lists them
+under it.
 
 ---
 

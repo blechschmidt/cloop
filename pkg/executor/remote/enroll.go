@@ -44,6 +44,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/security"
 )
 
@@ -220,6 +221,13 @@ func Mint(store Store, opts MintOptions) (token string, rec EnrollmentRecord, er
 			"remote: mint: ttl %s exceeds the %s maximum; enrollment tokens are meant to be short-lived",
 			ttl, MaxEnrollTTL)
 	}
+	// The labels become the device's record, which label grants are matched
+	// against (Task 20432): one no grant selector could name is refused here,
+	// where the operator typed it.
+	labels := executor.NormalizeLabels(opts.Labels)
+	if err := executor.ValidateLabels(labels); err != nil {
+		return "", EnrollmentRecord{}, fmt.Errorf("remote: mint: labels: %w", err)
+	}
 
 	id, err := randomString(idBytes)
 	if err != nil {
@@ -236,7 +244,7 @@ func Mint(store Store, opts MintOptions) (token string, rec EnrollmentRecord, er
 		Name:        name,
 		SecretHash:  hashSecret(secret),
 		WorkDirRoot: strings.TrimSpace(opts.WorkDirRoot),
-		Labels:      opts.Labels,
+		Labels:      labels,
 		CreatedAt:   now,
 		ExpiresAt:   now.Add(ttl),
 		CreatedBy:   opts.CreatedBy,

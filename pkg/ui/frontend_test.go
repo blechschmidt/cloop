@@ -76,6 +76,14 @@ var firewallAPISource string
 //go:embed history.go
 var historySource string
 
+// executorLabelsSource is pkg/ui/executor_labels.go (Task 20432), embedded for
+// the same two reasons: it broadcasts `executor_update` and `secrets_update`,
+// and handleExecutorLabels is registered without a method prefix, so the verbs
+// it accepts are discoverable only from its body.
+//
+//go:embed executor_labels.go
+var executorLabelsSource string
+
 // auditAPISource is pkg/ui/audit_api.go, for the same reason again: the
 // `audit_append` broadcast (Task 20167) lives there.
 //
@@ -287,6 +295,7 @@ func allUISources() string {
 		"\n" + executorPolicyAPISource +
 		"\n" + firewallAPISource +
 		"\n" + historySource +
+		"\n" + executorLabelsSource +
 		"\n" + suggestAPISource +
 		"\n" + membersSource +
 		"\n" + diskFloorSource +

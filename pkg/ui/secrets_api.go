@@ -217,6 +217,10 @@ type grantView struct {
 	// and why. Recorded on a grant whatever this hub runs, so it is sent
 	// whenever there is one.
 	UnguardedAck *unguardedAckView `json:"unguarded_ack,omitempty"`
+	// LabelMatches, for a grant to a label selector, is which executors its
+	// selector reaches now — none, when no executor carries the labels (Task
+	// 20432). Executor IDs and names, which the caller may list anyway.
+	LabelMatches *labelMatchView `json:"label_matches,omitempty"`
 }
 
 // unguardedAckView is a grant's unguarded acknowledgement. Identity, time and
@@ -915,6 +919,7 @@ func (s *Server) handleGrantsList(w http.ResponseWriter, r *http.Request) {
 	sort.SliceStable(resp.Grants, func(i, j int) bool {
 		return resp.Grants[i].CreatedAt.After(resp.Grants[j].CreatedAt)
 	})
+	s.annotateLabelMatches(r, bs.db, resp.Grants)
 	jsonOK(w, resp)
 }
 

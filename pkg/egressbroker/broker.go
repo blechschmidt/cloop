@@ -441,7 +441,9 @@ func (b *Broker) Redeem(ctx context.Context, req RedeemRequest) (*Redemption, er
 		IssuedAt:   now,
 		tokenHash:  hash,
 		doneCh:     make(chan struct{}),
-		requester:  secretbroker.Requester{ExecutorID: r.ExecutorID, ProjectID: r.ProjectID, Labels: copyLabels(r.Labels)},
+		// Who it was issued to, and nothing else of the request: the executor
+		// as the hub recorded it, for the project (Task 20432).
+		requester: secretbroker.NewRequester(r.Executor(), secretbroker.RequestScope{ProjectID: r.ProjectID}),
 	}
 	sess.setExpiry(chosen.SessionDeadline(now, b.maxSessionTTL))
 
@@ -596,7 +598,7 @@ func (b *Broker) recheckGrant(sess *Session, now time.Time) (Grant, error) {
 	if reason := g.DenyReason(now); reason != "" {
 		return Grant{}, fmt.Errorf("%w: %s", g.DenySentinel(), reason)
 	}
-	if !g.Subject.Matches(sess.requester) {
+	if !g.Subject.Matches(sess.issuedTo()) {
 		return Grant{}, fmt.Errorf("%w: grant %s is no longer issued to this requester", ErrNoGrant, sess.GrantID)
 	}
 	return g, nil

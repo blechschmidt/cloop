@@ -1031,6 +1031,77 @@
       execAudienceTarget = null;
     }
 
+    // ── Labels (Task 20432) ─────────────────────────────────────────────────────
+    //
+    // A device's labels are what a grant to label:region=eu,… is matched
+    // against: chosen at enrollment, changed here. The hub audits the edit and
+    // takes back, from every running task on the device or its virtual
+    // executors, a label grant the new labels no longer match.
+    let execLabelsTarget = null;
+
+    function openExecutorLabels(idx) {
+      const ex = _execAt(idx);
+      if (!ex) return;
+      execLabelsTarget = {id: ex.id};
+      const sub = document.getElementById('execLabelsSub');
+      if (sub) sub.textContent = ex.id + ' · ' + _execKindLabel(ex.kind);
+      const input = document.getElementById('execLabelsInput');
+      if (input) {
+        const labels = ex.labels || {};
+        input.value = Object.keys(labels).sort().map(k => k + '=' + labels[k]).join(', ');
+      }
+      _execLabelsNote('');
+      openOverlay('executor-labels-overlay', {dismiss: closeExecutorLabels, focus: '#execLabelsInput'});
+    }
+
+    function closeExecutorLabels() {
+      closeOverlay('executor-labels-overlay');
+      execLabelsTarget = null;
+    }
+
+    function _execLabelsNote(text) {
+      const el = document.getElementById('execLabelsNote');
+      if (!el) return;
+      el.style.display = text ? '' : 'none';
+      el.textContent = text || '';
+    }
+
+    // _execLabelsParse reads "k=v, k2=v2" into a map, or throws naming the pair
+    // that is not one. A value may contain '=': a selector splits at the first.
+    function _execLabelsParse(text) {
+      const out = {};
+      String(text || '').split(/[,\n]/).map(p => p.trim()).filter(Boolean).forEach(p => {
+        const at = p.indexOf('=');
+        if (at <= 0) throw new Error('"' + p + '" is not key=value');
+        out[p.slice(0, at).trim()] = p.slice(at + 1).trim();
+      });
+      return out;
+    }
+
+    function saveExecutorLabels() {
+      const t = execLabelsTarget;
+      if (!t) return;
+      let labels;
+      try {
+        labels = _execLabelsParse((document.getElementById('execLabelsInput') || {}).value);
+      } catch (e) {
+        _execLabelsNote(e.message);
+        return;
+      }
+      apiMethod('PUT', '/api/executors/' + encodeURIComponent(t.id) + '/labels', {labels}).then(d => {
+        if (!d || d.error) {
+          _execLabelsNote(_execDetailErrText(d && d.error) || 'Could not save the labels.');
+          return;
+        }
+        const taken = ((d.recheck || {}).taken_back || []).length;
+        toast(taken
+          ? 'Labels saved; ' + taken + ' credential' + (taken === 1 ? '' : 's') + ' taken back from running work'
+          : 'Labels saved', 'ok');
+        closeExecutorLabels();
+        loadExecutors();
+      }).catch(err => _execLabelsNote(_execDetailErrText(err) || 'Could not save the labels.'));
+    }
+
     function _execAudienceWarn(text) {
       const el = document.getElementById('execAudienceWarn');
       if (!el) return;
@@ -1157,6 +1228,8 @@
       if (ttl) ttl.value = '';
       const root = document.getElementById('enrollRoot');
       if (root) root.value = '';
+      const labels = document.getElementById('enrollLabels');
+      if (labels) labels.value = '';
       openOverlay('enroll-overlay', {dismiss: closeEnrollModal, focus: name});
     }
 
@@ -1176,6 +1249,12 @@
       };
       const ttlRaw = (document.getElementById('enrollTTL') || {}).value;
       if (ttlRaw) body.ttl_minutes = parseInt(ttlRaw, 10);
+      try {
+        body.labels = _execLabelsParse((document.getElementById('enrollLabels') || {}).value);
+      } catch (e) {
+        if (errEl) { errEl.textContent = e.message; errEl.style.display = 'block'; }
+        return;
+      }
       if (errEl) errEl.style.display = 'none';
       if (btn) btn.disabled = true;
 
@@ -1698,7 +1777,8 @@
       editExecutorVirtual, saveExecutorVirtual, deleteExecutorVirtual, openExecutorFirewall,
       closeExecutorFirewall, saveExecutorFirewall, clearExecutorFirewall, openExecutorLimits,
       closeExecutorLimits, saveExecutorLimits, clearExecutorLimits, openExecutorAudience,
-      closeExecutorAudience, addExecutorAudience, removeExecutorAudience, openEnrollModal,
+      closeExecutorAudience, addExecutorAudience, removeExecutorAudience, openExecutorLabels,
+      closeExecutorLabels, saveExecutorLabels, openEnrollModal,
       closeEnrollModal, submitEnroll, copyEnrollCommand, copyEnrollInstall, upgradeExecutor,
       editFleetAutoUpdate, revokeExecutor, cordonExecutor, uncordonExecutor, drainExecutor
     }, null, null, `
@@ -1822,6 +1902,11 @@
             <div class="form-group">
               <label class="form-label">Workspace root on the device (optional)</label>
               <input class="form-input" id="enrollRoot" placeholder="/var/lib/cloop/workspaces">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="enrollLabels">Labels (optional)</label>
+              <input class="form-input" id="enrollLabels" placeholder="region=eu, gpu=true" spellcheck="false">
+              <div class="form-hint">What a grant to <code>label:region=eu</code> is matched against. Change them later with Labels on the device&#39;s card.</div>
             </div>
             <div id="enrollError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
             <div class="modal-footer">
@@ -1976,6 +2061,23 @@
             <button class="btn danger" id="execLimitsClear" data-act="clearExecutorLimits">Remove ceiling</button>
             <button class="btn" data-act="closeExecutorLimits">Cancel</button>
             <button class="btn primary" data-act="saveExecutorLimits">Save</button>
+          </div>
+        </div>
+      </div>
+      <div id="executor-labels-overlay" data-overlay="flex" data-dismiss="closeExecutorLabels" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:560px;max-width:95vw;max-height:90vh;overflow:auto">
+          <h2 style="font-size:15px;font-weight:600;margin-bottom:2px">Labels</h2>
+          <div id="execLabelsSub" style="font-family:monospace;font-size:11px;color:var(--muted);margin-bottom:16px"></div>
+          <div class="form-hint" style="margin-bottom:14px">What a grant to <code>label:region=eu,gpu=true</code> is matched against: it reaches this device, and every virtual executor on it, while the device carries all of those labels. When you save, a running task that holds a credential from a label grant the new labels no longer match gives it back. Labels the device&#39;s agent reports about itself never count.</div>
+          <div class="form-group">
+            <label class="form-label" for="execLabelsInput">Labels</label>
+            <input class="form-input" id="execLabelsInput" placeholder="region=eu, gpu=true" spellcheck="false" data-enter="saveExecutorLabels">
+            <div class="form-hint">key=value pairs separated by commas. Leave it empty for none.</div>
+          </div>
+          <div id="execLabelsNote" class="exec-sched-note" style="display:none;margin-bottom:10px"></div>
+          <div class="modal-footer">
+            <button class="btn" data-act="closeExecutorLabels">Cancel</button>
+            <button class="btn primary" data-act="saveExecutorLabels">Save</button>
           </div>
         </div>
       </div>

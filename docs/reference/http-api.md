@@ -93,14 +93,14 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-295 endpoints, by the permission each one requires:
+298 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
 | `public` (no permission) | 60 |
 | `audit.read` | 5 |
 | `config.write` | 15 |
-| `executor.manage` | 33 |
+| `executor.manage` | 35 |
 | `executor.read` | 6 |
 | `project.read` | 54 |
 | `project.share` | 3 |
@@ -109,7 +109,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `run.stop` | 2 |
 | `sandbox.attach` | 2 |
 | `secret.grant` | 15 |
-| `secret.own` | 14 |
+| `secret.own` | 15 |
 | `secret.request` | 5 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
@@ -196,6 +196,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/executors/{id}/firewall` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/firewall` | `executor.manage` | executor |
 | PUT | `/api/executors/{id}/firewall` | `executor.manage` | executor |
+| GET | `/api/executors/{id}/labels` | `executor.manage` | executor |
+| PUT | `/api/executors/{id}/labels` | `executor.manage` | executor |
 | GET | `/api/executors/{id}/limits` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/limits` | `executor.manage` | executor |
 | PUT | `/api/executors/{id}/limits` | `executor.manage` | executor |
@@ -245,6 +247,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/grant-requests/{id}/withdraw` | `secret.request` | global |
 | GET | `/api/grants` | `secret.own` | global |
 | POST | `/api/grants` | `secret.own` | global |
+| GET | `/api/grants/matches` | `secret.own` | global |
 | DELETE | `/api/grants/{id}` | `secret.own` | global |
 | GET | `/api/grants/{id}/holders` | `secret.own` | global |
 | POST | `/api/grants/{id}/unguarded` | `user.manage` | global |

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -427,6 +429,7 @@ own allowed_refs is the ceiling and --branches narrows within it.`,
 		color.Green("✓ granted %s to %s", args[0], g.Subject.String())
 		fmt.Printf("  grant:       %s\n", g.ID)
 		fmt.Printf("  constraints: %s\n", g.Constraints.Summary())
+		printLabelReach(g.Subject, "  reaches:     ")
 		if g.ExpiresAt.IsZero() {
 			color.New(color.FgYellow).Println("  expires:     never")
 		} else {
@@ -717,7 +720,7 @@ denial reasons, never payloads.
 		// PAT on a hub with no git proxy, an expired grant, a mint GitHub
 		// refused.
 		var denied []secretbroker.Event
-		broker, closeFn, err := openBrokerObserved(secretbroker.AuditorFunc(func(ev secretbroker.Event) {
+		broker, db, closeFn, err := openBrokerDB(secretbroker.AuditorFunc(func(ev secretbroker.Event) {
 			if ev.Action == secretbroker.ActionLease && ev.Decision == secretbroker.DecisionDeny && ev.GrantID != "" {
 				denied = append(denied, ev)
 			}
@@ -727,7 +730,19 @@ denial reasons, never payloads.
 		}
 		defer closeFn()
 
-		lease, err := broker.Lease(cmd.Context(), executorID, projectID)
+		// As a dispatch asks: the executor as the hub records it, so a grant
+		// issued to a label selector its labels match is in the dry run too
+		// (Task 20432).
+		wd, _ := os.Getwd()
+		rec, err := secretbroker.LookupExecutor(cliExecutorRecords(db, wd), executorID)
+		if err != nil {
+			return err
+		}
+		if rec.HasLabels() {
+			color.New(color.Faint).Printf("executor %s carries %s (from its %s)\n", rec.ID, rec.LabelString(), rec.Source)
+		}
+		lease, err := broker.LeaseFor(cmd.Context(),
+			secretbroker.NewRequester(rec, secretbroker.RequestScope{ProjectID: projectID}), "")
 		if err != nil {
 			return err
 		}
@@ -905,4 +920,64 @@ func readAllStdin() ([]byte, error) {
 		}
 	}
 	return buf, nil
+}
+
+// cliExecutorRecords is the hub's record of its executors as a command run in
+// workDir sees it: db's agent credentials and virtual executors, and the
+// labels workDir's configuration gives its configured executors (Task 20432).
+// A configuration that cannot be read gives them none.
+func cliExecutorRecords(db *statedb.DB, workDir string) secretbroker.ExecutorRecords {
+	var configured map[string]map[string]string
+	if cfg, err := config.Load(workDir); err == nil && cfg != nil {
+		configured = cfg.Executors.ConfiguredExecutorLabels()
+	}
+	return executorstore.Records{DB: db, Configured: func() (map[string]map[string]string, error) {
+		return configured, nil
+	}}
+}
+
+// printLabelReach says which executors a grant to sub reaches now, for a
+// label selector (Task 20432): the executors whose recorded labels carry every
+// pair it names — or that none does yet, which is why such a grant delivers
+// nothing until one is labelled so. Nothing for any other subject.
+func printLabelReach(sub secretbroker.Subject, label string) {
+	if !sub.LabelSubject() {
+		return
+	}
+	workDir, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	db, err := statedb.Open(state.DBPath(workDir))
+	if err != nil {
+		color.New(color.FgYellow).Printf("%s(could not read the executors to say which this reaches: %v)\n", label, err)
+		return
+	}
+	defer db.Close()
+	var configured []executorstore.FleetMember
+	if cfg, err := config.Load(workDir); err == nil && cfg != nil {
+		for id := range cfg.Executors.ConfiguredExecutorLabels() {
+			configured = append(configured, executorstore.FleetMember{ID: id, Name: id, Kind: "configured"})
+		}
+	}
+	members, err := executorstore.Fleet(db, cliExecutorRecords(db, workDir), configured)
+	if err != nil {
+		color.New(color.FgYellow).Printf("%s(could not read the executors to say which this reaches: %v)\n", label, err)
+		return
+	}
+	reach := executorstore.Reaches(members, sub)
+	if len(reach) == 0 {
+		color.New(color.FgYellow).Printf("%sno executor yet: it reaches one only when an executor carries %s\n",
+			label, strings.TrimPrefix(sub.String(), "label:"))
+		return
+	}
+	names := make([]string, 0, len(reach))
+	for _, m := range reach {
+		name := m.ID
+		if m.Device != "" {
+			name += " (on " + m.Device + ")"
+		}
+		names = append(names, name)
+	}
+	fmt.Printf("%s%s\n", label, strings.Join(names, ", "))
 }

@@ -116,6 +116,15 @@ const (
 	// result — an executor's last audience entry being withdrawn widens access
 	// to the whole fleet, which reads as a small edit and is not one.
 	ActionExecutorAudience Action = "executor.audience"
+	// ActionExecutorLabels records an admin replacing an enrolled device's
+	// labels (Task 20432): what a grant issued to a label selector is matched
+	// against, so an edit decides which credentials reach the machine.
+	//
+	// The payload carries the labels before and after, and what re-judging the
+	// device's running leases and egress sessions took back — a credential
+	// that stopped matching leaves the workloads holding it at the edit, not at
+	// the lease's next renewal.
+	ActionExecutorLabels Action = "executor.labels"
 	// ActionExecutorVirtual records a virtual executor being created, changed
 	// or deleted (Task 20345): a sub-executor of a device with its own engine,
 	// runtime, IP firewall and host devices.

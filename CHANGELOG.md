@@ -10,6 +10,49 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+### Security
+
+- **A grant to a label selector reaches the executors the hub records with
+  those labels, and nothing a device says about itself counts.** A grant to
+  `label:region=eu,gpu=true` was accepted, listed and audited, and delivered
+  nothing: no dispatch path — a run's lease, its egress session, the workspace
+  fetch, the Kubernetes driver's credential, the GitHub App picker, the
+  harness-credential check, `hub doctor --smoke` — ever gave the broker the
+  executor's labels. Every requester is now built by one constructor,
+  `secretbroker.NewRequester`, from the hub's own record of the executor: an
+  enrolled device's agent credential, a virtual executor's device's, a
+  configured executor's new `executors.container.labels` or
+  `executors.kubernetes.labels`. The labels a device's agent advertises at
+  hello never count, and `tests/arch` fails on a requester assembled anywhere
+  else. Leases and egress sessions record the labels they are judged by, so a
+  run adopted after a restart is judged the same way, and the workspace fetch
+  now honours label grants instead of the guide saying it did not. **A label
+  grant issued on an earlier build starts delivering on this one:** before
+  upgrading, list the grants whose subject begins `label:` (`cloop secret
+  grants`, `cloop egress list`) and revoke any you did not mean to keep — after
+  it, the Secrets panel shows which executors each one reaches (Task 20432).
+
+### Added
+
+- **Device labels can be changed on the hub, and the credentials they no longer
+  qualify for are taken back from running work.** **Labels** on a device's card
+  (`PUT /api/executors/{id}/labels`, audited as `executor.labels`) replaces the
+  labels it was enrolled with; the device's running leases and egress sessions,
+  and its virtual executors', are re-judged at once, and a label grant the new
+  labels no longer match is taken back as a revoked grant is, from the hub's copy
+  and every holder. Each hub member re-checks the leases it holds once a minute,
+  which carries an edit made elsewhere, or a configuration the hub restarted
+  with, to them. The Enroll dialog takes labels too, and labels no selector
+  could name — a `,` in a value, a space in a key — are refused where they are
+  typed (Task 20432).
+- **The Secrets panel shows which executors a label grant reaches.** Each
+  grant to a label selector lists the executors carrying its labels now, or
+  says that none does; the grant dialog answers the same as the subject is
+  typed (`GET /api/grants/matches`), and `cloop secret grant` and
+  `cloop egress grant` print it. `cloop secret lease --executor` names the
+  labels the hub records for the executor it dry-runs, and
+  `cloop egress test --to executor:<id>` tests with them (Task 20432).
+
 ## [0.0.6] - 2026-10-16
 
 The release that carries the security fixes `main` has made since 0.0.5 — GitHub

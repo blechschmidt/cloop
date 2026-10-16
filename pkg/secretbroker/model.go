@@ -58,6 +58,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 // Kind classifies what a secret *is*, which determines both the constraints
@@ -474,6 +476,12 @@ func parseLabelSelector(s string) (map[string]string, error) {
 	}
 	if len(labels) == 0 {
 		return nil, fmt.Errorf("%w: label selector is empty (use 'any' to match everything)", ErrInvalidSubject)
+	}
+	// A label no executor can carry — a key with a space in it, say — makes a
+	// grant nothing will ever match (Task 20432): refused here, as it is
+	// where executors' labels are set.
+	if err := executor.ValidateLabels(labels); err != nil {
+		return nil, fmt.Errorf("%w: label selector: %v", ErrInvalidSubject, err)
 	}
 	return labels, nil
 }

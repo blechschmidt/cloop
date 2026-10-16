@@ -369,6 +369,24 @@
       return '<span class="sec-chip ' + chip[0] + '" title="' + esc(chip[2]) + '">' + chip[1] + '</span>';
     }
 
+    // _secLabelMatches says which executors a label selector reaches now (Task
+    // 20432) — their names, or that none carries the labels yet, which is why
+    // such a grant delivers nothing. Empty for any other subject.
+    function _secLabelMatches(m) {
+      if (!m) return '';
+      if (m.unknown) return '<div class="sec-hint sec-label-matches">' + esc(m.unknown) + '</div>';
+      const list = Array.isArray(m.executors) ? m.executors : [];
+      if (!list.length) {
+        return '<div class="sec-hint sec-label-matches" data-label-matches="none">Matches no executor now: ' +
+          'it reaches one only when an executor carries these labels.</div>';
+      }
+      const names = list.map(e => '<code>' + esc(e.id) + '</code>' +
+        (e.name && e.name !== e.id ? ' ' + esc(e.name) : '') +
+        (e.device ? ' (on ' + esc(e.device) + ')' : '')).join(', ');
+      return '<div class="sec-hint sec-label-matches" data-label-matches="' + list.length + '">Matches now: ' +
+        names + '</div>';
+    }
+
     function _secRenderGrants() {
       const body  = document.getElementById('secGrantsBody');
       const table = document.getElementById('secGrantsTable');
@@ -402,7 +420,8 @@
           '<td><span class="sec-chip kind">' + esc(g.kind || '') + '</span></td>' +
           '<td>' + resource + '</td>' +
           '<td class="audit-entity">' + esc(g.subject || '') +
-            (g.scope ? ' <span class="sec-chip">' + esc(g.scope) + '</span>' : '') + '</td>' +
+            (g.scope ? ' <span class="sec-chip">' + esc(g.scope) + '</span>' : '') +
+            _secLabelMatches(g.label_matches) + '</td>' +
           '<td class="sec-hide-sm">' + _secConstraintCell(g) + '</td>' +
           '<td><span class="sec-status ' + esc(g.status || '') + '">' + esc(g.status || '') + '</span></td>' +
           '<td class="' + _secTTLClass(g.active ? remaining : 0) + '">' +
@@ -907,8 +926,39 @@
         if (el) el.value = '';
       });
       onGrantKindChange();
+      const matches = document.getElementById('grantSubjectMatches');
+      if (matches) matches.innerHTML = '';
       openOverlay('grant-overlay', {dismiss: closeGrantModal, focus: '#grantSubject'});
       _secApplyGating();
+    }
+
+    // previewGrantSubject says, as the subject is typed, which executors a
+    // label selector reaches now, or why the subject would be refused (Task
+    // 20432). Debounced, and the answer to the latest keystroke wins.
+    let _secSubjectTimer = 0;
+    let _secSubjectSeq = 0;
+    function previewGrantSubject() {
+      clearTimeout(_secSubjectTimer);
+      _secSubjectTimer = setTimeout(_secPreviewSubject, 250);
+    }
+
+    function _secPreviewSubject() {
+      const out = document.getElementById('grantSubjectMatches');
+      const input = document.getElementById('grantSubject');
+      if (!out || !input) return;
+      const subject = (input.value || '').trim();
+      const seq = ++_secSubjectSeq;
+      if (!subject) { out.innerHTML = ''; return; }
+      api('/api/grants/matches?subject=' + encodeURIComponent(subject)).then(d => {
+        if (seq !== _secSubjectSeq) return;
+        d = d || {};
+        if (d.error) {
+          const msg = typeof d.error === 'string' ? d.error : (d.error.message || 'not a subject');
+          out.innerHTML = '<div class="sec-hint sec-label-matches">' + esc(msg) + '</div>';
+          return;
+        }
+        out.innerHTML = _secLabelMatches(d.matches);
+      }).catch(() => { if (seq === _secSubjectSeq) out.innerHTML = ''; });
     }
 
     function closeGrantModal() {
@@ -2112,7 +2162,7 @@
     return h.mount({
       open, loadSecretsPanel, loadSecrets, loadGrants, loadLeases, secretsAuditFor, deleteSecret,
       revokeGrant, revokeLease, openSecretModal, closeSecretModal, onSecretKindChange,
-      submitSecret, openGrantModal, closeGrantModal, onGrantKindChange, submitGrant,
+      submitSecret, openGrantModal, closeGrantModal, onGrantKindChange, submitGrant, previewGrantSubject,
       loadGrantRequests, toggleRequestUses, openRequestModal, closeRequestModal,
       onRequestSecretChange, submitRequest, withdrawRequest, approveRequest, denyRequest, reviewRequest, reviewToken,
       closeRequestDecideModal, submitDecision, loadTokens, revokeToken, openTokenModal,
@@ -2507,11 +2557,13 @@
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="grantSubject">Subject (who may use it)</label>
-              <input class="form-input" id="grantSubject" placeholder="project:/srv/app">
+              <input class="form-input" id="grantSubject" placeholder="project:/srv/app" data-input="previewGrantSubject">
               <div class="sec-hint" style="margin-top:6px">
                 <code>project:/srv/app</code>, <code>executor:edge-01</code>, <code>label:region=eu,gpu=true</code>,
-                or <code>any</code>. Matching is exact &mdash; no prefix fuzziness.
+                or <code>any</code>. Matching is exact &mdash; no prefix fuzziness. A label selector reaches every
+                executor the hub records with all of those labels.
               </div>
+              <div id="grantSubjectMatches" aria-live="polite"></div>
             </div>
             <div class="form-group">
               <label class="form-label" for="grantTTL">Grant lifetime</label>

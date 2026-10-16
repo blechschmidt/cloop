@@ -131,7 +131,7 @@ func (s *Session) record(hash [sha256.Size]byte) SessionRecord {
 		TaskID:      s.TaskID,
 		RunID:       s.RunID,
 		Actor:       s.Actor,
-		Labels:      copyLabels(s.requester.Labels),
+		Labels:      s.issuedTo().Labels,
 		IssuedAt:    s.IssuedAt,
 		ExpiresAt:   s.ExpiresAt(),
 		Counters:    s.Counters(),
@@ -239,11 +239,12 @@ func (b *Broker) RestoreSession(ctx context.Context, req RestoreRequest) (*Sessi
 			ErrInvalidGrant, id, rec.Grant.ID, rec.GrantID))
 	}
 
-	requester := secretbroker.Requester{
-		ExecutorID: rec.ExecutorID,
-		ProjectID:  rec.ProjectID,
-		Labels:     copyLabels(rec.Labels),
-	}
+	// The executor as the session recorded it when it was redeemed — or
+	// relabeled since — which is what its grant is re-judged against (Task
+	// 20432).
+	requester := secretbroker.NewRequester(
+		secretbroker.RecordedExecutor{ID: rec.ExecutorID, Labels: rec.Labels},
+		secretbroker.RequestScope{ProjectID: rec.ProjectID})
 	now := b.now()
 	// recheckGrant reports a grant it could not read as missing, which would
 	// end the session for good on a read error.

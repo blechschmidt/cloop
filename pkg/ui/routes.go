@@ -969,6 +969,9 @@ func (s *Server) routeTable() []routeSpec {
 		// someone deciding where to put a payload.
 		{Pattern: "/api/executors/{id}/limits", Handler: s.handleExecutorLimits, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
 		{Pattern: "/api/executors/{id}/audience", Handler: s.handleExecutorAudience, Methods: []string{"GET", "POST", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor},
+		// A device's labels: what a label grant reaching it is matched against
+		// (Task 20432). The permission enrolling one takes.
+		{Pattern: "/api/executors/{id}/labels", Handler: s.handleExecutorLabels, Methods: []string{"GET", "PUT"}, Perm: execMgmt, Scope: scopeExecutor},
 
 		// Virtual executors (Task 20345): sub-executors of an enrolled device
 		// with their own engine, runtime, firewall and host devices. {id} is
@@ -1067,6 +1070,9 @@ func (s *Server) routeTable() []routeSpec {
 		// the handler by the predicates the DELETE and the renewal apply.
 		{Pattern: "GET /api/secrets/{id}/authorize", Handler: s.handleSecretAuthorize, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "GET /api/grants", Handler: s.handleGrantsList, Perm: secOwn, Scope: scopeGlobal},
+		// Which executors a subject reaches now, for the grant dialog (Task
+		// 20432). Names executors only to a caller who may list them.
+		{Pattern: "GET /api/grants/matches", Handler: s.handleGrantSubjectMatches, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secOwn, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secOwn, Scope: scopeGlobal},
 		// Which running workloads hold a grant, for the revoke confirmation

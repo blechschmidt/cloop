@@ -326,6 +326,21 @@ it deliberately prefers neither. `tests/arch/orphan_test.go` has an `exempt`
 map for packages that are unreferenced on purpose — it is empty, and an entry
 needs an argument a reader can check.
 
+## Asking the secret broker on an executor's behalf
+
+Build a `secretbroker.Requester` — what a lease, an egress session or a grant
+query is matched as — with `secretbroker.RequesterFor(records, executorID,
+scope)`, or `secretbroker.NewRequester` over the `RecordedExecutor` that
+`secretbroker.LookupExecutor` returns, never as a struct literal: `go test
+./tests/arch/` rejects one anywhere in production code. The constructor takes
+the executor's labels from the hub's own record of it
+(`executorstore.Records`), which is what a grant to `label:region=eu` is matched
+against; a literal is how a dozen dispatch paths came to leave the labels out
+and label grants to deliver nothing (Task 20432). Never fill a
+`RecordedExecutor` from what a device's agent reports about itself — the gate
+allows assembling one only in the functions listed in
+`tests/arch/requester_test.go`, each with its reason.
+
 ## Opening a SQLite database
 
 Open cloop's databases with `statedb.Open` when you want the project store and

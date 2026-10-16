@@ -726,6 +726,30 @@ any workload carrying revocable bindings — see
 property of the system rather than of which backend a project happens to be
 bound to.
 
+### When an executor's labels change
+
+A grant to a label selector — `label:region=eu,gpu=true` — is matched against
+the labels of the executor a lease or a proxy session is for, and those labels
+are the hub's own record of the executor (Task 20432): an enrolled device's
+agent credential, a virtual executor's device's, a configured executor's
+configuration. Nothing an agent reports about itself counts — a device
+advertising `region=eu` at hello is judged by its credential, which the
+operator set. Every requester a dispatch builds comes from that record through
+one constructor, `secretbroker.NewRequester`, and `tests/arch` fails on a
+requester assembled anywhere else (see [Label subjects](#label-subjects--the-package-suites)).
+
+Because the record can change while a task runs, a label grant can stop
+matching a lease that carries it. The lease is then relabeled and what no
+longer matches is taken back exactly as a revoked grant is — the hub's copy,
+every holder, the git proxy and Kubernetes monitor sessions it fed, its App
+tokens — while the lease keeps its other grants; an egress session standing on
+such a grant is closed. This happens at once when an admin edits a device's
+labels (`PUT /api/executors/{id}/labels`, audited as `executor.labels` with the
+labels before and after), at every hub member's next janitor pass for the
+leases it holds, and when a member adopts a run. The relabeled labels are
+written to the lease's and the session's records, so a process that adopts the
+run judges it as the one that held it did.
+
 ### Revocation per backend
 
 Each driver can take back what it can actually reach, and the report says which
@@ -3597,6 +3621,26 @@ credential away from another user — see [Personal secrets](#personal-secrets).
 | An operator cannot mint into the shared namespace | `TestOperatorCannotMintASharedSecret` |
 | The request catalogue never names another user's personal secret, not even to an admin | `TestSecretCatalogHidesOtherUsersPersonalSecrets` |
 | The six routes lowered to `secret.own` are exactly the six intended, and leases stayed above them | `TestSecretsRoutesNarrowOperatorsToTheirOwn` |
+
+### Label subjects — the package suites
+
+The rows above keep one user's credential from another. These make a label
+grant reach exactly the executors the hub records with its labels — see
+[When an executor's labels change](#when-an-executors-labels-change).
+
+| Guarantee | Test |
+| --- | --- |
+| A label grant reaches a device carrying its labels on its agent credential, a virtual executor on that device and a configured container executor carrying them in the configuration, and not a device labelled otherwise or an executor the hub records no labels for (in `pkg/ui`) | `TestALabelGrantReachesTheExecutorsTheHubRecordsWithItsLabels` |
+| The labels a device's agent advertises at hello never count: a device enrolled without them that claims them is handed nothing a label grant carries until an admin sets them on its credential (in `pkg/ui`) | `TestALabelAnAgentReportsAboutItselfNeverCounts` |
+| Each kind of executor's labels come from the hub's own record — a device's credential, a virtual executor's device's, the configuration — never from its registry row, its advertised capabilities or the bookkeeping `parent=` label; a record that cannot be read is an error, not "no labels" (in `pkg/executorstore`) | `TestRecordsPerKindOfExecutor`, `TestRecordsThatCannotBeReadAreAnError` |
+| No `secretbroker.Requester` is built outside `secretbroker.NewRequester`, and no `RecordedExecutor` outside the functions allowed to assemble one (in `tests/arch`) | `TestRequesterIsBuiltOnlyFromTheHubsRecord`, `TestRequesterAllowancesAreStillUsed`, `TestRequesterGateFlagsWhatItShould` |
+| Relabeling a device mid-run takes back, from its leases and its virtual executors', on the hub and from every holder, a label grant the new labels no longer match, keeps the rest, records the new labels for an adopting process and audits the edit (in `pkg/ui`) | `TestChangingADevicesLabelsTakesBackWhatNoLongerMatches` |
+| A configured executor's new labels are taken up at the janitor's next pass, and a run adopted after its device was relabeled is judged by the labels recorded now (in `pkg/ui`) | `TestAConfiguredExecutorsNewLabelsAreTakenUpByTheJanitor`, `TestAnAdoptedRunIsJudgedByTheLabelsTheHubRecordsNow` |
+| An egress session standing on a label grant is closed when its device stops carrying the labels; its record carries the new labels and a restore judges it by them (in `pkg/ui`, `pkg/egressbroker`) | `TestALabelEgressGrantFollowsTheDevicesLabels`, `TestRelabeledSessionIsJudgedByItsNewLabels`, `TestRestoreJudgesARecordByTheLabelsItCarries` |
+| A relabeled lease is judged by its new labels: Extend refuses it while it carries a grant they no longer match, a renewal re-issues without it, and a process no longer holding the record cannot rewrite it (in `pkg/secretbroker`, `pkg/secretstore`) | `TestRelabelLeaseJudgesItByTheNewLabels`, `TestRelabelOfALeaseAnotherProcessTookOver`, `TestRelabeledLeaseIsRecordedForTheProcessThatAdoptsIt` |
+| The workspace fetch — the grant the hub chooses before dispatch and the lease the driver takes — reaches a label grant for a device and a virtual executor on it, and not for a device labelled otherwise (in `pkg/ui`, `pkg/executor/gitcreds`) | `TestTheWorkspaceGrantChosenBeforeDispatchCanBeALabelGrant`, `TestWorkspaceFetchLeasesALabelGrant` |
+| The Kubernetes driver's own cluster credential reaches it through a label grant by its configured labels only (in `pkg/executor/kubernetes`) | `TestBrokerSource_ALabelGrantReachesTheConfiguredExecutor` |
+| The grant list and the grant dialog name the executors a label selector reaches now, and none for a selector no executor carries; the label edit refuses virtual and configured executors and labels no selector could name (in `pkg/ui`, `pkg/executor`, `pkg/config`) | `TestGrantListAndDialogSayWhichExecutorsALabelReaches`, `TestLabelEditRefusesWhatItDoesNotSet`, `TestValidateLabelsAcceptsWhatASelectorCanName`, `TestExecutorLabelsAreValidatedAndRepaired` |
 
 ### Offboarding — `offboarding_test.go` and the package suites
 

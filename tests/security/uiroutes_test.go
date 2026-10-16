@@ -448,6 +448,11 @@ func TestSecretsAPIViewStructsCarryNoMaterialField(t *testing.T) {
 			// Neither can hold credential material.
 			"kube_delivery": true,
 			"unguarded_ack": true,
+			// Reviewed (Task 20432): for a grant to a label selector, which
+			// executors carry its labels now — executor IDs, names, kinds and
+			// a virtual executor's device, all of which the caller may list
+			// anyway, and only when they hold executor.read. No credential.
+			"label_matches": true,
 		},
 	}
 	lists := map[string]string{"/api/secrets": "secrets", "/api/grants": "grants"}

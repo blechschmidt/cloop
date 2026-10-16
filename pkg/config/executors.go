@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -514,6 +515,9 @@ func clampEgressConfig(e *EgressConfig) []string {
 // should be reported when it is written, not discovered months later at the
 // moment someone flips enabled to true.
 func ValidateContainerExecutor(c ContainerExecutorConfig) error {
+	if err := validateExecutorLabels("container", c.Labels); err != nil {
+		return err
+	}
 	if rt := strings.TrimSpace(c.Runtime); rt != "" {
 		switch rt {
 		case container.RuntimePodman, container.RuntimeDocker:
@@ -651,6 +655,9 @@ func (c ContainerExecutorConfig) DriverOptions() (container.Options, error) {
 // secret broker at run time, so the only thing config can say about them is
 // which secret to prefer.
 func ValidateKubernetesExecutor(k KubernetesExecutorConfig) error {
+	if err := validateExecutorLabels("kubernetes", k.Labels); err != nil {
+		return err
+	}
 	for field, v := range map[string]int64{
 		"active_deadline_seconds":          k.ActiveDeadlineSeconds,
 		"termination_grace_period_seconds": k.TerminationGracePeriodSeconds,
@@ -854,6 +861,7 @@ func (k KubernetesExecutorConfig) DriverOptions() (kubernetes.Options, error) {
 // half-configured cluster backend.
 func clampKubernetesExecutor(k *KubernetesExecutorConfig) []string {
 	var changed []string
+	k.Labels, changed = clampExecutorLabels("kubernetes", k.Labels, changed)
 
 	clampSeconds := func(name string, v *int64) {
 		if *v < 0 || *v > KubernetesSecondsUpper {
@@ -957,6 +965,7 @@ func clampKubernetesExecutor(k *KubernetesExecutorConfig) []string {
 // tighten confinement, never loosen it.
 func clampContainerExecutor(c *ContainerExecutorConfig) []string {
 	var changed []string
+	c.Labels, changed = clampExecutorLabels("container", c.Labels, changed)
 
 	if rt := strings.TrimSpace(c.Runtime); rt != "" &&
 		rt != container.RuntimePodman && rt != container.RuntimeDocker {
@@ -1079,4 +1088,77 @@ func validateHarnessCredentialExempt(ids []string) error {
 		}
 	}
 	return nil
+}
+
+// validateExecutorLabels refuses labels no grant selector could name, where
+// the operator typed them (Task 20432).
+func validateExecutorLabels(section string, labels map[string]string) error {
+	if err := executor.ValidateLabels(executor.NormalizeLabels(labels)); err != nil {
+		return fmt.Errorf("executors.%s.labels: %w", section, err)
+	}
+	return nil
+}
+
+// clampExecutorLabels is the load-time repair of a configured executor's
+// labels: each trimmed, as a selector is, and any no selector could match
+// dropped with a warning. Dropping a label can only take label grants away
+// from the executor, never give it one.
+func clampExecutorLabels(section string, labels map[string]string, changed []string) (map[string]string, []string) {
+	labels = executor.NormalizeLabels(labels)
+	if executor.ValidateLabels(labels) == nil {
+		return labels, changed
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	kept := map[string]string{}
+	for _, k := range keys {
+		one := map[string]string{k: labels[k]}
+		if err := executor.ValidateLabels(one); err != nil || len(kept) >= executor.MaxLabels {
+			why := "more than the label limit"
+			if err != nil {
+				why = err.Error()
+			}
+			changed = append(changed, fmt.Sprintf("executors.%s.labels: dropped %q: %s", section, k, why))
+			continue
+		}
+		kept[k] = labels[k]
+	}
+	if len(kept) == 0 {
+		return nil, changed
+	}
+	return kept, changed
+}
+
+// ConfiguredExecutorLabels returns the labels this configuration gives each
+// configured executor it enables, by executor ID: the record label grants
+// reaching a container or Kubernetes executor are matched against (Task
+// 20432). An enabled executor with no labels is present with none; an ID both
+// sections claim is absent.
+func (e ExecutorsConfig) ConfiguredExecutorLabels() map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if e.Container.Enabled {
+		id := strings.TrimSpace(e.Container.ID)
+		if id == "" {
+			id = container.DefaultID
+		}
+		out[id] = executor.NormalizeLabels(e.Container.Labels)
+	}
+	if e.Kubernetes.Enabled {
+		id := strings.TrimSpace(e.Kubernetes.ID)
+		if id == "" {
+			id = kubernetes.DefaultID
+		}
+		if _, taken := out[id]; taken {
+			// Two sections claiming one ID: which executor the registry kept
+			// is not this function's to know, so the ID carries no labels and
+			// no label grant reaches it until the collision is fixed.
+			delete(out, id)
+		} else {
+			out[id] = executor.NormalizeLabels(e.Kubernetes.Labels)
+		}
+	}
+	return out
 }

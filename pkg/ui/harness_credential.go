@@ -173,18 +173,21 @@ func describeKeySets(sets [][]string) string {
 // leaseRequester is who a lease for workDir on ex is issued to. One function
 // for the lease and for the preflight that predicts it, so they cannot come to
 // match grants differently: a feature holds its parent project's grants
-// (features.go), wherever in the project its work happens.
-func leaseRequester(workDir string, ex executor.Executor, runID string, withhold map[string]string) secretbroker.Requester {
-	executorID := ""
-	if ex != nil {
-		executorID = ex.ID()
+// (features.go), wherever in the project its work happens; and ex is judged as
+// the hub records it, labels included, so a label grant reaches the run (Task
+// 20432). db is the control plane's database when the caller holds it.
+func leaseRequester(db *statedb.DB, workDir string, ex executor.Executor, runID string,
+	withhold map[string]string) (secretbroker.Requester, error) {
+	rec, err := recordedExecutor(db, ex)
+	if err != nil {
+		var none secretbroker.Requester
+		return none, err
 	}
-	return secretbroker.Requester{
-		ExecutorID: executorID,
-		ProjectID:  policyProjectPath(workDir),
-		RunID:      runID,
-		Withhold:   withhold,
-	}
+	return secretbroker.NewRequester(rec, secretbroker.RequestScope{
+		ProjectID: policyProjectPath(workDir),
+		RunID:     runID,
+		Withhold:  withhold,
+	}), nil
 }
 
 // sandboxProviderName is the provider the `cloop run` inside an isolating
@@ -491,7 +494,7 @@ func harnessPreflight(workDir string, ex executor.Executor, who harnessWho, prov
 		}
 		return rep
 	}
-	broker, closeBroker, err := openUIBroker(dir)
+	broker, brokerDB, closeBroker, err := openUIBrokerDB(dir)
 	if err != nil {
 		// A broker this process cannot open is one acquireSecretLease cannot
 		// open either: the lease will carry nothing, anyone's or not.
@@ -511,7 +514,14 @@ func harnessPreflight(workDir string, ex executor.Executor, who harnessWho, prov
 		return rep
 	}
 	defer closeBroker()
-	offers, err := broker.EnvOffers(leaseRequester(workDir, ex, "", nil))
+	requester, err := leaseRequester(brokerDB, workDir, ex, "", nil)
+	if err != nil {
+		if rep.Applies && !rep.FromConfig {
+			rep.State, rep.BrokerProblem = "missing", "the hub could not read its record of the executor: "+err.Error()
+		}
+		return rep
+	}
+	offers, err := broker.EnvOffers(requester)
 	if err != nil {
 		if rep.Applies && !rep.FromConfig {
 			rep.State, rep.BrokerProblem = "missing", "the hub could not read the grants: "+err.Error()
@@ -531,7 +541,9 @@ func harnessPreflight(workDir string, ex executor.Executor, who harnessWho, prov
 	if rep.State != "ok" {
 		return rep
 	}
-	first, ok, err := broker.LeaseHorizon(leaseRequester(workDir, ex, "", rep.Withhold))
+	withheld := requester
+	withheld.Withhold = rep.Withhold
+	first, ok, err := broker.LeaseHorizon(withheld)
 	if err == nil && ok {
 		rep.applyHorizon(first, who, now, func(id string) string {
 			if sec, derr := broker.DescribeSecret(id); derr == nil {

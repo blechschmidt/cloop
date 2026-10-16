@@ -786,7 +786,23 @@ func smokeLease(ctx context.Context, dir string, ex executor.Executor, caps exec
 	// its git proxy holds, or any other — have no business in a diagnostic's
 	// sandbox. Withheld grants are refused before their payloads are opened,
 	// each on its own audit row.
-	requester := secretbroker.Requester{ExecutorID: ex.ID()}
+	//
+	// As the executor the hub records, labels included (Task 20432), so a
+	// grant issued to a label selector it matches is among those withheld —
+	// and the lease, asked as the same requester, cannot carry one that is not.
+	var configured map[string]map[string]string
+	if cfg, cerr := config.Load(dir); cerr == nil && cfg != nil {
+		configured = cfg.Executors.ConfiguredExecutorLabels()
+	}
+	records := executorstore.Records{DB: db, Configured: func() (map[string]map[string]string, error) {
+		return configured, nil
+	}}
+	requester, err := secretbroker.RequesterFor(records, ex.ID(), secretbroker.RequestScope{})
+	if err != nil {
+		return finish(StageFail, fmt.Sprintf("could not read the hub's record of executor %s: %v", ex.ID(), err),
+			"The smoke leases as a task would, which needs the executor's recorded labels; `cloop hub doctor` "+
+				"without --smoke reports the state of the control plane's database")
+	}
 	withhold, err := smokeWithhold(broker, requester, grant.ID)
 	if err != nil {
 		return finish(StageFail, fmt.Sprintf("could not list the grants aimed at this executor: %v", err),

@@ -757,8 +757,16 @@ func (b *Broker) revokeStored(grantID string, at time.Time, cause RevocationCaus
 //
 // A requester with no matching grants gets an empty lease, not an error:
 // "this project has no secrets" is a normal state and must not fail a run.
+//
+// It knows the executor by ID alone, so no label grant reaches it: a caller
+// leasing for an executor the hub keeps a record of uses LeaseFor with
+// RequesterFor, which carries the labels recorded for it (Task 20432).
 func (b *Broker) Lease(ctx context.Context, executorID, projectID string) (*Lease, error) {
-	return b.LeaseFor(ctx, Requester{ExecutorID: executorID, ProjectID: projectID}, "")
+	ex, err := LookupExecutor(nil, executorID)
+	if err != nil {
+		return nil, err
+	}
+	return b.LeaseFor(ctx, NewRequester(ex, RequestScope{ProjectID: projectID}), "")
 }
 
 // LeaseFor is Lease with executor labels (for SubjectLabel grants) and an
@@ -1033,13 +1041,22 @@ func (b *Broker) Renew(ctx context.Context, leaseID string) (*Lease, error) {
 	}
 	b.mu.Lock()
 	st, ok := b.leases[leaseID]
+	var (
+		requester Requester
+		actor     string
+	)
+	if ok {
+		// Copied under the lock: a label change relabels the lease in place
+		// (RelabelLease, Task 20432).
+		requester, actor = st.requester, st.actor
+	}
 	b.mu.Unlock()
 	if !ok {
 		ev := Event{Action: ActionRenew, LeaseID: leaseID}
 		return nil, b.denyf(ev, ErrLeaseNotFound, "unknown lease %q", leaseID)
 	}
 
-	renewed, err := b.LeaseFor(ctx, st.requester, st.actor)
+	renewed, err := b.LeaseFor(ctx, requester, actor)
 	if err != nil {
 		return nil, err
 	}

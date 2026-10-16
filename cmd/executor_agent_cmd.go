@@ -757,7 +757,7 @@ func init() {
 	executorEnrollCmd.Flags().String("server", "",
 		"control-plane WebSocket URL to print in the device command")
 	executorEnrollCmd.Flags().StringSlice("label", nil,
-		"scheduler selector as key=value (repeatable)")
+		"label as key=value (repeatable): what a grant to label:key=value is matched against")
 
 	executorAgentCmd.Flags().String("server", "",
 		"control-plane WebSocket URL (default: from the saved credential)")
@@ -772,7 +772,8 @@ func init() {
 	executorAgentCmd.Flags().Int("max-concurrent", 0,
 		"maximum simultaneous workloads (default: number of CPUs)")
 	executorAgentCmd.Flags().StringSlice("label", nil,
-		"scheduler selector as key=value (repeatable)")
+		"label to advertise as key=value (repeatable); the device's own claim, which no grant is matched against — "+
+			"set grant labels at enrollment or with Labels on the device's card")
 	executorAgentCmd.Flags().String("pin", "",
 		"expected control-plane SPKI fingerprint, sha256:<base64> (comma-separate several to stage a key rotation)")
 	executorAgentCmd.Flags().String("ca-file", "",

@@ -792,7 +792,13 @@ func acquireSecretLease(controlPlaneDir, workDir string, ex executor.Executor, r
 	// is a grant to its work, wherever in the project that work happens.
 	// leaseRequester is shared with the harness preflight, which has to
 	// predict this lease exactly.
-	lease, err := broker.LeaseFor(ctx, leaseRequester(workDir, ex, runID, withhold), "ui")
+	requester, err := leaseRequester(db, workDir, ex, runID, withhold)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ui: lease secrets for %s: %v\n", workDir, err)
+		closeDB()
+		return nil
+	}
+	lease, err := broker.LeaseFor(ctx, requester, "ui")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ui: lease secrets for %s: %v\n", workDir, err)
 		closeDB()

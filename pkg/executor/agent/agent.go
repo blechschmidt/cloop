@@ -68,7 +68,9 @@ type Config struct {
 	WorkDirRoot string
 	// MaxConcurrent bounds simultaneous workloads. Zero means NumCPU.
 	MaxConcurrent int
-	// Labels are operator-supplied scheduler selectors.
+	// Labels are selectors set on the device and advertised at hello. They
+	// are this device's own claim: the hub matches label grants against the
+	// labels on the device's credential instead (Task 20432).
 	Labels map[string]string
 	// RetainBytes overrides DefaultRetainBytes per workload.
 	RetainBytes int

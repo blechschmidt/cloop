@@ -298,6 +298,44 @@ func (e EgressStore) CheckpointSession(id string, c egressbroker.SessionCounters
 	return e.report(statedb.ProxySessionEgress, id, "checkpoint its counters", err)
 }
 
+// Compile-time proof that the store keeps a relabeled session's labels.
+var _ egressbroker.SessionLabelStore = EgressStore{}
+
+// RelabelSession implements egressbroker.SessionLabelStore: the record's
+// labels become the session's executor's new ones (Task 20432), so a process
+// restoring it judges its grant as this one does. A rewrite that lands on no
+// row is an error, as a checkpoint's is.
+func (e EgressStore) RelabelSession(id string, labels map[string]string) error {
+	holder, err := e.holder()
+	if err != nil {
+		return err
+	}
+	row, err := e.DB.GetProxySession(statedb.ProxySessionEgress, id)
+	if err != nil {
+		return e.report(statedb.ProxySessionEgress, id, "read its record to relabel it", err)
+	}
+	var scope EgressScope
+	if err := json.Unmarshal([]byte(row.Scope), &scope); err != nil {
+		return fmt.Errorf("decode the scope of egress session %s: %w", id, err)
+	}
+	scope.Labels = nil
+	if len(labels) > 0 {
+		scope.Labels = make(map[string]string, len(labels))
+		for k, v := range labels {
+			scope.Labels[k] = v
+		}
+	}
+	raw, err := json.Marshal(scope)
+	if err != nil {
+		return err
+	}
+	ok, err := e.DB.RescopeProxySession(statedb.ProxySessionEgress, id, holder, string(raw))
+	if err == nil && !ok {
+		return errNotHeld
+	}
+	return e.report(statedb.ProxySessionEgress, id, "record its executor's new labels", err)
+}
+
 // CloseSession implements egressbroker.SessionStore.
 func (e EgressStore) CloseSession(id, reason string, at time.Time, c egressbroker.SessionCounters) error {
 	raw, err := json.Marshal(c)

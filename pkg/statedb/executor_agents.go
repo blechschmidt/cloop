@@ -283,6 +283,48 @@ func (d *DB) RevokeAgentCredential(agentID string, at time.Time) error {
 	return nil
 }
 
+// SetAgentCredentialLabels replaces an enrolled agent's labels and mirrors them
+// onto its executors row, in one transaction (Task 20432).
+//
+// The credential's labels are the hub's record of the device that label grants
+// are matched against, and the row's are what the Executors panel shows: one
+// write, so the panel never shows labels the grants are not judged by. A row
+// that does not exist yet — a device enrolled by a hub that has not recorded
+// it — is left for the connect recorder to write.
+func (d *DB) SetAgentCredentialLabels(agentID string, labels map[string]string) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return errors.New("statedb: agent id is required")
+	}
+	encoded, err := marshalLabelMap(labels)
+	if err != nil {
+		return fmt.Errorf("statedb: marshal agent labels: %w", err)
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("statedb: set labels of agent %q: begin: %w", agentID, classifyDriverErr(err))
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+	res, err := tx.Exec(`UPDATE executor_agent_credentials SET labels_json = ? WHERE agent_id = ?`,
+		encoded, agentID)
+	if err != nil {
+		return fmt.Errorf("statedb: set labels of agent %q: %w", agentID, classifyDriverErr(err))
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("%w: %q", ErrAgentCredentialNotFound, agentID)
+	}
+	if _, err := tx.Exec(`UPDATE executors SET labels_json = ? WHERE id = ?`, encoded, agentID); err != nil {
+		return fmt.Errorf("statedb: mirror labels of agent %q: %w", agentID, classifyDriverErr(err))
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("statedb: set labels of agent %q: commit: %w", agentID, classifyDriverErr(err))
+	}
+	return nil
+}
+
 // TouchAgentCredential records a successful authentication.
 func (d *DB) TouchAgentCredential(agentID string, at time.Time) error {
 	d.mu.Lock()
@@ -369,9 +411,11 @@ func marshalLabelMap(m map[string]string) (string, error) {
 	return string(encoded), nil
 }
 
-// unmarshalLabelMap tolerates malformed JSON by returning nil. Labels are
-// advisory scheduler metadata; a corrupt blob must never make an otherwise
-// valid credential unauthenticatable.
+// unmarshalLabelMap tolerates malformed JSON by returning nil: a corrupt blob
+// must never make an otherwise valid credential unauthenticatable. Labels decide
+// which label grants reach a device (Task 20432), and no labels match none of
+// them, so a corrupt blob costs the device those grants and never widens what
+// it receives.
 func unmarshalLabelMap(s string) map[string]string {
 	if s == "" || s == "{}" {
 		return nil

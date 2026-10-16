@@ -93,6 +93,9 @@ type Session struct {
 
 	// requester is who the session was issued to, labels included, so a
 	// renewal can ask whether the grant is still issued to the same party.
+	// Guarded by reqMu: a label change relabels a live session (Task 20432).
+	// Read it with issuedTo.
+	reqMu     sync.Mutex
 	requester secretbroker.Requester
 
 	bytesUp   atomic.Int64
@@ -613,4 +616,14 @@ func buildProxyURL(endpoint, sessionID, token string) (string, error) {
 	u.Path = ""
 	u.RawQuery = ""
 	return u.String(), nil
+}
+
+// issuedTo returns who the session is judged as now: the requester it was
+// issued to, relabeled since if its executor's labels changed (Task 20432).
+func (s *Session) issuedTo() secretbroker.Requester {
+	s.reqMu.Lock()
+	defer s.reqMu.Unlock()
+	r := s.requester
+	r.Labels = copyLabels(r.Labels)
+	return r
 }

@@ -424,7 +424,14 @@ func (s *Server) StopLeaseJanitor() {
 func (s *Server) sweepExpiredLeases(now time.Time) []remote.ExpiredLease {
 	ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
 	defer cancel()
-	// Grants first: a grant revoked by something that told no hub is taken
+	// Labels first (Task 20432): a lease whose executor's recorded labels
+	// changed — edited on another hub member, or a configuration this hub
+	// restarted with — is judged by the new ones, and gives back the label
+	// grants they no longer match.
+	if rc := s.reconcileExecutorLabels(ctx, nil, "janitor"); len(rc.Errors) > 0 {
+		fmt.Fprintf(os.Stderr, "ui: re-judge leases by their executors' labels: %s\n", strings.Join(rc.Errors, "; "))
+	}
+	// Grants next: a grant revoked by something that told no hub is taken
 	// back from the lease that carries it, which then goes on — rather than
 	// lapsing below with every other grant it carries.
 	s.reconcileWithdrawnGrants(ctx)

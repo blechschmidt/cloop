@@ -45,6 +45,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/projectconfine"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -135,9 +136,16 @@ type executorView struct {
 	// the sandbox mode is: an admin scanning the fleet for a machine to bind a
 	// project to needs to see which ones are off limits before they choose one
 	// and are refused. Admitted is always true when Restricted is false.
-	Restricted bool              `json:"restricted,omitempty"`
-	Admitted   bool              `json:"admitted"`
-	Labels     map[string]string `json:"labels,omitempty"`
+	Restricted bool `json:"restricted,omitempty"`
+	Admitted   bool `json:"admitted"`
+	// Labels are the labels the hub records for the executor — what a grant
+	// to a label selector is matched against (Task 20432): a device's agent
+	// credential's, a virtual executor's device's, a configured executor's
+	// from the configuration. LabelSource names which. Not the registry
+	// row's, whose only label on a virtual executor is the hub's bookkeeping
+	// parent=<device>, which no grant is matched against.
+	Labels      map[string]string `json:"labels,omitempty"`
+	LabelSource string            `json:"label_source,omitempty"`
 
 	// Virtual describes a virtual executor (Task 20345): its parent device, a
 	// summary of its firewall and devices, and why the device cannot apply
@@ -474,7 +482,25 @@ func (s *Server) collectExecutorViews(ctx context.Context, db *statedb.DB) []exe
 		}()
 	}
 	wg.Wait()
+	applyRecordedLabels(views, db)
 	return views
+}
+
+// applyRecordedLabels sets each view's labels to the hub's record of them
+// (Task 20432). A record that cannot be read leaves the view without labels
+// rather than with the registry row's, which may not be the ones grants see.
+func applyRecordedLabels(views []executorView, db *statedb.DB) {
+	if db == nil {
+		return
+	}
+	records := hubExecutorRecords(db)
+	for i := range views {
+		rec, err := secretbroker.LookupExecutor(records, views[i].ID)
+		views[i].Labels, views[i].LabelSource = nil, ""
+		if err == nil && rec.HasLabels() {
+			views[i].Labels, views[i].LabelSource = rec.Labels, rec.Source
+		}
+	}
 }
 
 // schedulerFor adapts an already-open control-plane database to the scheduling
@@ -948,6 +974,12 @@ func (s *Server) handleExecutorEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	if root := strings.TrimSpace(req.WorkDirRoot); root != "" && !filepath.IsAbs(root) {
 		jsonErr(w, "workdir_root must be an absolute path on the device", http.StatusBadRequest)
+		return
+	}
+	// The labels become the device's record, what label grants are matched
+	// against (Task 20432): one no selector could name is refused here.
+	if err := executor.ValidateLabels(executor.NormalizeLabels(req.Labels)); err != nil {
+		jsonErr(w, "labels: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 

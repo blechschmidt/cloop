@@ -127,6 +127,39 @@ func (s *Store) SetLeaseGrants(id, holder string, grantIDs []string) (bool, erro
 	return s.db.RewriteSecretLeaseRecord(id, holder, string(raw))
 }
 
+// Compile-time proof that the adapter keeps a relabeled lease's labels (Task
+// 20432).
+var _ secretbroker.LeaseLabelStore = (*Store)(nil)
+
+// SetLeaseLabels rewrites the labels of a record's requester if holder holds it
+// (Task 20432): the labels a process taking the lease over judges its grants
+// by.
+func (s *Store) SetLeaseLabels(id, holder string, labels map[string]string) (bool, error) {
+	row, err := s.db.GetSecretLease(id)
+	if err != nil {
+		return false, translateErr(err)
+	}
+	if row.Holder != holder {
+		return false, nil
+	}
+	var doc leaseDoc
+	if err := json.Unmarshal([]byte(row.Record), &doc); err != nil {
+		return false, fmt.Errorf("secretstore: decode lease %s: %w", id, err)
+	}
+	doc.Labels = nil
+	if len(labels) > 0 {
+		doc.Labels = make(map[string]string, len(labels))
+		for k, v := range labels {
+			doc.Labels[k] = v
+		}
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return false, fmt.Errorf("secretstore: encode lease %s: %w", id, err)
+	}
+	return s.db.RewriteSecretLeaseRecord(id, holder, string(raw))
+}
+
 // Location names the database the store reads, for a subscriber to the
 // broker's revocations that must tell control planes apart (Task 20403).
 func (s *Store) Location() string { return s.db.Path() }
@@ -155,18 +188,22 @@ func leaseFromRow(row statedb.SecretLeaseRow) (secretbroker.LeaseRecord, error) 
 	if runID == "" {
 		runID = row.RunID
 	}
-	return secretbroker.LeaseRecord{
-		ID:     row.LeaseID,
-		Holder: row.Holder,
-		Requester: secretbroker.Requester{
-			ExecutorID:    executorID,
+	// The executor as the lease recorded it when it was issued — or relabeled
+	// since (SetLeaseLabels) — which is what the process taking it over judges
+	// its grants by until it finds the hub's record says otherwise (Task 20432).
+	requester := secretbroker.NewRequester(
+		secretbroker.RecordedExecutor{ID: executorID, Labels: doc.Labels},
+		secretbroker.RequestScope{
 			ProjectID:     projectID,
 			RunID:         runID,
-			Labels:        doc.Labels,
 			GitHubProxied: doc.GitHubProxied,
 			KubeInProcess: doc.KubeInProcess,
 			Withhold:      doc.Withhold,
-		},
+		})
+	return secretbroker.LeaseRecord{
+		ID:        row.LeaseID,
+		Holder:    row.Holder,
+		Requester: requester,
 		Actor:     doc.Actor,
 		IssuedAt:  row.IssuedAt,
 		ExpiresAt: row.ExpiresAt,

@@ -1259,6 +1259,14 @@ type ContainerExecutorConfig struct {
 	// test <id>` and by project bindings. Empty means "container".
 	ID string `yaml:"id,omitempty"`
 
+	// Labels are this executor's labels: what a grant to
+	// label:region=eu,gpu=true is matched against (Task 20432). They are the
+	// hub's record of the executor — read when a lease is issued, so an edit
+	// applies to the next run without a restart, and re-checked against the
+	// leases already issued within a minute, which give back what the new
+	// labels no longer match. Keys and values follow executor.ValidateLabels.
+	Labels map[string]string `yaml:"labels,omitempty"`
+
 	// Runtime pins the container runtime: "podman" or "docker". Empty
 	// auto-detects, preferring podman (rootless podman confines a workload
 	// with a user namespace as well as with flags).
@@ -1439,6 +1447,11 @@ type KubernetesExecutorConfig struct {
 	// test <id>`, by grants (`--to executor:<id>`) and by project bindings.
 	// Empty means "kubernetes".
 	ID string `yaml:"id,omitempty"`
+
+	// Labels are this executor's labels, as for executors.container.labels:
+	// what a label grant is matched against, read when a lease is issued
+	// (Task 20432).
+	Labels map[string]string `yaml:"labels,omitempty"`
 
 	// KubeconfigSecret names the brokered kubeconfig secret, by name or ID.
 	// Empty accepts the first kubeconfig grant issued to this executor,

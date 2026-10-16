@@ -40,7 +40,8 @@ type DetectOptions struct {
 	WorkDirRoot string
 	// MaxConcurrent is the agent's workload ceiling.
 	MaxConcurrent int
-	// Labels are operator-supplied scheduler selectors.
+	// Labels are selectors set on the device, advertised as its own claim;
+	// no grant is matched against them (Task 20432).
 	Labels map[string]string
 	// LookPath overrides exec.LookPath for tests.
 	LookPath func(string) (string, error)

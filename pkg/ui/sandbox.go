@@ -71,7 +71,7 @@ func applySandbox(spec executor.Spec, ex executor.Executor, workDir string) (exe
 		return spec, resolved, err
 	}
 
-	if err := resolved.ApplyTo(&spec, workDir, egressGrantChecker{}); err != nil {
+	if err := resolved.ApplyTo(&spec, workDir, egressGrantChecker{ex: ex}); err != nil {
 		return spec, resolved, err
 	}
 	spec.Env = resolved.FilterEnv(spec.Env)
@@ -225,7 +225,15 @@ func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex exec
 // The store is opened lazily, inside HasEgressGrant, because the overwhelming
 // majority of specs never name a grant — every workload start would otherwise
 // open and close a SQLite handle to answer a question nobody asked.
-type egressGrantChecker struct{}
+//
+// It asks as the executor the run is bound to, as the hub records it — the
+// requester the session will be redeemed as (applyEgressSession) — so a grant
+// issued to that executor, or to a label selector its labels match (Task
+// 20432), satisfies the spec as it would at redemption. It used to ask as the
+// project alone, which only a project or "any" grant could answer.
+type egressGrantChecker struct {
+	ex executor.Executor
+}
 
 // HasEgressGrant implements sandbox.GrantChecker.
 //
@@ -239,7 +247,7 @@ type egressGrantChecker struct{}
 // the tenancy boundary, so the subject check stays even though IDs are already
 // unique. A future ID scheme that is not, or a wildcard subject, has to fail
 // closed here rather than at the call site.
-func (egressGrantChecker) HasEgressGrant(projectPath, grantID string) bool {
+func (c egressGrantChecker) HasEgressGrant(projectPath, grantID string) bool {
 	bs, err := openBrokersAt(controlPlaneDir())
 	if err != nil || bs == nil {
 		return false
@@ -255,7 +263,11 @@ func (egressGrantChecker) HasEgressGrant(projectPath, grantID string) bool {
 	if err != nil {
 		return false
 	}
-	requester := secretbroker.Requester{ProjectID: policyProjectPath(projectPath)}
+	rec, err := recordedExecutor(bs.db, c.ex)
+	if err != nil {
+		return false
+	}
+	requester := secretbroker.NewRequester(rec, secretbroker.RequestScope{ProjectID: policyProjectPath(projectPath)})
 	now := time.Now()
 	for _, g := range grants {
 		if g.ID != grantID {

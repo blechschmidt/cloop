@@ -105,9 +105,12 @@ func makeExecutorConnectRecorder(db *statedb.DB) func(remote.AgentRecord, remote
 		}
 		row.Status = remote.StatusOnline
 		row.Inventory = inventoryFromCaps(caps, agentVersion)
-		if len(agent.Labels) > 0 {
-			row.Labels = agent.Labels
-		}
+		// The credential's labels, always — including none: they are the
+		// hub's record of the device that label grants are judged by (Task
+		// 20432), and a row that kept labels the credential no longer carries
+		// would show the panel a match the grants do not make. Never caps'
+		// labels, which are the device's own claim.
+		row.Labels = agent.Labels
 		// Keep the full advertisement too: the inventory columns are a subset,
 		// and a capability that has no column yet must not be lost.
 		if encoded, mErr := json.Marshal(caps); mErr == nil {

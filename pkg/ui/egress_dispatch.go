@@ -229,13 +229,20 @@ func applyEgressSession(spec executor.Spec, ex executor.Executor, workDir string
 	if resolved.Present() {
 		named = strings.TrimSpace(resolved.Spec.Capabilities.Network)
 	}
-	requester := secretbroker.Requester{
-		ExecutorID: ex.ID(),
+	// The executor as the hub records it, labels included, so an egress grant
+	// issued to label:region=eu reaches a run on an executor carrying it (Task
+	// 20432). The proxy's own database handle when the hub hosts one.
+	var recordsDB *statedb.DB
+	if svc := activeEgressProxy(); svc != nil {
+		recordsDB = svc.db
+	}
+	rec, recErr := recordedExecutor(recordsDB, ex)
+	requester := secretbroker.NewRequester(rec, secretbroker.RequestScope{
 		// A feature holds its parent project's grants and never its own path,
 		// exactly as for the secret lease (features.go).
 		ProjectID: policyProjectPath(workDir),
 		RunID:     run.runID,
-	}
+	})
 
 	// refuse turns a reason this run gets no session into the outcome: a
 	// refusal when the sandbox spec named the grant, a journal row when the
@@ -255,6 +262,16 @@ func applyEgressSession(spec executor.Spec, ex executor.Executor, workDir string
 	}
 
 	svc := activeEgressProxy()
+	if recErr != nil {
+		// Which egress grants reach this run turns on a record that cannot be
+		// read: refused when the sandbox named one, as an unreadable grant
+		// store is, and otherwise left to the hub's log.
+		if named != "" {
+			return refuse(named, "the hub's record of the executor could not be read: "+recErr.Error(), "")
+		}
+		fmt.Fprintf(os.Stderr, "ui: egress: read the record of executor %s for %s: %v\n", ex.ID(), workDir, recErr)
+		return spec, nil, nil
+	}
 	match, lookupErr := matchingEgressGrant(svc, requester, named)
 	if lookupErr != nil {
 		if named != "" {

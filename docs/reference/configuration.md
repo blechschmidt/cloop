@@ -212,7 +212,18 @@ executors:
     extra_args: []           # additional runtime flags; each must start with "-"
     selinux_label: ""        # "z" or "Z" — required when SELinux is enforcing
     orphan_grace_period_seconds: 600   # 0 means 600; see below
+    labels:                  # what a grant to label:k=v is matched against
+      region: eu
 ```
+
+`labels` are the executor's labels, which a [grant to a label
+selector](../guides/secrets.md#label-subjects) is matched against —
+`executors.kubernetes.labels` is the same for the Kubernetes executor. They are
+read from the configuration the hub starts with, like the rest of the section;
+after a restart that changes them, the leases the hub adopts are judged by the
+new labels and give back what those no longer match. A key with a space, `,` or
+`=`, or a value with `,`, is refused by `cloop config validate`, and dropped
+with a warning on load: no selector could name it.
 
 or with `cloop config set executors.container.<key> <value>`. The setter's key
 list covers `enabled`, `id`, `runtime`, `image`, `cpus`, `memory`, `pids_limit`,
@@ -690,6 +701,16 @@ persists that 0600 at `~/.cloop/agent.json`, and reconnects with it from then
 on. If a token leaks, `cloop executor revoke <id>` (or **Revoke** on the card)
 kills it; if it was already redeemed, that revokes the resulting credential too,
 drops the device's session, and unbinds every project that pointed at it.
+
+`--label region=eu` (repeatable), or the Labels field of the Enroll dialog,
+gives the device labels: what a [grant to a label
+selector](../guides/secrets.md#label-subjects) is matched against. They live on
+the device's credential, on the hub, and an admin changes them later with
+**Labels** on the device's card (`PUT /api/executors/{id}/labels`, audited as
+`executor.labels`); a running task holding a credential from a label grant the
+new labels no longer match gives it back when they are saved. Labels the device
+itself reports — `cloop executor agent --label` — are not its labels and match
+no grant.
 
 That command runs the agent in the *foreground* and installs nothing. For a
 device you intend to keep, install it as a supervised service instead:

@@ -113,6 +113,9 @@ func (s *Server) takeOverRunLeases(workDir string, ex executor.Executor, handleI
 			// the workload now, before anything is restored on its behalf;
 			// the lease keeps the grants nobody revoked (Task 20403).
 			s.withdrawOnAdoption(sl)
+			// And a label grant its executor's labels stopped matching while
+			// no hub held it (Task 20432).
+			s.relabelAdoptedLease(sl)
 			// And what it feeds: the run's git proxy and Kubernetes monitor
 			// sessions, under the ids and tokens its workload holds, and the
 			// App tokens behind them (Task 20383).

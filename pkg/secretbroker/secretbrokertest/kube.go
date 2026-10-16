@@ -211,7 +211,11 @@ func KubeLease(t testing.TB, guard secretbroker.KubeGuard, grants ...KubeGrant) 
 			}
 		}
 	}
-	lease, err := b.LeaseFor(ctx, secretbroker.Requester{ExecutorID: KubeExecutor, ProjectID: KubeProject}, "test")
+	requester, err := secretbroker.RequesterFor(nil, KubeExecutor, secretbroker.RequestScope{ProjectID: KubeProject})
+	if err != nil {
+		t.Fatalf("requester: %v", err)
+	}
+	lease, err := b.LeaseFor(ctx, requester, "test")
 	if err != nil {
 		t.Fatalf("lease: %v", err)
 	}

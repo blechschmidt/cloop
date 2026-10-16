@@ -228,7 +228,7 @@ func (s *Server) harnessCredentialView(r *http.Request, entry projectEntry) harn
 	}
 	canShared := s.canGrantSharedHere(r)
 	view.CanPaste = viewer.Identity != "" || canShared
-	view.Candidates = s.harnessCandidates(bs.secret, viewer, canShared, rep, target)
+	view.Candidates = s.harnessCandidates(bs, ex, viewer, canShared, rep, target)
 	return view
 }
 
@@ -257,16 +257,24 @@ func (s *Server) canGrantSharedHere(r *http.Request) bool {
 // Spendability, not visibility, is the test — an admin may see a colleague's
 // personal secret and may never grant it, and offering it would guarantee a
 // refusal.
-func (s *Server) harnessCandidates(b *secretbroker.Broker, viewer secretbroker.Viewer, canShared bool, rep harnessReport, target string) []harnessCandidateView {
+func (s *Server) harnessCandidates(bs *brokerSet, ex executor.Executor, viewer secretbroker.Viewer, canShared bool,
+	rep harnessReport, target string) []harnessCandidateView {
 	out := []harnessCandidateView{}
+	b := bs.secret
 	secrets, err := b.ListSecretsFor(viewer)
 	if err != nil {
 		return out
 	}
 	granted := map[string]bool{}
-	if grants, gerr := b.ListGrants(secretbroker.GrantFilter{ActiveOnly: true}); gerr == nil {
+	// Granted means "the lease will carry it": a grant to the project, to the
+	// executor its runs land on, or to a label selector that executor's
+	// recorded labels match (Task 20432) — the requester the lease is issued
+	// to, not the project alone.
+	rec, rerr := recordedExecutor(bs.db, ex)
+	if grants, gerr := b.ListGrants(secretbroker.GrantFilter{ActiveOnly: true}); gerr == nil && rerr == nil {
+		requester := secretbroker.NewRequester(rec, secretbroker.RequestScope{ProjectID: target})
 		for _, g := range grants {
-			if g.Subject.Matches(secretbroker.Requester{ProjectID: target}) {
+			if g.Subject.Matches(requester) {
 				granted[g.SecretID] = true
 			}
 		}

@@ -949,7 +949,12 @@ type AgentCapabilities struct {
 	// has registered ("runc", "runsc", "kata"), so the dashboard can offer
 	// them instead of asking an admin to type a name the device may not know.
 	OCIRuntimes []string `json:"oci_runtimes,omitempty"`
-	// Labels are free-form selectors (region, site, gpu) set by the operator.
+	// Labels are free-form selectors (region, site, gpu) set on the device,
+	// with `cloop executor agent --label`. They are the device's own claim, and
+	// stored with the rest of its advertisement only: the labels a grant to a
+	// label selector is matched against are the ones on the device's
+	// credential, which the hub recorded at enrollment (Task 20432), and
+	// nothing reads these to decide one.
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// UpdateChannel is the channel the device installs builds from (Task

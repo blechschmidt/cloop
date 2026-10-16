@@ -113,6 +113,9 @@ func registerBuiltinExecutors() {
 // merged for the startup banner and ignored by the code that enforces it.
 func bootstrapExecutors(dir string, port int) {
 	cfg := bootstrapHubConfig(dir, port)
+	// The labels a label grant reaching a configured executor is matched
+	// against (Task 20432): this configuration's, as for its drivers.
+	setConfiguredExecutorLabels(cfg)
 	// The git interception proxy before anything that could be handed a
 	// credential source. Reconciliation below gives the Kubernetes driver its
 	// source once and keeps it for the process's life, so a proxy started

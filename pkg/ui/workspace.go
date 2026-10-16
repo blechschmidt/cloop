@@ -430,8 +430,9 @@ func projectSeedRemedy(ex executor.Executor) string {
 // used. ListGrants plus ListSecrets answers the same question from metadata
 // alone — no payload is opened, no lease exists to leak or release.
 //
-// The matching mirrors LeaseFor exactly: same requester shape (executor ID plus
-// project path, no labels), same active-grant rule, same repository allowlist.
+// The matching mirrors LeaseFor exactly: same requester (the executor as the
+// hub records it, labels included, and the project path), same active-grant
+// rule, same repository allowlist.
 // It has to. A grant selected here that LeaseFor would not produce is a Spec
 // that names a grant the driver cannot lease, which fails at dispatch with a
 // worse error than the one this function could have returned.
@@ -474,7 +475,7 @@ func workspaceGrantFor(w executor.Workspace, ex executor.Executor, workDir strin
 		return "", nil
 	}
 
-	broker, closeDB, err := openUIBroker(controlPlaneDir())
+	broker, brokerDB, closeDB, err := openUIBrokerDB(controlPlaneDir())
 	if err != nil {
 		if isBrokerUnconfigured(err) {
 			// The broker is not in use on this install. That is the same
@@ -514,7 +515,15 @@ func workspaceGrantFor(w executor.Workspace, ex executor.Executor, workDir strin
 		return "", denied(fmt.Sprintf("%s names no forge host a credential could be presented to: %v", w.Repo, herr))
 	}
 
-	requester := secretbroker.Requester{ExecutorID: ex.ID(), ProjectID: policyProjectPath(workDir)}
+	// The executor as the hub records it, so a grant issued to a label
+	// selector its labels match is chosen here exactly as the lease will
+	// deliver it (Task 20432): a virtual executor through its device's labels.
+	rec, err := recordedExecutor(brokerDB, ex)
+	if err != nil {
+		return "", denied(fmt.Sprintf("the hub's record of executor %s, which decides the label grants it holds, "+
+			"could not be read: %v", ex.ID(), err))
+	}
+	requester := secretbroker.NewRequester(rec, secretbroker.RequestScope{ProjectID: policyProjectPath(workDir)})
 	// unverified is the first grant admitting the path whose host is not on
 	// record — a GitHub App minted before hosts were — chosen only when no
 	// grant known to be for this host is, since the lease may refuse it.
@@ -1048,6 +1057,11 @@ func workspaceCredentialFactory(db *statedb.DB) func(string) executor.WorkspaceC
 	}
 	return func(executorID string) executor.WorkspaceCredentialSource {
 		src, err := gitcreds.New(broker, executorID, workspaceLeaseActor)
+		if err == nil {
+			// The executor's labels, for the label grants it holds (Task
+			// 20432).
+			src.Records = hubExecutorRecords(db)
+		}
 		if err != nil {
 			// Returning src here would hand back a non-nil interface holding a
 			// nil pointer, which the driver would call and panic on. The

@@ -211,6 +211,7 @@ nothing else.`,
 		color.Green("✓ granted egress %s", g.ID)
 		faint := color.New(color.Faint)
 		faint.Printf("  to      %s\n", g.Subject.String())
+		printLabelReach(g.Subject, "  reaches ")
 		faint.Printf("  policy  %s\n", g.Summary())
 		faint.Printf("  expires %s\n", g.ExpiresAt.Local().Format(time.RFC1123))
 		if !hasPrivateCIDR(g.CIDRs) {
@@ -370,9 +371,13 @@ request is audited exactly as a sandbox's would be.`,
 		if err != nil {
 			return fmt.Errorf("egress: resolve working directory: %w", err)
 		}
-		requester, err := egressTestRequester(workDir)
+		requester, hypothetical, err := egressTestRequester(workDir)
 		if err != nil {
 			return err
+		}
+		if hypothetical {
+			color.New(color.Faint).Printf("testing as a hypothetical executor carrying %s; a run is judged by the "+
+				"labels the hub records for its executor\n", secretbroker.FormatLabels(requester.Labels))
 		}
 
 		broker, closeFn, err := openEgressBroker()
@@ -489,24 +494,41 @@ request is audited exactly as a sandbox's would be.`,
 // It uses the working directory as the project, matching how a run in this
 // directory would be scoped, and a fixed "cli" executor ID so an
 // executor-scoped grant is not accidentally satisfied by the test command.
-func egressTestRequester(workDir string) (secretbroker.Requester, error) {
-	if strings.TrimSpace(egressTestToFlag) != "" {
-		sub, err := secretbroker.ParseSubject(egressTestToFlag)
-		if err != nil {
-			return secretbroker.Requester{}, err
-		}
-		switch sub.Type {
-		case secretbroker.SubjectExecutor:
-			return secretbroker.Requester{ExecutorID: sub.Value, ProjectID: workDir}, nil
-		case secretbroker.SubjectProject:
-			return secretbroker.Requester{ExecutorID: "cli", ProjectID: sub.Value}, nil
-		case secretbroker.SubjectLabel:
-			return secretbroker.Requester{ExecutorID: "cli", ProjectID: workDir, Labels: sub.Labels}, nil
-		default:
-			return secretbroker.Requester{ExecutorID: "cli", ProjectID: workDir}, nil
-		}
+//
+// --to executor:<id> tests as that executor as the hub records it, labels
+// included, which is how a dispatch to it is judged (Task 20432).
+// --to label:<selector> tests as a hypothetical executor carrying exactly
+// those labels: what a grant issued to that selector does for an executor
+// that carries them. Whether any executor does is the hub's record to say —
+// the Secrets panel lists the executors each label grant matches.
+func egressTestRequester(workDir string) (r secretbroker.Requester, hypothetical bool, err error) {
+	scope := secretbroker.RequestScope{ProjectID: workDir}
+	if strings.TrimSpace(egressTestToFlag) == "" {
+		r, err = secretbroker.RequesterFor(nil, "cli", scope)
+		return r, false, err
 	}
-	return secretbroker.Requester{ExecutorID: "cli", ProjectID: workDir}, nil
+	sub, err := secretbroker.ParseSubject(egressTestToFlag)
+	if err != nil {
+		return r, false, err
+	}
+	switch sub.Type {
+	case secretbroker.SubjectExecutor:
+		db, err := statedb.Open(state.DBPath(workDir))
+		if err != nil {
+			return r, false, fmt.Errorf("egress: open state database to read executor %s's record: %w", sub.Value, err)
+		}
+		defer db.Close()
+		r, err = secretbroker.RequesterFor(cliExecutorRecords(db, workDir), sub.Value, scope)
+		return r, false, err
+	case secretbroker.SubjectProject:
+		r, err = secretbroker.RequesterFor(nil, "cli", secretbroker.RequestScope{ProjectID: sub.Value})
+		return r, false, err
+	case secretbroker.SubjectLabel:
+		return secretbroker.NewRequester(secretbroker.RecordedExecutor{ID: "cli", Labels: sub.Labels}, scope), true, nil
+	default:
+		r, err = secretbroker.RequesterFor(nil, "cli", scope)
+		return r, false, err
+	}
 }
 
 // waitForProxy blocks until the listener has an address, so the client cannot

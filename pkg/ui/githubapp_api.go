@@ -24,6 +24,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/authz"
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
@@ -324,6 +325,18 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 		writeBrokerError(w, err, "list grants")
 		return
 	}
+	// Asked as the lease will ask: as the executor the project's runs land
+	// on, as the hub records it — so a grant to that executor, or to a label
+	// selector its labels match (Task 20432), is listed with the project's
+	// own. An executor whose record cannot be read leaves only the grants that
+	// need none.
+	registerBuiltinExecutors()
+	boundTo, _ := executor.ResolveBinding(entry.Path)
+	rec, rerr := recordedExecutor(bs.db, boundTo)
+	if rerr != nil {
+		rec, _ = secretbroker.LookupExecutor(nil, "")
+	}
+	requester := secretbroker.NewRequester(rec, secretbroker.RequestScope{ProjectID: entry.Path})
 	assignments := make([]projectRepoAssignment, 0, 4)
 	for _, g := range grants {
 		sec, known := byID[g.SecretID]
@@ -338,7 +351,7 @@ func (s *Server) handleProjectRepositories(w http.ResponseWriter, r *http.Reques
 		// Only grants issued to *this* project. A wildcard subject reaches it
 		// too, and is shown, because an operator asking "what can this project
 		// see" needs the honest answer rather than the narrow one.
-		if !g.Subject.Matches(secretbroker.Requester{ProjectID: entry.Path}) {
+		if !g.Subject.Matches(requester) {
 			continue
 		}
 		forgeHost, _ := secretbroker.SecretForgeHost(sec)

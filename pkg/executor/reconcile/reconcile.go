@@ -62,6 +62,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
 	"github.com/blechschmidt/cloop/pkg/executor/gitproxycreds"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
+	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -917,7 +918,7 @@ func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity,
 		// configured yet. Attempting it and accepting nil keeps that hub
 		// schedulable — public repositories still clone, and the driver's
 		// preflight reports the gap rather than the chart failing to come up.
-		ws, closeWS := optionalWorkspaceSource(dir, execID)
+		ws, closeWS := optionalWorkspaceSource(dir, cfg, execID)
 		return Identity{Cluster: src, Workspace: ws}, closeWS, nil
 	}
 
@@ -942,6 +943,10 @@ func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity,
 		closeDB()
 		return Identity{}, nil, err
 	}
+	// The executor's labels for the label grants it holds (Task 20432): the
+	// ones this configuration gives it, the configuration it is built from.
+	records := executorRecords(db, cfg)
+	src.Records = records
 	// The same broker, so a private-repository fetch and the cluster
 	// credential are governed by one grant store and one audit trail.
 	ws, err := gitcreds.New(broker, execID, "reconcile")
@@ -949,6 +954,7 @@ func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity,
 		closeDB()
 		return Identity{}, nil, err
 	}
+	ws.Records = records
 	return Identity{Cluster: src, Workspace: ws}, closeDB, nil
 }
 
@@ -989,7 +995,7 @@ func routeWorkspaceSource(cfg *config.Config, opts Options, execID string,
 // ones by name (see *executor.WorkspaceGrantError), which is a far better
 // deployment story than an in-cluster hub that will not start because nobody
 // has minted a GitHub secret yet. Preflight reports it as a warning.
-func optionalWorkspaceSource(dir, execID string) (executor.WorkspaceCredentialSource, func()) {
+func optionalWorkspaceSource(dir string, cfg *config.Config, execID string) (executor.WorkspaceCredentialSource, func()) {
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {
 		return nil, nil
@@ -1012,7 +1018,23 @@ func optionalWorkspaceSource(dir, execID string) (executor.WorkspaceCredentialSo
 		closeDB()
 		return nil, nil
 	}
+	src.Records = executorRecords(db, cfg)
 	return src, closeDB
+}
+
+// executorRecords is the hub's record of its executors for a broker source
+// built here: db's agent credentials and virtual executors, and the labels
+// cfg gives its configured executors (Task 20432) — the configuration the
+// driver itself is built from, so the driver's leases and the hub's judge the
+// executor by the same labels.
+func executorRecords(db *statedb.DB, cfg *config.Config) secretbroker.ExecutorRecords {
+	var configured map[string]map[string]string
+	if cfg != nil {
+		configured = cfg.Executors.ConfiguredExecutorLabels()
+	}
+	return executorstore.Records{DB: db, Configured: func() (map[string]map[string]string, error) {
+		return configured, nil
+	}}
 }
 
 func convertContainerFindings(in []container.Finding) []Finding {
