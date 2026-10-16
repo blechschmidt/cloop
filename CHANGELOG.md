@@ -10,6 +10,22 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-10-16
+
+The release that carries the security fixes `main` has made since 0.0.5 — GitHub
+credentials that went to whatever host a project's origin named (Task 20423),
+project images edge devices ran unverified under `require_signature`, CLI
+cordons that took nothing back and a push token the harness could read (Task
+20424), admin API tokens anyone could mint while no role policy existed, a SCIM
+lockout anyone could trigger and git-proxy sessions that outlived their run
+(Task 20422), and a root key that could be changed only by re-minting every
+secret (Task 20425) — together with device forwarders, which bring an on-prem
+USB device or network segment to a sandbox on a remote executor (Tasks 20429,
+20430), audit forwarding (Task 20426), an approvals inbox (Task 20427) and task
+attachments (Task 20428). Executor protocol **v22**, against 0.0.5's v21. Read
+*Upgrading from 0.0.5* before upgrading: the first start suspends API tokens and
+removes Claude logins that 0.0.5 kept.
+
 ### Security
 
 - **A brokered GitHub credential goes only to the host its grant is for.**
@@ -236,10 +252,11 @@ Members of one control plane can run both releases during the upgrade, but
   another user can read or replace, a previous key without a current one, and a
   live key-encryption key that no configured key derives, which 0.0.5 started
   beside anyway (Task 20425).
-- **Helm**: with `secrets.existingSecret`, keep the key under `CLOOP_SECRET_KEY`
-  and without a trailing newline (the file reader drops one, which makes it
-  another key), keep `podSecurityContext.fsGroup`, and do not run the Pod as
-  root; changing that Secret does not restart the Pods (Task 20425).
+- **Helm chart 0.4.1 → 0.5.0**: with `secrets.existingSecret`, keep the key
+  under `CLOOP_SECRET_KEY` and without a trailing newline (the file reader drops
+  one, which makes it another key), keep `podSecurityContext.fsGroup`, and do
+  not run the Pod as root; changing that Secret does not restart the Pods (Task
+  20425).
 - **A new bootstrap's `hub.env` no longer holds the key**: point a shell at the
   key file with `CLOOP_SECRET_KEY_FILE` (Task 20425).
 - **Approving or denying a grant request now also needs `secret.grant` on the
@@ -387,7 +404,8 @@ Members of one control plane can run both releases during the upgrade, but
   `CLOOP_SECRET_KEY_FILE` and blanks the variable `envFrom` would set, takes
   `secrets.previousSecretKey` for a change of root, restarts the Pods when its
   own Secret changes, and writes that Secret as `data`, so a value removed from
-  the chart's values is removed from the Secret on upgrade (Task 20425).
+  the chart's values is removed from the Secret on upgrade (Task 20425). The
+  chart is 0.5.0; this change had left it at 0.4.1 (Task 20431).
 - **A root agent hands each container workspace to its work root's owner**, so
   its sandboxes run unprivileged; an agent running as root with a work root
   another user owns had its container runs refused (Task 20430).

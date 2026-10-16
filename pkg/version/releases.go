@@ -61,6 +61,9 @@ var publishedReleases = []Release{
 	{Tag: "v0.0.4", Protocol: 13},
 	// The first release stamped with its place on main (Task 20421).
 	{Tag: "v0.0.5", Protocol: 21, Sequence: 1082},
+	// Protocol v22: the device channels of forwarded USB and L2 devices
+	// (Task 20431).
+	{Tag: "v0.0.6", Protocol: 22, Sequence: 1116},
 }
 
 // ReleaseSequence returns the sequence the release tag's binaries carry, and
