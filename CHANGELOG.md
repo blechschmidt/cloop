@@ -139,7 +139,10 @@ schema and the hub's HTTP API may change in any release.
   and fingerprint at startup, and refuses to start on a refused source or on a
   live key-encryption key no configured key derives. See *The root key* and
   *Changing `CLOOP_SECRET_KEY` itself* in `docs/operations/runbook.md` (Task
-  20425).
+  20425). A key file owned by root is accepted only in the shapes Kubernetes and
+  systemd make: readable through a group the hub is in, or through an ACL that
+  lets the hub's user alone read it, which is how systemd 255 and later hand a
+  unit with `User=` its credentials (Task 20431).
 
 ### Upgrading from 0.0.5
 

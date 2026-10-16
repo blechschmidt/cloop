@@ -346,7 +346,15 @@ func (rv resolver) readFile(path, what string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%w: %s: cannot read its owner", ErrRefused, path)
 	}
-	if err := rv.checkAccess(path, int(st.Uid), int(st.Gid), fi.Mode().Perm()); err != nil {
+	// A root-owned file another user reads may be readable through an ACL,
+	// which its mode bits do not show; see acl.go.
+	var acl []aclEntry
+	if st.Uid == 0 && rv.euid != 0 {
+		if acl, err = readACL(f); err != nil {
+			return "", fmt.Errorf("%w: %s: cannot read its ACL: %v", ErrRefused, path, err)
+		}
+	}
+	if err := rv.checkAccess(path, int(st.Uid), int(st.Gid), fi.Mode().Perm(), acl); err != nil {
 		return "", err
 	}
 
@@ -376,13 +384,16 @@ func (rv resolver) readFile(path, what string) (string, error) {
 // checkAccess is the owner and mode rule: a key file belongs to this process
 // and is readable by nobody else (0400 or 0600).
 //
-// One shape owned by root is accepted as well, because it is the one
-// Kubernetes makes and cannot be asked to make differently: a Secret volume's
-// files are owned by root and, with the Pod's fsGroup set — which a hub needs
-// for its own volume — readable through that group, 0440 from a defaultMode of
-// 0400. The process reads it as a member of the group; nobody outside the Pod's
-// group can. Root owning a file grants nothing root did not have already.
-func (rv resolver) checkAccess(path string, uid, gid int, perm fs.FileMode) error {
+// Two shapes owned by root are accepted as well, because they are the ones
+// Kubernetes and systemd make and cannot be asked to make differently. A
+// Secret volume's files are owned by root and, with the Pod's fsGroup set —
+// which a hub needs for its own volume — readable through that group, 0440
+// from a defaultMode of 0400: the process reads it as a member of the group,
+// and nobody outside the Pod's group can. A systemd credential is owned by
+// root and readable through an ACL entry naming the unit's user (acl, the
+// file's extended ACL, nil when it has none), judged by checkACL. Root owning
+// a file grants nothing root did not have already.
+func (rv resolver) checkAccess(path string, uid, gid int, perm fs.FileMode, acl []aclEntry) error {
 	switch {
 	case perm&0o022 != 0:
 		return fmt.Errorf("%w: %s can be written by users other than its owner (mode %04o); chmod 0400 it",
@@ -399,6 +410,9 @@ func (rv resolver) checkAccess(path string, uid, gid int, perm fs.FileMode) erro
 			return fmt.Errorf("%w: %s can be read by its group (mode %04o); chmod 0400 it", ErrRefused, path, perm)
 		}
 		return nil
+	case uid == 0 && acl != nil:
+		// The group bits are the ACL's mask here, not the group's permission.
+		return rv.checkACL(path, gid, acl)
 	case uid == 0 && perm&0o070 == 0o040 && rv.inGroup(gid):
 		return nil
 	case uid == 0:

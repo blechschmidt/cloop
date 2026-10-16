@@ -2025,9 +2025,13 @@ its two slots is read from three sources, in this order:
 `0400` or `0600`, outside every `.cloop/` directory; one trailing newline is not
 part of the key. Anything else is refused, and the hub does not start: a file
 another user can read or replace, a path through `.cloop/` — even by a symlink —
-an empty file. The one file the hub accepts without owning it is the shape
-Kubernetes gives a Secret volume: owned by root, readable by the Pod's `fsGroup`
-and nobody else (mode `0440`).
+an empty file. Two files the hub accepts without owning them, because they are
+the shapes Kubernetes and systemd make: a Secret volume's, owned by root and
+readable by the Pod's `fsGroup` and nobody else (mode `0440`); and the
+credential systemd 255 and later hand a unit with `User=`, owned by root and
+readable through an ACL entry naming that user and nobody else. `stat` shows
+the credential as `0440` too, but that is the ACL's mask: no group can read it.
+A root-owned file whose ACL also lets another user or group read it is refused.
 
 **Two sources that disagree are refused**, never ranked: a key moved into a file
 with a different one left in `hub.env` is two keys, and which one the hub picked

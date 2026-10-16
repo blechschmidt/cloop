@@ -243,9 +243,100 @@ func TestKeyFileOwnerRule(t *testing.T) {
 		"root's, group-writable":            {0, 65532, 0o460, false},
 		"root's, unreadable to the group":   {0, 65532, 0o400, false},
 	} {
-		err := rv.checkAccess("/k", tc.uid, tc.gid, tc.perm)
+		err := rv.checkAccess("/k", tc.uid, tc.gid, tc.perm, nil)
 		if (err == nil) != tc.ok {
 			t.Errorf("%s: err = %v, want ok=%v", name, err, tc.ok)
+		}
+	}
+}
+
+// A root-owned file with an extended ACL is judged by its entries (Task
+// 20431). The first case is how systemd 255 and later hand a unit with User=
+// its credentials — root's, 0440 by stat, the 0440 being the mask — which the
+// mode-bit rule refused, so `cloop ui` under the unit `cloop hub bootstrap`
+// prints did not start.
+func TestKeyFileACLRule(t *testing.T) {
+	rv := resolver{euid: 1000, gid: 1000, groups: []int{65532}}
+	const undefined = 0xffffffff
+	acl := func(extra ...aclEntry) []aclEntry {
+		return append([]aclEntry{
+			{aclUserObj, aclRead, undefined},
+			{aclGroupObj, 0, undefined},
+			{aclOther, 0, undefined},
+		}, extra...)
+	}
+	for name, tc := range map[string]struct {
+		gid  int
+		perm os.FileMode
+		acl  []aclEntry
+		ok   bool
+	}{
+		"a systemd credential, naming this process": {0, 0o440,
+			acl(aclEntry{aclUser, aclRead, 1000}, aclEntry{aclMask, aclRead, undefined}), true},
+		"naming a group this process is in": {0, 0o440,
+			acl(aclEntry{aclGroup, aclRead, 65532}, aclEntry{aclMask, aclRead, undefined}), true},
+		"naming this process and another user": {0, 0o440,
+			acl(aclEntry{aclUser, aclRead, 1000}, aclEntry{aclUser, aclRead, 1001},
+				aclEntry{aclMask, aclRead, undefined}), false},
+		"naming a group this process is not in": {0, 0o440,
+			acl(aclEntry{aclUser, aclRead, 1000}, aclEntry{aclGroup, aclRead, 4242},
+				aclEntry{aclMask, aclRead, undefined}), false},
+		"letting this process write it": {0, 0o440,
+			acl(aclEntry{aclUser, aclRead | aclWrite, 1000}, aclEntry{aclMask, aclRead | aclWrite, undefined}), false},
+		"masking this process's read away": {0, 0o400,
+			acl(aclEntry{aclUser, aclRead, 1000}, aclEntry{aclMask, 0, undefined}), false},
+		"granting this process nothing": {0, 0o440,
+			acl(aclEntry{aclUser, 0, 1000}, aclEntry{aclGroup, aclRead, 4242}, aclEntry{aclMask, aclRead, undefined}), false},
+		// The mode bits of this one pass the Kubernetes rule — root's, 0440,
+		// a group this process is in — yet another user reads it through the
+		// ACL, which the mode bits do not show.
+		"another user behind a group the process is in": {65532, 0o440,
+			[]aclEntry{{aclUserObj, aclRead, undefined}, {aclGroupObj, aclRead, undefined},
+				{aclUser, aclRead, 1001}, {aclMask, aclRead, undefined}, {aclOther, 0, undefined}}, false},
+	} {
+		err := rv.checkAccess("/k", 0, tc.gid, tc.perm, tc.acl)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", name, err, tc.ok)
+		}
+		if err != nil && !errors.Is(err, ErrRefused) {
+			t.Errorf("%s: err = %v, want ErrRefused", name, err)
+		}
+	}
+}
+
+// parseACL reads the kernel's system.posix_acl_access layout: a version word,
+// then 8-byte entries, little-endian.
+func TestParseACL(t *testing.T) {
+	// getfacl's "user::r--, user:65534:r--, group::---, mask::r--, other::---".
+	raw := []byte{
+		0x02, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff,
+		0x02, 0x00, 0x04, 0x00, 0xfe, 0xff, 0x00, 0x00,
+		0x04, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+		0x10, 0x00, 0x04, 0x00, 0xff, 0xff, 0xff, 0xff,
+		0x20, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+	}
+	got, err := parseACL(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []aclEntry{{aclUserObj, aclRead, 0xffffffff}, {aclUser, aclRead, 65534}, {aclGroupObj, 0, 0xffffffff},
+		{aclMask, aclRead, 0xffffffff}, {aclOther, 0, 0xffffffff}}
+	if len(got) != len(want) {
+		t.Fatalf("parseACL = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	for name, bad := range map[string][]byte{
+		"empty":           nil,
+		"a short entry":   raw[:len(raw)-3],
+		"another version": append([]byte{0x01, 0x00, 0x00, 0x00}, raw[4:]...),
+	} {
+		if _, err := parseACL(bad); err == nil {
+			t.Errorf("%s: parsed", name)
 		}
 	}
 }

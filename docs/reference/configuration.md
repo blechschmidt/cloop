@@ -1569,7 +1569,7 @@ them hold different keys:
 
 | Setting | Holds |
 | --- | --- |
-| `CLOOP_SECRET_KEY_FILE` | absolute path to a file holding the key: a regular file the hub's user owns, mode `0400` or `0600`, outside every `.cloop/` directory (one trailing newline is ignored). A Kubernetes Secret volume — owned by root, mode `0440`, readable through the Pod's `fsGroup` — is accepted too |
+| `CLOOP_SECRET_KEY_FILE` | absolute path to a file holding the key: a regular file the hub's user owns, mode `0400` or `0600`, outside every `.cloop/` directory (one trailing newline is ignored). A Kubernetes Secret volume — owned by root, mode `0440`, readable through the Pod's `fsGroup` — is accepted too, and so is a file owned by root that an ACL lets the hub's user, and nobody else, read: how systemd 255 and later hand a unit with `User=` its credentials |
 | `$CREDENTIALS_DIRECTORY/cloop-secret-key` | the systemd credential: `LoadCredential=cloop-secret-key:<file>`, or `LoadCredentialEncrypted=` with a file `systemd-creds encrypt` sealed — to the host's credential secret and, where there is one, its TPM |
 | `CLOOP_SECRET_KEY` | the key itself, in the environment — the last resort: readable in `/proc/<pid>/environ` and inherited by children |
 | `CLOOP_SECRET_KEY_PREVIOUS_FILE`, `cloop-secret-key-previous`, `CLOOP_SECRET_KEY_PREVIOUS` | the key a [change of root](../operations/runbook.md#changing-cloop_secret_key-itself) is replacing, read the same way: it opens what it sealed and mints nothing. Refused without a current key, or when it is the current key |
