@@ -116,6 +116,12 @@ schema and the hub's HTTP API may change in any release.
   spent budget among them — and reported them as authentication failures
   "retried once after refreshing credentials". A `403` is now reported once,
   as the refusal it is (Task 20435).
+- **Claude Opus 4.5 and 4.6 and Claude Haiku 4.5 are priced as Anthropic bills
+  them.** The price table charged Opus 4.5 and 4.6 at $15 and $75 per million
+  input and output tokens — three times the $5 and $25 the API bills — and
+  Haiku 4.5 at Haiku 3.5's $0.80 and $4 rather than $1 and $5, so cost reports
+  and `daily_cost_usd` overstated the one and understated the other
+  (Task 20435).
 - **Reading the provisioned directory no longer takes the database's write
   lock.** The SCIM directory was read inside a plain transaction, which the
   connection policy begins `IMMEDIATE`, so every reader of it — the hub's

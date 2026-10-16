@@ -272,17 +272,21 @@ var prices = map[string]ModelPricing{
 	// against: a spend ceiling cannot stop what it measures as zero. Opus 5.5
 	// is listed ahead of Opus 5 for readability only; lookup is exact-match
 	// first, so the neighbouring prefix cannot shadow it.
-	"claude-opus-5-5":   {InputPerM: 5.00, OutputPerM: 25.00},
-	"claude-opus-5":     {InputPerM: 5.00, OutputPerM: 25.00},
-	"claude-sonnet-5":   {InputPerM: 3.00, OutputPerM: 15.00},
-	"claude-fable-5":    {InputPerM: 10.00, OutputPerM: 50.00},
+	"claude-opus-5-5": {InputPerM: 5.00, OutputPerM: 25.00},
+	"claude-opus-5":   {InputPerM: 5.00, OutputPerM: 25.00},
+	"claude-sonnet-5": {InputPerM: 3.00, OutputPerM: 15.00},
+	"claude-fable-5":  {InputPerM: 10.00, OutputPerM: 50.00},
+	// Opus 4.5 and 4.6 are priced as Opus 4.7, and Haiku 4.5 above Haiku
+	// 3.5, on Anthropic's pricing page (checked 2026-10-16). The model relay
+	// enforces daily_cost_usd from this table (Task 20435); it had charged
+	// Opus 4.5 and 4.6 three times what the API bills, Haiku 4.5 four fifths.
 	"claude-opus-4-8":   {InputPerM: 5.00, OutputPerM: 25.00},
 	"claude-opus-4-7":   {InputPerM: 5.00, OutputPerM: 25.00},
-	"claude-opus-4-6":   {InputPerM: 15.00, OutputPerM: 75.00},
-	"claude-opus-4-5":   {InputPerM: 15.00, OutputPerM: 75.00},
+	"claude-opus-4-6":   {InputPerM: 5.00, OutputPerM: 25.00},
+	"claude-opus-4-5":   {InputPerM: 5.00, OutputPerM: 25.00},
 	"claude-sonnet-4-6": {InputPerM: 3.00, OutputPerM: 15.00},
 	"claude-sonnet-4-5": {InputPerM: 3.00, OutputPerM: 15.00},
-	"claude-haiku-4-5":  {InputPerM: 0.80, OutputPerM: 4.00},
+	"claude-haiku-4-5":  {InputPerM: 1.00, OutputPerM: 5.00},
 	// Anthropic Claude 3.x
 	"claude-3-opus-20240229":     {InputPerM: 15.00, OutputPerM: 75.00},
 	"claude-3-5-sonnet-20241022": {InputPerM: 3.00, OutputPerM: 15.00},
