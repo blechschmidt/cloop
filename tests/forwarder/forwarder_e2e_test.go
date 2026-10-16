@@ -169,6 +169,7 @@ func newWorld(t *testing.T) *world {
 		w.bin = filepath.Join(root, "cloop")
 		cmd := exec.Command("go", "build", "-o", w.bin, ".")
 		cmd.Dir = "../.."
+		cmd.Env = append(os.Environ(), goEnv...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("build cloop: %v\n%s", err, out)
 		}
