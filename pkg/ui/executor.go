@@ -663,6 +663,15 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		return nil, executor.Handle{}, err
 	}
 
+	// What the run's pushes are scanned for, from now until the run and every
+	// git proxy session naming it are over (Task 20436). A dispatch that does
+	// not start takes it back.
+	endPushScan := registerRunPushScan(runID, workDir, lease, spec)
+	defer func() {
+		if err != nil {
+			endPushScan()
+		}
+	}()
 	handle, err := ex.Start(context.Background(), spec)
 	if err != nil {
 		lease.Close()
@@ -697,6 +706,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		wipeLeaseOnExit(ex, handle.ID, lease, egress)
 		// The workload is over: nothing is left for the intent to name.
 		intent.forget()
+		endPushScan()
 	}()
 	if forwards != nil {
 		// Forwarded devices go back with the workload (Task 20430): one this
@@ -1047,6 +1057,9 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 		return nil, err
 	}
 	defer intent.forget()
+	// What its pushes are scanned for, for the length of the call (Task
+	// 20436).
+	defer registerRunPushScan(runID, workDir, lease, spec)()
 	res, runErr := executor.Run(ctx, ex, spec)
 	if runErr != nil {
 		auditImageDenial(workDir, runErr)

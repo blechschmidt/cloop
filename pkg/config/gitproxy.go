@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
@@ -42,6 +43,9 @@ func ValidateGitProxyConfig(g GitProxyConfig) error {
 		}
 	}
 	if err := validateMonitorTLS("executors.git_proxy", g.TLS); err != nil {
+		return err
+	}
+	if err := validatePushScan(g); err != nil {
 		return err
 	}
 	if g.AutoTLS() && (strings.TrimSpace(g.CertFile) != "" || strings.TrimSpace(g.KeyFile) != "") {
@@ -165,6 +169,7 @@ func clampGitProxyConfig(g *GitProxyConfig) []string {
 		g.AdvertiseURL = ""
 		g.Enabled = false
 	}
+	changed = append(changed, clampPushScan(g)...)
 	changed = append(changed, clampMonitorTLS("executors.git_proxy", &g.TLS, g.CertFile, g.KeyFile)...)
 	// Not inferred from the missing files: a section that said enabled: true
 	// with neither has always been switched off here, and turning it into a
@@ -204,4 +209,79 @@ func (g GitProxyConfig) Policy() gitproxy.Policy {
 	}
 	pol.Normalize()
 	return pol
+}
+
+// Bounds on the push scan's limits (Task 20436). A limit is a ceiling on the
+// work one push may cost the hub, so its own ceiling is what keeps a typo from
+// turning it into no limit at all.
+const (
+	PushScanMaxObjectMBUpper = 64 << 10 // 64 GiB
+	PushScanMaxPushMBUpper   = 1 << 20  // 1 TiB
+	PushScanSecondsUpper     = 3600
+)
+
+// validatePushScan checks the push scan's mode and limits.
+func validatePushScan(g GitProxyConfig) error {
+	if _, err := gitproxy.ParseScanMode(g.PushScan); err != nil {
+		return err
+	}
+	for _, l := range pushScanLimits(&g) {
+		if l.value < 0 || l.value > l.upper {
+			return fmt.Errorf("%s must be between 0 and %d (got %d)", l.setting, l.upper, l.value)
+		}
+	}
+	return nil
+}
+
+// clampPushScan repairs the push scan's settings at load. An unreadable mode
+// becomes the default, values — never off, which is the one repair that would
+// turn a typo into a push forwarded unread — and a limit out of range its
+// default.
+func clampPushScan(g *GitProxyConfig) []string {
+	var changed []string
+	if _, err := gitproxy.ParseScanMode(g.PushScan); err != nil {
+		changed = append(changed, err.Error()+"; scanning for the run's values")
+		g.PushScan = ""
+	}
+	for _, l := range pushScanLimits(g) {
+		if l.value < 0 || l.value > l.upper {
+			changed = append(changed, fmt.Sprintf("%s: value %d outside [0, %d]", l.setting, l.value, l.upper))
+			*l.field = 0
+		}
+	}
+	return changed
+}
+
+type pushScanLimit struct {
+	setting string
+	value   int
+	upper   int
+	field   *int
+}
+
+func pushScanLimits(g *GitProxyConfig) []pushScanLimit {
+	return []pushScanLimit{
+		{gitproxy.SettingPushScanObjectMB, g.PushScanMaxObjectMB, PushScanMaxObjectMBUpper, &g.PushScanMaxObjectMB},
+		{gitproxy.SettingPushScanPushMB, g.PushScanMaxPushMB, PushScanMaxPushMBUpper, &g.PushScanMaxPushMB},
+		{gitproxy.SettingPushScanSeconds, g.PushScanSeconds, PushScanSecondsUpper, &g.PushScanSeconds},
+	}
+}
+
+// PushScanMode is the configured scan mode: unset, or unreadable, is values.
+func (g GitProxyConfig) PushScanMode() gitproxy.ScanMode {
+	m, err := gitproxy.ParseScanMode(g.PushScan)
+	if err != nil {
+		return gitproxy.ScanValues
+	}
+	return m
+}
+
+// PushScanLimits is what the scan of one push may cost, zero values left for
+// the proxy's defaults.
+func (g GitProxyConfig) PushScanLimits() gitproxy.ScanLimits {
+	return gitproxy.ScanLimits{
+		MaxObjectBytes: int64(g.PushScanMaxObjectMB) << 20,
+		MaxPushBytes:   int64(g.PushScanMaxPushMB) << 20,
+		MaxDuration:    time.Duration(g.PushScanSeconds) * time.Second,
+	}
 }

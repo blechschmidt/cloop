@@ -240,6 +240,17 @@ const (
 	// one whose harness was refused a model or a budget, and whose spend the
 	// relay measured.
 	EventModelRelay EventType = "model_relay"
+
+	// EventGitPushRefused records a push the git proxy refused because it
+	// carries a credential the run was given, or because the proxy could not
+	// scan it within its limits or read its pack (Task 20436). The message
+	// names the objects and the grant and secret each value came from; the
+	// details carry them as fields. Never the value.
+	//
+	// On the project's journal because the push came from the run, and the
+	// one who reads the refusal in git's output is the agent: the people
+	// running the project learn of it here, and on the task it happened in.
+	EventGitPushRefused EventType = "git_push_refused"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any
@@ -336,6 +347,43 @@ func (d *DB) ListEvents(offset, limit int) (rows []EventRow, total int, err erro
 		return nil, total, classifyDriverErr(err)
 	}
 	return rows, total, nil
+}
+
+// ListEventsOfType returns the newest limit rows of one type, latest first.
+func (d *DB) ListEventsOfType(t EventType, limit int) ([]EventRow, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if limit <= 0 {
+		limit = 100
+	}
+	q, err := d.conn.Query(
+		`SELECT id, timestamp, type, task_id, task_title, step, message, details
+		 FROM events WHERE type = ?
+		 ORDER BY id DESC
+		 LIMIT ?`,
+		string(t), limit,
+	)
+	if err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	defer q.Close()
+	var rows []EventRow
+	for q.Next() {
+		var r EventRow
+		var ts, typ string
+		if err := q.Scan(&r.ID, &ts, &typ, &r.TaskID, &r.TaskTitle, &r.Step, &r.Message, &r.Details); err != nil {
+			return nil, classifyDriverErr(err)
+		}
+		if tt, perr := time.Parse(time.RFC3339Nano, ts); perr == nil {
+			r.Timestamp = tt
+		}
+		r.Type = EventType(typ)
+		rows = append(rows, r)
+	}
+	if err := q.Err(); err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	return rows, nil
 }
 
 // CountEvents returns the total number of journal rows. Cheap; used by the UI

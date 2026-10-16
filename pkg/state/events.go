@@ -70,6 +70,7 @@ const (
 	EventModelRelay        = statedb.EventModelRelay
 	EventRunReexecuted     = statedb.EventRunReexecuted
 	EventRunAdoption       = statedb.EventRunAdoption
+	EventGitPushRefused    = statedb.EventGitPushRefused
 )
 
 // LogEvent appends one row to the project's event journal. Best-effort: any
@@ -135,6 +136,24 @@ func ListEvents(workDir string, offset, limit int) ([]EventRow, int, error) {
 	}
 	defer db.Close()
 	return db.ListEvents(offset, limit)
+}
+
+// ListEventsOfType returns the newest limit events of one type, latest first.
+// Returns nil for a project that has no state.db yet.
+func ListEventsOfType(workDir string, t EventType, limit int) ([]EventRow, error) {
+	if workDir == "" {
+		return nil, nil
+	}
+	dbPath := effectiveDBPath(ActiveDir(workDir))
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, nil
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return db.ListEventsOfType(t, limit)
 }
 
 // EventHistory reads one page of the project's journal — its steps and events

@@ -82,6 +82,11 @@ type gitProxyService struct {
 	// certs is the certificate the hub issued the proxy itself, under
 	// tls: auto (Task 20409); nil when it serves cert_file and key_file.
 	certs *monitorCert
+	// scanMode and scanLimits are the hub's push scan settings (Task 20436):
+	// executors.git_proxy.push_scan and its limits. A project's own setting
+	// may tighten the mode (gitproxy_pushscan.go).
+	scanMode   gitproxy.ScanMode
+	scanLimits gitproxy.ScanLimits
 }
 
 // gitProxySingleton is the process's proxy, or nil when none is configured.
@@ -220,15 +225,24 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 	}
 	// Sessions are recorded as owned by this process, so another hub process
 	// the sandbox's git request reaches can forward it here (Task 20354).
-	reg.OnEvent = withProxySessionOwnership(ownerGitProxy, gitProxySessionEvent, gitProxyAuditSink(auditDB))
+	// A push the scan refused is also filed in its run's history (Task
+	// 20436).
+	reg.OnEvent = withProxySessionOwnership(ownerGitProxy, gitProxySessionEvent,
+		withPushScanJournal(gitProxyAuditSink(auditDB)))
 	if auditDB != nil {
 		// Lease-path sessions are recorded (Task 20383), so the process that
 		// adopts a run after this one stops can restore them.
 		reg.Store = newGitSessionStore(auditDB)
 	}
 
+	// Set below, before the proxy serves anything: the scan hook reads the
+	// service's settings.
+	var svc *gitProxyService
 	px, err := gitproxy.New(reg, gitproxy.Options{
 		Fallback: clusterProxyFallback(ownerGitProxy, clusterAPIProxyGit),
+		// Every push is scanned for the credentials its run was given
+		// before the forge may accept it (Task 20436).
+		PushScan: func(sess *gitproxy.Session) gitproxy.PushScan { return svc.pushScanFor(sess) },
 		// The model relay for sandboxed runs (Task 20435), served beside the
 		// proxy so a sandbox reaches both at one address, over one
 		// certificate, through one firewall rule.
@@ -241,7 +255,7 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 	}
 
 	reapCtx, stopReaping := context.WithCancel(context.Background())
-	svc := &gitProxyService{
+	svc = &gitProxyService{
 		reg:         reg,
 		proxy:       px,
 		baseURL:     baseURL,
@@ -251,6 +265,8 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 		stopReaping: stopReaping,
 		auditDB:     auditDB,
 		certs:       certs,
+		scanMode:    g.PushScanMode(),
+		scanLimits:  g.PushScanLimits(),
 	}
 
 	go func() {
@@ -261,8 +277,8 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 	go svc.reap(reapCtx)
 
 	fmt.Fprintf(os.Stderr,
-		"ui: git interception proxy on %s, advertised as %s; pushes limited to %s\n",
-		ln.Addr(), baseURL, strings.Join(svc.policy.AllowedRefs, ", "))
+		"ui: git interception proxy on %s, advertised as %s; pushes limited to %s and scanned for %s\n",
+		ln.Addr(), baseURL, strings.Join(svc.policy.AllowedRefs, ", "), scanModeDescription(svc.scanMode))
 	if certs != nil {
 		leaf := certs.srv.Current()
 		fmt.Fprintf(os.Stderr,
@@ -300,6 +316,8 @@ func (s *gitProxyService) reap(ctx context.Context) {
 			return
 		case <-t.C:
 			s.reg.ReapExpired()
+			// And the push scan values of runs no session names any more.
+			sweepRunPushScans()
 		}
 	}
 }
@@ -430,7 +448,7 @@ func gitProxyAuditSink(db *statedb.DB) func(gitproxy.Event) {
 		// Event.String renders. gitproxy.Event has no field that could hold
 		// credential material or object content, which is what makes this
 		// safe to write to a table an operator exports.
-		payload, err := json.Marshal(map[string]any{
+		fields := map[string]any{
 			"kind":       string(e.Kind),
 			"session_id": e.SessionID,
 			"repo":       e.RepoPath,
@@ -438,7 +456,18 @@ func gitProxyAuditSink(db *statedb.DB) func(gitproxy.Event) {
 			"task_id":    e.TaskID,
 			"refs":       e.Refs,
 			"detail":     e.Detail,
-		})
+		}
+		// A refusal by the push scan says which run, and where the push
+		// carries what — objects and provenance, never the value (Task
+		// 20436).
+		if e.Scan != "" {
+			fields["scan"] = e.Scan
+			fields["run_id"] = e.RunID
+		}
+		if len(e.Findings) > 0 {
+			fields["findings"] = e.Findings
+		}
+		payload, err := json.Marshal(fields)
 		if err != nil {
 			payload = []byte(`{}`)
 		}

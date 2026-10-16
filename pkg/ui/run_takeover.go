@@ -104,6 +104,15 @@ func (s *Server) takeOverRunLeases(workDir string, ex executor.Executor, handleI
 			if r, ok := ex.(executor.HandleRedactor); ok {
 				r.AddHandleRedactions(handleID, sl.broker.RedactionValues(id)...)
 			}
+			// And the run's pushes are scanned for the same values (Task
+			// 20436) — recorded before its sessions are restored below, so
+			// no push through one is scanned without them, and forgotten
+			// once the run and every session naming it are over.
+			adoptRunPushScan(sl.lease.RunID, workDir, id, sl.broker.RedactionCredentials(id))
+			go func(runID string) {
+				watchWorkloadExit(ex, handleID)
+				endRunPushScan(runID)
+			}(sl.lease.RunID)
 			liveLeases.add(sl)
 			go wipeLeaseOnExit(ex, handleID, sl, nil)
 			s.log().Info("cluster", 0, "took over the secret lease of an adopted run",

@@ -11,7 +11,7 @@
 set -eu
 
 [ $# -ge 4 ] || {
-	echo "usage: $0 <project_idx> <branch|readonly|pat|ws> <repo> <other_repo> [VAR=value ...]" >&2
+	echo "usage: $0 <project_idx> <branch|readonly|pat|ws|scan> <repo> <other_repo> [VAR=value ...]" >&2
 	exit 2
 }
 idx=$1 scenario=$2 repo=$3 other=$4
@@ -25,6 +25,7 @@ branch) defaults="ALLOWED=cloop/e2e-allowed-$stamp OTHER=cloop/e2e-other-$stamp 
 readonly) defaults="RO_BRANCH=cloop/e2e-ro-$stamp" ;;
 pat) defaults="PAT_BRANCH=cloop/e2e-pat-$stamp OUTSIDE=e2e-outside-$stamp" ;;
 ws) defaults="WS_BRANCH=cloop/e2e-ws-$stamp OTHER=cloop/e2e-other-$stamp" ;;
+scan) defaults="SCAN_BRANCH=cloop/e2e-scan-$stamp SCAN_TAG=cloop-e2e-scan-$stamp SCAN_VAR=E2E_SCAN_KEY" ;;
 *)
 	echo "unknown scenario $scenario" >&2
 	exit 2

@@ -295,6 +295,9 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	// not applied here because the helper it needs does not exist on this
 	// branch yet; when it lands, this is the place for it — a reproduction
 	// acquires the same lease a real run does and deserves the same guarantee.
+	// Its pushes are scanned for what it was given, as a run's are (Task
+	// 20436).
+	defer registerRunPushScan(runID, rs.ProjectDir, lease, spec)()
 	res, runErr := executor.Run(ctx, ex, spec)
 	outcome := &taskreplay.RunOutcome{
 		Branch:       rs.Branch,

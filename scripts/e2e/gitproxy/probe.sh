@@ -12,6 +12,8 @@
 #   readonly: RO_BRANCH, VICTIM (an existing scratch branch the probe tries to delete)
 #   pat:      PAT_BRANCH, OUTSIDE
 #   ws:       WS_BRANCH, OTHER
+#   scan:     SCAN_BRANCH, SCAN_TAG, SCAN_VAR — the env variable a leased env
+#             secret delivered, whose value each push carries (Task 20436)
 #
 # Every check prints one line, "RESULT <id> PASS|FAIL <detail>", and the run
 # ends with SUMMARY. Nothing here prints a credential: the token checks report
@@ -267,6 +269,69 @@ ws)
 	expect_allowed W1 "refs/heads/$WS_BRANCH" "push to $WS_BRANCH (inside the grant's branches)" "HEAD:refs/heads/$WS_BRANCH"
 	expect_denied W2 "refs/heads/$OTHER" "push to $OTHER (outside the grant's branches)" "HEAD:refs/heads/$OTHER"
 	expect_denied W3 refs/heads/main "push to main" HEAD:refs/heads/main
+	;;
+scan)
+	# Task 20436: the push scan. Every push below carries the value a leased
+	# env secret delivered — in a file, a commit message, an annotated tag,
+	# base64-encoded — and must be refused by the scan with the ref unmoved
+	# and the value in none of git's output; then a clean push lands.
+	val=$(printenv "${SCAN_VAR:-E2E_SCAN_KEY}")
+	if [ -z "$val" ]; then
+		res S0 FAIL "the lease delivered no ${SCAN_VAR:-E2E_SCAN_KEY} to push"
+	else
+		info "the leased value is ${#val} characters long"
+		leaked=""
+		expect_scanned() {
+			id=$1 ref=$2 what=$3
+			shift 3
+			before=$(remote_sha "$ref")
+			if push "$@"; then
+				res "$id" FAIL "$what was ACCEPTED: $(brief "$O")"
+			elif [ "$(remote_sha "$ref")" != "$before" ]; then
+				res "$id" FAIL "$what reported failure but $ref moved"
+			elif grep -qF -- "$val" "$O"; then
+				leaked="$leaked $id"
+				res "$id" FAIL "$what refused, but git's output carries the value"
+			elif ! grep -q 'carries a credential' "$O"; then
+				res "$id" FAIL "$what failed, but not by the push scan: $(brief "$O")"
+			else
+				res "$id" PASS "$what refused by the scan: $(brief "$O")"
+			fi
+		}
+		fresh() { git reset -q --hard "$MAIN0" >/dev/null 2>&1; }
+
+		fresh
+		printf 'API_KEY=%s\n' "$val" >"deploy-$STAMP.env"
+		git add "deploy-$STAMP.env" && $GITC commit -qm "Task 20436 scan e2e: a file" >/dev/null
+		expect_scanned S1 "refs/heads/$SCAN_BRANCH-1" "a file carrying the value" "HEAD:refs/heads/$SCAN_BRANCH-1"
+
+		fresh
+		printf 'nothing here\n' >"notes-$STAMP.txt"
+		git add "notes-$STAMP.txt" && $GITC commit -qm "Task 20436 scan e2e: key $val" >/dev/null
+		expect_scanned S2 "refs/heads/$SCAN_BRANCH-2" "a commit message carrying the value" "HEAD:refs/heads/$SCAN_BRANCH-2"
+
+		fresh
+		$GITC tag -a "$SCAN_TAG" -m "release notes, key $val" >/dev/null
+		expect_scanned S3 "refs/tags/$SCAN_TAG" "an annotated tag carrying the value" "refs/tags/$SCAN_TAG"
+		git tag -d "$SCAN_TAG" >/dev/null 2>&1
+
+		fresh
+		printf 'data:\n  key: %s\n' "$(printf '%s' "$val" | base64 | tr -d '\n')" >"secret-$STAMP.yaml"
+		git add "secret-$STAMP.yaml" && $GITC commit -qm "Task 20436 scan e2e: base64" >/dev/null
+		expect_scanned S4 "refs/heads/$SCAN_BRANCH-4" "a base64-encoded value" "HEAD:refs/heads/$SCAN_BRANCH-4"
+
+		fresh
+		printf 'Task 20436 clean push %s\n' "$STAMP" >"clean-$STAMP.txt"
+		git add "clean-$STAMP.txt" && $GITC commit -qm "Task 20436 scan e2e: clean" >/dev/null
+		expect_allowed S5 "refs/heads/$SCAN_BRANCH-clean" "a push carrying no credential" "HEAD:refs/heads/$SCAN_BRANCH-clean"
+
+		if [ -z "$leaked" ]; then
+			res S6 PASS "no refusal echoed the value"
+		else
+			res S6 FAIL "refusals echoed the value:$leaked"
+		fi
+		fresh
+	fi
 	;;
 *)
 	res SCENARIO FAIL "unknown scenario $SCENARIO"

@@ -5055,6 +5055,16 @@ func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
+	// The pushes the git proxy refused while the task ran (Task 20436), as
+	// lines of its details: the agent read the refusal in git's output, and
+	// this is where the people running the project read it. Added to the
+	// copy sent here, never to the stored task, whose annotations are the
+	// run's to write.
+	if refused := pushRefusalsForTask(workDir, task); len(refused) > 0 {
+		shown := *task
+		shown.Annotations = append(append([]pm.Annotation(nil), task.Annotations...), refused...)
+		task = &shown
+	}
 
 	// Cap returned bodies so a runaway artifact can't blow up the browser.
 	const maxBodyBytes = 256 * 1024 // 256 KB

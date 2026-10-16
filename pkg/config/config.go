@@ -1045,6 +1045,29 @@ type GitProxyConfig struct {
 	// allowlist that forgot about deletes would let a sandbox destroy the
 	// very branches it was scoped to.
 	AllowDelete bool `yaml:"allow_delete,omitempty"`
+
+	// PushScan says what every push through the proxy is scanned for before
+	// the forge may accept it (Task 20436): "values" — the exact values the
+	// run was given, as delivered, base64-encoded and percent-encoded — which
+	// is the default whenever the proxy runs; "shapes", which adds pkg/redact's
+	// registry of credential formats; or "off", which forwards packs unread. A
+	// project's own .cloop/config.yaml may set a stricter mode for its pushes,
+	// never a weaker one.
+	//
+	// shapes is opt-in because repositories carry realistic fake keys in
+	// their test fixtures — this one does — and a mode that refused those
+	// would be switched off.
+	PushScan string `yaml:"push_scan,omitempty"`
+
+	// PushScanMaxObjectMB bounds the inflated size of one object the scan
+	// reads, PushScanMaxPushMB the inflated size of a whole push, and
+	// PushScanSeconds the time spent scanning one — inflating and matching,
+	// not waiting on the network. Zero is 1024 MiB, 4096 MiB and 300 s. A
+	// push past any of them is refused, naming the setting: a scan that gave
+	// up is not one that found nothing.
+	PushScanMaxObjectMB int `yaml:"push_scan_max_object_mb,omitempty"`
+	PushScanMaxPushMB   int `yaml:"push_scan_max_push_mb,omitempty"`
+	PushScanSeconds     int `yaml:"push_scan_seconds,omitempty"`
 }
 
 // EgressConfig configures the egress broker's forward proxy.

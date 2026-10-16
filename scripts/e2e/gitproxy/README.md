@@ -76,6 +76,7 @@ refusal it was meant to report.
    | `readonly` | read | — |
    | `pat` | write (on the `github_pat` secret) | — |
    | `ws` | write, `cloop/e2e-ws-*`; the project directory is a checkout of the granted repository, so the device provisions it through the proxy | |
+   | `scan` | write, plus an `env` secret delivering `E2E_SCAN_KEY` (any random value of 8+ characters); the hub's `allowed_refs` also admits `refs/tags/cloop-e2e-scan-*`, so the tag case reaches the push scan rather than the branch policy | — |
 
 ## Running it
 
@@ -85,6 +86,7 @@ export CLOOP_HUB=http://127.0.0.1:18347 CLOOP_HUB_TOKEN=...
 ./mktask.sh 2 readonly acme/granted acme/other VICTIM=cloop/e2e-victim-1   # an existing scratch branch
 ./mktask.sh 3 pat      acme/granted acme/other
 ./mktask.sh 5 ws       acme/granted acme/other
+./mktask.sh 6 scan     acme/granted acme/other   # Task 20436
 curl -X POST -H "Authorization: Bearer $CLOOP_HUB_TOKEN" "$CLOOP_HUB/api/run?project_idx=1"
 ```
 
@@ -109,6 +111,16 @@ Every line is `RESULT <id> PASS|FAIL <detail>`, then `SUMMARY`.
 | R1–R5 | fetch works; pushes and a delete are refused at the advertisement; the lease says read-only |
 | W1–W3 | on a broad `github_pat`: the hub's allowlist holds, and the other repository stays refused |
 | WS1–WS5 | the provisioned workspace is the granted repository at `main`, its origin is the proxy, it holds no credential, and pushes from it follow the grant |
+| S1–S4 | a push carrying the leased `E2E_SCAN_KEY` value — in a file, a commit message, an annotated tag, base64-encoded — is refused **by the push scan** (`carries a credential`), the ref does not appear on GitHub, and git's output does not contain the value |
+| S5 | a push carrying no credential lands on GitHub |
+| S6 | no refusal echoed the value |
+
+The `scan` scenario's first run (Task 20436), from a runc container on sgx
+against `bb-selforg/cloop-app-e2e`, passed 18 of 18; the hub's audit trail held
+one `gitproxy.push_secret_refused` row per refused push and the task's details
+one line each, and the value was in neither database, log nor output. Delete
+the `-clean` branch S5 leaves afterwards — the proxy refuses deletes, so through
+the API with the App's own token.
 
 A refusal counts only if the proxy made it (its `cloop git proxy` body or a
 `remote rejected` report), and every push check re-reads the ref afterwards —
