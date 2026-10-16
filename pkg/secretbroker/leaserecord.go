@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -456,6 +457,24 @@ func (b *Broker) HeldElsewhere(leaseID string) bool {
 // shape the pattern-based scrubbers already recognise. Nil for a lease this
 // broker does not hold.
 func (b *Broker) RedactionValues(leaseID string) []string {
+	creds := b.RedactionCredentials(leaseID)
+	if len(creds) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, c.Value)
+	}
+	return out
+}
+
+// RedactionCredentials is RedactionValues with each value's provenance: the
+// values an adopted run's pushes are scanned for (Task 20436), which a refusal
+// names by grant and secret. It covers what the store can re-derive — env
+// secrets and personal access tokens — and nothing a lease minted or rewrote:
+// a GitHub App token, a kubeconfig or registry document, a proxy session's
+// token.
+func (b *Broker) RedactionCredentials(leaseID string) []CredentialValue {
 	b.mu.Lock()
 	st, ok := b.leases[leaseID]
 	var grantIDs []string
@@ -463,7 +482,7 @@ func (b *Broker) RedactionValues(leaseID string) []string {
 		grantIDs = append(grantIDs, st.grantIDs...)
 	}
 	b.mu.Unlock()
-	var out []string
+	var out []CredentialValue
 	for _, id := range grantIDs {
 		g, err := b.store.GetGrant(id)
 		if err != nil {
@@ -479,9 +498,16 @@ func (b *Broker) RedactionValues(leaseID string) []string {
 		}
 		switch s.Kind {
 		case KindEnv:
-			for k, v := range jsonUnmarshalEnv(plaintext, s.Name) {
-				if deliverableEnvKey(g.Constraints, k) && v != "" {
-					out = append(out, v)
+			env := jsonUnmarshalEnv(plaintext, s.Name)
+			keys := make([]string, 0, len(env))
+			for k := range env {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if v := env[k]; deliverableEnvKey(g.Constraints, k) && v != "" {
+					out = append(out, CredentialValue{Value: v, GrantID: g.ID, SecretName: s.Name, Kind: s.Kind,
+						Field: "env " + k})
 				}
 			}
 		case KindGitHubPAT:
@@ -489,7 +515,8 @@ func (b *Broker) RedactionValues(leaseID string) []string {
 			// GitHub Enterprise Server PAT is a JSON document (Task 20423),
 			// and redacting the document would leave the token itself.
 			if token, _, perr := parseGitHubPAT(plaintext); perr == nil && token != "" {
-				out = append(out, token)
+				out = append(out, CredentialValue{Value: token, GrantID: g.ID, SecretName: s.Name, Kind: s.Kind,
+					Field: "the GitHub token"})
 			}
 		}
 		zero(plaintext)
