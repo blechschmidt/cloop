@@ -18,7 +18,7 @@
   'use strict';
 
   window.cloopExecadminPanel = function (h) {
-    const {api, apiMethod, esc, toast, relTime} = h;
+    const {api, apiMethod, esc, toast, relTime, canGlobal} = h;
     const {openOverlay, closeOverlay, loadExecutors, fwSync, openProject, switchTab, openTaskDetails} = window;
     const _execAt = h.execAt, _execKindLabel = h.execKind, _execDetailErrText = h.execErr;
     const {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal, meta: _fwMeta} = h.fw;
