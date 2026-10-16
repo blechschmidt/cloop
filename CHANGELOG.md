@@ -33,13 +33,14 @@ schema and the hub's HTTP API may change in any release.
   it, the Secrets panel shows which executors each one reaches (Task 20432).
 - **Retiring a sealing key now erases it from the database file, not just from
   its row.** Retirement blanked a key-encryption key's salt and check value, but
-  SQLite left the old bytes in the page's free space, so a copy of the file
-  taken afterwards still held a retired key's salt — and with
-  `CLOOP_SECRET_KEY`, the key. `cloop hub key retire`, `--retire-previous` and
-  `cloop db restore --accept-secret-loss` now write with secure delete on, which
-  zeroes what they blank; what the write-ahead log holds of the old page lasts
-  until the log is reused, and a backup taken before the retirement keeps
-  everything (Task 20433).
+  SQLite left the old bytes in the page's free space — as an earlier write to
+  the key's row, a demotion or an attribution, could leave another image of it
+  there — so a copy of the file taken afterwards still held a retired key's salt
+  and, with `CLOOP_SECRET_KEY`, the key. Every write to the key registry now
+  runs with secure delete on, which zeroes what it frees. What the write-ahead
+  log holds of an old page lasts until the log is reused, an image a build
+  before this one freed lasts until SQLite reuses its space, and a backup taken
+  before the retirement keeps everything (Task 20433).
 
 ### Added
 
@@ -60,7 +61,10 @@ schema and the hub's HTTP API may change in any release.
   (`cloop_kms_requests_total`, `cloop_kms_request_duration_seconds`). Restore
   preflight and the key escrow say when a backup's keys need the KMS, and the
   Azure Terraform module gains `modules/key-vault-kms`, a wrap-and-unwrap key
-  with the hub identity's permission on it alone (Task 20433).
+  with the hub identity's permission on it alone. Retire KMS-held keys with this
+  build or later: an older `cloop hub key retire` leaves the KMS's ciphertext of
+  the key behind, which the hub destroys at its next start and the cluster
+  leader at its next KMS poll (Task 20433).
 
 - **Device labels can be changed on the hub, and the credentials they no longer
   qualify for are taken back from running work.** **Labels** on a device's card

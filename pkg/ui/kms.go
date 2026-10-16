@@ -20,6 +20,10 @@ package ui
 //     records sealing_key.kms_rewrapped. One member, so a rotation is followed
 //     once; the rewrap is a compare-and-swap, so a leader change mid-way does
 //     no harm either.
+//   - The leader also scrubs the KMS ciphertext off retired keys, as `cloop
+//     ui` does at start (ScrubRetiredKMSKeys). Retiring a key destroys it, but
+//     a build from before this task, which retires a KMS-held key by blanking
+//     only the columns it knows, leaves behind what the KMS would unwrap.
 
 import (
 	"context"
@@ -130,23 +134,51 @@ func (s *Server) pollKMS(ctx context.Context) bool {
 			fmt.Fprintf(os.Stderr, "ui: the KMS %s is answering again\n", p.Name())
 		}
 	}
-	if currentOK && s.isLeader() {
-		s.followKMSRotation(ctx, current.KeyID)
+	if s.isLeader() {
+		s.tendKMSKeys(ctx, current.KeyID, currentOK)
 	}
 	return healthy
 }
 
-// followKMSRotation rewraps every live key the current KMS root holds under a
-// KMS key other than currentKey. Leader only.
-func (s *Server) followKMSRotation(ctx context.Context, currentKey string) {
-	if currentKey == "" {
-		return
-	}
+// tendKMSKeys is the leader's share of a poll. It scrubs the KMS ciphertext
+// off keys a build from before Task 20433 retired (ScrubRetiredKMSKeys) and,
+// when the current KMS has answered, rewraps the live keys it holds under a
+// key other than the one it now encrypts under.
+func (s *Server) tendKMSKeys(ctx context.Context, currentKey string, answered bool) {
 	db, closeDB, err := s.openControlPlaneDB()
 	if err != nil {
 		return
 	}
 	defer closeDB()
+	ScrubRetiredKMSKeys(db, "ui")
+	if answered {
+		followKMSRotation(ctx, db, currentKey)
+	}
+}
+
+// ScrubRetiredKMSKeys destroys the KMS ciphertext retired keys still carry
+// (statedb.ScrubRetiredKEKs), saying so on stderr under prefix. A build from
+// before Task 20433 leaves it behind when it retires a KMS-held key, so
+// `cloop ui` runs this at start — with or without a KMS now, since the key may
+// have been retired part-way through a move off one — and the leader at each
+// poll.
+func ScrubRetiredKMSKeys(db *statedb.DB, prefix string) {
+	n, err := db.ScrubRetiredKEKs()
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "%s: retired sealing keys may still carry their KMS ciphertext: %v\n", prefix, err)
+	case n > 0:
+		fmt.Fprintf(os.Stderr, "%s: destroyed the KMS ciphertext %d retired sealing key(s) still carried — a build "+
+			"from before Task 20433 retired them and left it\n", prefix, n)
+	}
+}
+
+// followKMSRotation rewraps every live key the current KMS root holds under a
+// KMS key other than currentKey. Leader only.
+func followKMSRotation(ctx context.Context, db *statedb.DB, currentKey string) {
+	if currentKey == "" {
+		return
+	}
 	store, err := secretstore.New(db)
 	if err != nil {
 		return

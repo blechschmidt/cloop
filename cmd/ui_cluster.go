@@ -258,6 +258,24 @@ func announceRoots(keys rootkey.Roots, roots kms.Roots) map[string]string {
 	return out
 }
 
+// scrubRetiredKeys destroys the KMS ciphertext retired sealing keys still
+// carry before the hub serves (ui.ScrubRetiredKMSKeys): a build from before
+// Task 20433 leaves it behind when it retires a KMS-held key. Whatever roots
+// this member has — the key may have been retired part-way through a move off
+// the KMS.
+func scrubRetiredKeys(workdir string) {
+	dbPath := state.DBPath(workdir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return // the hub's own open reports it, with more context
+	}
+	defer db.Close()
+	ui.ScrubRetiredKMSKeys(db, "ui")
+}
+
 // checkHubRoots applies the rule a hub starts by (Task 20425), before it joins
 // the cluster or serves anything: every live sealing key in the control plane
 // opens with a root this process holds — derives from its root key, or unwraps

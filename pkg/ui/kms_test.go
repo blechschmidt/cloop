@@ -16,8 +16,10 @@ import (
 
 // A serving hub follows a rotation of its KMS key (Task 20433): the poll every
 // member makes sees the new key, and the leader rewraps the key-encryption
-// keys the KMS holds onto it and records sealing_key.kms_rewrapped. A KMS that
-// stops answering is remembered as such, and the poll says so.
+// keys the KMS holds onto it and records sealing_key.kms_rewrapped. The
+// leader's poll also scrubs the KMS ciphertext an older build's retirement
+// left. A KMS that stops answering is remembered as such, and the poll says
+// so.
 func TestHubFollowsARotationOfItsKMSKey(t *testing.T) {
 	t.Cleanup(secretbroker.ForgetOpenedKeys)
 	p := kmstest.StartPlugin(t)
@@ -46,6 +48,13 @@ func TestHubFollowsARotationOfItsKMSKey(t *testing.T) {
 		Payload: []byte("A=1"), Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
+	// A KMS-held key a build from before Task 20433 retired: it blanks the
+	// columns it knows and leaves the KMS's ciphertext.
+	if err := db.PutKEK(statedb.KEKRow{ID: "kek_left", State: secretbroker.KEKStateRetired,
+		CreatedAt: "2026-01-01T00:00:00Z", Wrap: secretbroker.WrapKMS, KMSKeyID: "key-1",
+		KMSCiphertext: []byte("ciphertext-an-older-build-left")}); err != nil {
+		t.Fatal(err)
+	}
 	_ = db.Close()
 
 	srv := New(dir, 0, "")
@@ -57,6 +66,20 @@ func TestHubFollowsARotationOfItsKMSKey(t *testing.T) {
 	if h := srv.KMSHealth()[prov.Name()]; h.Err != "" || h.Status.KeyID != "key-1" {
 		t.Fatalf("health = %+v", h)
 	}
+	db, err = statedb.Open(state.DBPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.ListKEKs()
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.ID == "kek_left" && len(r.KMSCiphertext) != 0 {
+			t.Fatal("the leader's poll left the KMS ciphertext on a retired key")
+		}
+	}
 
 	newKey := p.Rotate()
 	if !srv.pollKMS(ctx) {
@@ -67,7 +90,7 @@ func TestHubFollowsARotationOfItsKMSKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rows, err := db.ListKEKs()
+	rows, err = db.ListKEKs()
 	if err != nil {
 		t.Fatal(err)
 	}

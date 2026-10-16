@@ -8,7 +8,13 @@ package statedb
 import (
 	"bytes"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -256,6 +262,226 @@ func TestRetirementLeavesNothingOfTheKeyInTheFile(t *testing.T) {
 		if bytes.Contains(data, b) {
 			t.Errorf("%s is still in the file after retirement", what)
 		}
+	}
+	if !bytes.Contains(data, liveCT) {
+		t.Error("the live key's KMS ciphertext is not in the file: the scan is not reading what it should")
+	}
+}
+
+// Retirement reaches the images of the row its key's earlier writes freed,
+// too: they ran with secure_delete, so none of them was left in a page's free
+// space with the salt, the check value or a KMS ciphertext in it — of which a
+// rewrap after a rotation of the KMS key leaves one the KMS would still unwrap
+// under the old key version. The sequences are a key's ordinary life: minted
+// primary, attributed, demoted when another is promoted, rewrapped, retired
+// (Task 20433).
+func TestNoEarlierImageOfARetiredKeyStaysInTheFile(t *testing.T) {
+	scan := func(t *testing.T, path string, gone map[string][]byte) {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for what, b := range gone {
+			if bytes.Contains(data, b) {
+				t.Errorf("%s is still in the file after retirement", what)
+			}
+		}
+	}
+	must := func(t *testing.T, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("held by a KMS", func(t *testing.T) {
+		path := freshPath(t)
+		db, err := Open(path)
+		must(t, err)
+		salt := "dec0ydec0ydec0ydec0ydec0ydec0ydec0ydec0ydec0ydec0ydec0ydec0yzz"
+		check := []byte("check-value-of-the-kms-held-key")
+		first := []byte("vault:v1:the-first-ciphertext-under-kms-key-version-1")
+		second := []byte("vault:v2:the-second-ciphertext-under-kms-key-version-22xx")
+		must(t, db.PutKEK(KEKRow{ID: "kek_a", Salt: salt, State: "primary", CheckValue: check,
+			CreatedAt: "2026-01-01T00:00:00Z", Root: "vault", Wrap: "kms", KMSKeyID: "transit/cloop:v1",
+			KMSCiphertext: first}))
+		must(t, db.PutKEK(KEKRow{ID: "kek_b", Salt: "bbbb", State: "active", CheckValue: []byte("cv-b"),
+			CreatedAt: "2026-01-02T00:00:00Z"}))
+		must(t, db.PromoteKEK("kek_b", time.Now()))
+		if ok, err := db.RewrapKEK("kek_a", first, KEKRow{KMSKeyID: "transit/cloop:v2", KMSCiphertext: second}); err != nil || !ok {
+			t.Fatalf("rewrap: %v, %v", ok, err)
+		}
+		must(t, db.RetireKEK("kek_a", time.Now()))
+		must(t, db.Close())
+		scan(t, path, map[string][]byte{"the salt": []byte(salt), "the check value": check,
+			"the ciphertext under the old KMS key version": first, "the current ciphertext": second})
+	})
+
+	t.Run("derived from a passphrase", func(t *testing.T) {
+		path := freshPath(t)
+		db, err := Open(path)
+		must(t, err)
+		salt := "5a175a175a175a175a175a175a175a175a175a175a175a175a175a175a175a17"
+		check := []byte("check-value-of-the-derived-key")
+		// Minted by a build before Task 20425, so unattributed; demoted; then
+		// attributed by the first newer process to derive it.
+		must(t, db.PutKEK(KEKRow{ID: "kek_p", Salt: salt, State: "primary", CheckValue: check,
+			CreatedAt: "2026-01-01T00:00:00Z"}))
+		must(t, db.PutKEK(KEKRow{ID: "kek_q", Salt: "qqqq", State: "active", CheckValue: []byte("cv-q"),
+			CreatedAt: "2026-01-02T00:00:00Z"}))
+		must(t, db.PromoteKEK("kek_q", time.Now()))
+		if ok, err := db.SetKEKRoot("kek_p", "fp:0123456789ab"); err != nil || !ok {
+			t.Fatalf("attribute: %v, %v", ok, err)
+		}
+		must(t, db.RetireKEK("kek_p", time.Now()))
+		must(t, db.Close())
+		scan(t, path, map[string][]byte{"the salt": []byte(salt), "the check value": check})
+	})
+}
+
+// Every write to the key registry runs on a secure-delete connection: a
+// statement given to secureExec, or one on the transaction shreddingTx began.
+// A writer that goes to the pool, or to a transaction of its own, frees images
+// of a key's row unzeroed, and the file keeps them past the key's retirement
+// (Task 20433).
+func TestEveryKeyRegistryWriteIsSecureDelete(t *testing.T) {
+	fset := token.NewFileSet()
+	names, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []*ast.File
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	write := regexp.MustCompile(`(?is)\b(update|insert\s+(or\s+\w+\s+)?into|delete\s+from|replace\s+into)\s+broker_keks\b`)
+	callsTo := func(fn *ast.FuncDecl, name string) bool {
+		found := false
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				switch f := c.Fun.(type) {
+				case *ast.SelectorExpr:
+					found = found || f.Sel.Name == name
+				case *ast.Ident:
+					found = found || f.Name == name
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	writes := 0
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				c, ok := n.(*ast.CallExpr)
+				if !ok || len(c.Args) == 0 {
+					return true
+				}
+				lit, ok := c.Args[0].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING || !write.MatchString(lit.Value) {
+					return true
+				}
+				writes++
+				at := fset.Position(lit.Pos())
+				sel, _ := c.Fun.(*ast.SelectorExpr)
+				switch {
+				case sel != nil && sel.Sel.Name == "secureExec":
+				case fn.Name.Name == "takeWriteLock":
+					// Takes the caller's transaction: checked at its call sites.
+				case sel != nil && isIdent(sel.X, "tx") && callsTo(fn, "shreddingTx"):
+				default:
+					t.Errorf("%s: %s writes broker_keks off a secure-delete connection", at, fn.Name.Name)
+				}
+				return true
+			})
+			if fn.Name.Name != "takeWriteLock" && callsTo(fn, "takeWriteLock") && !callsTo(fn, "shreddingTx") {
+				t.Errorf("%s takes the registry's write lock on a transaction shreddingTx did not begin", fn.Name.Name)
+			}
+		}
+	}
+	if writes < 8 {
+		t.Fatalf("found %d writes to broker_keks; the scan is not reading what it should", writes)
+	}
+}
+
+func isIdent(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+// A build from before migration 0079 retires a key by blanking the columns it
+// knows (the statement below is its RetireKEK's), so a KMS-held key it retires
+// keeps the KMS's ciphertext of it — what the KMS would still unwrap.
+// ScrubRetiredKEKs destroys that, in the row and in the file, and leaves a
+// live key's ciphertext alone (Task 20433).
+func TestScrubDestroysWhatAnOlderBuildsRetirementLeft(t *testing.T) {
+	path := freshPath(t)
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftCT := []byte("vault:v1:kms-ciphertext-an-older-build-retired-and-left")
+	liveCT := []byte("vault:v1:live-kms-ciphertext-that-stays")
+	for _, row := range []KEKRow{
+		{ID: "kek_old", Salt: "dec0ydec0ydec0ydec0ydec0ydec0ydec0ydec0y", State: "active",
+			CheckValue: []byte("check-of-the-old-key"), CreatedAt: "2026-01-01T00:00:00Z", Wrap: "kms",
+			KMSKeyID: "transit/cloop:v1", KMSCiphertext: leftCT, KMSAnnotations: `{"a.example.com":"dg=="}`},
+		{ID: "kek_live", Salt: "11ve11ve11ve11ve", State: "primary", CheckValue: []byte("check-of-the-live-key"),
+			CreatedAt: "2026-01-02T00:00:00Z", Wrap: "kms", KMSKeyID: "transit/cloop:v1", KMSCiphertext: liveCT},
+	} {
+		if err := db.PutKEK(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := db.ScrubRetiredKEKs(); err != nil || n != 0 {
+		t.Fatalf("with nothing retired the sweep scrubbed %d: %v", n, err)
+	}
+
+	if _, err := db.conn.Exec(`UPDATE broker_keks SET state='retired', salt='', check_value=NULL, retired_at=?
+		WHERE id = ?`, "2026-10-16T00:00:00Z", "kek_old"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.ScrubRetiredKEKs(); err != nil || n != 1 {
+		t.Fatalf("the sweep scrubbed %d key(s), want 1: %v", n, err)
+	}
+	rows, err := db.ListKEKs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		switch {
+		case r.ID == "kek_old" && (len(r.KMSCiphertext) != 0 || r.KMSAnnotations != ""):
+			t.Errorf("the retired key still carries ciphertext %q and annotations %q", r.KMSCiphertext, r.KMSAnnotations)
+		case r.ID == "kek_live" && !bytes.Equal(r.KMSCiphertext, liveCT):
+			t.Errorf("the sweep touched the live key: %q", r.KMSCiphertext)
+		}
+	}
+	if n, err := db.ScrubRetiredKEKs(); err != nil || n != 0 {
+		t.Fatalf("a second sweep scrubbed %d: %v", n, err)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, leftCT) {
+		t.Error("the KMS ciphertext the older build left is still in the file after the sweep")
 	}
 	if !bytes.Contains(data, liveCT) {
 		t.Error("the live key's KMS ciphertext is not in the file: the scan is not reading what it should")

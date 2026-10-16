@@ -1879,12 +1879,19 @@ the moment it is promoted, and it adopts that key on first use.
 Rotation never destroys a key. Retirement does, and it is irreversible: it
 blanks the KEK's salt so the key cannot be derived from `CLOOP_SECRET_KEY`
 again, at all — and for a key [held by a KMS](#keys-in-a-kms) destroys the KMS's
-ciphertext of it, so not even the KMS can give it back. The blanked bytes are
-zeroed in the file, not left in SQLite's free space (secure delete); what the
-write-ahead log holds of the old page lasts until the log is reused, and a
-backup taken before the retirement keeps everything. Anything still sealed under
-the key is then unrecoverable, which is why retirement **refuses** while any row
-references the key.
+ciphertext of it, so not even the KMS can give it back. Every write to the key
+registry runs with secure delete, so neither the blanked bytes nor an image an
+earlier write left of the row stays in SQLite's free space; what the write-ahead
+log holds of an old page lasts until the log is reused, and a backup taken
+before the retirement keeps everything. Anything still sealed under the key is
+then unrecoverable, which is why retirement **refuses** while any row references
+the key.
+
+Retire a KMS-held key with this build or later. An older `cloop hub key retire`
+(v0.0.6 and before) blanks only the columns it knows, leaving the KMS's
+ciphertext of the key in its row; a hub of this build destroys it at its next
+start, and the cluster leader at its next KMS poll, and says so in its log
+(`destroyed the KMS ciphertext … retired sealing key(s) still carried`).
 
 ```console
 $ cloop hub key status                   # must report zero unrotated rows

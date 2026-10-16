@@ -159,6 +159,7 @@ but not for anything reachable from a network.`,
 		if err := checkHubRoots(workdir, hubRoots); err != nil {
 			return err
 		}
+		scrubRetiredKeys(workdir)
 
 		token := uiToken
 		if token == "" {

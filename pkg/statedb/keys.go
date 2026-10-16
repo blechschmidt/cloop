@@ -179,7 +179,7 @@ func (d *DB) PutKEK(row KEKRow) error {
 	// attribution. How a key is held never changes after it is minted, so an
 	// update leaves wrap alone, and a KMS wrapping changes only through
 	// RewrapKEK's compare-and-swap.
-	if _, err := d.conn.Exec(
+	if _, err := d.secureExec(
 		`INSERT INTO broker_keks(id, salt, state, check_value, created_at, created_by, retired_at, root,
 		                         wrap, kms_key_id, kms_ciphertext, kms_annotations)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
@@ -296,7 +296,7 @@ func (d *DB) RewrapKEK(id string, expect []byte, next KEKRow) (bool, error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	res, err := d.conn.Exec(
+	res, err := d.secureExec(
 		`UPDATE broker_keks SET kms_key_id = ?, kms_ciphertext = ?, kms_annotations = ?,
 		   root = CASE WHEN ? <> '' THEN ? ELSE root END
 		 WHERE id = ? AND wrap = 'kms' AND state <> 'retired' AND kms_ciphertext = ?`,
@@ -322,7 +322,7 @@ func (d *DB) SetKEKRoot(id, root string) (bool, error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	res, err := d.conn.Exec(
+	res, err := d.secureExec(
 		`UPDATE broker_keks SET root = ? WHERE id = ? AND root = '' AND state <> 'retired'`, root, id)
 	if err != nil {
 		return false, fmt.Errorf("statedb: attribute sealing key %s: %w", id, classifyDriverErr(err))
@@ -346,10 +346,11 @@ func (d *DB) PromoteKEK(id string, at time.Time) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	tx, err := d.conn.Begin()
+	tx, done, err := d.shreddingTx()
 	if err != nil {
 		return fmt.Errorf("statedb: promote sealing key: %w", classifyDriverErr(err))
 	}
+	defer done()
 	defer tx.Rollback()
 
 	if err := takeWriteLock(tx, id); err != nil {
@@ -443,18 +444,22 @@ func (d *DB) RetireKEK(id string, at time.Time) error {
 }
 
 // shreddingTx begins a transaction on a connection of its own with
-// secure_delete on, for the writes that destroy key material (Task 20433).
+// secure_delete on, for every write to the key registry (Task 20433).
 //
 // Blanking a column does not, by itself, remove the bytes it held from the
 // file: SQLite rewrites the record and leaves the old one in the page's free
 // space, where a copy of the file still finds a retired key's salt — or a KMS
 // ciphertext the KMS would still unwrap. With secure_delete the freed space is
-// overwritten with zeros. It is a per-connection setting, and the pool's other
-// connections keep the default, so the cost is paid by retirements alone; done
-// puts the connection's setting back and returns it to the pool. What the
-// write-ahead log still holds of the old page lasts until the log is reused,
-// and a backup taken before the retirement keeps everything — docs/security
-// says so.
+// overwritten with zeros. Retirement alone is not enough: every earlier write
+// to the row — a demotion, an attribution, a rewrap — freed an image of it
+// too, and one freed unzeroed is out of the retirement's reach. So no write to
+// broker_keks runs without it. It is a per-connection setting, and the pool's
+// other connections keep the default, so the cost is paid by key-lifecycle
+// writes alone; done puts the connection's setting back and returns it to the
+// pool. What the write-ahead log still holds of an old page lasts until the
+// log is reused, an image a build from before this one freed lasts until
+// SQLite reuses its space, and a backup taken before the retirement keeps
+// everything — docs/security says so.
 func (d *DB) shreddingTx() (*sql.Tx, func(), error) {
 	ctx := context.Background()
 	conn, err := d.conn.Conn(ctx)
@@ -480,6 +485,24 @@ func (d *DB) shreddingTx() (*sql.Tx, func(), error) {
 		return nil, nil, err
 	}
 	return tx, done, nil
+}
+
+// secureExec runs one statement in a shreddingTx.
+func (d *DB) secureExec(query string, args ...any) (sql.Result, error) {
+	tx, done, err := d.shreddingTx()
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	defer tx.Rollback()
+	res, err := tx.Exec(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 // AbandonKEKs retires the given keys although sealed rows still reference
@@ -522,6 +545,51 @@ func (d *DB) AbandonKEKs(ids []string, at time.Time) ([]string, error) {
 		return nil, fmt.Errorf("statedb: abandon sealing keys: %w", classifyDriverErr(err))
 	}
 	return done, nil
+}
+
+// ScrubRetiredKEKs destroys the KMS ciphertext retired keys still carry, and
+// returns how many keys it scrubbed (Task 20433).
+//
+// RetireKEK and AbandonKEKs clear it with the salt. A build from before
+// migration 0079 does not: it blanks the columns it knows, so its `cloop hub
+// key retire` of a KMS-held key leaves behind the one thing that still gives
+// the key back to whoever holds the database and the KMS. The hub sweeps up
+// after it. The sweep reads first and writes, on a secure-delete connection,
+// only when there is something to scrub, so the usual call takes no write
+// lock.
+func (d *DB) ScrubRetiredKEKs() (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var n int
+	if err := d.conn.QueryRow(
+		`SELECT COUNT(*) FROM broker_keks
+		 WHERE state = 'retired' AND (kms_ciphertext IS NOT NULL OR kms_annotations <> '')`,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("statedb: find retired sealing keys' KMS ciphertext: %w", classifyDriverErr(err))
+	}
+	if n == 0 {
+		return 0, nil
+	}
+
+	tx, done, err := d.shreddingTx()
+	if err != nil {
+		return 0, fmt.Errorf("statedb: scrub retired sealing keys: %w", classifyDriverErr(err))
+	}
+	defer done()
+	defer tx.Rollback()
+
+	res, err := tx.Exec(
+		`UPDATE broker_keks SET kms_ciphertext=NULL, kms_annotations=''
+		 WHERE state = 'retired' AND (kms_ciphertext IS NOT NULL OR kms_annotations <> '')`)
+	if err != nil {
+		return 0, fmt.Errorf("statedb: scrub retired sealing keys: %w", classifyDriverErr(err))
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("statedb: scrub retired sealing keys: %w", classifyDriverErr(err))
+	}
+	scrubbed, _ := res.RowsAffected()
+	return int(scrubbed), nil
 }
 
 // ---------------------------------------------------------------------------
