@@ -281,6 +281,7 @@ terraform-validate:
 	  echo "==> $$m: validate"; \
 	  $(TF) -chdir=$$m validate || exit 1; \
 	  for ex in $$m/examples/*/; do \
+	    [ -d "$$ex" ] || continue; \
 	    echo "==> $$ex: validate"; \
 	    $(TF) -chdir=$$ex init -backend=false -input=false >/dev/null || exit 1; \
 	    $(TF) -chdir=$$ex validate || exit 1; \
