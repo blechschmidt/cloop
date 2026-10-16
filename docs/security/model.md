@@ -345,9 +345,17 @@ that would justify a firewall an operator could misconfigure into allowing
 everything. It binds a workload that does not cooperate, because it is the
 kernel rather than an environment variable, and it covers ICMP and everything
 else that is neither TCP nor UDP, because an exfiltration channel over ICMP is
-still an exfiltration channel. Drops are silent rather than rejected: a sandbox
-probing for reachable networks learns nothing from a timeout, whereas an ICMP
-unreachable confirms something is listening.
+still an exfiltration channel. A denied packet the sandbox sent is refused, not
+dropped (Task 20437): a TCP reset, or an ICMP "administratively prohibited".
+Silence used to be the rule, on the theory that a sandbox probing for networks
+learns nothing from a timeout; but the sandbox already knows it is filtered, and
+what silence bought in practice was a harness waiting out a timeout on every
+blocked fetch and a developer reading it as an outage. A refusal says only that
+something refused. `drop_denied` keeps silence for a rule set that wants it, and
+a level below inherits it. Every deny path also logs, rate-limited, to an NFLOG
+group the installing process reads in-process with the `CAP_NET_ADMIN` it
+already holds for the ruleset — no child is granted anything — keeping
+addresses, ports and counts only.
 
 The filter reproduces the proxy's block set prefix for prefix, and reproduces
 its waiver rule as *ordering* — the allow for an explicitly granted CIDR is

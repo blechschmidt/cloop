@@ -269,12 +269,6 @@ Log used:		0/62
 …
 $ curl -sS -m 10 -o /dev/null -w 'github %{http_code}' https://api.github.com/
 github 200
-$ curl -sS -m 6 -o /dev/null https://1.0.0.1/            # denylist
-curl: (28) Connection timed out after 6000 milliseconds
-$ curl -sS -m 6 -o /dev/null http://10.0.0.1/            # private space
-curl: (28) Connection timed out after 6001 milliseconds
-$ curl -sS -m 6 -o /dev/null http://100.100.100.200/     # the cloud metadata service
-curl: (28) Connection timed out after 6001 milliseconds
 ```
 
 — the sandbox holds exactly one device node, talks to the HSM over libusb as an
@@ -282,3 +276,29 @@ unprivileged user, and reaches the Internet but not the denied range, the
 private network or the metadata service. The same device's second virtual
 executor, on `runsc`, is refused the YubiHSM at creation and runs untrusted work
 under the same firewall on a bridge of its own.
+
+A connection the firewall denies fails at once: TCP is answered with a reset,
+everything else with an ICMP "administratively prohibited", so the workload
+sees "Connection refused" rather than waiting out a timeout. A virtual executor
+on sgx with the public Internet on 443, resolver `1.1.1.1` and `1.0.0.1/32`
+denied ran a probe whose output reads
+
+```
+RESULT 1.1.1.1:443 open
+RESULT 1.0.0.1:443 blocked (Connection refused after 2 ms)
+RESULT 8.8.8.8:80 blocked (Connection refused after 2 ms)
+```
+
+and the run's history says which rule refused each:
+
+```
+blocked 1.0.0.1:443/tcp, in virtual executor vx-wj7bbgym43's deny list (1.0.0.1/32)
+blocked 8.8.8.8:80/tcp, port 80 is not one virtual executor vx-wj7bbgym43's allow list opens (443)
+```
+
+The task's details show the same under **Network**, and the project's firewall
+card lists them under **Recently blocked** — see
+[diagnosing a blocked connection](firewall.md#diagnosing-a-blocked-connection).
+**Drop denied connections silently** in the dialog keeps the old behaviour: the
+same connect then sits out its timeout (8,001 ms for the probe above), and is
+still recorded.
