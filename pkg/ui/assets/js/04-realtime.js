@@ -341,6 +341,16 @@ function handleRealtimeMsg(type, data, scope) {
         if (activeTab === 'audit') panelIf('audit', 'refresh');
       } catch(_) {}
       break;
+    case 'forwarder_status':
+      // A device forwarder connected or dropped (Task 20429). Like
+      // executor_update, the envelope carries only the id and status; the
+      // Forwarders section re-reads the list, which joins storage with live
+      // connectivity in one place.
+      try {
+        if (activeTab === 'executors') panelIf('execadmin', 'loadForwarders');
+        if (activeTab === 'audit') panelIf('audit', 'refresh');
+      } catch(_) {}
+      break;
     case 'audit_append':
       // The trail grew (Task 20167). The envelope carries only the action
       // name, never row contents: this fans out to every connected client

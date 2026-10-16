@@ -902,6 +902,19 @@ const OPENERS = {
     },
     ready: `${textOf('#enrollCommand')}.includes('cloop executor')`,
   },
+  'forwarder-enroll-overlay': {
+    // Submitted, so the dialog shows the one thing it is for: the command to
+    // run on the on-prem device, the longest unbroken string here.
+    open: async () => {
+      await openTab('executors');
+      await click(`#tab-executors button[data-action="openForwarderEnroll"]`);
+      await waitFor(visible('#fwdName'), 'the forwarder enrollment form');
+      await type('#fwdName', F.deviceName);
+      await type('#fwdUSB', '1050:0030');
+      await click('#fwdEnrollSubmitBtn');
+    },
+    ready: `${textOf('#fwdEnrollCommand')}.includes('cloop forward')`,
+  },
   'executor-detail-overlay': {
     open: async () => { await onExecutors('openExecutorDetail'); },
     ready: `!!document.querySelector('#execDetailBody .exec-detail-verdict')`,

@@ -1423,7 +1423,172 @@
         .catch(() => toast('Failed to drain executor', 'err'));
     }
 
+    // ── Device forwarders (Task 20429) ───────────────────────────────────────
+    //
+    // A forwarder is not an executor, so it renders in its own section of the
+    // Executors tab. The list lives in the eager DOM (#fwdList) like #execList,
+    // so its card buttons dispatch through bundled ACTIONS (fwdAct); the dialogs
+    // are this deferred panel's and route through data-act.
+    let fwdData = null;
+
+    function loadForwarders() {
+      if (!canGlobal('executor.read')) return Promise.resolve(null);
+      const list = document.getElementById('fwdList');
+      return api('/api/forwarders').then(d => {
+        fwdData = d || {};
+        _renderForwarders(fwdData);
+        return fwdData;
+      }).catch(err => {
+        if (list) list.innerHTML = '<div style="font-size:13px;color:var(--red)">Failed to load forwarders: '
+          + esc(err && err.message || String(err)) + '</div>';
+      });
+    }
+
+    function _fwdAt(idx) {
+      return (fwdData && fwdData.forwarders && fwdData.forwarders[idx]) || null;
+    }
+
+    function _renderForwarders(d) {
+      const list = document.getElementById('fwdList');
+      if (!list) return;
+      const fwds = (d && d.forwarders) || [];
+      if (!fwds.length) {
+        list.innerHTML = '<div style="font-size:12.5px;color:var(--muted)">No forwarders enrolled. '
+          + 'Use <strong>+ Enroll forwarder</strong> to bridge an on-prem USB device or interface.</div>';
+        return;
+      }
+      const manage = canGlobal('executor.manage');
+      list.innerHTML = fwds.map((f, i) => {
+        const dot = f.connected ? 'online' : (f.revoked ? 'unknown' : 'offline');
+        const status = f.revoked ? 'revoked' : (f.connected ? 'connected' : 'offline');
+        let detail = '';
+        if (f.connected && !f.available && f.detail) {
+          detail = '<div style="font-size:11.5px;color:var(--red);margin-top:4px">' + esc(f.detail) + '</div>';
+        }
+        let resolved = '';
+        if (f.resolved && f.resolved.node) {
+          resolved = '<div style="font-size:11px;color:var(--muted);margin-top:2px">resolved: '
+            + esc(f.resolved.node) + '</div>';
+        }
+        const expose = (manage && f.connected && f.kind === 'usb' && !f.revoked)
+          ? '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="forwarderExpose" data-arg="' + i + '">Expose</button>' : '';
+        const revoke = (manage && !f.revoked)
+          ? '<button class="btn" style="padding:3px 9px;font-size:11.5px" data-action="forwarderRevoke" data-arg="' + i + '">Revoke</button>' : '';
+        return '<div class="exec-card">'
+          + '<div style="display:flex;align-items:center;gap:8px">'
+          + '<span class="exec-dot ' + dot + '"></span>'
+          + '<strong style="font-size:13px">' + esc(f.name || f.id) + '</strong>'
+          + '<span style="font-size:11px;color:var(--muted);margin-left:auto">' + esc(status) + '</span></div>'
+          + '<div style="font-size:12px;color:var(--muted);margin-top:6px">' + esc(f.device_str || f.kind) + '</div>'
+          + resolved + detail
+          + '<div style="display:flex;gap:6px;margin-top:10px">' + expose + revoke + '</div>'
+          + '</div>';
+      }).join('');
+    }
+
+    function openForwarderEnroll() {
+      const form = document.getElementById('fwdEnrollForm');
+      const result = document.getElementById('fwdEnrollResult');
+      const err = document.getElementById('fwdEnrollError');
+      if (form) form.style.display = 'block';
+      if (result) result.style.display = 'none';
+      if (err) err.style.display = 'none';
+      const name = document.getElementById('fwdName');
+      if (name) name.value = '';
+      const usb = document.getElementById('fwdUSB'); if (usb) usb.value = '';
+      const iface = document.getElementById('fwdIface'); if (iface) iface.value = '';
+      const ttl = document.getElementById('fwdTTL'); if (ttl) ttl.value = '';
+      onFwdKindChange();
+      openOverlay('forwarder-enroll-overlay', {dismiss: closeForwarderEnroll, focus: name});
+    }
+
+    function closeForwarderEnroll() {
+      closeOverlay('forwarder-enroll-overlay');
+      loadForwarders();
+    }
+
+    function onFwdKindChange() {
+      const kind = (document.getElementById('fwdKind') || {}).value || 'usb';
+      const usbRow = document.getElementById('fwdUSBRow');
+      const ifaceRow = document.getElementById('fwdIfaceRow');
+      if (usbRow) usbRow.style.display = kind === 'usb' ? 'block' : 'none';
+      if (ifaceRow) ifaceRow.style.display = kind === 'l2' ? 'block' : 'none';
+    }
+
+    function submitForwarderEnroll() {
+      const errEl = document.getElementById('fwdEnrollError');
+      const btn = document.getElementById('fwdEnrollSubmitBtn');
+      const kind = (document.getElementById('fwdKind') || {}).value || 'usb';
+      const body = { name: (document.getElementById('fwdName') || {}).value || '', kind: kind };
+      if (kind === 'usb') {
+        const spec = ((document.getElementById('fwdUSB') || {}).value || '').trim();
+        const parts = spec.split(':');
+        if (parts.length < 2) {
+          if (errEl) { errEl.textContent = 'USB must be vendor:product[:serial], e.g. 1050:0030'; errEl.style.display = 'block'; }
+          return;
+        }
+        body.usb = { vendor_id: parts[0], product_id: parts[1] };
+        if (parts.length >= 3) body.usb.serial = parts[2];
+      } else {
+        body.interface = ((document.getElementById('fwdIface') || {}).value || '').trim();
+      }
+      const ttlRaw = (document.getElementById('fwdTTL') || {}).value;
+      if (ttlRaw) body.ttl_minutes = parseInt(ttlRaw, 10);
+      if (errEl) errEl.style.display = 'none';
+      if (btn) btn.disabled = true;
+      api('/api/forwarders/enroll', body).then(d => {
+        if (btn) btn.disabled = false;
+        if (!d || d.error) {
+          if (errEl) { errEl.textContent = (d && d.error) || 'Enrollment failed'; errEl.style.display = 'block'; }
+          return;
+        }
+        const form = document.getElementById('fwdEnrollForm');
+        const result = document.getElementById('fwdEnrollResult');
+        if (form) form.style.display = 'none';
+        if (result) result.style.display = 'block';
+        const cmd = document.getElementById('fwdEnrollCommand');
+        if (cmd) cmd.textContent = d.command || '';
+        const exp = document.getElementById('fwdEnrollExpiry');
+        if (exp) exp.textContent = d.expires ? ('Token expires ' + d.expires) : '';
+      }).catch(() => {
+        if (btn) btn.disabled = false;
+        if (errEl) { errEl.textContent = 'Enrollment failed'; errEl.style.display = 'block'; }
+      });
+    }
+
+    function copyForwarderCommand() {
+      const cmd = (document.getElementById('fwdEnrollCommand') || {}).textContent || '';
+      if (cmd && navigator.clipboard) navigator.clipboard.writeText(cmd).then(() => toast('Copied', 'ok'));
+    }
+
+    function forwarderRevoke(idx) {
+      const f = _fwdAt(idx);
+      if (!f) return;
+      if (!confirm('Revoke forwarder "' + (f.name || f.id) + '"? Its device will stop being reachable.')) return;
+      api('/api/forwarders/' + encodeURIComponent(f.id), null, {method: 'DELETE'})
+        .then(() => { toast('Forwarder revoked', 'ok'); loadForwarders(); })
+        .catch(() => toast('Failed to revoke forwarder', 'err'));
+    }
+
+    function forwarderExpose(idx) {
+      const f = _fwdAt(idx);
+      if (!f) return;
+      api('/api/forwarders/' + encodeURIComponent(f.id) + '/expose', {}).then(d => {
+        if (!d || d.error) { toast((d && d.error) || 'Failed to expose device', 'err'); return; }
+        const box = document.getElementById('fwdExposeResult');
+        if (!box) return;
+        const parts = ['<div class="exec-banner" style="margin-top:4px"><div>'];
+        parts.push('<strong style="font-size:12.5px">' + esc(f.name || f.id) + '</strong>');
+        if (d.command) parts.push('<div class="exec-token" style="margin-top:6px">' + esc(d.command) + '</div>');
+        if (d.note) parts.push('<div style="font-size:11.5px;color:var(--muted);margin-top:6px">' + esc(d.note) + '</div>');
+        parts.push('</div></div>');
+        box.innerHTML = parts.join('');
+      }).catch(() => toast('Failed to expose device', 'err'));
+    }
+
     return h.mount({
+      loadForwarders, openForwarderEnroll, closeForwarderEnroll, onFwdKindChange,
+      submitForwarderEnroll, copyForwarderCommand, forwarderRevoke, forwarderExpose,
       openExecutorDetail, closeExecutorDetail, openExecutorTaskRef, openExecutorSandbox,
       closeExecutorSandbox, onExecSandboxModeChange, saveExecutorSandbox, clearExecutorSandbox,
       openExecutorVirtual, closeExecutorVirtual, refreshExecutorVirtual, evxSync,
@@ -1434,6 +1599,61 @@
       closeEnrollModal, submitEnroll, copyEnrollCommand, copyEnrollInstall, upgradeExecutor,
       editFleetAutoUpdate, revokeExecutor, cordonExecutor, uncordonExecutor, drainExecutor
     }, null, null, `
+      <div id="forwarder-enroll-overlay" data-overlay="flex" data-dismiss="closeForwarderEnroll" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:620px;max-width:95vw;max-height:90vh;overflow:auto">
+          <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Enroll a device forwarder</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+            The forwarder dials <em>out</em> to this control plane and bridges one device. This mints a
+            single-use token and prints the command to run on the on-prem machine &mdash; nothing is contacted from here.
+          </p>
+          <div id="fwdEnrollForm">
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Forwarder name</label>
+                <input class="form-input" id="fwdName" placeholder="e.g. bench-usb">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Token lifetime (minutes)</label>
+                <input class="form-input" id="fwdTTL" type="number" min="1" max="1440" placeholder="15">
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Device type</label>
+              <select class="form-select" id="fwdKind" data-change="onFwdKindChange">
+                <option value="usb">USB device</option>
+                <option value="l2">Network interface (layer 2)</option>
+              </select>
+            </div>
+            <div class="form-group" id="fwdUSBRow">
+              <label class="form-label">USB identity (vendor:product[:serial])</label>
+              <input class="form-input" id="fwdUSB" placeholder="e.g. 1050:0030 or 1050:0030:0001234">
+            </div>
+            <div class="form-group" id="fwdIfaceRow" style="display:none">
+              <label class="form-label">Interface name on the on-prem host</label>
+              <input class="form-input" id="fwdIface" placeholder="e.g. eth1">
+            </div>
+            <div id="fwdEnrollError" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+            <div class="modal-footer">
+              <button class="btn" data-act="closeForwarderEnroll">Cancel</button>
+              <button class="btn primary" id="fwdEnrollSubmitBtn" data-global-perm="executor.manage" data-act="submitForwarderEnroll">Mint token</button>
+            </div>
+          </div>
+          <div id="fwdEnrollResult" style="display:none">
+            <div class="form-group">
+              <label class="form-label">Run this on the on-prem device</label>
+              <div class="exec-token" id="fwdEnrollCommand"></div>
+              <div style="font-size:11.5px;color:var(--muted);margin-top:6px">
+                The token is single-use and shown only once. The forwarder runs nothing but this one device bridge.
+              </div>
+            </div>
+            <div style="font-size:11.5px;color:var(--muted);margin-bottom:12px" id="fwdEnrollExpiry"></div>
+            <div class="modal-footer">
+              <button class="btn" data-act="copyForwarderCommand">Copy command</button>
+              <button class="btn primary" data-act="closeForwarderEnroll">Done</button>
+            </div>
+          </div>
+        </div>
+      </div>
       <div id="enroll-overlay" data-overlay="flex" data-dismiss="closeEnrollModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
           <h2 style="font-size:15px;font-weight:600;margin-bottom:6px">Enroll a remote executor</h2>

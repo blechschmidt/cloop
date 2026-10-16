@@ -132,6 +132,7 @@ var rootCommandGroups = map[string]string{
 	"serve":     groupHub,
 	"hub":       groupHub,
 	"executor":  groupHub,
+	"forward":   groupHub,
 	"egress":    groupHub,
 	"worktree":  groupHub,
 	"daemon":    groupHub,

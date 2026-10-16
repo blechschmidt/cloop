@@ -945,3 +945,41 @@ func AuditProjectLifecycle(d *DB, in ProjectAuditInput) {
 		Payload:    MarshalAuditPayload(payload),
 	})
 }
+
+// ForwarderAuditInput carries one device-forwarder decision to the audit log
+// (Task 20429). Action is the full registry constant rather than a bare verb:
+// a forwarder is not an executor, so it does not share the executor family's
+// composer, and typing the field as auditaction.Action is what lets the
+// emission-site gate prove the name is registered.
+type ForwarderAuditInput struct {
+	Action      auditaction.Action
+	ForwarderID string
+	Actor       string
+	Detail      map[string]any
+}
+
+// AuditForwarderLifecycle records a forwarder enrollment, revocation or
+// exposure.
+func AuditForwarderLifecycle(d *DB, in ForwarderAuditInput) {
+	if in.Action == "" {
+		return
+	}
+	actor := in.Actor
+	if actor == "" {
+		actor = "system"
+	}
+	payload := map[string]any{"action": in.Action.Verb()}
+	if in.ForwarderID != "" {
+		payload["forwarder_id"] = in.ForwarderID
+	}
+	for k, v := range in.Detail {
+		payload[k] = v
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  string(in.Action),
+		EntityType: "forwarder",
+		EntityID:   in.ForwarderID,
+		Payload:    MarshalAuditPayload(payload),
+	})
+}

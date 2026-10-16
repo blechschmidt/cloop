@@ -165,6 +165,22 @@ const (
 	// allows, so nothing re-dispatches it (Task 20391).
 	ActionExecutorFailoverExhausted Action = "executor.failover_exhausted"
 
+	// ── forwarder ──────────────────────────────────────────────────────────
+
+	// ActionForwarderEnroll records a device forwarder's enrollment token being
+	// minted (Task 20429). A forwarder is a minimal on-prem binary that bridges
+	// one USB or layer-2 device to the hub and runs no workload; it is not an
+	// executor, which is why it has its own action family.
+	ActionForwarderEnroll Action = "forwarder.enroll"
+	// ActionForwarderRevoke records a forwarder's enrollment token or
+	// credential being revoked.
+	ActionForwarderRevoke Action = "forwarder.revoke"
+	// ActionForwarderExpose records a forwarded device being exposed for
+	// consumption — a loopback USB/IP import endpoint opened, or a TAP bridged
+	// — so "when did this on-prem device become reachable, and who opened it"
+	// is answerable from the trail.
+	ActionForwarderExpose Action = "forwarder.expose"
+
 	// ── workspace ──────────────────────────────────────────────────────────
 
 	// ActionWorkspaceProvisionStart records the beginning of source provisioning.

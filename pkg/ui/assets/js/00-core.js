@@ -380,7 +380,7 @@ act('switchTab', function(name) {
     if (name === 'risk-matrix') loadRiskMatrix();
     if (name === 'analytics') loadAnalytics();
     if (name === 'queue') loadQueue();
-    if (name === 'executors') loadExecutors();
+    if (name === 'executors') { loadExecutors(); panelAct('execadmin', 'loadForwarders'); }
     if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
     if (name === 'provider-calls') loadProviderCalls();
   }

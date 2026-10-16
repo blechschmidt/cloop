@@ -1239,7 +1239,7 @@ func (s *Server) buildHandler(mux *http.ServeMux) http.Handler {
 	// cluster's internal API, authentication. A page elsewhere must be turned
 	// away before any of them looks at what it sent.
 	app := s.uiRateLimitMiddleware(s.securityHeaders(s.hostGuard(s.forgeryGuard(s.executorConnectBypass(
-		s.clusterInternalBypass(s.authMiddleware(s.authzMiddleware(mux))))))))
+		s.forwarderConnectBypass(s.clusterInternalBypass(s.authMiddleware(s.authzMiddleware(mux)))))))))
 	// gzip wraps the application but sits below the panic recovery, so a
 	// handler that panics mid-body still unwinds into the 500 rather than
 	// leaving a half-written deflate stream the browser cannot parse.

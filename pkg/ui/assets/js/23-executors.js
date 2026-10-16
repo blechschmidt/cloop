@@ -503,6 +503,14 @@ ACTIONS.drainExecutor        = execAct('drainExecutor');
 ACTIONS.editFleetAutoUpdate  = () => panelAct('execadmin', 'editFleetAutoUpdate');
 ACTIONS.openEnrollModal      = () => panelAct('execadmin', 'openEnrollModal');
 
+// Device forwarders (Task 20429) render in their own section of this tab; their
+// card buttons dispatch through the same deferred panel as the executor ones.
+const fwdAct = fn => function() { panelAct('execadmin', fn, +this.dataset.arg); };
+ACTIONS.loadForwarders      = () => panelAct('execadmin', 'loadForwarders');
+ACTIONS.openForwarderEnroll = () => panelAct('execadmin', 'openForwarderEnroll');
+ACTIONS.forwarderRevoke     = fwdAct('forwarderRevoke');
+ACTIONS.forwarderExpose     = fwdAct('forwarderExpose');
+
 // _execAt resolves a card index to its executor, or null. Indices, never
 // names: an executor name or an operator-typed reason in markup is the bug
 // class of Tasks 163/20033.
