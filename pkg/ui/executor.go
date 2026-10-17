@@ -537,7 +537,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// project's — after the sandbox, whose scope and DisableNetwork they fold
 	// in, and before the workspace, whose capability gate then sees the
 	// network the workload will really have (Task 20363).
-	spec, fwRes, err := applyFirewallResolved(spec, ex, workDir)
+	spec, fwRes, err := applyFirewall(spec, ex, workDir)
 	if err != nil {
 		lease.Close()
 		return nil, executor.Handle{}, err
@@ -1002,7 +1002,7 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 		auditImageDenial(workDir, err)
 		return nil, err
 	}
-	if spec, err = applyFirewall(spec, ex, workDir); err != nil {
+	if spec, _, err = applyFirewall(spec, ex, workDir); err != nil {
 		return nil, err
 	}
 	// The same egress session a run gets (Task 20378): a helper subcommand

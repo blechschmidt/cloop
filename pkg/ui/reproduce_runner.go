@@ -238,7 +238,7 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 		auditImageDenial(rs.ProjectDir, err)
 		return nil, err
 	}
-	if spec, err = applyFirewall(spec, ex, rs.ProjectDir); err != nil {
+	if spec, _, err = applyFirewall(spec, ex, rs.ProjectDir); err != nil {
 		return nil, err
 	}
 	// The project's egress, as its own runs get it (Task 20378), for the

@@ -221,7 +221,7 @@ func TestFirewall_DeviceRulesBoundVirtualExecutorsAndProjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec, err := applyFirewall(executor.Spec{WorkDir: dir}, ex, dir)
+	spec, _, err := applyFirewall(executor.Spec{WorkDir: dir}, ex, dir)
 	if err != nil {
 		t.Fatalf("applyFirewall: %v", err)
 	}
