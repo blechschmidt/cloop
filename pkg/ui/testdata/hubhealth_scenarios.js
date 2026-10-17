@@ -169,7 +169,9 @@ const scenarios = {
       await wait(50);
       await globalThis.__settle(3);
     }
-    for (let i = 0; i < 20 && !String(document.getElementById('hubCASection').innerHTML).includes('Certificate authority'); i++) {
+    // The hub CA's section is drawn by a request of its own (Task 20438): give
+    // a slow runner the same five seconds the browser driver gives it.
+    for (let i = 0; i < 100 && !String(document.getElementById('hubCASection').innerHTML).includes('Certificate authority'); i++) {
       await wait(50);
       await globalThis.__settle(3);
     }
