@@ -4828,10 +4828,13 @@ kernel refuses the projects that require isolation
 verified — an agent too old to be asked, a probe that cannot run, an executor
 probed by nothing yet — which is admitted with a warning on the run unless
 `executors.isolation_evidence` is `required`
-(`TestSelectAdmitsAnUnverifiedClaimWithAWarning`), and the reference kernel the
-comparison rests on: a device agent in a VM that drives an outer host's engine
-through a socket, with an identical kernel build on both, would compare the
-wrong kernels (`pkg/isolationprobe/classify.go`).
+(`TestSelectAdmitsAnUnverifiedClaimWithAWarning`). A wrong reference kernel
+cannot manufacture a VM: `vm` requires the sandbox's kernel to be younger than
+the host's, so a reference that is itself a guest — an agent inside a VM driving
+an outer host's engine, a cluster whose default runtime is a VM — leaves the
+host kernel `unknown` rather than verified
+(`TestAnAgentInsideAVMComparesItsOwnKernel`). What the probe cannot say is how
+well the kernel it found is configured.
 
 **The hub CA is replaced only when an operator replaces it, and a backup
 outlives the replacement.** The certificates the hub issues its git proxy and

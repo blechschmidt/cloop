@@ -186,10 +186,11 @@ func TestReferencesThatDescribeTheWrongKernel(t *testing.T) {
 			t.Fatalf("Classify = %s, want unknown", v.Kind)
 		}
 	})
-	t.Run("a node reference booted moments ago", func(t *testing.T) {
+	t.Run("a reference that is itself a VM", func(t *testing.T) {
 		// A cluster whose default runtime is itself a VM hands the reference
 		// Pod a fresh kernel; the host kernel the probe Pod saw must not be
-		// read as "different from the host's, so a VM".
+		// read as "different from the host's, so a VM". It has been up far
+		// longer than the reference, which no VM serving a sandbox can be.
 		fresh := loadFixture(t, "sgx-qemu-q35-guest.json").Probe
 		ref := Reference{Kernel: &fresh, Source: SourceClusterNode}
 		if v := Classify(runc.Probe, ref); v.Kind != KindUnknown {
@@ -211,6 +212,48 @@ func TestReferencesThatDescribeTheWrongKernel(t *testing.T) {
 
 // TestADifferentKernelWithoutMarksIsUnknown: a kernel other than the host's
 // with no hypervisor or gVisor marker is not given a kind it did not show.
+// TestAFreshNodeIsStillTheHost is the case CI's kind cluster met: its runner
+// VM had booted 327 seconds before the probe. A node an autoscaler — or a CI
+// runner — booted minutes ago is still the host, the boot ID still says so,
+// and a Kata guest on it is still younger than it.
+func TestAFreshNodeIsStillTheHost(t *testing.T) {
+	node := Evidence{Schema: 1, Release: "6.17.0-1022-azure", Version: "#22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026",
+		BootID: "7b1e5f0a-3c9d-4e21-9a47-0d6c2b8e1f35", UptimeSeconds: 327, Hypervisor: true,
+		DMIVendor: "Microsoft Corporation", DMIProduct: "Virtual Machine"}
+	ref := Reference{Kernel: &node, Source: SourceClusterNode}
+
+	runcPod := node
+	runcPod.UptimeSeconds = 322
+	if v := Classify(runcPod, ref); v.Kind != KindHostKernel {
+		t.Fatalf("a runc Pod on a node up 5 minutes: %s (%s), want host-kernel", v.Kind, v.Detail)
+	}
+
+	guest := loadFixture(t, "sgx-qemu-q35-guest.json").Probe
+	if v := Classify(guest, ref); v.Kind != KindVM {
+		t.Fatalf("a Kata guest on a node up 5 minutes: %s (%s), want vm", v.Kind, v.Detail)
+	}
+}
+
+// TestAnAgentInsideAVMComparesItsOwnKernel: an agent running in a VM that
+// drives the outer host's engine through its socket reads its own guest kernel
+// as "the host's". A runc container then shows the outer host's kernel — a
+// different kernel with a hypervisor's marks — which must not read as a VM:
+// it has been up longer than the agent's kernel, and no VM serving a sandbox
+// predates the machine it runs on.
+func TestAnAgentInsideAVMComparesItsOwnKernel(t *testing.T) {
+	f := loadFixture(t, "sgx-docker-runc.json") // the outer host's kernel, up 167 days
+	agentVM := loadFixture(t, "sgx-qemu-q35-guest-host-kernel-image.json").Probe
+	agentVM.UptimeSeconds = 86400 // the agent's VM booted a day ago
+	ref := Reference{Kernel: &agentVM, Source: SourceAgent, EngineKernel: agentVM.Release}
+	v := Classify(f.Probe, ref)
+	if v.Kind != KindUnknown || !strings.Contains(v.Detail, "not booted for the sandbox") {
+		t.Fatalf("Classify = %s (%s), want unknown naming the uptimes", v.Kind, v.Detail)
+	}
+	if got := Judge(KindVM, v.Kind); got != StatusUnverified {
+		t.Errorf("Judge = %s, want unverified", got)
+	}
+}
+
 func TestADifferentKernelWithoutMarksIsUnknown(t *testing.T) {
 	f := loadFixture(t, "sgx-qemu-q35-guest.json")
 	p := f.Probe

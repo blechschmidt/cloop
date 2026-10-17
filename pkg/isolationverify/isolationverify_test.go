@@ -168,7 +168,7 @@ func TestAFailedProbeKeepsTheContradiction(t *testing.T) {
 	// The operator fixes the runtime: it now really is a VM.
 	ex.answer = func() (executor.IsolationProbe, error) {
 		guest := isolationprobe.Evidence{Schema: 1, Release: "6.6.142-0-virt", Version: "#1-Alpine SMP",
-			BootID: "37031ef6-ddd1-44bb-a61d-990106817d96", Hypervisor: true, DMIVendor: "QEMU"}
+			BootID: "37031ef6-ddd1-44bb-a61d-990106817d96", UptimeSeconds: 1.88, Hypervisor: true, DMIVendor: "QEMU"}
 		host := sgx
 		return executor.IsolationProbe{Runtime: "kata", Evidence: guest,
 			Reference: isolationprobe.Reference{Kernel: &host, Source: isolationprobe.SourceHub}}, nil

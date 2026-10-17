@@ -186,12 +186,22 @@ attempt and keeps the verdict it had, so breaking the probe is not a way out of 
 contradiction. A device's agent answers from protocol v26; an older one is
 recorded as unverified, with the upgrade named.
 
+**A wrong reference cannot manufacture a VM.** The comparison needs a reference
+that describes the machine the runtime runs on, and two things keep a wrong one
+from turning the host kernel into isolation. The hub checks the engine's reported
+kernel release against the reference. And `vm` needs the sandbox's kernel to be
+*younger* than the reference's, because a VM serving a sandbox boots after the
+machine it runs on: a cluster whose default runtime is itself a VM hands the
+reference Pod a fresh guest kernel, and an agent inside a VM that drives an outer
+host's engine reads its own — in both, the host kernel the probe found has been up
+longer than the reference, and the verdict is `unknown`, not `vm`
+(`TestAnAgentInsideAVMComparesItsOwnKernel`). No absolute age is asked of the
+reference: a node booted minutes ago — an autoscaled node, a CI runner — is still
+the host, and its boot ID still says so (`TestAFreshNodeIsStillTheHost`).
+
 **What it does not do.** The probe answers what serves the sandbox's system
-calls, not whether that kernel is configured well. The comparison needs a reference
-that describes the machine the runtime runs on, and the hub checks the engine's
-reported kernel release against it, but an agent in a VM driving an outer host's
-engine through a socket, with identical kernel builds on both, would still compare
-the wrong kernels.
+calls, not whether that kernel is configured well, and a claim it could not check
+— an agent too old to be asked, an image that is not there — stays unverified.
 
 #### `KernelIsolated` is the third column, and the reason there is one
 
