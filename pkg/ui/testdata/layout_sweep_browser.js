@@ -482,8 +482,14 @@ function track() {
     const p = msg.params || {};
     switch (msg.method) {
     case 'Network.requestWillBeSent':
-      // A server-sent event stream never finishes; it is not a load.
-      if (p.type !== 'EventSource') inflight.set(p.requestId, p.request.url);
+      // A server-sent event stream never finishes; it is not a load. Nor is
+      // the page's own trail, which nothing on the page waits for: a
+      // keepalive fetch, or on unload a beacon that outlives its document and
+      // may never report finishing here — one that did not stalled every boot
+      // after it (CI run 38985699187). The sweep answers it itself, below.
+      if (p.type !== 'EventSource' && !(p.request.method === 'POST' && /\/api\/telemetry(\?|$)/.test(p.request.url))) {
+        inflight.set(p.requestId, p.request.url);
+      }
       break;
     case 'Network.loadingFinished':
     case 'Network.loadingFailed':
