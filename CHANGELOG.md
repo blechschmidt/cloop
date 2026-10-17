@@ -189,6 +189,12 @@ schema and the hub's HTTP API may change in any release.
   gateway and every IPv6 connect failed with "no route to host". Neighbour
   discovery and multicast listener reports with this host are now let through
   (Task 20437).
+- **A device's ID never begins with a dash.** One enrollment in 64 minted an
+  agent, enrollment-token or workload ID starting with `-`, which `cloop
+  executor revoke` and every other command taking one read as a flag
+  (`unknown shorthand flag`). Such IDs are now drawn again; one already minted
+  still works after `--` (`cloop executor revoke -- -B63De5I_6wwcG6R`)
+  (Task 20437).
 
 - **A refusal Claude Code words as a failed sign-in is no longer retried as
   one.** Claude Code prints "Failed to authenticate" for a `403` as for a

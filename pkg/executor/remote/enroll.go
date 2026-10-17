@@ -229,7 +229,7 @@ func Mint(store Store, opts MintOptions) (token string, rec EnrollmentRecord, er
 		return "", EnrollmentRecord{}, fmt.Errorf("remote: mint: labels: %w", err)
 	}
 
-	id, err := randomString(idBytes)
+	id, err := randomID(idBytes)
 	if err != nil {
 		return "", EnrollmentRecord{}, fmt.Errorf("remote: mint: generate id: %w", err)
 	}
@@ -312,7 +312,7 @@ func Redeem(store Store, token string, opts RedeemOptions) (credential string, a
 		return "", AgentRecord{}, fmt.Errorf("%w: secret does not match token %s", ErrTokenInvalid, id)
 	}
 
-	agentID, err := randomString(idBytes)
+	agentID, err := randomID(idBytes)
 	if err != nil {
 		return "", AgentRecord{}, fmt.Errorf("remote: redeem: generate agent id: %w", err)
 	}
@@ -491,4 +491,17 @@ func randomString(n int) (string, error) {
 		return "", err
 	}
 	return b64.EncodeToString(buf), nil
+}
+
+// randomID is randomString for an ID an operator types as an argument: never
+// one that begins with '-', which a command line reads as a flag. Base64url
+// starts one draw in 64 with it — `cloop executor revoke -B63De5I_6wwcG6R`
+// failed with "unknown shorthand flag" — and those are drawn again.
+func randomID(n int) (string, error) {
+	for {
+		s, err := randomString(n)
+		if err != nil || !strings.HasPrefix(s, "-") {
+			return s, err
+		}
+	}
 }

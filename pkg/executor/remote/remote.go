@@ -875,7 +875,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// response is lost to a disconnect the workload is still addressable: we
 	// can ask about the ID we chose, and a repeated start for a known ID is a
 	// no-op on the agent rather than a second copy of the workload.
-	handleID, err := randomString(idBytes)
+	handleID, err := randomID(idBytes)
 	if err != nil {
 		return executor.Handle{}, fmt.Errorf("remote: generate handle id: %w", err)
 	}
