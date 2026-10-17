@@ -275,10 +275,16 @@ async function runCold(cdp) {
     // The resident loaders run after the markup arrives: the build section and
     // the hidden-projects button are drawn by bundled code.
     await waitFor(cdp, `${text('#buildInfoBody')}.indexOf('Loading') === -1`, 'the build section');
+    // And the form is filled in from the hub's answer whenever that arrives:
+    // a value typed before it is put back to the stored one, and saved as
+    // that — the likeliest reading of a CI run (38987521738) that timed out
+    // below on a slow runner. The key badges are drawn by the same answer.
+    await waitFor(cdp, `!!document.querySelector('#anthropicKeyStatus .badge')`, 'the stored settings');
     await type(cdp, '#cfgProvider', 'anthropic');
     await click(cdp, '#tab-settings [data-act="saveProvider"]');
     const stored = await waitFor(cdp, `(async () => { const d = await (await fetch('/api/config')).json();
-      return d.provider === 'anthropic' ? d.provider : ''; })()`, 'the provider to be stored');
+      return d.provider === 'anthropic' ? d.provider : ''; })()`, 'the provider to be stored',
+      `'the field holds ' + document.getElementById('cfgProvider').value + ' / ' + ${text('#toast')}`);
     return {rendered: true, oidc_section: await cdp.eval(visible('#oidcPanel')), stored};
   });
 
