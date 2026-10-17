@@ -263,6 +263,9 @@ const secretsIn = `(() => {
       const at = document.elementFromPoint(r.left + 10, r.top + r.height / 2);
       return r.top >= head.bottom - 1 && r.top < window.innerHeight / 2 && !!at && t.contains(at); })()`,
       'the section to come into view below the header');
+    // The hub CA's section is drawn by a request of its own (Task 20438).
+    await waitFor(cdp, `(() => { const c = document.getElementById('hubCASection');
+      return !!c && /Certificate authority/.test(c.textContent); })()`, 'the hub CA section');
     out.admin = await cdp.eval(READ);
     out.admin_secrets = await cdp.eval(secretsIn);
 
