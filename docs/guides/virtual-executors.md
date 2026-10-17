@@ -245,6 +245,24 @@ a device through VFIO. Put hardware on a virtual executor with the engine's
 default runtime (`runc` or `crun`), and untrusted work on a separate one with
 `runsc`.
 
+A virtual executor's runtime is verified like any executor's (Task 20439). When it
+is created or edited, when its device connects, and daily, the hub asks the device
+to run `cloop isolation-probe` in a sandbox under the virtual executor's own engine
+and runtime — the agent binds its own binary in read-only, so the image cannot
+answer for it — and compares what the kernel serving that sandbox said with the
+device's own kernel. The dialog shows the verdict beside each virtual executor,
+with a **Re-probe** button:
+
+- `claims runsc, verified: a userspace kernel (gVisor)` — gVisor's Sentry answered;
+- `claims kata, runs on the host kernel` — the device's `kata` is an alias for runc,
+  and a project whose `.cloop/sandbox.yaml` requires kernel isolation or
+  virtualization is refused on this virtual executor, naming the evidence;
+- `claims kata, not verified: the probe could not run` — hover for why: an agent
+  older than protocol v26 cannot be asked, and the card names its upgrade.
+
+Changing a virtual executor's engine forgets what was verified under the old one:
+the same runtime name can be a different runtime under another engine.
+
 ## Worked example: a YubiHSM on an edge device
 
 The sgx executor host has a YubiHSM 2 attached over USB/IP. With a udev rule

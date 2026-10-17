@@ -1,0 +1,31 @@
+{
+ "about": "The hub's host (Hetzner vServer, a KVM guest itself): docker's default runtime, with the hub's own kernel read directly as the reference. Captured 2026-10-17 (Task 20439).",
+ "runtime": "",
+ "engine_kernel": "6.8.0-139-generic",
+ "source": "hub",
+ "host": {
+  "schema": 1,
+  "release": "6.8.0-139-generic",
+  "version": "#139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug 1 03:52:05 UTC 2026",
+  "machine": "x86_64",
+  "proc_version": "Linux version 6.8.0-139-generic (buildd@lcy02-amd64-036) (x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug 1 03:52:05 UTC 2026",
+  "boot_id": "bbcf604a-1603-4bdb-a64e-5c620bd32b6e",
+  "uptime_seconds": 2759010.4,
+  "hypervisor": true,
+  "dmi_vendor": "Hetzner",
+  "dmi_product": "vServer"
+ },
+ "probe": {
+  "schema": 1,
+  "release": "6.8.0-139-generic",
+  "version": "#139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug 1 03:52:05 UTC 2026",
+  "machine": "x86_64",
+  "proc_version": "Linux version 6.8.0-139-generic (buildd@lcy02-amd64-036) (x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug 1 03:52:05 UTC 2026",
+  "boot_id": "bbcf604a-1603-4bdb-a64e-5c620bd32b6e",
+  "uptime_seconds": 2759010.27,
+  "hypervisor": true,
+  "dmi_vendor": "Hetzner",
+  "dmi_product": "vServer"
+ },
+ "want": "host-kernel"
+}

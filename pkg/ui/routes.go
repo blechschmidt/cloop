@@ -967,6 +967,8 @@ func (s *Server) routeTable() []routeSpec {
 		// its PATH. That is reconnaissance rather than status, so reading it is
 		// an administrative act.
 		{Pattern: "/api/executors/{id}/sandbox", Handler: s.handleExecutorSandbox, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
+		// Run the isolation probe under the executor's runtime now (Task 20439).
+		{Pattern: "POST /api/executors/{id}/isolation-probe", Handler: s.handleExecutorIsolationProbe, Perm: execMgmt, Scope: scopeExecutor},
 
 		// The other two policies a hub holds about an executor (Task 20310).
 		// Same shape and same reasoning as the sandbox route above, including

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -90,32 +89,19 @@ func (e *Executor) SmokeTest(ctx context.Context, workDir string) (SmokeTestResu
 	result := SmokeTestResult{Image: e.opts.Image, Runtime: e.rt.String(), OCIRuntime: e.opts.OCIRuntime}
 
 	if workDir == "" {
-		tmp, err := os.MkdirTemp("", "cloop-smoke-*")
+		// A rootful run takes the sandbox UID from this directory's owner
+		// (Executor.sandboxUser) and the driver refuses uid 0, so a root-owned
+		// temp dir would make the smoke test impossible on exactly the hosts
+		// that run the hub as a system service — throwawayWorkDir hands it to
+		// an unprivileged owner. The rule that sidesteps — inherit the
+		// project's owner so files stay readable on the host afterwards — has
+		// nothing to hold here: this directory is deleted a few hundred
+		// milliseconds from now.
+		tmp, cleanup, err := throwawayWorkDir("", "cloop-smoke-*")
 		if err != nil {
-			return result, fmt.Errorf("container: create smoke-test workdir: %w", err)
+			return result, err
 		}
-		defer func() { _ = os.RemoveAll(tmp) }()
-		// The sandbox runs as a non-root UID; MkdirTemp is 0700 and owned by
-		// the control-plane user, so widen it enough for that UID to write.
-		if err := os.Chmod(tmp, 0o777); err != nil {
-			return result, fmt.Errorf("container: prepare smoke-test workdir: %w", err)
-		}
-		// Hand the directory to an unprivileged owner when the control plane
-		// is root. A rootful run takes the sandbox UID from this directory's
-		// owner (Executor.sandboxUser), and the driver refuses uid 0 — so a
-		// root-owned temp dir makes the smoke test impossible on exactly the
-		// hosts that run the hub as a system service, and the refusal talks
-		// about a "project directory" the operator never named.
-		//
-		// The rule this sidesteps — inherit the project's owner so files stay
-		// readable on the host afterwards — has nothing to hold here: this
-		// directory is deleted a few hundred milliseconds from now.
-		if os.Geteuid() == 0 {
-			if err := os.Chown(tmp, smokeTestUID, smokeTestGID); err != nil {
-				return result, fmt.Errorf(
-					"container: hand the smoke-test workdir to uid %d: %w", smokeTestUID, err)
-			}
-		}
+		defer cleanup()
 		workDir = tmp
 	}
 
@@ -150,41 +136,19 @@ func (e *Executor) SmokeTest(ctx context.Context, workDir string) (SmokeTestResu
 		EgressRules:    &executor.FirewallRules{},
 	}
 
-	started := time.Now()
-	handle, err := e.start(ctx, spec, extra)
-	if err != nil {
-		return result, err
+	res, err := e.runOnce(ctx, spec, extra)
+	if res.HandleID != "" {
+		result.ContainerName = ContainerName(mustAbs(workDir), res.HandleID)
 	}
-	result.ContainerName = ContainerName(mustAbs(workDir), handle.ID)
-
-	lines, err := e.Stream(ctx, handle.ID)
 	if err != nil {
-		_ = e.Signal(context.WithoutCancel(ctx), handle.ID, executor.SignalKill)
-		return result, fmt.Errorf("container: stream smoke test output: %w", err)
-	}
-
-	var sb strings.Builder
-	var timedOut bool
-collect:
-	for {
-		select {
-		case line, ok := <-lines:
-			if !ok {
-				break collect
-			}
-			sb.WriteString(line.Text)
-		case <-ctx.Done():
-			timedOut = true
-			_ = e.Signal(context.WithoutCancel(ctx), handle.ID, executor.SignalKill)
-			break collect
+		if res.HandleID == "" {
+			return result, err
 		}
+		return result, fmt.Errorf("container: smoke test: %w", err)
 	}
-	result.Output = strings.TrimSpace(sb.String())
-	result.Duration = time.Since(started)
-
-	statusCtx, statusCancel := context.WithTimeout(context.WithoutCancel(ctx), shortCmdTimeout)
-	defer statusCancel()
-	status, statusErr := e.Status(statusCtx, handle.ID)
+	result.Output = res.Output
+	result.Duration = res.Duration
+	status, statusErr, timedOut := res.Status, res.StatusErr, res.TimedOut
 	if statusErr == nil {
 		result.ExitCode = status.ExitCode
 	}

@@ -12,6 +12,29 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A runtime's isolation claim is verified instead of believed.** An
+  executor's `Virtualized` and `KernelIsolated` were read off its runtime's
+  name, so a `daemon.json` alias or a RuntimeClass whose handler is runc ran a
+  project that demanded a VM on the host kernel. The hub now runs `cloop
+  isolation-probe` — the hub's or the agent's own binary, bound into the sandbox
+  read-only so an image cannot fake it — under each executor's runtime when
+  configured container and Kubernetes executors are reconciled, at a device's
+  hello, after a runtime change (the Sandbox dialog, a virtual executor's
+  definition), daily and on the card's Re-probe, and classifies what the kernel
+  serving the sandbox said — uname, `/proc/version`, its boot ID, the CPU's
+  hypervisor flag, the DMI vendor, gVisor's markers — against the executing
+  host's own kernel as host-kernel, userspace-kernel, vm or unknown. A project
+  requiring kernel isolation or virtualization is refused on an executor whose
+  evidence contradicts its claim (constraint `isolation_evidence`, quoting the
+  evidence); one never verified is admitted with a warning on the run, or
+  refused under `executors.isolation_evidence: required`. Evidence is recorded
+  per executor and runtime (migration 0082, a guarded new table the stable UI
+  never reads); executor cards, the virtual-executor dialog and the Sandbox
+  dialog say "claims kata, runs on the host kernel"; `cloop hub doctor` and Hub
+  health check `executors.isolation`; a changed verdict is audited as
+  `executor.isolation_verdict`; `cloop_executor_isolation_probes_total` counts
+  the probes. Devices answer from protocol v26; an older agent is recorded as
+  unverified, naming the upgrade (Task 20439).
 - **The hub's own CA can be replaced online, and in an emergency at once.**
   Under `tls: auto` the CA the git proxy's and Kubernetes monitor's
   certificates come from was minted once, valid ten years, and never replaced:

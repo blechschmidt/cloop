@@ -486,6 +486,8 @@ function _renderExecutors(d) {
     h += '</div>';
     return h;
   }).join('');
+  // Each runtime's claim against what the isolation probe found (Task 20439).
+  panelIf('execadmin', 'isolationChips');
 }
 
 // The executor cards' buttons act through deferred/execadmin.js (Tasks 20386,

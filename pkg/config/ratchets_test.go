@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -39,5 +40,31 @@ func TestApplyRatchetsInstallsAllThree(t *testing.T) {
 	ExecutorsConfig{AllowHostProcess: &allow}.ApplyRatchets()
 	if executor.HostExecutionAllowed() {
 		t.Error("a later, looser section loosened the host policy")
+	}
+}
+
+// TestApplyRatchetsInstallsTheIsolationEvidencePolicy: the fourth fleet policy
+// rides the same method (Task 20439), and a later "warn" cannot relax it.
+func TestApplyRatchetsInstallsTheIsolationEvidencePolicy(t *testing.T) {
+	prev := executor.SetIsolationEvidenceRequired(false)
+	t.Cleanup(func() { executor.SetIsolationEvidenceRequired(prev) })
+
+	ExecutorsConfig{IsolationEvidence: executor.IsolationEvidencePolicyRequired}.ApplyRatchets()
+	if !executor.IsolationEvidenceRequired() {
+		t.Fatal("isolation_evidence: required was not installed")
+	}
+	ExecutorsConfig{IsolationEvidence: executor.IsolationEvidencePolicyWarn}.ApplyRatchets()
+	if !executor.IsolationEvidenceRequired() {
+		t.Fatal("a later warn relaxed the policy")
+	}
+	if err := ValidateExecutors(ExecutorsConfig{IsolationEvidence: "strict"}); err == nil {
+		t.Error("an unknown policy validated")
+	}
+	if err := ValidateExecutors(ExecutorsConfig{IsolationEvidence: "required"}); err != nil {
+		t.Errorf("required: %v", err)
+	}
+	if w := ExecutorWarnings(ExecutorsConfig{IsolationEvidence: "strict"}); len(w) == 0 ||
+		!strings.Contains(strings.Join(w, " "), "isolation_evidence") {
+		t.Errorf("no warning for an unknown policy: %v", w)
 	}
 }

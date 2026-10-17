@@ -132,6 +132,67 @@ work that was required to be virtualized onto something that is not. So gVisor's
 it is a userspace kernel, not a virtual machine, and calling it one would
 misstate what an escape reaches.
 
+#### The name is checked: isolation evidence
+
+A runtime's name is all the OCI and RuntimeClass APIs show a client, so an
+operator could register runc under the name `kata` — a `daemon.json` alias, a
+RuntimeClass whose handler is runc — and the executor claimed a VM while its
+workloads ran on the host kernel. Since Task 20439 the hub verifies the claim
+instead of believing it.
+
+**The probe.** `cloop isolation-probe` is a mode of the cloop binary that reads,
+from inside a sandbox, what only the kernel serving it can answer: `uname`,
+`/proc/version`, the boot ID that kernel drew when it booted
+(`/proc/sys/kernel/random/boot_id`), its uptime, the CPU's `hypervisor` flag, the
+DMI vendor and product (`QEMU`, `Cloud Hypervisor`, Firecracker's), and gVisor's
+markers — its fixed kernel build string and the boot log only the Sentry writes.
+The container driver binds the running binary — the hub's, or a device's agent's —
+into the sandbox read-only at `/.cloop-isolation-probe/`, with the host's own
+loader and C library beside it when the binary is dynamically linked, so the
+image supplies a root filesystem and nothing the probe reads: an image cannot
+substitute a probe that answers what it likes. A Kubernetes Pod cannot be handed a
+file from the hub, so there the probe is the cloop in the executor's configured
+image — the operator's, never a project's `image:`.
+
+**The verdict.** `isolationprobe.Classify` compares that evidence with the
+executing host's own kernel — read by the hub directly for its own container
+executor, reported by the agent for a device, and read on a Kubernetes node by a
+second Pod bound to the same node under the cluster's default runtime, since the
+executor Role cannot read Node objects. The boot ID settles most cases: a runc
+container reads its host's, while a VM and a gVisor sandbox each draw their own.
+The result is one of `host-kernel`, `userspace-kernel`, `vm` or `unknown`, and a
+claim is **verified** when the evidence shows at least what it claims,
+**contradicted** when it shows less, and **unverified** otherwise. A hypervisor
+flag or a cloud vendor's DMI string never counts on its own: every host this was
+built on is itself a VM, so a runc container there shows both.
+
+| Runtime named | Probe finds | Standing |
+| --- | --- | --- |
+| `kata` | its own kernel behind a hypervisor | verified |
+| `kata` | the host's boot ID | **contradicted** — the host kernel |
+| `kata` | gVisor's markers | **contradicted** — no hypervisor |
+| `runsc` | gVisor's markers, or a VM | verified |
+| `runsc` | the host's boot ID | **contradicted** |
+| anything | nothing it can classify, or the probe could not run | unverified |
+
+**When it runs.** When configured container and Kubernetes executors are
+reconciled, at each device's hello, after a runtime changes (the Sandbox dialog,
+a virtual executor's definition), daily, and when an administrator presses
+Re-probe on the card. Each attempt is recorded per executor and runtime in
+`isolation_evidence` (migration 0082, a guarded new table), a verdict that changes
+is audited as `executor.isolation_verdict`, and every probe is counted in
+`cloop_executor_isolation_probes_total`. A probe that could not run records the
+attempt and keeps the verdict it had, so breaking the probe is not a way out of a
+contradiction. A device's agent answers from protocol v26; an older one is
+recorded as unverified, with the upgrade named.
+
+**What it does not do.** The probe answers what serves the sandbox's system
+calls, not whether that kernel is configured well. The comparison needs a reference
+that describes the machine the runtime runs on, and the hub checks the engine's
+reported kernel release against it, but an agent in a VM driving an outer host's
+engine through a socket, with identical kernel builds on both, would still compare
+the wrong kernels.
+
 #### `KernelIsolated` is the third column, and the reason there is one
 
 That last point used to end the discussion, and it left a gap. An operator running
@@ -1136,7 +1197,7 @@ Ranking, applied as a stable sort:
 `*PlacementError` carrying the headline `Constraint`, a per-candidate
 `Rejection` list, and how many candidates were considered. Constraints are
 named: `no_candidates`, `executor_id`, `health`, `host_execution_policy`,
-`isolation`, `virtualization`, `kernel_isolation`, `labels`, `platform`, `arch`,
+`isolation`, `virtualization`, `kernel_isolation`, `isolation_evidence`, `labels`, `platform`, `arch`,
 `harness`, `container_runtime`, `network_egress`, `resource_limits`,
 `disk_limit`, `stream`, `signal`, `memory`, `capacity`, `image_override`, `sandbox_build`,
 `sandbox_mounts`, `host_mounts`, `devices`, `interfaces`, `egress_scope`, `workspace`,
@@ -1157,6 +1218,17 @@ must not be a kernel bug on the host" can say that, instead of demanding a VM an
 watching every `runsc` node in the fleet get rejected for a property it had
 provided. Every virtualized executor is also kernel-isolated; the reverse does
 not hold, and the gap between them is exactly gVisor.
+
+`isolation_evidence` comes right after those two and asks whether the claim they
+accepted holds up (Task 20439). Both read `Virtualized` and `KernelIsolated`, which
+come from a runtime's name; this one reads what the isolation probe found when it
+ran under that runtime. Evidence that **contradicts** the claim — a runtime named
+`kata` found to be the host kernel, or gVisor — refuses a project requiring either
+property, always, and the message quotes the evidence and its date. A claim **never
+verified** is admitted with a warning on the run's journal, or refused when
+`executors.isolation_evidence` is `required`. Only a project that asks for
+isolation is affected: nothing else relied on the name. See
+[The name is checked](#the-name-is-checked-isolation-evidence).
 
 `interfaces` is `devices` narrowed twice over, and the second narrowing is the
 one that surprises people. A `host_interface` grant needs an executor on the

@@ -171,6 +171,12 @@ const (
 	ActionExecutorAutoUpdate Action = "executor.autoupdate"
 	// ActionExecutorStateChange records a health-state transition nobody asked for.
 	ActionExecutorStateChange Action = "executor.state_change"
+	// ActionExecutorIsolationVerdict records the isolation probe reaching a
+	// verdict on an executor's runtime that differs from the last one recorded
+	// for it — the first, or a change: a runtime named kata found to be the
+	// host kernel, a contradiction cleared once the runtime was fixed (Task
+	// 20439).
+	ActionExecutorIsolationVerdict Action = "executor.isolation_verdict"
 	// ActionExecutorFailover records a session moving off a failed executor.
 	ActionExecutorFailover Action = "executor.failover"
 	// ActionExecutorFailoverExhausted records a session lost after it had

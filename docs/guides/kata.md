@@ -214,8 +214,38 @@ else, and its runs fail at start rather than at placement. `cloop hub doctor` an
 the startup log carry the same finding, so this is visible without asking; it is
 just not self-correcting.
 
-A last check from inside, if you want to see it rather than infer it — the guest
-kernel is not the host's:
+### The isolation probe checks the name for you
+
+Since Task 20439 the hub does not take the runtime's name on trust. It runs
+`cloop isolation-probe` — a mode of the cloop binary, bound into the sandbox
+read-only so the image cannot answer for it — under the configured runtime when
+the executor is reconciled, at a device's hello, after the runtime changes, and
+daily, and compares what the kernel serving the sandbox says about itself with
+the host's own kernel. A Kata guest has a kernel and a boot ID of its own and
+QEMU's or Cloud Hypervisor's firmware tables; a runc container reads the host's
+boot ID. The verdict is on the executor's card in the Executors panel:
+
+| Card says | Meaning |
+| --- | --- |
+| `claims kata-qemu, verified: a virtual machine` | the probe found a guest kernel behind a hypervisor |
+| `claims kata, runs on the host kernel` | the name is an alias for runc; projects requiring isolation are refused here |
+| `claims kata, runs on a userspace kernel (gVisor)` | the name is an alias for runsc; there is no hypervisor |
+| `claims kata, never verified` | no probe has completed; admitted with a warning unless `executors.isolation_evidence` is `required` |
+
+Hover the chip for the evidence and when it was read; **Re-probe** runs the probe
+again — after you fix `daemon.json`, say. The same verdicts are in
+`cloop hub doctor` and Settings → Hub health as `executors.isolation`, and each
+change of verdict is in the audit trail as `executor.isolation_verdict`.
+
+To refuse executors whose claim was never verified instead of warning:
+
+```yaml
+executors:
+  isolation_evidence: required    # default: warn
+```
+
+A last check from inside, if you want to see it yourself — the guest kernel is
+not the host's:
 
 ```console
 $ uname -r                                    # on the host
@@ -376,13 +406,22 @@ Kata Pod reports `remote`, and no set of isolation values selects exactly those
 two without also admitting every non-Kata remote executor. See
 [Placement](../architecture/executors.md#placement).
 
-One honest limit, worth stating before you build policy on it: the claim is
-derived from the runtime **name** and nothing else, because a name is all the OCI
-and RuntimeClass APIs expose. `kata`, `katacontainers`, `kata-*`, `kata.*` and
+The claim starts as the runtime's **name**, because a name is all the OCI and
+RuntimeClass APIs expose: `kata`, `katacontainers`, `kata-*`, `kata.*` and
 `io.containerd.kata.v2` are recognised; everything else is false, including
 gVisor's `runsc`, which is a stronger boundary than runc but is a userspace
-kernel rather than a virtual machine and would be misdescribed as one. Register
-runc under the name `kata` and cloop will believe you.
+kernel rather than a virtual machine and would be misdescribed as one.
+
+The [isolation probe](#the-isolation-probe-checks-the-name-for-you) then checks
+it. Register runc under the name `kata` and the probe reads the host's boot ID:
+the executor's card says *claims kata, runs on the host kernel*, and a project
+requiring virtualization is refused there under the constraint
+`isolation_evidence`, with the evidence quoted. A claim nothing has verified yet
+is admitted with a warning on the run, unless `executors.isolation_evidence` is
+`required`. On Kubernetes the node's own kernel is read by a second Pod on the
+same node under the cluster's default runtime, because the executor Role cannot
+read Node objects; and the probe there is the cloop in the executor's configured
+image, because a Pod cannot be handed a file from the hub.
 
 ---
 
@@ -398,6 +437,8 @@ runc under the name `kata` and cloop will believe you.
 | Isolation still reads `container` | the name is not one the matcher recognises as Kata | use `kata`, `kata-qemu`, `kata-clh` or another `kata-*` name |
 | Pods stay unscheduled after setting `runtime_class` | the Kata pool is tainted | add the matching `tolerations` and `node_selector` |
 | Preflight green, smoke test fails | Kata is configured but the VM did not boot | read the runtime's stderr in the smoke output; usually a missing hypervisor binary or a nested-virtualization limit |
+| Card says *claims kata, runs on the host kernel* | the runtime named `kata` is runc — a `daemon.json` alias, or a RuntimeClass whose handler is runc | register the real Kata shim under that name, restart the engine, press **Re-probe** |
+| Card says *not verified: the probe could not run* | the executor's image is missing, the device is offline, or its agent predates the probe | hover the chip for the reason; the device's card names the upgrade |
 | `unknown config key "executors.container.oci_runtime"` | a cloop older than the fix for this; the key was documented and enforced but not settable | upgrade, or set it by hand in `.cloop/config.yaml` |
 | A remote executor's dispatch fails with *device cannot start a virtual machine* | the enrolled device reported no usable `/dev/kvm` | [Remote executors](#remote-executors-enrolled-devices) — enable nested virtualization on the device's host, or switch that executor to `runsc` |
 | `timed out waiting for QMP ready: Connection refused` on a device | Kata could not start QEMU there, almost always no `/dev/kvm` | upgrade the agent to v9+ so the hub refuses the dispatch up front and names the cause |

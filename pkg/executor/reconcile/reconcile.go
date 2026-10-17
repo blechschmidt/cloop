@@ -267,6 +267,14 @@ type Options struct {
 	// reconciling for itself — checks nothing there; the hub always sets it.
 	ControlPlaneDir string
 
+	// IsolationProbe, when set, is handed every container and Kubernetes
+	// executor a preflight pass reconciles, to verify the isolation its
+	// runtime's name claims (Task 20439). It is expected to return at once —
+	// the hub's starts the probe in the background — because a probe starts a
+	// sandbox, which under Kata is a VM's boot. Nil probes nothing, which is
+	// right for a CLI command that will never dispatch.
+	IsolationProbe func(ex executor.IsolationProber)
+
 	// SweepGate, when set, is asked before the startup sweep (periodic false)
 	// and before each periodic orphan sweep (periodic true); a pass it refuses
 	// is skipped. Nil runs every pass, which is right for a control plane
@@ -279,6 +287,13 @@ type Options struct {
 	// spares peers' workloads by itself (see executor.TrackedElsewhere) and is
 	// gated to one process only so that it is not done N times.
 	SweepGate func(periodic bool) bool
+}
+
+// probeIsolation hands ex to the IsolationProbe hook, if there is one.
+func (o Options) probeIsolation(ex executor.IsolationProber) {
+	if o.IsolationProbe != nil {
+		o.IsolationProbe(ex)
+	}
 }
 
 // sweepAllowed consults SweepGate.
@@ -681,6 +696,9 @@ func reconcileContainer(ctx context.Context, cfg *config.Config, store executor.
 	pre := ex.Preflight(pctx, "")
 	d.Findings = convertContainerFindings(pre.Findings)
 	d.Registered = true
+	// Whatever preflight found: a probe that cannot run records why, and a
+	// degraded executor is still one placement may choose.
+	opts.probeIsolation(ex)
 	if err := pre.Err(); err != nil {
 		d.Status = StatusDegraded
 		d.Message = err.Error()
@@ -795,6 +813,7 @@ func reconcileKubernetes(ctx context.Context, dir string, cfg *config.Config, st
 	pre := ex.Preflight(pctx)
 	d.Findings = convertKubernetesFindings(pre.Findings)
 	d.Registered = true
+	opts.probeIsolation(ex)
 	if err := pre.Err(); err != nil {
 		d.Status = StatusDegraded
 		d.Message = err.Error()

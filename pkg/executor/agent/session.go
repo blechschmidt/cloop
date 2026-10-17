@@ -533,6 +533,12 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 			// handle's traffic (Task 20345).
 			go a.handleInventoryReq(ctx, sess, frame)
 
+		case remote.TypeIsolationProbe:
+			// Its own goroutine: the probe starts a sandbox, which under Kata
+			// is a VM's boot, and the frame loop carries every other handle's
+			// traffic (Task 20439).
+			go a.handleIsolationProbe(ctx, sess, frame)
+
 		case remote.TypeInstallHarness:
 			// Its own goroutine, and for this frame that is not optional. The
 			// hub sends it from inside a dispatch and blocks on the reply, so

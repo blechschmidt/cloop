@@ -286,6 +286,11 @@ type agentInvalidation struct {
 const (
 	agentEventDeleted  = "deleted"
 	agentEventEnrolled = "enrolled"
+	// agentEventIsolationProbe asks the member holding a device's socket to
+	// probe one of its runtimes, after the runtime changed through another
+	// member (Task 20439). Its Agent is the executor to probe — the device's
+	// own ID or one of its virtual executors'.
+	agentEventIsolationProbe = "isolation_probe"
 )
 
 // publishAgentChange tells other members about an agent change.
@@ -305,6 +310,13 @@ func (s *Server) applyAgentInvalidation(p agentInvalidation) {
 		return
 	}
 	switch p.Event {
+	case agentEventIsolationProbe:
+		if _, holds := s.actsForAgent(s.agentForExecutorID(p.Agent)); holds {
+			if ex, err := executor.Get(p.Agent); err == nil {
+				probeIsolation(ex, executor.ProbePointRuntimeChange)
+			}
+		}
+		return
 	case agentEventDeleted:
 		// The device's leases first, while this member can still reach it
 		// (Task 20424): a member holding its session takes them back before

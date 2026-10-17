@@ -156,7 +156,10 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			// version and hardware are what change when it is upgraded, so
 			// recording them once at enrollment would freeze the fleet
 			// inventory at each device's join date (Task 20230).
-			OnConnect: s.makeExecutorConnectBroadcaster(makeExecutorConnectRecorder(db)),
+			//
+			// And starts the isolation probe of the device's runtimes, here,
+			// on the member holding its socket (Task 20439).
+			OnConnect: s.makeExecutorConnectBroadcaster(makeExecutorConnectProber(makeExecutorConnectRecorder(db))),
 			Logf: func(format string, args ...any) {
 				fmt.Fprintf(os.Stderr, format+"\n", args...)
 			},

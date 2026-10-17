@@ -93,14 +93,14 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-306 endpoints, by the permission each one requires:
+307 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
 | `public` (no permission) | 62 |
 | `audit.read` | 5 |
 | `config.write` | 18 |
-| `executor.manage` | 35 |
+| `executor.manage` | 36 |
 | `executor.read` | 6 |
 | `project.read` | 56 |
 | `project.share` | 3 |
@@ -198,6 +198,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/executors/{id}/firewall` | `executor.manage` | executor |
 | POST | `/api/executors/{id}/firewall` | `executor.manage` | executor |
 | PUT | `/api/executors/{id}/firewall` | `executor.manage` | executor |
+| POST | `/api/executors/{id}/isolation-probe` | `executor.manage` | executor |
 | GET | `/api/executors/{id}/labels` | `executor.manage` | executor |
 | PUT | `/api/executors/{id}/labels` | `executor.manage` | executor |
 | GET | `/api/executors/{id}/limits` | `executor.manage` | executor |

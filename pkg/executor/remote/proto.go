@@ -55,6 +55,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/isolationprobe"
 )
 
 // Protocol version bounds. Bump ProtocolVersion for any incompatible change;
@@ -272,7 +273,17 @@ const (
 	// hub hands such an agent the active CA alone and records that the run
 	// trusts only it — an activation then waits for the run, or names it. See
 	// MinNodeCABundleVersion.
-	ProtocolVersion = 25
+	//
+	// v26 verifies a runtime's isolation claim (Task 20439, isolationproto.go).
+	// The hello gains host_kernel, the device's own kernel as the agent reads
+	// it, and a frame pair — isolation_probe and isolation_evidence — lets the
+	// hub ask the device to run `cloop isolation-probe` in a sandbox under a
+	// runtime it names and send back what the kernel serving it said. The hub
+	// compares the two: a runtime named kata that is runc reads the device's
+	// own boot ID. Gated on the hub side: an older agent has no handler and
+	// would never answer, so the hub does not ask, and records the device's
+	// claim as unverified with the upgrade named. See MinIsolationProbeVersion.
+	ProtocolVersion = 26
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -1036,6 +1047,12 @@ type AgentCapabilities struct {
 	// way: unknown. Informational to the hub, so no protocol bump: the
 	// device's own installer is what enforces the order.
 	BuildSequence int `json:"build_sequence,omitempty"`
+	// HostKernel is the device's own kernel as the agent reads it — uname,
+	// /proc/version, the boot ID — the reference an isolation probe's evidence
+	// is compared with (Task 20439, protocol v26). The probe's reply carries a
+	// fresh reading too; this one is for the fleet view. Absent from an older
+	// agent, whose runtimes the hub then cannot verify.
+	HostKernel *isolationprobe.Evidence `json:"host_kernel,omitempty"`
 }
 
 // Executor projects the device's advertised capabilities onto the
@@ -1798,6 +1815,7 @@ func DecodeHello(f Frame) (HelloPayload, error) {
 	var p HelloPayload
 	err := decodePayload(f, &p)
 	p.Capabilities.USBDevices = CleanUSBInventory(p.Capabilities.USBDevices)
+	p.Capabilities.HostKernel = cleanHostKernel(p.Capabilities.HostKernel)
 	return p, err
 }
 

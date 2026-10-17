@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 218 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 219 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 195 |
+| `control-plane` | the hub's own state.db | 196 |
 | `project` | the project's .cloop/state.db | 19 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-218 actions in 48 families. Every action is listed: this section is the whole
+219 actions in 48 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (18) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -206,6 +206,7 @@ Payload keys, on every action above: `yaml`
 | `executor.failover` | `executor_session` | control-plane | stable | A session is moved off an executor that stopped answering, or fails to be placed anywhere. |
 | `executor.failover_exhausted` | `executor_session` | control-plane | stable | An executor goes unreachable holding a session that was already re-dispatched as often as executors.failover.max_attempts allows, so nothing re-dispatches it. |
 | `executor.firewall` | `executor` | control-plane | stable | An admin sets or clears a device's firewall rule set, the superset every sandbox on it must fit inside. |
+| `executor.isolation_verdict` | `executor` | control-plane | stable | The isolation probe, run under an executor's runtime at reconcile, at a device's hello, after a runtime change, daily or on request, reaches a verdict that differs from the last one recorded for that executor and runtime. |
 | `executor.labels` | `executor` | control-plane | stable | An admin replaces an enrolled device's labels, the ones label grants are matched against. |
 | `executor.limits` | `executor` | control-plane | stable | An admin sets the most CPU, memory, disk and processes any one workload on an executor may be given. |
 | `executor.revoke` | `executor` | control-plane | stable | An enrolled agent's credential is revoked and it is removed from the fleet. |
@@ -227,6 +228,7 @@ Payload keys:
 - `executor.failover` — `session_id`, `from`, `to`, `attempt`, `max_attempts`, `project_path`, `task_id`, `running_tasks`, `placed`, `error`
 - `executor.failover_exhausted` — `session_id`, `from`, `attempt`, `max_attempts`, `project_path`, `running_tasks`, `nodes`, `error`
 - `executor.firewall` — `action`, `executor_id`, `from`, `to`, `fingerprint`, `cleared`, `constrained`
+- `executor.isolation_verdict` — `runtime`, `claim`, `verdict`, `status`, `previous_verdict`, `previous_status`, `point`, `detail`
 - `executor.labels` — `action`, `executor_id`, `from`, `to`, `leases`, `sessions`, `taken_back`
 - `executor.limits` — `action`, `executor_id`, `from`, `to`, `cleared`
 - `executor.revoke` — `action`, `executor_id`, `name`, `kind`
@@ -243,6 +245,7 @@ Payload keys:
 - `executor.failover` — `placed` distinguishes a successful move from one with nowhere to go; then `to` is empty and `error` says why. A session past executors.failover.max_attempts is recorded as executor.failover_exhausted instead.
 - `executor.failover_exhausted` — `nodes` names every executor the run was lost on, oldest first, each with when it went unreachable. A workload that takes down every node it lands on ends here instead of on the next node.
 - `executor.firewall` — `from` and `to` describe the whole rule set — allowlist, denylist, ports, resolvers and the public-Internet switch — so a widened device is legible from this row alone. `cleared` is true when the rule set was removed, which leaves the device bounded only by its configuration. `constrained` counts the virtual executors and project rule sets the save narrowed to fit; each of those has its own row (`executor.virtual` with action "constrain", `project.firewall` with action "constrain").
+- `executor.isolation_verdict` — `claim` is what the runtime's name claims (vm, userspace-kernel, host-kernel) and `verdict` what the probe found; `status` is contradicted when the evidence shows less isolation than the claim, which refuses projects that require kernel isolation or virtualization. `previous_*` are empty for an executor's first verdict. A probe that could not run is recorded on the evidence row, not here.
 - `executor.labels` — `from` and `to` are the device's labels before and after. `leases` and `sessions` count the live secret leases and egress sessions — the device's and its virtual executors' — that were re-judged by the new labels, and `taken_back` how many label grants they no longer matched; each of those has its own lease.revoke_sent or egress.close row naming the grant.
 - `executor.limits` — Records its previous ceiling as well as the new one. A raised cap is the change worth reviewing, and it is invisible in the new value alone. `cleared` is true when the ceiling was removed, which makes the executor uncapped rather than capped at zero.
 - `executor.sandbox` — One of two executor actions that record their previous value: it changes a containment boundary, so `from` is what makes "when did this device stop isolating its workloads" answerable from the trail alone. `cleared` is true when the configuration was removed rather than replaced.

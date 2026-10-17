@@ -740,6 +740,22 @@ type ExecutorsConfig struct {
 	// config. See pkg/executor/agentbuild.go.
 	MinAgentBuild string `yaml:"min_agent_build,omitempty"`
 
+	// IsolationEvidence decides what placement does with an executor whose
+	// isolation claim has never been verified (Task 20439): "warn", the
+	// default, admits it to a project that requires kernel isolation or
+	// virtualization and journals a warning on the run; "required" refuses
+	// it. An executor whose evidence contradicts its claim is refused either
+	// way.
+	//
+	// The claim is Capabilities.Virtualized or KernelIsolated, read off the
+	// runtime's name; the evidence is what `cloop isolation-probe`, run under
+	// that runtime, found serving the sandbox. See pkg/executor/isolation.go.
+	//
+	// Applied as a ratchet (executor.ApplyIsolationEvidencePolicy), like the
+	// build floor: one project's config.yaml cannot relax a hub that requires
+	// evidence.
+	IsolationEvidence string `yaml:"isolation_evidence,omitempty"`
+
 	// OrphanSweepIntervalMinutes is how often the hub re-runs the orphan sweep
 	// that collects workloads it is no longer tracking. Absent uses
 	// reconcile.DefaultSweepInterval (15 minutes); an explicit 0 disables it.
@@ -1149,6 +1165,8 @@ func (e ExecutorsConfig) ApplyRatchets() {
 	if ceiling, err := e.Limits.Ceiling(); err == nil {
 		executor.ApplyResourceCeiling(ceiling)
 	}
+	// Nor stop a hub requiring isolation evidence from requiring it.
+	executor.ApplyIsolationEvidencePolicy(e.IsolationEvidence)
 }
 
 // FailoverConfig bounds executor failover (Task 20391).

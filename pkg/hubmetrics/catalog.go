@@ -139,6 +139,23 @@ var (
 		Type:   TypeCounter,
 		Labels: []string{"constraint"},
 	})
+
+	// point is executor.ProbePoint* (5 values); status is IsolationProbe*
+	// (4 values). Task 20439.
+	IsolationProbes = Default.MustRegister(Definition{
+		Name:   "cloop_executor_isolation_probes_total",
+		Help:   "Isolation probes run under an executor's runtime, by where they were run from and how the runtime's claim stood after: verified, contradicted, unverified, or failed when the probe could not run.",
+		Type:   TypeCounter,
+		Labels: []string{"point", "status"},
+	})
+)
+
+// IsolationProbes status values.
+const (
+	IsolationProbeVerified     = "verified"
+	IsolationProbeContradicted = "contradicted"
+	IsolationProbeUnverified   = "unverified"
+	IsolationProbeFailed       = "failed"
 )
 
 // Secret broker leases. kind is pkg/secretbroker.Kind* (9 values).

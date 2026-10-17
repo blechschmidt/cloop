@@ -311,6 +311,27 @@ misconfigured fleet before users report it:
 rate(cloop_executor_placement_failures_total[5m]) > 0
 ```
 
+### Isolation probes
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_executor_isolation_probes_total` | counter | `point`, `status` |
+
+One sample per isolation probe the hub runs under an executor's runtime (Task
+20439). `point` is where it was asked from: `reconcile`, `hello`,
+`runtime_change`, `daily` or `manual`. `status` is how the runtime's claim stood
+after it: `verified`, `contradicted` — the probe found less isolation than the
+runtime's name claims, which refuses projects requiring isolation there —
+`unverified` for an inconclusive verdict, or `failed` when the probe could not
+run. Counted by the member that ran the probe, so sum across members.
+
+**A runtime is not what its name says** — page on it; the executor's card and
+`cloop hub doctor` name it and the evidence:
+
+```promql
+increase(cloop_executor_isolation_probes_total{status="contradicted"}[1d]) > 0
+```
+
 ## Secrets and leases
 
 | Metric | Type | Labels |

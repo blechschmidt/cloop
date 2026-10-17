@@ -42,37 +42,40 @@ import (
 type Constraint string
 
 const (
-	ConstraintNoCandidates     Constraint = "no_candidates"
-	ConstraintExecutorID       Constraint = "executor_id"
-	ConstraintHealth           Constraint = "health"
-	ConstraintHostPolicy       Constraint = "host_execution_policy"
-	ConstraintIsolation        Constraint = "isolation"
-	ConstraintVirtualization   Constraint = "virtualization"
-	ConstraintKernelIsolation  Constraint = "kernel_isolation"
-	ConstraintLabels           Constraint = "labels"
-	ConstraintPlatform         Constraint = "platform"
-	ConstraintArch             Constraint = "arch"
-	ConstraintHarness          Constraint = "harness"
-	ConstraintContainerRuntime Constraint = "container_runtime"
-	ConstraintNetworkEgress    Constraint = "network_egress"
-	ConstraintResourceLimits   Constraint = "resource_limits"
-	ConstraintDiskLimit        Constraint = "disk_limit"
-	ConstraintStream           Constraint = "stream"
-	ConstraintSignal           Constraint = "signal"
-	ConstraintMemory           Constraint = "memory"
-	ConstraintCapacity         Constraint = "capacity"
-	ConstraintImageOverride    Constraint = "image_override"
-	ConstraintSandboxBuild     Constraint = "sandbox_build"
-	ConstraintSandboxMounts    Constraint = "sandbox_mounts"
-	ConstraintHostMounts       Constraint = "host_mounts"
-	ConstraintDevices          Constraint = "devices"
-	ConstraintInterfaces       Constraint = "interfaces"
-	ConstraintEgressScope      Constraint = "egress_scope"
-	ConstraintWorkspace        Constraint = "workspace"
-	ConstraintWriteBack        Constraint = "write_back"
-	ConstraintSecretFiles      Constraint = "secret_files"
-	ConstraintRevocation       Constraint = "revocation"
-	ConstraintAgentBuild       Constraint = "agent_build"
+	ConstraintNoCandidates    Constraint = "no_candidates"
+	ConstraintExecutorID      Constraint = "executor_id"
+	ConstraintHealth          Constraint = "health"
+	ConstraintHostPolicy      Constraint = "host_execution_policy"
+	ConstraintIsolation       Constraint = "isolation"
+	ConstraintVirtualization  Constraint = "virtualization"
+	ConstraintKernelIsolation Constraint = "kernel_isolation"
+	// ConstraintIsolationEvidence is an isolation claim the probe contradicted,
+	// or one never verified on a hub that requires evidence (Task 20439).
+	ConstraintIsolationEvidence Constraint = "isolation_evidence"
+	ConstraintLabels            Constraint = "labels"
+	ConstraintPlatform          Constraint = "platform"
+	ConstraintArch              Constraint = "arch"
+	ConstraintHarness           Constraint = "harness"
+	ConstraintContainerRuntime  Constraint = "container_runtime"
+	ConstraintNetworkEgress     Constraint = "network_egress"
+	ConstraintResourceLimits    Constraint = "resource_limits"
+	ConstraintDiskLimit         Constraint = "disk_limit"
+	ConstraintStream            Constraint = "stream"
+	ConstraintSignal            Constraint = "signal"
+	ConstraintMemory            Constraint = "memory"
+	ConstraintCapacity          Constraint = "capacity"
+	ConstraintImageOverride     Constraint = "image_override"
+	ConstraintSandboxBuild      Constraint = "sandbox_build"
+	ConstraintSandboxMounts     Constraint = "sandbox_mounts"
+	ConstraintHostMounts        Constraint = "host_mounts"
+	ConstraintDevices           Constraint = "devices"
+	ConstraintInterfaces        Constraint = "interfaces"
+	ConstraintEgressScope       Constraint = "egress_scope"
+	ConstraintWorkspace         Constraint = "workspace"
+	ConstraintWriteBack         Constraint = "write_back"
+	ConstraintSecretFiles       Constraint = "secret_files"
+	ConstraintRevocation        Constraint = "revocation"
+	ConstraintAgentBuild        Constraint = "agent_build"
 )
 
 // Candidate is one executor offered to the scheduler, together with everything
@@ -539,6 +542,15 @@ func reject(c Candidate, req Requirements) (Rejection, bool) {
 				"workload requires a kernel-isolated sandbox (set "+
 				"executors.container.oci_runtime to runsc for gVisor or a kata runtime, or "+
 				"executors.kubernetes.runtime_class to the matching RuntimeClass)")
+	}
+	// The claim the two checks above accepted rests on a runtime's name. This
+	// asks whether the isolation probe bore it out (isolation.go): evidence
+	// that contradicts it always refuses, and a claim never verified refuses
+	// only where executors.isolation_evidence requires evidence.
+	if req.RequireVirtualization || req.RequireKernelIsolation {
+		if detail, rejected := rejectForIsolationEvidence(c.Executor); rejected {
+			return no(ConstraintIsolationEvidence, "%s", detail)
+		}
 	}
 
 	for k, want := range req.Labels {

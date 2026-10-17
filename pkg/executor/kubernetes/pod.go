@@ -309,7 +309,12 @@ type podSpec struct {
 	// RuntimeClassName selects a node-level RuntimeClass — the Kubernetes
 	// spelling of "run this Pod under Kata rather than runc". Omitted when
 	// empty so the cluster's default handler stays in effect.
-	RuntimeClassName string              `json:"runtimeClassName,omitempty"`
+	RuntimeClassName string `json:"runtimeClassName,omitempty"`
+	// NodeName is the node the Pod is bound to: read back once the scheduler
+	// placed it, and set only by the isolation probe's reference Pod, which
+	// must read the kernel of the node the probe Pod ran on (Task 20439).
+	// Omitted when empty, so every other Pod is scheduled as before.
+	NodeName         string              `json:"nodeName,omitempty"`
 	ImagePullSecrets []localObjectRef    `json:"imagePullSecrets,omitempty"`
 	SecurityContext  *podSecurityContext `json:"securityContext,omitempty"`
 	// InitContainers run to completion, in order, before Containers start.

@@ -29,6 +29,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
+	"github.com/blechschmidt/cloop/pkg/isolationverify"
 	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -228,6 +229,8 @@ func bootstrapExecutors(dir string) {
 			if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
 				executor.ApplyResourceCeiling(ceiling)
 			}
+			// And the same isolation evidence policy (Task 20439).
+			executor.ApplyIsolationEvidencePolicy(cfg.Executors.IsolationEvidence)
 		}
 	}
 	registerBuiltinExecutors()
@@ -246,9 +249,21 @@ func bootstrapExecutors(dir string) {
 			"does not run the git interception proxy (only `cloop ui` does): git workspaces "+
 			"on this server's executors will be refused rather than given the forge credential\n")
 	}
+	// The REST API places work too, so it reads the same isolation evidence
+	// the dashboard does and probes the executors it reconciles (Task 20439).
+	verifier := isolationverify.New(isolationverify.Options{
+		DBPath: state.DBPath(dir),
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "apiserver: "+format+"\n", args...)
+		},
+	})
+	executor.SetIsolationEvidenceSource(verifier.Lookup)
 	reconcile.Bootstrap(dir, cfg, reconcile.Options{
 		ReconcileOrphans: true,
 		SweepInterval:    cfg.Executors.OrphanSweepInterval(),
+		IsolationProbe: func(ex executor.IsolationProber) {
+			verifier.ProbeAsync(ex, executor.ProbePointReconcile)
+		},
 		// What the container driver must never bind over (Task 20418).
 		ControlPlaneDir: dir,
 		// `cloop serve` is not a hub cluster member (Task 20354), so it cannot

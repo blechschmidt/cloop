@@ -1544,6 +1544,15 @@ func (s *Server) Run(ctx context.Context) error {
 	// monitor sessions. See kubeshare.go.
 	s.runLeaderDuty(watcherCtx, "kube-share-renewal", s.watchKubeShareRenewals)
 	go s.watchKubeGuardUpstreams(watcherCtx)
+	// The daily isolation probe of every executor's runtime (Task 20439), on
+	// every member: each probes the devices whose sockets it holds, and the
+	// leader the container and Kubernetes executors. Each verdict announces
+	// itself to open dashboards, whichever trigger reached it. See
+	// isolation.go.
+	if v := activeIsolationVerifier(); v != nil {
+		v.SetOnRecord(func(executorID string) { s.broadcastExecutorUpdate("isolation", executorID) })
+	}
+	go s.watchIsolationProbes(watcherCtx)
 	// Every member polls the KMS its sealing keys are wrapped by, which keeps
 	// the KMS metrics current, and the leader rewraps keys after a rotation
 	// of the KMS key (Task 20433). See kms.go.

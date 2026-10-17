@@ -1,0 +1,31 @@
+{
+ "about": "The same QEMU q35 guest on sgx booting sgx's own kernel image (/boot/vmlinuz-6.8.0-79-generic): release, build string and /proc/version all equal the host's, and only the boot ID tells the guest's kernel from the host's. Captured 2026-10-17 (Task 20439).",
+ "runtime": "kata-qemu",
+ "engine_kernel": "6.8.0-79-generic",
+ "source": "agent",
+ "host": {
+  "schema": 1,
+  "release": "6.8.0-79-generic",
+  "version": "#79-Ubuntu SMP PREEMPT_DYNAMIC Tue Aug 12 14:42:46 UTC 2025",
+  "machine": "x86_64",
+  "proc_version": "Linux version 6.8.0-79-generic (buildd@lcy02-amd64-049) (x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #79-Ubuntu SMP PREEMPT_DYNAMIC Tue Aug 12 14:42:46 UTC 2025",
+  "boot_id": "2d725fb0-4ac8-4443-b68c-8c50313f7439",
+  "uptime_seconds": 14460004.91,
+  "hypervisor": true,
+  "dmi_vendor": "Alibaba Cloud",
+  "dmi_product": "Alibaba Cloud ECS"
+ },
+ "probe": {
+  "schema": 1,
+  "release": "6.8.0-79-generic",
+  "version": "#79-Ubuntu SMP PREEMPT_DYNAMIC Tue Aug 12 14:42:46 UTC 2025",
+  "machine": "x86_64",
+  "proc_version": "Linux version 6.8.0-79-generic (buildd@lcy02-amd64-049) (x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #79-Ubuntu SMP PREEMPT_DYNAMIC Tue Aug 12 14:42:46 UTC 2025",
+  "boot_id": "b2bf37a4-2e98-45fc-b48a-a1991b6d2349",
+  "uptime_seconds": 2.88,
+  "hypervisor": true,
+  "dmi_vendor": "QEMU",
+  "dmi_product": "Standard PC (Q35 + ICH9, 2009)"
+ },
+ "want": "vm"
+}

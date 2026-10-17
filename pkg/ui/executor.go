@@ -149,6 +149,10 @@ func bootstrapExecutors(dir string, port int) {
 	// refused and the first isolating driver below becomes the default,
 	// which is exactly what that mode is asking for.
 	registerBuiltinExecutors()
+	// The isolation verifier before reconciliation, which hands it every
+	// configured container and Kubernetes executor to probe (Task 20439), and
+	// before anything can dispatch: placement reads its evidence.
+	startIsolationVerifier(dir)
 	reconcileConfiguredExecutors(dir, cfg)
 	// The host driver's copy of the same backstop (Task 20418).
 	localprocess.Shared().SetControlPlaneDir(dir)
@@ -257,6 +261,9 @@ func reconcileConfiguredExecutors(dir string, cfg *config.Config) {
 		WrapWorkspaceSource: func(execID string, src executor.WorkspaceCredentialSource) executor.WorkspaceCredentialSource {
 			return activeGitProxy().Wrap(execID, src)
 		},
+		// Verify what each configured runtime claims (Task 20439), in the
+		// background: a probe starts a sandbox.
+		IsolationProbe: func(ex executor.IsolationProber) { probeIsolation(ex, executor.ProbePointReconcile) },
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "ui: "+format+"\n", args...)
 		},

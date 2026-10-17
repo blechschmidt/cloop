@@ -405,6 +405,14 @@
           : 'This device reported no container engine at its last connect.';
       }
       if (d && d.warning) _execSandboxWarn(d.warning);
+      // What the runtime saved last was found to be (Task 20439): the name is a
+      // claim, and this is the probe's answer to it.
+      const iso = document.getElementById('execSandboxIso');
+      if (iso) {
+        const e = d && d.isolation_evidence;
+        iso.style.display = e ? '' : 'none';
+        iso.innerHTML = e ? 'Isolation: ' + _isoChip(e) + ' ' + esc(_isoWhen(e)) : '';
+      }
       _execSandboxSyncFields();
     }
 
@@ -464,6 +472,78 @@
         .catch(() => toast('Failed to reset sandbox configuration', 'err'));
     }
 
+
+    // ── Isolation evidence (Task 20439) ─────────────────────────────────────────
+    //
+    // A card's "kata / VM" chip is read off its runtime's name. The hub checks
+    // the name: it runs the isolation probe under the runtime and compares what
+    // the kernel serving the sandbox said about itself with the host's own, so a
+    // runtime named kata that is runc reads "claims kata, runs on the host
+    // kernel". isolationChips adds that verdict to every card the list just drew
+    // — panelIf calls it after each redraw — and the dialogs above and below
+    // show it beside the runtime they set.
+    // A contradiction is a warning, not a missing capability, so it does not
+    // wear the dimmed look of one; an unverified claim is a caution.
+    const _isoTone = {contradicted: 'color:var(--red);border-color:var(--red)',
+      unverified: 'color:var(--yellow);border-color:var(--yellow)'};
+
+    function _isoChip(e) {
+      const cls = e.status === 'verified' ? 'pos' : 'neg';
+      const tone = e.claim !== 'host-kernel' && _isoTone[e.status];
+      const tip = [e.detail, e.error ? 'The latest probe could not run: ' + e.error : '', _isoWhen(e),
+        e.refused ? 'Projects whose .cloop/sandbox.yaml requires kernel isolation or a hypervisor are refused here.' : '']
+        .filter(Boolean).join('\n');
+      return '<span class="exec-chip ' + cls + '" data-iso="' + esc(e.status) + '"'
+        + (tone ? ' style="opacity:1;' + tone + '"' : '') + ' title="' + esc(tip) + '">' + esc(e.summary) + '</span>';
+    }
+
+    function _isoWhen(e) {
+      if (e.probed_at) return 'Probed ' + relTime(new Date(e.probed_at)) + (e.point ? ' (' + e.point + ')' : '') + '.';
+      if (e.attempted_at) return 'Last attempt ' + relTime(new Date(e.attempted_at)) + '.';
+      return 'Never probed.';
+    }
+
+    function isolationChips() {
+      const manage = canGlobal('executor.manage');
+      document.querySelectorAll('#execList .exec-card').forEach(card => {
+        const main = card.querySelector('.exec-card-main');
+        const ex = main && _execAt(+main.dataset.arg);
+        const e = ex && ex.isolation_evidence;
+        const row = card.querySelector('.exec-chips');
+        if (!e || !row || row.querySelector('[data-iso]')) return;
+        // The name's own chip says what the probe found, when it found less.
+        if (e.status === 'contradicted') {
+          row.querySelectorAll('.exec-chip.pos').forEach(c => {
+            if (c.textContent === 'kata / VM') { c.className = 'exec-chip neg'; c.title = 'Named for a VM — ' + e.summary; }
+          });
+        }
+        row.insertAdjacentHTML('beforeend', _isoChip(e));
+        if (!manage) return;
+        // Wired here, not by attribute: the card is the bundle's markup, and
+        // its actions are the bundle's registry; this one is the panel's own.
+        const b = document.createElement('button');
+        b.className = 'btn';
+        b.style.cssText = 'padding:2px 8px;font-size:11px';
+        b.textContent = 'Re-probe';
+        b.title = 'Run the isolation probe under this executor’s runtime now';
+        b.onclick = ev => { ev.stopPropagation(); _reprobe(ex.id, ex.name || ex.id); };
+        row.appendChild(b);
+      });
+    }
+
+    function _reprobe(id, name) {
+      apiMethod('POST', '/api/executors/' + encodeURIComponent(id) + '/isolation-probe', {})
+        .then(d => {
+          if (!d || d.error) { toast((d && d.error) || 'Could not start the probe', 'err'); return; }
+          toast(d.started ? 'Probing ' + name + '’s runtime…' : 'A probe of ' + name + ' is already running', 'ok');
+        })
+        .catch(err => toast(_execDetailErrText(err) || 'Could not start the probe', 'err'));
+    }
+
+    function reprobeExecutorVirtual(i) {
+      const v = execVx && ((execVx.data || {}).virtual_executors || [])[+i];
+      if (v) _reprobe(v.id, v.name || v.id);
+    }
 
     // ── Virtual executors (Task 20345) ──────────────────────────────────────────
     //
@@ -543,7 +623,10 @@
           + '">exceeds device firewall</span>' : '')
         + (v.metadata ? '<span class="exec-chip neg" title="' + esc(v.metadata.join('; '))
           + '">contains a metadata service</span>' : '')
-        + '<button class="btn" style="padding:2px 8px;font-size:11px" data-act="editExecutorVirtual" data-arg="' + i + '">Edit</button></div>').join('');
+        + (v.isolation_evidence ? _isoChip(v.isolation_evidence) : '')
+        + '<button class="btn" style="padding:2px 8px;font-size:11px" data-act="editExecutorVirtual" data-arg="' + i + '">Edit</button>'
+        + (v.isolation_evidence ? '<button class="btn" style="padding:2px 8px;font-size:11px" data-act="reprobeExecutorVirtual" data-arg="'
+          + i + '" title="Run the isolation probe under this runtime now">Re-probe</button>' : '') + '</div>').join('');
       h += '<h3 style="font-size:13px;margin:12px 0 4px">USB devices on ' + esc(d.name)
         + ' <button class="btn" style="padding:2px 8px;font-size:11px" data-act="refreshExecutorVirtual">Refresh</button></h3>';
       if (d.usb_error) h += '<div class="form-hint">' + esc(d.usb_error) + '</div>';
@@ -1780,6 +1863,7 @@
       forwarderBind, closeForwarderBind, submitForwarderBind, forwarderUnbind,
       openExecutorDetail, closeExecutorDetail, openExecutorTaskRef, openExecutorSandbox,
       closeExecutorSandbox, onExecSandboxModeChange, saveExecutorSandbox, clearExecutorSandbox,
+      isolationChips, reprobeExecutorVirtual,
       openExecutorVirtual, closeExecutorVirtual, refreshExecutorVirtual, evxSync,
       editExecutorVirtual, saveExecutorVirtual, deleteExecutorVirtual, openExecutorFirewall,
       closeExecutorFirewall, saveExecutorFirewall, clearExecutorFirewall, openExecutorLimits,
@@ -2006,6 +2090,7 @@
                   <option value="kata-clh">kata-clh</option>
                 </datalist>
                 <div class="form-hint">The <code>--runtime</code> name the engine resolves against its own root-owned config. A path is refused.</div>
+                <div class="form-hint" id="execSandboxIso" style="display:none"></div>
               </div>
             </div>
             <div class="form-group">

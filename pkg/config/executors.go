@@ -217,6 +217,11 @@ func ValidateExecutors(e ExecutorsConfig) error {
 		return fmt.Errorf("executors.write_back: %q is not a write-back mode; use %q, or leave it unset "+
 			"so runs return no work", v, WriteBackPush)
 	}
+	if v := e.IsolationEvidence; !executor.ValidIsolationEvidencePolicy(v) {
+		return fmt.Errorf("executors.isolation_evidence: %q is not a policy; use %q to refuse executors "+
+			"whose isolation claim was never verified, or %q (the default) to admit them with a warning",
+			strings.TrimSpace(v), executor.IsolationEvidencePolicyRequired, executor.IsolationEvidencePolicyWarn)
+	}
 	if v := e.Failover.MaxAttempts; v != nil && !ValidFailoverMaxAttempts(*v) {
 		return FailoverMaxAttemptsError(*v)
 	}
@@ -272,6 +277,14 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 				"eligible. Use a released vMAJOR.MINOR.PATCH build such as v0.1.0, or remove "+
 				"the key.", v))
 		}
+	}
+
+	// A policy this hub does not know is the default, warn — but the operator
+	// who typed it expects unverified executors to be refused.
+	if v := e.IsolationEvidence; !executor.ValidIsolationEvidencePolicy(v) {
+		out = append(out, fmt.Sprintf("executors.isolation_evidence is %q, which is not a policy, so "+
+			"executors whose isolation was never verified are admitted with a warning; use %q to refuse "+
+			"them, or remove the key.", strings.TrimSpace(v), executor.IsolationEvidencePolicyRequired))
 	}
 
 	// A write-back mode this hub does not know returns nothing, which is the

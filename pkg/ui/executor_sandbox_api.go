@@ -88,6 +88,10 @@ type executorSandboxView struct {
 	// empty. It exists so the one non-obvious failure — configuring container
 	// mode on a device whose agent is too old — is stated in the panel.
 	Warning string `json:"warning,omitempty"`
+	// IsolationEvidence is the configured runtime's claim against what the
+	// isolation probe found under it (Task 20439), so the dialog that sets
+	// the runtime says whether the last one set was what its name says.
+	IsolationEvidence *executorIsolationView `json:"isolation_evidence,omitempty"`
 }
 
 // executorSandboxRequest is the PUT body. Every field is optional; an omitted
@@ -224,6 +228,8 @@ func (s *Server) serveExecutorSandboxPut(w http.ResponseWriter, r *http.Request,
 			"from":    before.Describe(),
 		})
 		s.broadcastExecutorUpdate("sandbox", id)
+		// The runtime changed: verify the one now in force (Task 20439).
+		s.probeAfterRuntimeChange(id, before, executor.SandboxSettings{})
 		s.renderExecutorSandbox(w, db, id)
 		return
 	}
@@ -260,6 +266,8 @@ func (s *Server) serveExecutorSandboxPut(w http.ResponseWriter, r *http.Request,
 	// Tell open dashboards the fleet changed, so another admin's Executors panel
 	// does not go on showing the containment this one just replaced.
 	s.broadcastExecutorUpdate("sandbox", id)
+	// Verify the runtime the new settings name (Task 20439).
+	s.probeAfterRuntimeChange(id, before, after)
 	s.renderExecutorSandbox(w, db, id)
 }
 
@@ -276,6 +284,9 @@ func (s *Server) describeSandboxTarget(view *executorSandboxView, id string) {
 	view.Remote = inv.remote
 	view.DeviceEngines = inv.engines
 	view.AgentSupported = inv.sandboxCapable
+	if ex, err := executor.Get(id); err == nil {
+		view.IsolationEvidence = isolationViewFor(ex)
+	}
 
 	switch {
 	case !inv.remote && inv.known:

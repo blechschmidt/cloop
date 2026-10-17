@@ -125,6 +125,10 @@ type Config struct {
 	// a virtual executor. Nil is the container driver; tests substitute one
 	// that needs no engine, to exercise what the agent hands a sandbox.
 	ContainerDriver func(executor.SandboxSettings) (executor.Executor, error)
+	// IsolationProbe runs the isolation probe (Task 20439) in place of the
+	// container driver. Nil is the container driver; tests substitute an
+	// answer, so the frame pair can be exercised without an engine.
+	IsolationProbe func(context.Context, executor.SandboxSettings) remote.IsolationEvidencePayload
 	// Channel is the update channel this device follows (Task 20376), from
 	// the unit's channel drop-in by way of CLOOP_UPDATE_CHANNEL. Empty is
 	// stable. It is reported in the hello, so the hub knows what to offer,
@@ -517,6 +521,10 @@ func (a *Agent) Capabilities() remote.AgentCapabilities {
 	// by (Task 20380); reported so the hub never offers a build it would refuse.
 	caps.BuildSequence, _ = version.BuildSequence()
 	if a.cfg.HostProbes {
+		// The kernel an isolation probe's evidence is compared with (Task
+		// 20439). A reading of files and a syscall, but the machine's, which
+		// a test's hello has no business carrying.
+		caps.HostKernel = hostKernel()
 		mode, _, _, issue := a.remoteUpgradeReadiness()
 		caps.RemoteUpgrade = mode != remoteUpgradeUnavailable
 		caps.RemoteUpgradeIssue = issue

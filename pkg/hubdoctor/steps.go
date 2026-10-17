@@ -101,6 +101,11 @@ func steps(dir string, cfg *config.Config, opts Options, wal walSample, rep *Rep
 		{"executors.rollback_protection", "Rollback protection of enrolled devices", func(_ context.Context, add addFn) {
 			checkRollbackProtection(dir, add)
 		}},
+		// After the executor step, whose registry it reads for executors never
+		// probed. Reads the evidence rows only; it starts no probe.
+		{"executors.isolation", "Executor isolation evidence", func(_ context.Context, add addFn) {
+			checkIsolationEvidence(dir, add)
+		}},
 		{"runs.build_lag", "Builds of the runs on this host", func(_ context.Context, add addFn) { checkRunBuilds(add) }},
 	}
 	if set.networkPolicy != nil {

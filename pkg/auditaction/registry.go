@@ -555,6 +555,22 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 	},
 	{
+		Action: ActionExecutorIsolationVerdict,
+		Home:   HomeControlPlane,
+		Entity: "executor",
+		Trigger: "The isolation probe, run under an executor's runtime at reconcile, at a device's hello, " +
+			"after a runtime change, daily or on request, reaches a verdict that differs from the last one " +
+			"recorded for that executor and runtime.",
+		Payload:   []string{"runtime", "claim", "verdict", "status", "previous_verdict", "previous_status", "point", "detail"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`claim` is what the runtime's name claims (vm, userspace-kernel, host-kernel) and `verdict` what " +
+			"the probe found; `status` is contradicted when the evidence shows less isolation than the claim, " +
+			"which refuses projects that require kernel isolation or virtualization. `previous_*` are empty " +
+			"for an executor's first verdict. A probe that could not run is recorded on the evidence row, " +
+			"not here.",
+	},
+	{
 		Action:    ActionExecutorFailover,
 		Home:      HomeControlPlane,
 		Entity:    "executor_session",

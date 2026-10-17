@@ -525,7 +525,8 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		s.handleDeviceFrame(ctx, f)
 		return false
 
-	case TypeStarted, TypeRevoked, TypeSecretRefreshed, TypeUpgrading, TypeHarnessInstalled, TypeInventory, TypeError:
+	case TypeStarted, TypeRevoked, TypeSecretRefreshed, TypeUpgrading, TypeHarnessInstalled, TypeInventory,
+		TypeIsolationEvidence, TypeError:
 		s.deliver(f)
 		return false
 

@@ -129,6 +129,11 @@ type executorView struct {
 	// same as host mode, and the card renders the two differently: an unset
 	// remote device is one whose containment nobody has decided.
 	Sandbox *executorSandboxSummary `json:"sandbox,omitempty"`
+	// IsolationEvidence is the executor's isolation claim against what the
+	// isolation probe found under its runtime (Task 20439): "claims kata,
+	// runs on the host kernel". Nil for an executor whose payloads run under
+	// no runtime.
+	IsolationEvidence *executorIsolationView `json:"isolation_evidence,omitempty"`
 	// Restricted reports that this executor has a non-empty access list
 	// (Task 20310). Admitted is whether the identity asking may use it.
 	//
@@ -643,6 +648,7 @@ func (s *Server) buildExecutorView(
 	caps := ex.Capabilities()
 	view.Capabilities = &caps
 	view.Isolation = string(caps.Isolation)
+	view.IsolationEvidence = isolationViewFor(ex)
 
 	// An edge agent connected to another hub member (Task 20354) has no
 	// session here, and asking it for a health check would report a healthy
@@ -1199,6 +1205,8 @@ func (s *Server) handleExecutorDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	executor.DefaultRegistry.Unregister(id)
+	// Nothing verified about its runtimes outlives it (Task 20439).
+	forgetIsolationEvidence(id)
 	// Its virtual executors go with it (Task 20345): they dispatch through its
 	// session, so none of them can run anything now, and the device's own card —
 	// the only place they are managed — has just been removed.
@@ -1911,6 +1919,16 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 			remediation = "Bind this project to an executor that can fetch a git workspace, " +
 				"or upgrade the agent on this device to a build that supports workspace provisioning. " +
 				executor.AgentUpgradeAdvice()
+		}
+		if placement.Constraint == executor.ConstraintIsolationEvidence {
+			// Nothing in the project is wrong, and "an executor that
+			// supports it" is not a property executors have: the bound one
+			// claims the isolation and its probe found less, or never ran
+			// (Task 20439). The fix is on the executor's host or its card.
+			remediation = "Press Re-probe on the executor's card in the Executors panel once its probe can run — " +
+				"after making its runtime what its name says (the real runtime registered under that name, or " +
+				"the name changed to the one it is) if the probe found less — or bind this project to an " +
+				"executor whose isolation probe verifies its claim."
 		}
 		writeSandboxDenied(w, "sandbox_unsupported", placement.Error(), remediation,
 			executor.IsolatedIDs())

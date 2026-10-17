@@ -1,0 +1,31 @@
+{
+ "about": "sgx has no /dev/kvm, so Kata cannot run there or on the hub's host. This is a genuine QEMU q35 guest (TCG) booted on sgx inside a disposable container, with Alpine's linux-virt kernel and the probe as init — the machine type and firmware tables a Kata-qemu guest presents. Captured 2026-10-17 (Task 20439).",
+ "runtime": "kata-qemu",
+ "engine_kernel": "6.8.0-79-generic",
+ "source": "agent",
+ "host": {
+  "schema": 1,
+  "release": "6.8.0-79-generic",
+  "version": "#79-Ubuntu SMP PREEMPT_DYNAMIC Tue Aug 12 14:42:46 UTC 2025",
+  "machine": "x86_64",
+  "proc_version": "Linux version 6.8.0-79-generic (buildd@lcy02-amd64-049) (x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #79-Ubuntu SMP PREEMPT_DYNAMIC Tue Aug 12 14:42:46 UTC 2025",
+  "boot_id": "2d725fb0-4ac8-4443-b68c-8c50313f7439",
+  "uptime_seconds": 14460004.91,
+  "hypervisor": true,
+  "dmi_vendor": "Alibaba Cloud",
+  "dmi_product": "Alibaba Cloud ECS"
+ },
+ "probe": {
+  "schema": 1,
+  "release": "6.6.142-0-virt",
+  "version": "#1-Alpine SMP PREEMPT_DYNAMIC 2026-06-04 05:37:20",
+  "machine": "x86_64",
+  "proc_version": "Linux version 6.6.142-0-virt (buildozer@build-3-20-x86_64) (gcc (Alpine 13.2.1_git20240309) 13.2.1 20240309, GNU ld (GNU Binutils) 2.42) #1-Alpine SMP PREEMPT_DYNAMIC 2026-06-04 05:37:20",
+  "boot_id": "37031ef6-ddd1-44bb-a61d-990106817d96",
+  "uptime_seconds": 1.88,
+  "hypervisor": true,
+  "dmi_vendor": "QEMU",
+  "dmi_product": "Standard PC (Q35 + ICH9, 2009)"
+ },
+ "want": "vm"
+}

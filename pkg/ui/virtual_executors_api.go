@@ -101,6 +101,9 @@ type virtualExecutorView struct {
 	// Constrained lists the project rule sets a save narrowed to fit, on an
 	// update's answer.
 	Constrained []firewallChange `json:"constrained,omitempty"`
+	// IsolationEvidence is its runtime's claim against what the isolation
+	// probe found (Task 20439).
+	IsolationEvidence *executorIsolationView `json:"isolation_evidence,omitempty"`
 }
 
 // virtualExecutorRequest is the POST/PUT body.
@@ -232,6 +235,7 @@ func viewVirtualExecutor(v statedb.VirtualExecutor, projects []string) virtualEx
 			} else {
 				out.Issue = err.Error()
 			}
+			out.IsolationEvidence = isolationViewFor(vx)
 		}
 	}
 	return out
@@ -294,6 +298,8 @@ func (s *Server) createVirtualExecutor(w http.ResponseWriter, r *http.Request, d
 		"to":        stored.Spec.Describe(),
 	})
 	s.broadcastExecutorUpdate("virtual", id)
+	// A new runtime to verify (Task 20439).
+	s.probeAfterRuntimeChange(id, executor.SandboxSettings{}, stored.Spec.Sandbox)
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(viewVirtualExecutor(stored, nil))
 }
@@ -386,6 +392,8 @@ func (s *Server) handleVirtualExecutor(w http.ResponseWriter, r *http.Request) {
 		})
 		s.auditFirewallChanges(r, db, "virtual executor "+id, changes)
 		s.broadcastExecutorUpdate("virtual", id)
+		// Its runtime may have changed (Task 20439).
+		s.probeAfterRuntimeChange(id, cur.Spec.Sandbox, updated.Spec.Sandbox)
 		view := viewVirtualExecutor(updated, projectsByExecutor(db)[id])
 		view.Constrained = changes
 		jsonOK(w, view)
@@ -412,6 +420,7 @@ func (s *Server) handleVirtualExecutor(w http.ResponseWriter, r *http.Request) {
 			"parent_id": cur.ParentID,
 			"from":      cur.Spec.Describe(),
 		})
+		forgetIsolationEvidence(id)
 		s.broadcastExecutorUpdate("virtual", id)
 		jsonOK(w, map[string]any{"deleted": id})
 	default:
@@ -529,6 +538,7 @@ func (s *Server) deleteVirtualExecutorsOf(r *http.Request, db *statedb.DB, paren
 			"from":      v.Spec.Describe(),
 			"reason":    "its device was revoked",
 		})
+		forgetIsolationEvidence(v.ID)
 		s.broadcastExecutorUpdate("virtual", v.ID)
 		removed++
 	}

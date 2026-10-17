@@ -259,6 +259,18 @@ const (
 	// the run, the rule and the counts as fields; never anything a packet
 	// carried beyond its addresses and ports.
 	EventNetworkBlocked EventType = "network_blocked"
+
+	// EventIsolationEvidence records that a run whose .cloop/sandbox.yaml
+	// requires kernel isolation or virtualization was placed on an executor
+	// whose isolation claim has never been verified by the isolation probe
+	// (Task 20439): the claim rests on a runtime's name alone, and the
+	// project asked for more than a name. Written once per hub process for
+	// each executor's runtime and each attempt to verify it.
+	//
+	// On the project's journal because the requirement is the project's, and
+	// executors.isolation_evidence — what would refuse the placement instead —
+	// is on the hub.
+	EventIsolationEvidence EventType = "isolation_evidence"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

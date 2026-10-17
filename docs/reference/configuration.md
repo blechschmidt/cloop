@@ -1237,6 +1237,41 @@ fleet-wide floor. Lowering it means restarting with the looser config.
 See [Placement](../architecture/executors.md#placement) for how the constraint is
 ranked and enforced on both the scheduling and the project-binding paths.
 
+### Isolation evidence
+
+What placement does with an executor whose isolation claim has never been
+verified:
+
+```yaml
+executors:
+  isolation_evidence: required   # or warn, the default
+```
+
+An executor's `Virtualized` and `KernelIsolated` capabilities come from its
+runtime's name — `kata` claims a VM, `runsc` a userspace kernel — and since Task
+20439 the hub checks the name: it runs `cloop isolation-probe` under the runtime
+when configured executors are reconciled, at each device's hello, after a runtime
+change, daily and on the card's **Re-probe**, and records what the kernel serving
+the sandbox said about itself against the host's own kernel.
+
+| Evidence | A project requiring kernel isolation or virtualization |
+| --- | --- |
+| verifies the claim | is placed |
+| contradicts it — a `kata` that is runc or gVisor, a `runsc` that is runc | is **refused** under the `isolation_evidence` constraint, naming the evidence, whatever this key says |
+| none yet, or the probe could not run or was inconclusive | `warn`: placed, with a warning on the run's journal; `required`: refused |
+
+`warn` and `required` are the only values: `cloop config set` refuses anything
+else, and a hand-edited unknown value raises a banner on the Executors tab saying
+unverified executors are being admitted. Like `min_agent_build` it is a
+**ratchet**: once a hub requires evidence, a tenant's `config.yaml` saying `warn`
+does not relax it. It is a hub-scope key, so the per-instance overlay
+`config.ui-<port>.yaml` may set it for one hub alone.
+
+Before turning on `required`, check the Executors panel or `cloop hub doctor`
+(`executors.isolation`): a device whose agent predates protocol v26 cannot be
+probed, so every project requiring isolation on it would be refused until it is
+upgraded. See [The name is checked](../architecture/executors.md#the-name-is-checked-isolation-evidence).
+
 ### Feature bundles
 
 A [feature](../guides/features.md) that runs on an executor isolating from the
@@ -2802,7 +2837,7 @@ ui:
 | Key | What the hub does with it |
 | --- | --- |
 | `executors.allow_host_process` | Whether a harness may run on this host at all. `false` in the overlay puts this hub in strict mode; `true` there relaxes a shared `config.yaml` that says `false`, for this hub alone. |
-| `executors.min_agent_build`, `executors.limits` | The oldest agent build the hub will place work on, and the fleet resource ceiling. As with `allow_host_process`, a value the overlay states replaces `config.yaml`'s. Once installed, nothing the process reads later can lower either one. |
+| `executors.min_agent_build`, `executors.limits`, `executors.isolation_evidence` | The oldest agent build the hub will place work on, the fleet resource ceiling, and whether an executor whose isolation claim was never verified is refused. As with `allow_host_process`, a value the overlay states replaces `config.yaml`'s. Once installed, nothing the process reads later can loosen any of them. |
 | `executors.container`, `executors.kubernetes`, `executors.orphan_sweep_interval_minutes` | Which isolating drivers the hub registers at startup, and how often it sweeps their orphans. |
 | `executors.git_proxy`, `executors.kube_guard` | The git interception proxy and the Kubernetes access monitor, started at startup. |
 | `executors.egress` | The egress proxy, bound at startup. In a cluster each member binds its own, so `listen_addr` belongs here when two members share a host. |
@@ -2821,7 +2856,7 @@ ui:
 | `github.token` | The token the hub hands a pull request that runs on its own host. |
 
 Settings read at startup (the drivers, the git proxy, the Kubernetes monitor,
-the egress proxy, the three executor ratchets) take effect at the next restart,
+the egress proxy, the executor ratchets) take effect at the next restart,
 whichever file they are in. The rest are read on each use.
 
 `cloop hub doctor --port N` diagnoses the hub on port `N` with its overlay

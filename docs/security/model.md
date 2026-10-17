@@ -278,24 +278,32 @@ gVisor's `runsc` moves it differently, without a hypervisor: the workload's
 system calls are served by gVisor's own userspace kernel rather than the host's,
 so a host-kernel bug has to be reached through it. The executor advertises that
 as `Capabilities().KernelIsolated` — which Kata also sets, and placement can
-require — and not as `Virtualized`. Everything below about a trusted runtime name
-applies to it equally.
+require — and not as `Virtualized`. Everything below about a runtime name and the
+probe that checks it applies to it equally.
 
 Four things it deliberately does not change, because a boundary that is
 misdescribed is worse than one that is merely weaker:
 
-- **The `Virtualized` claim is trusted, not verified.** It is derived from the
-  configured runtime *name* (`kata`, `kata-qemu`, a `kata-*` RuntimeClass) and
-  nothing else, because a name is all the OCI and RuntimeClass APIs expose to a
-  client. Anyone who can write the hub's config can register runc under the name
-  `kata` and be believed by every consumer of that flag, placement included.
-  Preflight's `/dev/kvm` check is evidence, not a retraction: `Capabilities()` is
-  computed from the name alone, so a container executor whose KVM check *failed*
-  still advertises `Virtualized` and still takes work — it is `degraded`, and
-  degraded nodes are schedulable. Only the smoke test ever boots a VM. Config is
-  already trusted input here — `allow_host_process` sits in the same file — so
-  this widens no boundary, but it does mean the flag describes an *intent* the
-  operator expressed, and `cloop executor test` is what turns it into a fact.
+- **The `Virtualized` claim is a name, and the hub checks it (Task 20439).** It
+  is derived from the configured runtime *name* (`kata`, `kata-qemu`, a `kata-*`
+  RuntimeClass), because a name is all the OCI and RuntimeClass APIs expose to a
+  client — so a `daemon.json` alias or a RuntimeClass whose handler is runc
+  claims a VM it does not have. The hub therefore runs `cloop isolation-probe`
+  under each executor's runtime — at reconcile, at a device's hello, after a
+  runtime change, daily — and compares what the kernel serving the sandbox says
+  about itself with the executing host's own kernel; a runc sandbox reads the
+  host's boot ID (`TestClassifyCapturedEvidence`,
+  `TestRuncRegisteredAsKataIsCaught`). The probe is the hub's or the agent's own
+  binary, bound in read-only, so an image cannot answer for it. A project whose
+  `.cloop/sandbox.yaml` requires kernel isolation or virtualization is refused on
+  an executor whose evidence contradicts its claim, naming the evidence
+  (`TestSelectRefusesAContradictedClaim`), and the chain is proven on a real
+  engine with runc standing in for `kata`
+  (`TestRuncRegisteredAsKataIsCaughtByTheProbe`). An executor never verified is
+  admitted with a warning on the run, or refused under
+  `executors.isolation_evidence: required`
+  (`TestSelectAdmitsAnUnverifiedClaimWithAWarning`). The probe answers *what*
+  serves the sandbox's system calls, not how well that kernel is configured.
 - **Egress is unchanged.** A VM has the same network the container would have
   had. `network: none` and a `NetworkPolicy` remain the only things that
   constrain outbound traffic, and a Kata sandbox on a bridge network reaches the
@@ -311,10 +319,12 @@ misdescribed is worse than one that is merely weaker:
   [revocation guarantee](#the-lease-revocation-guarantee) and its weak row are
   unchanged, and a workload can still disclose its own credentials.
 
-There is no row for this in the [guarantee → test table](#the-guarantee--test-table)
-and that is not an oversight: nothing in `tests/security/` proves a VM booted,
-and a test that asserted the flag against the name it was derived from would
-assert only that the matcher matches.
+The evidence's tests live beside the code rather than in `tests/security/`,
+because they need what that suite cannot have: the probe's real captures — runc
+and runsc on sgx, a QEMU q35 guest booting a different kernel and one booting
+the host's own image (`TestAVMBootingTheHostsOwnKernelImage`) — and a real engine
+to run the alias through. Kata itself could not be run where the captures were
+made: neither machine has `/dev/kvm`.
 
 ### The network the sandbox sits on
 
@@ -4808,10 +4818,20 @@ compromise. `executors.container.oci_runtime` and
 `executors.kubernetes.runtime_class` change that — Kata puts the workload behind
 a hypervisor, gVisor's `runsc` serves its system calls from a userspace kernel —
 and the [section above](#the-kernel-underneath-the-sandbox) is explicit about
-what they buy and what they leave exactly where it was — including that
-`Virtualized` and `KernelIsolated` are derived from a runtime *name*
-(`TestIsVirtualizedRuntime`) and are therefore a claim cloop trusts rather than
-one it verifies.
+what they buy and what they leave exactly where it was. `Virtualized` and
+`KernelIsolated` are derived from a runtime *name* (`TestIsVirtualizedRuntime`),
+and since Task 20439 the hub verifies that claim with the isolation probe rather
+than trusting it: a runtime named for isolation whose probe found the host
+kernel refuses the projects that require isolation
+(`TestSelectRefusesAContradictedClaim`,
+`TestRuncRegisteredAsKataIsCaughtByTheProbe`). What remains is a claim never
+verified — an agent too old to be asked, a probe that cannot run, an executor
+probed by nothing yet — which is admitted with a warning on the run unless
+`executors.isolation_evidence` is `required`
+(`TestSelectAdmitsAnUnverifiedClaimWithAWarning`), and the reference kernel the
+comparison rests on: a device agent in a VM that drives an outer host's engine
+through a socket, with an identical kernel build on both, would compare the
+wrong kernels (`pkg/isolationprobe/classify.go`).
 
 **The hub CA is replaced only when an operator replaces it, and a backup
 outlives the replacement.** The certificates the hub issues its git proxy and

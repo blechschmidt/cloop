@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/artifact"
@@ -70,6 +71,9 @@ func applySandbox(spec executor.Spec, ex executor.Executor, workDir string) (exe
 	if err := executor.CheckSandboxSupport(ex, resolved.Requirements(), workDir); err != nil {
 		return spec, resolved, err
 	}
+	// Admitted, but on a claim nothing has verified: say so on the run's
+	// journal (Task 20439). A contradicted claim was refused above.
+	journalUnverifiedIsolation(workDir, ex, resolved.Requirements())
 
 	if err := resolved.ApplyTo(&spec, workDir, egressGrantChecker{ex: ex}); err != nil {
 		return spec, resolved, err
@@ -285,3 +289,47 @@ func (c egressGrantChecker) HasEgressGrant(projectPath, grantID string) bool {
 // (executors_api.go), which is the single place every workload-dispatch error
 // is rendered. Adding a second renderer here would be how the run panel and the
 // project panel start disagreeing about what a refusal means.
+
+// isolationWarned remembers which unverified placements this hub process has
+// already journaled, so a project of a hundred tasks carries one warning per
+// executor runtime and probe attempt rather than a hundred.
+var isolationWarned = struct {
+	sync.Mutex
+	seen map[string]bool
+}{seen: map[string]bool{}}
+
+// journalUnverifiedIsolation writes the run's warning when ex was admitted for
+// a project requiring isolation on a claim no probe has verified.
+func journalUnverifiedIsolation(workDir string, ex executor.Executor, req executor.Requirements) {
+	msg := executor.IsolationAdmissionWarning(ex, req)
+	if msg == "" || workDir == "" {
+		return
+	}
+	st := executor.JudgeIsolation(ex)
+	attempt := ""
+	if st.Record != nil {
+		attempt = st.Record.AttemptedAt.String()
+	}
+	key := workDir + "\x00" + ex.ID() + "\x00" + st.Runtime + "\x00" + attempt
+	isolationWarned.Lock()
+	if isolationWarned.seen[key] {
+		isolationWarned.Unlock()
+		return
+	}
+	if len(isolationWarned.seen) >= 4096 {
+		isolationWarned.seen = map[string]bool{}
+	}
+	isolationWarned.seen[key] = true
+	isolationWarned.Unlock()
+
+	state.LogEventDetails(workDir, state.EventRow{
+		Type:    state.EventIsolationEvidence,
+		Step:    state.NoStep,
+		Message: msg,
+	}, map[string]any{
+		"executor_id": ex.ID(),
+		"runtime":     st.Runtime,
+		"claim":       string(st.Claim),
+		"status":      string(st.Status),
+	})
+}
