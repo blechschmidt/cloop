@@ -146,3 +146,52 @@ func TestACurrentAgentIsSentTheCAForNode(t *testing.T) {
 		t.Fatalf("this build speaks v%d, below the v%d its own hub needs", remote.ProtocolVersion, remote.MinNodeCAVersion)
 	}
 }
+
+// rotationRelaySpec is relaySpec while the hub's CA is being rotated: the
+// bundle holds both CAs (Task 20438).
+func rotationRelaySpec(t *testing.T) executor.Spec {
+	spec := relaySpec(t)
+	spec.GitCA.PEM = append(append([]byte(nil), spec.GitCA.PEM...), proxyGitCA(t).PEM...)
+	return spec
+}
+
+// TestAnAgentBeforeV25IsNeverSentTwoCAsForNode: an agent before protocol v25
+// would refuse a Node bundle of two certificates at its own validation. The
+// hub hands it the active CA alone; should a spec with both reach the driver
+// anyway, it is refused naming the upgrade rather than sent to fail there.
+func TestAnAgentBeforeV25IsNeverSentTwoCAsForNode(t *testing.T) {
+	old := remote.MinNodeCABundleVersion - 1
+	ex, _ := deviceAt(t, executor.SandboxSettings{Mode: executor.SandboxModeHost}, old)
+	_, err := ex.Start(context.Background(), rotationRelaySpec(t))
+	if !errors.Is(err, remote.ErrNodeCABundleUnsupported) {
+		t.Fatalf("Start on a v%d agent = %v, want ErrNodeCABundleUnsupported", old, err)
+	}
+	if !strings.Contains(err.Error(), executor.AgentUpgradePath(old, remote.MinNodeCABundleVersion)) {
+		t.Errorf("refusal does not name the upgrade: %v", err)
+	}
+	// One CA for Node is still what such an agent takes.
+	ex, p := deviceAt(t, executor.SandboxSettings{Mode: executor.SandboxModeHost}, old)
+	sent := answerStart(t, p)
+	if _, err := ex.Start(context.Background(), relaySpec(t)); err != nil {
+		t.Fatalf("Start with one CA on a v%d agent: %v", old, err)
+	}
+	<-sent
+}
+
+// TestACurrentAgentIsSentBothCAsForNode: during a rotation a current agent is
+// sent the two CAs, and its own validation — the code the agent runs — takes
+// them.
+func TestACurrentAgentIsSentBothCAsForNode(t *testing.T) {
+	ex, p := deviceAt(t, executor.SandboxSettings{Mode: executor.SandboxModeHost}, remote.ProtocolVersion)
+	sent := answerStart(t, p)
+	if _, err := ex.Start(context.Background(), rotationRelaySpec(t)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := (<-sent).Spec.GitCA
+	if got == nil || !got.Node || got.CertCount() != 2 {
+		t.Fatalf("the start frame carried %+v, want both CAs with Node set", got)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("the agent's validation refuses what it was sent: %v", err)
+	}
+}

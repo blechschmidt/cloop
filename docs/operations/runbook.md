@@ -154,7 +154,8 @@ What it checks, and what each one catches that nothing else does:
 | <a id="doctor-images"></a>`images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable wherever signatures are verified — the container and Kubernetes executors, and the hub itself for a device or virtual executor whose sandbox runs a container (Task 20424) — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names, which a device fleet needs from the hub too: the hub resolves a device's tag there before verifying it |
 | <a id="doctor-executors"></a>`executors` | reconciliation diagnostics, the strict-mode gate (asked of the check `/readyz` serves), and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`); and each device that follows releases whose build carries no sequence — every release before v0.0.5 — with the way to cover it (`executors.rollback_protection`) |
 | <a id="doctor-runs"></a>`runs` | the build each `cloop run` on this host executes, against the hub's (`runs.build_lag`): a run behind it, which a host-process run can adopt at its next task boundary, and one that recorded no build, which has to be restarted once before it can. See [Long-lived runs after an upgrade](#long-lived-runs-after-an-upgrade) |
-| <a id="doctor-gitproxy"></a>`gitproxy` | whether pushes are brokered at all; whether the proxy would start — its TLS material loaded as the listener loads it, its base judged by `gitproxy.NormalizeBaseURL` — the base sandboxes are pointed at (`advertise_url`, or the bound address as the hub advertises it) and whether only this machine can reach it, plus a bounded dial of it; the branch allowlist and delete authority; and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`); and, under `tls: auto`, the certificate the hub issued the proxy — readable, verifying against the hub CA, naming the advertised host, not about to lapse — and the hub CA itself (`hubca.expiry`, a warning within a year of its expiry, because replacing it changes what every sandbox trusts) |
+| <a id="doctor-gitproxy"></a>`gitproxy` | whether pushes are brokered at all; whether the proxy would start — its TLS material loaded as the listener loads it, its base judged by `gitproxy.NormalizeBaseURL` — the base sandboxes are pointed at (`advertise_url`, or the bound address as the hub advertises it) and whether only this machine can reach it, plus a bounded dial of it; the branch allowlist and delete authority; and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`); and, under `tls: auto`, the certificate the hub issued the proxy — readable, verifying against the hub CA, naming the advertised host, not about to lapse — and the hub CA's expiry (`hubca.expiry`, see `hubca` below) |
+| <a id="doctor-hubca"></a>`hubca` | the hub's own CA under `tls: auto` (Task 20438): its expiry (`hubca.expiry`, a warning within a year and a failure within 30 days, naming the rotation); a rotation under way (`hubca.rotation`: a stage older than the longest `session_minutes` a monitor grants — the runs it waits for should have ended — a previous CA still trusted that long after its activation, and a failure when the leader has not reissued the certificates minutes after an activation); every live member taking part (`hubca.members`: a member on a build that predates rotation, which an activation refuses to run beside, or one that has fallen behind); and the active CA's name constraints against the names the monitors are configured at (`hubca.names`, a failure for a name they do not permit). See [Rotating the hub CA](#rotating-the-hub-ca) |
 | <a id="doctor-kubeguard"></a>`kubeguard` | whether kubeconfig grants are brokered at all; whether the monitor would start — its TLS material and CA bundle read as the hub reads them, its base judged by `kubeguard.NormalizeBaseURL` — where sandboxes are pointed and whether only this machine can reach it, plus a bounded dial; and the verb ceiling; under `tls: auto`, the hub-issued certificate and the hub CA, as for the git proxy |
 | <a id="doctor-egress"></a>`egress` | whether the broker is on; for each running hub, where its proxy listens and is advertised, or why it would not bind (`egress.hosted`, read from the status every hub records at startup); how each kind of sandbox this hub runs reaches the proxy, by the hub's own routing rules — containers by the bind address (`egress.listen_addr`), Pods and devices by `advertise_addr` (`egress.advertise_addr`) — and a bounded dial of it; and the trap of an `internal: true` filter with no broker to proxy through |
 | <a id="doctor-firewall"></a>`firewall` | whether any egress allowlist opens a cloud metadata service by containing it (`firewall.metadata`): an `egress_filter` allowlist in `config.yaml` in force is a **fail** (`cloop ui` refuses to start on it) and one in a switched-off section a warning; and every stored rule set or egress grant that was saved before the rule, which keeps the service closed but should name or deny it — the device, virtual-executor and project firewalls and the active grants, each by where it is and what it contains |
@@ -1828,19 +1829,21 @@ minute, so their count is a floor.
 
 ## Key rotation
 
-Six credentials, six procedures, one subsection each below. The TLS key
+Seven credentials, seven procedures, one subsection each below. The TLS key
 rotates in a staged overlap; the dashboard token rotates by replacement and
 causes a logout; an enrollment token or agent credential is revoked and the
 device re-enrolled; the sealing key rotates online with `cloop hub key rotate`;
-grants rotate by expiry rather than by procedure; SCIM credentials rotate with an
+the hub's own CA rotates online, staged, with `cloop hub ca rotate`; grants
+rotate by expiry rather than by procedure; SCIM credentials rotate with an
 overlap.
 
 Not among them, because nothing has to be done: the certificates the hub issues
 its git proxy and Kubernetes monitor under `tls: auto` renew themselves two days
 before they expire (see
-[the git interception proxy](#the-git-interception-proxy)). The CA they chain to
-is minted once, valid for ten years, and never replaced — `cloop hub key rotate`
-re-seals its key under the new sealing key without reissuing it.
+[the git interception proxy](#the-git-interception-proxy)). `cloop hub key
+rotate` re-seals the CA's key — and a staged CA's — under the new sealing key
+without reissuing either; replacing the CA itself is
+[its own procedure](#rotating-the-hub-ca).
 
 ### TLS certificate and agent pins — supported, staged
 
@@ -1871,12 +1874,128 @@ hand: the cluster leader replaces each monitor's leaf two days before it
 expires, every member serves the new one within a minute, and sandboxes trust
 the hub's CA rather than the leaf, so a run in progress is not interrupted —
 `cloop hub doctor` fails `gitproxy.tls` and `kubeguard.tls` if that has stopped
-happening. The CA itself lives ten years and is not rotated automatically:
-replacing it changes what every sandbox trusts. With an operator's `cert_file`
+happening. The CA itself lives ten years and is replaced only when an operator
+rotates it, in steps that change what every new sandbox trusts before any
+certificate changes: see [Rotating the hub CA](#rotating-the-hub-ca). With an operator's `cert_file`
 and `key_file`, nothing pins the certificate, but it is validated by every
 sandbox's git, so a rotation onto a new CA has to reach the sandbox image's
 trust store *before* the hub starts serving it — otherwise the first symptom is
 every provisioning fetch failing to verify the peer.
+
+### Rotating the hub CA
+
+Under `tls: auto` the hub issues its git proxy's and Kubernetes monitor's
+certificates from a CA of its own, and every sandbox is told to trust that CA
+for the monitors' URLs. The certificates renew themselves; the CA is replaced
+with `cloop hub ca rotate`, online and in three steps, so that no sandbox is cut
+off by surprise. Rotate it when its key may have leaked — a backup taken
+together with the root key, a KMS identity used where it should not have been,
+an operator who held either leaving — when `cloop hub doctor` reports it
+nearing expiry (`hubca.expiry`: a warning within a year, a failure within 30
+days), and before moving a monitor's advertise URL to a host the CA's name
+constraints do not permit (below). Settings → Hub health offers the same steps
+to an administrator without a shell on the hub host.
+
+```console
+$ cloop hub ca rotate --status                    # where it stands: CAs, members, runs a step waits for
+$ cloop hub ca rotate --stage                     # mint the new CA; every new sandbox trusts both
+$ cloop hub ca rotate --status                    # the runs dispatched before the stage, still running
+$ cloop hub ca rotate --activate                  # once none is left: certificates come from the new CA
+$ cloop hub ca rotate --retire-previous --yes     # once every member serves them: the old CA is destroyed
+```
+
+**Stage.** The new CA is minted and sealed exactly as the first: under the KEK
+registry — so under the KMS when `secrets.kms` is set — and rewrapped by `cloop
+hub key rotate` like every other sealed key. Every hub member re-reads its CAs
+within a minute (at once, when the cluster bus carries the step), and every
+sandbox it dispatches from then on trusts both: git's per-URL
+`http.<url>.sslCAInfo` bundle, the kube monitor kubeconfig's
+`certificate-authority-data`, the harness's `NODE_EXTRA_CA_CERTS` when its model
+calls go through the relay, a Pod's lease Secret, and a device's or virtual
+executor's start frame. The certificates still come from the old CA. Each
+dispatch records which CAs it was told to trust, on the spec its executor
+session keeps (`executor.LabelHubCATrust`), and that record is what the next
+step reads. The egress proxy holds no trust of its own: it is a cleartext
+CONNECT proxy that never installs a CA, and a sandbox reaches the monitors
+directly rather than through it, so it needs nothing.
+
+**Activate.** The staged CA becomes the one certificates are issued from, and
+the cluster leader reissues both monitors' certificates at once; every member
+serves them within a minute, and a member keeps serving the old CA's
+certificate until then — every sandbox dispatched since the stage trusts both.
+(A member whose leader has not reissued after three minutes reissues itself.)
+`--activate` is **refused** while a run dispatched before the stage is still
+running: it trusts only the old CA and would stop verifying the monitors. The
+refusal names each run, its project, task and executor; wait for them, or
+`--activate --force --yes`, which breaks them and records them on the rotation.
+It is refused too while a live hub member has not adopted the stage, or runs a
+build that predates rotation — such a member would go on signing with the CA it
+opened at start, so no flag gets past it: upgrade or stop it. The command waits
+up to `--wait` (two minutes) for every member to serve the new certificates and
+says who it is waiting for.
+
+**Retire the previous CA.** Once every member serves certificates from the new
+CA, `--retire-previous --yes` takes the old one out of every bundle and deletes
+its row on a secure-delete connection: its sealed key is gone from the database
+file, not left in SQLite's free space — every write to `hub_tls` zeroes what it
+frees, so neither does an earlier image of the row survive (a rewrap, the
+activation that moved it). It is refused while a stored certificate or a member
+still serves the old CA's. What the write-ahead log still holds of an old page
+lasts until the log is reused, and **a backup taken before the retirement keeps
+the old key** — re-take or destroy those backups. Until you retire it, the old
+CA is what you roll back to: nothing else needs undoing.
+
+`--abort --yes` destroys a staged CA that was never activated; every dispatch
+that trusted it trusts the active CA too.
+
+**An emergency: `--now --yes`.** For a key you believe is being used now, every
+step at once: a fresh CA is minted (a staged one is abandoned too — its key sits
+in the same database), activated, both monitors' certificates reissued from it,
+and the old CA retired. The runs whose dispatch trusted only the replaced CAs
+are named, and recorded on the rotation; every hub member ends their git proxy,
+Kubernetes monitor and model relay sessions within a minute and records
+`hub_ca.sessions_ended`, because whoever holds the old key could otherwise
+answer for the monitors and take the session tokens those runs present. Those
+runs fail from then on; restart them. It is refused while a hub member runs a
+build that predates rotation. A leaked CA key usually means the sealing key or
+the database leaked with it: change the root as well
+([Changing `CLOOP_SECRET_KEY` itself](#changing-cloop_secret_key-itself)) and
+re-mint the credentials that root could open.
+
+**Name constraints, and what moving an advertise URL costs.** A CA a rotation
+mints carries X.509 name constraints permitting the names the monitors are
+reached at — every name a certificate was issued for so far, the configured
+`advertise_url` and `listen_addr` hosts, and each `--name` — and nothing else.
+git already trusts the CA for the monitors' URLs only, but a harness's Node.js
+trusts it for every host, so without constraints whoever holds the key could
+present a certificate for any host to a relayed harness; with them, Go, OpenSSL
+and GnuTLS refuse it. `--no-name-constraints` mints one without. The constraints
+are part of the CA's certificate, so **moving a monitor to a host they do not
+permit is a rotation**: the certificate a member would serve leaves the name
+out, every sandbox reaching the monitor by it refuses it, and `cloop hub doctor`
+fails `hubca.names`. Plan the move: `--stage --name <new-host>` (the old names
+are kept), wait for the runs dispatched before, `--activate`, then change
+`advertise_url` and restart the members. The CA a control plane minted at its
+first start carries no constraints; its first rotation adds them.
+
+Two older pieces of the fleet hold a rotation back. A device agent before
+protocol v25 cannot take two CAs for Node: a relayed run there is handed the
+active CA alone, so it trusts only the old one and blocks the activation like a
+run dispatched before the stage — upgrade such devices first. And a hub member
+on a build before rotation blocks it, as above. Restoring a backup taken before
+a rotation brings its CA back as the active one: sandboxes dispatched after the
+retirement do not trust it, and their runs fail until restarted.
+
+Every step is on the trail — `hub_ca.rotation_staged`,
+`hub_ca.rotation_activated` (naming any runs it was forced past),
+`hub_ca.previous_retired`, `hub_ca.rotation_abandoned`,
+`hub_ca.emergency_rotated` (alert on it) and each member's
+`hub_ca.sessions_ended` — and in the [metrics](metrics.md#the-hubs-certificate-authority):
+the CAs' expiry, the phase, how long the current step has lasted, the runs and
+members it waits for. `cloop hub doctor` warns when a stage has lasted longer
+than the longest `session_minutes` a monitor grants (`hubca.rotation`), when a
+previous CA is still trusted that long after its activation, and when a member
+predates rotation or has fallen behind (`hubca.members`).
 
 ### Dashboard token (`CLOOP_UI_TOKEN`) — retire the old value, deploy a new one
 

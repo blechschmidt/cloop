@@ -99,14 +99,14 @@ func loadCommandConfig(cmd *cobra.Command, dir string) (*config.Config, error) {
 }
 
 // readsHubOverlay reports whether cmd reads the per-instance overlay of the
-// hub its --port names: `cloop hub key` and everything under it, and `cloop db
-// restore`.
+// hub its --port names: `cloop hub key` and `cloop hub ca` and everything
+// under them, and `cloop db restore`.
 func readsHubOverlay(cmd *cobra.Command) bool {
 	if cmd == dbRestoreCmd {
 		return true
 	}
 	for c := cmd; c != nil; c = c.Parent() {
-		if c == hubKeyCmd {
+		if c == hubKeyCmd || c == hubCACmd {
 			return true
 		}
 	}

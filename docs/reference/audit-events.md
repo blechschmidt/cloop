@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 212 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 218 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 189 |
+| `control-plane` | the hub's own state.db | 195 |
 | `project` | the project's .cloop/state.db | 19 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-212 actions in 48 families. Every action is listed: this section is the whole
+218 actions in 48 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (18) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (2) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (18) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -735,15 +735,33 @@ Payload keys:
 
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
-| `hub_ca.leaf_issued` | `hub_ca` | control-plane | beta | A hub process issues a credential monitor's serving certificate from the hub CA: at its first start, when the cluster leader renews one, or when a member needs a name the stored one lacks. |
+| `hub_ca.emergency_rotated` | `hub_ca` | control-plane | beta | `cloop hub ca rotate --now` replaces every hub CA at once with a fresh one, for a key believed compromised. |
+| `hub_ca.leaf_issued` | `hub_ca` | control-plane | beta | A hub process issues a credential monitor's serving certificate from the hub CA: at its first start, when the cluster leader renews one, when a member needs a name the stored one lacks, or when a rotation activated another CA. |
 | `hub_ca.minted` | `hub_ca` | control-plane | beta | A hub process mints the control plane's certificate authority, the first time any starts a credential monitor under `tls: auto`. |
+| `hub_ca.previous_retired` | `hub_ca` | control-plane | beta | `cloop hub ca rotate --retire-previous` deletes the replaced CA with secure_delete on, so its sealed key is gone from the database file, and drops it from every bundle. |
+| `hub_ca.rotation_abandoned` | `hub_ca` | control-plane | beta | `cloop hub ca rotate --abort` destroys a staged CA that was never activated, or an emergency rotation abandons one. |
+| `hub_ca.rotation_activated` | `hub_ca` | control-plane | beta | `cloop hub ca rotate --activate` makes the staged CA the one leaves are issued from; the cluster leader then reissues every leaf. |
+| `hub_ca.rotation_staged` | `hub_ca` | control-plane | beta | `cloop hub ca rotate --stage` (or Settings → Hub health) mints a CA to replace the hub's, sealed under the KEK registry like the first (Task 20438). |
+| `hub_ca.sessions_ended` | `hub_ca` | control-plane | beta | A hub member ends the git proxy, Kubernetes monitor and model relay sessions of the runs an emergency rotation named, within a minute of it. |
 
 Payload keys:
 
-- `hub_ca.leaf_issued` — `monitor`, `serial`, `names`, `not_after`, `replaced`
+- `hub_ca.emergency_rotated` — `rotation`, `replaced`, `active`, `names`, `cut_runs`, `via`
+- `hub_ca.leaf_issued` — `monitor`, `serial`, `names`, `not_after`, `replaced`, `issuer`, `reason`
 - `hub_ca.minted` — `serial`, `not_after`, `fingerprint`
+- `hub_ca.previous_retired` — `rotation`, `retired`, `active`, `cut_runs`, `emergency`, `via`
+- `hub_ca.rotation_abandoned` — `rotation`, `abandoned`, `active`, `detail`, `emergency`, `via`
+- `hub_ca.rotation_activated` — `rotation`, `from`, `to`, `forced`, `emergency`, `via`
+- `hub_ca.rotation_staged` — `rotation`, `from`, `to`, `fingerprint`, `not_after`, `names`, `emergency`, `via`
+- `hub_ca.sessions_ended` — `rotation`, `member`, `runs`, `git_proxy`, `kube_guard`, `model_relay`
 
+- `hub_ca.emergency_rotated` — Alert on it. `cut_runs` are the runs that trusted only the replaced CAs; each hub member ends their proxy sessions and records `hub_ca.sessions_ended`.
+- `hub_ca.leaf_issued` — `reason` is first, renewal, names, activation or unreadable; `issuer` is the serial of the CA that signed it.
 - `hub_ca.minted` — Every sandbox is told to trust this CA for the monitors' URLs, so a second `hub_ca.minted` row for one control plane — its `hub_tls` table lost or restored without it — means sandboxes holding the previous CA will refuse the next certificate the monitors serve.
+- `hub_ca.previous_retired` — A backup taken before this row still holds the retired CA's sealed key.
+- `hub_ca.rotation_activated` — `forced` names the runs dispatched before the stage that an operator activated past with --force: they stop verifying the credential monitors.
+- `hub_ca.rotation_staged` — From this row on every dispatch trusts both CAs; leaves still come from `from`. `names` are the new CA's X.509 name constraints, empty when it was minted without them.
+- `hub_ca.sessions_ended` — Counts per monitor are what this member held; a run's sessions on another member are in that member's row.
 
 ### oidc.*
 

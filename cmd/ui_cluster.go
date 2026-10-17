@@ -17,6 +17,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/exposure"
+	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/kms"
@@ -66,6 +67,10 @@ func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan, ro
 	for name, fp := range roots {
 		endpoints[name] = fp
 	}
+	// That this member's build takes part in rotating the hub CA (Task
+	// 20438): it re-reads the CAs, records what each dispatch trusts and
+	// reports what it serves, so an activation may run beside it.
+	endpoints[hubca.EndpointRotation] = "1"
 	node, err := hubcluster.Join(hubcluster.Options{
 		DBPath:       state.DBPath(workdir),
 		Address:      listen.String(),

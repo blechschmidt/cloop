@@ -128,6 +128,11 @@ func steps(dir string, cfg *config.Config, opts Options, wal walSample, rep *Rep
 		step{"kubeguard", "Kubernetes access monitor", func(ctx context.Context, add addFn) {
 			checkKubeGuard(ctx, dir, cfg, opts, add)
 		}},
+		// After both monitors whose certificates it issues: a rotation of the
+		// hub's own CA under way, the members taking part, and its name
+		// constraints against the names the monitors are configured at (Task
+		// 20438).
+		step{"hubca", "Hub certificate authority", func(_ context.Context, add addFn) { checkHubCA(dir, cfg, opts, add) }},
 		step{"egress", "Egress proxy", func(ctx context.Context, add addFn) { checkEgressBroker(ctx, dir, cfg, opts, add) }},
 		// Beside the storage the projects live in: whether any registered
 		// project's directory overlaps what the hub must never bind (Task 20418).

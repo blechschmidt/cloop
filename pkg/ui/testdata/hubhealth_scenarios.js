@@ -24,6 +24,19 @@ const VIEWER = {oidc_enabled: true, authenticated: true, role: 'viewer',
   permissions: ['project.read'], global_permissions: ['project.read', 'executor.read']};
 
 const later = ms => new Date(Date.now() + ms).toISOString();
+
+// Where a rotation of the hub's CA stands (Task 20438): staged, a member
+// behind, and a run whose dispatch predates the stage — named with strings a
+// workload chose, which the section draws as text.
+const CA_STATUS = {phase: 'staged', ready: false, running: 2, longest_session_minutes: 60,
+  active: {slot: 'active', serial: 'aaaaaaaaaaaaaaaa', not_after: '2036-01-01T00:00:00Z'},
+  next: {slot: 'next', serial: 'bbbbbbbbbbbbbbbb', not_after: '2036-10-01T00:00:00Z', names: ['hub.internal']},
+  rotation: {ID: 'rot_1', StagedAt: new Date(Date.now() - 60000).toISOString(), StagedBy: 'user:<b>alice</b>',
+    ActivatedAt: '0001-01-01T00:00:00Z'},
+  members: [{id: 'hub_b', caught_up: false, behind: 'it does not yet hand dispatches hub CA bbbbbbbbbbbb'}],
+  blocking: [{run_id: 'run_<img src=x onerror="window.__xss=2">', project: '/srv/<script>x</script>', task_id: 3,
+    executor_id: 'ex_1'}],
+  next_step: 'Waiting for 1 run(s) dispatched before the stage to finish'};
 // The hub's clock is an hour behind the page's: the indicator must time the
 // report's expiry by the hub's, from served_at, or it never asks again.
 const HUB_SKEW = -3600000;
@@ -149,14 +162,20 @@ const scenarios = {
   // only where it is one.
   async the_indicator_opens_the_panel() {
     const {h} = await boot(ADMIN, REPORT);
+    h.routes['/api/hub/ca'] = CA_STATUS;
     const el = {dataset: {action: 'openHubHealth'}, disabled: false};
     document.dispatchEvent({type: 'click', target: {closest: sel => (sel === '[data-action]' ? el : null), dataset: {}}});
     for (let i = 0; i < 20 && !String(document.getElementById('hubHealthBody').innerHTML).includes('Failing'); i++) {
       await wait(50);
       await globalThis.__settle(3);
     }
+    for (let i = 0; i < 20 && !String(document.getElementById('hubCASection').innerHTML).includes('Certificate authority'); i++) {
+      await wait(50);
+      await globalThis.__settle(3);
+    }
     return {
       html: String(document.getElementById('hubHealthBody').innerHTML),
+      ca: String(document.getElementById('hubCASection').innerHTML),
       status: String(document.getElementById('hubHealthStatus').textContent || ''),
       full: askedFull(h), xss: globalThis.__xss || null,
     };

@@ -36,9 +36,11 @@ package executor
 // connection the process makes — there is no per-URL form. So a bundle asks
 // for it explicitly (Node), only the hub sets that, only for a run whose model
 // calls go to a relay this CA certifies, and the file it names holds the hub's
-// CA and nothing else: Validate refuses a Node bundle of more than one
-// certificate. The CA issues leaves for the proxy's advertised names alone
-// (pkg/hubca), and its key never leaves the hub.
+// CAs and nothing else: Validate refuses a Node bundle of more than
+// MaxNodeCACerts certificates — the hub's CA, and during a rotation of it
+// (Task 20438) the one replacing it or the one it replaced. The CAs issue
+// leaves for the proxy's advertised names alone (pkg/hubca), a CA a rotation
+// minted is name-constrained to them, and their keys never leave the hub.
 
 import (
 	"crypto/x509"
@@ -64,6 +66,9 @@ const (
 	MaxGitCAPEMBytes = 64 << 10
 	// maxGitCAURLs bounds the URLs one bundle is trusted for.
 	maxGitCAURLs = 16
+	// MaxNodeCACerts bounds a bundle Node is handed: the hub's CA, and while
+	// it is being rotated, the other one sandboxes trust beside it.
+	MaxNodeCACerts = 2
 )
 
 // GitCA is a certificate authority a workload's git trusts for particular
@@ -147,10 +152,11 @@ func (c *GitCA) Validate() error {
 	if n == 0 {
 		return fmt.Errorf("%w: git_ca PEM holds no certificate", ErrInvalidSpec)
 	}
-	if c.Node && n != 1 {
+	if c.Node && n > MaxNodeCACerts {
 		// Node trusts the file for every host it reaches: it holds the hub's
-		// CA and nothing else.
-		return fmt.Errorf("%w: git_ca for Node holds %d certificates; it must hold exactly the hub's CA", ErrInvalidSpec, n)
+		// CAs and nothing else.
+		return fmt.Errorf("%w: git_ca for Node holds %d certificates; it must hold the hub's CA, and during a "+
+			"rotation the other one beside it, at most %d", ErrInvalidSpec, n, MaxNodeCACerts)
 	}
 	return nil
 }
@@ -283,4 +289,23 @@ func (s Spec) NeedsGitCA(workspaceRepo string) bool {
 		}
 	}
 	return false
+}
+
+// CertCount is how many certificates the bundle holds.
+func (c *GitCA) CertCount() int {
+	if c == nil {
+		return 0
+	}
+	n := 0
+	rest := c.PEM
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return n
+		}
+		if block.Type == "CERTIFICATE" {
+			n++
+		}
+	}
 }

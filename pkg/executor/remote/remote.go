@@ -868,6 +868,11 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 				e.subject(), sess.Version(), MinNodeCAVersion,
 				"to have this workload's harness trust the hub's model relay (executors.model_relay)",
 				"Or turn the relay off for this hub; the run then gets its Claude credential as before."))
+		} else if spec.GitCA.Node && spec.GitCA.CertCount() > 1 && !SupportsNodeCABundle(sess.Version()) {
+			return executor.Handle{}, fmt.Errorf("%w: %s", ErrNodeCABundleUnsupported, executor.NeedsProtocol(
+				e.subject(), sess.Version(), MinNodeCABundleVersion,
+				"to have this workload's harness trust both of the hub's CAs while the CA is rotated",
+				"The hub hands an older agent the active CA alone; this dispatch carried both."))
 		}
 	}
 

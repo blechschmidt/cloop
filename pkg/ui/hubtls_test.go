@@ -9,6 +9,7 @@ package ui
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -212,4 +214,88 @@ func TestAutoTLSIssuanceIsAudited(t *testing.T) {
 	if minted != 1 || issued != 1 {
 		t.Fatalf("audit rows: %d hub_ca.minted, %d hub_ca.leaf_issued; want 1 and 1 (%+v)", minted, issued, rows)
 	}
+}
+
+// agentAt is an executor whose agent negotiated protocol v, for
+// agentProtocolOf.
+type agentAt struct {
+	executor.Executor
+	v int
+}
+
+func (a agentAt) ProtocolVersion() int { return a.v }
+
+// TestLabelHubCATrust: every dispatch records which hub CAs it was handed and
+// on which paths (Task 20438) — an empty record from a member holding none,
+// both CAs during a stage — and an agent before protocol v25, which cannot
+// take two CAs for Node, is handed the active one alone and recorded so.
+func TestLabelHubCATrust(t *testing.T) {
+	prevG, prevK := gitProxySingleton.Load(), kubeGuardSingleton.Load()
+	t.Cleanup(func() { gitProxySingleton.Store(prevG); kubeGuardSingleton.Store(prevK) })
+	gitProxySingleton.Store(nil)
+	kubeGuardSingleton.Store(nil)
+	useControlPlane(t, t.TempDir())
+
+	base := executor.Spec{Argv: []string{"claude"}, Labels: map[string]string{executor.LabelRunID: "run_none"}}
+	none := labelHubCATrust(base, nil)
+	if v, ok := none.Labels[executor.LabelHubCATrust]; !ok || v != "" || none.Labels[executor.LabelHubCAUses] != "" {
+		t.Fatalf("a member holding no hub CA recorded %q/%q (present %v)", v, none.Labels[executor.LabelHubCAUses], ok)
+	}
+	if _, ok := base.Labels[executor.LabelHubCATrust]; ok {
+		t.Fatal("labelling wrote into the caller's label map")
+	}
+
+	dir := autoTLSDir(t)
+	useControlPlane(t, dir)
+	svc, err := startGitProxy(autoTLSConfig(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+	gitProxySingleton.Store(svc)
+	c := svc.certs.ca
+	ca1 := c.trust.State().Active.Serial
+	staged, err := hubca.Stage(hubca.Env{Store: c.store, Sealer: c.keyring, Options: hubca.Options{Actor: "test"}},
+		hubca.StageRequest{NoNameConstraints: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.tick()
+
+	relay := applyGitProxyTrust(executor.Spec{Argv: []string{"claude"}, Labels: map[string]string{executor.LabelRunID: "run_r"}})
+	relay.GitCA.Node = true
+	current := labelHubCATrust(relay, agentAt{v: remote.ProtocolVersion})
+	if current.GitCA.CertCount() != 2 || current.Labels[executor.LabelHubCATrust] != hubca.Label([]string{ca1, staged.CA.Serial}) ||
+		current.Labels[executor.LabelHubCAUses] != "git_proxy,node" {
+		t.Fatalf("a current agent during the stage: %d CA(s), trust %q, uses %q", current.GitCA.CertCount(),
+			current.Labels[executor.LabelHubCATrust], current.Labels[executor.LabelHubCAUses])
+	}
+	old := labelHubCATrust(relay, agentAt{v: remote.MinNodeCABundleVersion - 1})
+	if old.GitCA.CertCount() != 1 || old.Labels[executor.LabelHubCATrust] != ca1 {
+		t.Fatalf("an agent before v%d was handed %d CA(s), recorded trust %q; want the active CA alone",
+			remote.MinNodeCABundleVersion, old.GitCA.CertCount(), old.Labels[executor.LabelHubCATrust])
+	}
+	if err := old.GitCA.Validate(); err != nil {
+		t.Fatalf("the reduced bundle does not validate: %v", err)
+	}
+	if relay.GitCA.CertCount() != 2 {
+		t.Fatal("reducing the bundle for an older agent changed the caller's spec")
+	}
+	// What a rotation reads back: the older agent's run holds an activation
+	// back, the current one's does not.
+	runs := hubca.RunsFrom([]statedb.ExecutorSessionRow{
+		sessionRow(t, "s1", current), sessionRow(t, "s2", old),
+	})
+	if runs[0].Breaks(staged.CA.Serial) || !runs[1].Breaks(staged.CA.Serial) {
+		t.Fatalf("read back: current breaks %v, older breaks %v", runs[0].Breaks(staged.CA.Serial), runs[1].Breaks(staged.CA.Serial))
+	}
+}
+
+func sessionRow(t *testing.T, id string, spec executor.Spec) statedb.ExecutorSessionRow {
+	t.Helper()
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return statedb.ExecutorSessionRow{ID: id, ExecutorID: "ex", State: statedb.ExecutorSessionRunning, SpecJSON: string(b)}
 }

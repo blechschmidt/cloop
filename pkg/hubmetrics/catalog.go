@@ -210,6 +210,67 @@ var (
 	})
 )
 
+// The hub's own certificate authority and its rotation (Task 20438). The
+// labels are pkg/hubca's closed sets: monitor is hubca.Monitor (git_proxy,
+// kube_guard), reason a hubca.Reason* (first, renewal, names, activation,
+// unreadable), slot a hubca.Slot (active, next, previous), phase a hubca.Phase
+// (none, steady, staged, activated), proxy the three a rotation ends sessions
+// on (HubCAProxy*). The three counters are each member's own; the gauges read
+// the shared database and are exported by the cluster leader only.
+var (
+	HubCALeavesIssued = Default.MustRegister(Definition{
+		Name:   "cloop_hub_ca_leaves_issued_total",
+		Help:   "Credential monitor certificates this hub process issued from the hub CA, by monitor (git_proxy, kube_guard) and reason (first, renewal, names, activation, unreadable).",
+		Type:   TypeCounter,
+		Labels: []string{"monitor", "reason"},
+	})
+
+	HubCATrustAdoptions = Default.MustRegister(Definition{
+		Name: "cloop_hub_ca_trust_adoptions_total",
+		Help: "Times this hub process started handing sandboxes a different set of hub CAs, or signing with a different one: once per rotation step it saw.",
+		Type: TypeCounter,
+	})
+
+	HubCASessionsEnded = Default.MustRegister(Definition{
+		Name:   "cloop_hub_ca_sessions_ended_total",
+		Help:   "Proxy sessions this hub process ended because an emergency rotation named their runs, by proxy (git_proxy, kube_guard, model_relay).",
+		Type:   TypeCounter,
+		Labels: []string{"proxy"},
+	})
+
+	HubCANotAfter = Default.MustRegister(Definition{
+		Name:   "cloop_hub_ca_not_after_timestamp_seconds",
+		Help:   "When each hub CA expires, as a Unix time, by slot (active, next, previous). Alert well ahead of the active one's: replacing it is a staged rotation. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"slot"},
+	})
+
+	HubCARotationPhase = Default.MustRegister(Definition{
+		Name:   "cloop_hub_ca_rotation_phase",
+		Help:   "1 for the phase the hub CA is in (none, steady, staged, activated), 0 for the others. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"phase"},
+	})
+
+	HubCARotationStepAge = Default.MustRegister(Definition{
+		Name: "cloop_hub_ca_rotation_step_age_seconds",
+		Help: "Seconds since the rotation under way took its last step (staged, or activated with the previous CA not yet retired); 0 when none is under way. Exported by the cluster leader only.",
+		Type: TypeGauge,
+	})
+
+	HubCARunsBlocking = Default.MustRegister(Definition{
+		Name: "cloop_hub_ca_runs_blocking",
+		Help: "Running runs the rotation's next step would break: while staged, those not given the staged CA; once activated, those given only the previous one. Exported by the cluster leader only.",
+		Type: TypeGauge,
+	})
+
+	HubCAMembersBehind = Default.MustRegister(Definition{
+		Name: "cloop_hub_ca_members_behind",
+		Help: "Live hub members that have not adopted the rotation's current step, or whose build predates rotation. Exported by the cluster leader only.",
+		Type: TypeGauge,
+	})
+)
+
 // Sessions. Deliberately unlabelled by subject: the count of sessions is
 // operational, the roster of who holds them is in the audit trail behind
 // audit.read, and putting subjects in a scrape would copy that roster into
@@ -936,6 +997,11 @@ const (
 	MergeAutoResolved = "auto_resolved"
 	MergeUnresolved   = "unresolved"
 	MergeError        = "error"
+
+	// Hub CA rotation: the proxies a rotation ends sessions on.
+	HubCAProxyGit   = "git_proxy"
+	HubCAProxyKube  = "kube_guard"
+	HubCAProxyRelay = "model_relay"
 
 	// KEK rotation phases.
 	RotationTotal     = "total"

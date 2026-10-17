@@ -33,6 +33,7 @@ type hubHealthScenario struct {
 	Before hubHealthBadgeState `json:"before"`
 	After  hubHealthBadgeState `json:"after"`
 	HTML   string              `json:"html"`
+	CA     string              `json:"ca"`
 	Status string              `json:"status"`
 	Full   int                 `json:"full"`
 	XSS    any                 `json:"xss"`
@@ -174,6 +175,21 @@ func TestDashboard_HubHealthPanelRendersText(t *testing.T) {
 	}
 	if p.Status != "1 failing" {
 		t.Errorf("the section's badge says %q, want 1 failing", p.Status)
+	}
+	// The hub CA's section (Task 20438): where the rotation stands, what it
+	// waits for, the steps it allows — every value a workload or a member
+	// chose drawn as text.
+	for _, want := range []string{
+		"Certificate authority", ">staged<", "permits hub.internal", "<code>hub_b</code>",
+		"Activate anyway…", "Abort the stage…", "&lt;img src=x onerror=&quot;window.__xss=2&quot;&gt;",
+		"&lt;script&gt;x&lt;/script&gt;", "user:&lt;b&gt;alice&lt;/b&gt;", "the longest monitor session is 60 min",
+	} {
+		if !strings.Contains(p.CA, want) {
+			t.Errorf("the hub CA section does not show %q:\n%s", want, p.CA)
+		}
+	}
+	if strings.Contains(p.CA, "<img") || strings.Contains(p.CA, "<script") || strings.Contains(p.CA, ">Activate</button>") {
+		t.Errorf("the hub CA section carries markup, or offers a plain activation the runs forbid:\n%s", p.CA)
 	}
 	if p.XSS != nil {
 		t.Errorf("something ran: window.__xss = %v", p.XSS)

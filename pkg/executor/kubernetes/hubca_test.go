@@ -191,3 +191,31 @@ func TestBuildPod_HubCAForNodeReachesTheHarness(t *testing.T) {
 		t.Fatalf("under a bundle naming the proxy's URL, Node's CA = %+v; want it kept for Node with no git URL", kept)
 	}
 }
+
+// TestStart_APodDispatchedDuringARotationTrustsBothCAs: while the hub's CA is
+// being rotated a dispatch carries both CAs, for git and for the harness's
+// Node; the Pod's lease Secret carries both, and the Pod is built — a bundle
+// Node takes whole (Task 20438).
+func TestStart_APodDispatchedDuringARotationTrustsBothCAs(t *testing.T) {
+	ex, api, _ := newTestExecutor(t, nil)
+	ca := hubGitCA(t)
+	ca.PEM = append(append([]byte(nil), ca.PEM...), hubGitCA(t).PEM...)
+	ca.Node = true
+	spec := testSpec()
+	spec.GitCA = ca
+
+	handle, err := ex.Start(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Start with the two CAs of a rotation: %v", err)
+	}
+	api.mu.Lock()
+	sec := api.secrets[leaseSecretName(handle.ID)]
+	api.mu.Unlock()
+	if sec == nil {
+		t.Fatal("no lease Secret")
+	}
+	got := &executor.GitCA{URLs: ca.URLs, PEM: sec.Data[hubCAKey], Node: true}
+	if got.CertCount() != 2 || string(got.PEM) != string(ca.PEM) {
+		t.Fatalf("the lease Secret carries %d certificate(s), want both CAs", got.CertCount())
+	}
+}

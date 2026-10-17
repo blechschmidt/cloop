@@ -48,6 +48,26 @@ func rowAAD(id, serial string) string {
 	return secretbroker.AADFor(secretbroker.SetHubTLS, id+"/"+serial)
 }
 
+// aadFor is the associated data a row's key is sealed with. A leaf's is bound
+// to its row and serial. A CA's is bound to its serial under the id every CA
+// row had before rotation existed ("ca"), whichever of the three CA rows it
+// sits in (Task 20438): an activation moves a CA from 'ca:next' to 'ca' and
+// from 'ca' to 'ca:previous' without opening its key, and the binding that
+// matters — this envelope opens for this certificate and no other, and never
+// on a leaf's row — is the serial's. The first CA's envelope, sealed before
+// rotation existed, opens unchanged.
+func aadFor(id, kind, serial string) string {
+	if kind == "ca" {
+		return rowAAD(caRowID, serial)
+	}
+	return rowAAD(id, serial)
+}
+
+// Rotations returns the most recent CA rotations first, at most limit.
+func (s *Store) Rotations(limit int) ([]statedb.HubCARotationRow, error) {
+	return s.db.ListHubCARotations(limit)
+}
+
 // SealedSetName identifies the set in rotation reports.
 func (s *Store) SealedSetName() string { return secretbroker.SetHubTLS }
 
@@ -64,7 +84,7 @@ func (s *Store) ListSealedNotUnder(keyID string, limit int) ([]secretbroker.Seal
 	for _, r := range rows {
 		out = append(out, secretbroker.SealedRow{
 			ID:  r.ID,
-			AAD: rowAAD(r.ID, r.Serial),
+			AAD: aadFor(r.ID, r.Kind, r.Serial),
 			Env: secretbroker.Envelope{KeyID: r.KeyID, WrappedDEK: r.WrappedDEK, Ciphertext: r.KeySealed},
 		})
 	}
@@ -80,14 +100,14 @@ func (s *Store) ReplaceSealed(id string, expect, next secretbroker.Envelope) (bo
 
 var _ secretbroker.SealedSet = (*Store)(nil)
 
-// sealKey seals a private key for a row.
-func sealKey(sealer Sealer, id, serial string, key *ecdsa.PrivateKey) (secretbroker.Envelope, error) {
+// sealKey seals a private key for a row of kind ("ca" or "leaf").
+func sealKey(sealer Sealer, id, kind, serial string, key *ecdsa.PrivateKey) (secretbroker.Envelope, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return secretbroker.Envelope{}, fmt.Errorf("hubca: encode the key for %s: %w", id, err)
 	}
 	defer wipe(der)
-	env, err := sealer.SealFor(rowAAD(id, serial), der)
+	env, err := sealer.SealFor(aadFor(id, kind, serial), der)
 	if err != nil {
 		return secretbroker.Envelope{}, sealError(id, err)
 	}
@@ -96,7 +116,7 @@ func sealKey(sealer Sealer, id, serial string, key *ecdsa.PrivateKey) (secretbro
 
 // openKey opens a row's sealed private key and checks it belongs to cert.
 func openKey(sealer Sealer, row statedb.HubTLSRow, cert *x509.Certificate) (crypto.Signer, error) {
-	der, err := sealer.OpenEnvelope(rowAAD(row.ID, row.Serial),
+	der, err := sealer.OpenEnvelope(aadFor(row.ID, row.Kind, row.Serial),
 		secretbroker.Envelope{KeyID: row.KeyID, WrappedDEK: row.WrappedDEK, Ciphertext: row.KeySealed})
 	if err != nil {
 		return nil, sealError(row.ID, err)
@@ -139,6 +159,9 @@ type Options struct {
 	// Audit receives one record per certificate this process minted or
 	// issued — never one it adopted from another process. Nil drops them.
 	Audit func(Issued)
+	// Rotation receives one record per rotation step this process took
+	// (rotate.go). Nil drops them.
+	Rotation func(RotationEvent)
 }
 
 // Issued describes a certificate this process put in the store: the CA, or a
@@ -156,6 +179,10 @@ type Issued struct {
 	NotAfter    time.Time
 	// Replaced is the serial of the leaf this one replaced, if any.
 	Replaced string
+	// Issuer is the serial of the CA that signed a leaf.
+	Issuer string
+	// Reason says why a leaf was issued: Reason*.
+	Reason string
 }
 
 func (o Options) audit(i Issued) {
@@ -239,12 +266,12 @@ func OpenAuthority(s *Store, sealer Sealer, o Options) (*Authority, error) {
 	row, err := s.db.GetHubTLS(caRowID)
 	if errors.Is(err, statedb.ErrHubTLSNotFound) {
 		now := o.now()
-		cert, certPEM, key, merr := mintCA(now)
+		cert, certPEM, key, merr := mintCA(now, nil)
 		if merr != nil {
 			return nil, merr
 		}
 		serial := serialHex(cert.SerialNumber)
-		env, serr := sealKey(sealer, caRowID, serial, key)
+		env, serr := sealKey(sealer, caRowID, "ca", serial, key)
 		if serr != nil {
 			return nil, serr
 		}
@@ -349,16 +376,17 @@ func loadLeaf(s *Store, sealer Sealer, m Monitor) (*Leaf, string, error) {
 }
 
 // issueLeaf signs and stores a new leaf for m, replacing the row whose serial
-// is replace ("" for none). It reports whether it was stored; false means
-// another process stored one first, which the caller re-reads.
-func issueLeaf(s *Store, sealer Sealer, ca *Authority, m Monitor, sans []string, replace string, o Options) (*Leaf, bool, error) {
+// is replace ("" for none), for reason (Reason*). It reports whether it was
+// stored; false means another process stored one first, which the caller
+// re-reads.
+func issueLeaf(s *Store, sealer Sealer, ca *Authority, m Monitor, sans []string, replace, reason string, o Options) (*Leaf, bool, error) {
 	now := o.now()
 	cert, certPEM, key, err := ca.issue(m, sans, now)
 	if err != nil {
 		return nil, false, err
 	}
 	serial := serialHex(cert.SerialNumber)
-	env, err := sealKey(sealer, m.rowID(), serial, key)
+	env, err := sealKey(sealer, m.rowID(), "leaf", serial, key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -378,7 +406,7 @@ func issueLeaf(s *Store, sealer Sealer, ca *Authority, m Monitor, sans []string,
 	}
 	if stored {
 		o.audit(Issued{Monitor: m, Serial: serial, Fingerprint: certFingerprint(cert), Names: certSANs(cert),
-			NotAfter: cert.NotAfter, Replaced: replace})
+			NotAfter: cert.NotAfter, Replaced: replace, Issuer: ca.Serial(), Reason: reason})
 	}
 	return &Leaf{
 		Monitor: m, Serial: serial, Cert: cert, CertPEM: certPEM, IssuedBy: o.Actor,

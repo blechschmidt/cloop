@@ -75,7 +75,10 @@ type sandboxUser struct {
 // request regardless of what the context says, which is the difference this
 // package exists to make. Setting it means `kubectl get pods` works without
 // -n; it means nothing about what `kubectl -n other get pods` can do.
-func (r *Registry) renderKubeconfig(s *Session, token, defaultNamespace string) ([]byte, error) {
+//
+// bundle, when set, is the trust anchor the document carries instead of the
+// registry's CABundle (MintRequest.CABundle).
+func (r *Registry) renderKubeconfig(s *Session, token, defaultNamespace string, bundle []byte) ([]byte, error) {
 	if strings.TrimSpace(r.BaseURL) == "" {
 		return nil, fmt.Errorf("kubeguard: registry has no base url to advertise")
 	}
@@ -99,8 +102,11 @@ func (r *Registry) renderKubeconfig(s *Session, token, defaultNamespace string) 
 	var cl sandboxCluster
 	cl.Name = kubeconfigClusterName
 	cl.Cluster.Server = r.BaseURL
-	if len(r.CABundle) > 0 {
-		cl.Cluster.CAData = base64.StdEncoding.EncodeToString(r.CABundle)
+	if len(bundle) == 0 {
+		bundle = r.CABundle
+	}
+	if len(bundle) > 0 {
+		cl.Cluster.CAData = base64.StdEncoding.EncodeToString(bundle)
 	}
 	doc.Clusters = []sandboxCluster{cl}
 

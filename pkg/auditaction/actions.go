@@ -538,6 +538,26 @@ const (
 	// ActionHubCALeafIssued records the hub issuing a credential monitor's
 	// serving certificate from its CA.
 	ActionHubCALeafIssued Action = "hub_ca.leaf_issued"
+	// ActionHubCARotationStaged records a CA minted to replace the hub's,
+	// which every sandbox dispatched from then on trusts beside it (Task
+	// 20438).
+	ActionHubCARotationStaged Action = "hub_ca.rotation_staged"
+	// ActionHubCARotationActivated records the staged CA becoming the one the
+	// credential monitors' certificates are issued from.
+	ActionHubCARotationActivated Action = "hub_ca.rotation_activated"
+	// ActionHubCAPreviousRetired records the replaced CA retired: out of every
+	// bundle, its sealed key destroyed.
+	ActionHubCAPreviousRetired Action = "hub_ca.previous_retired"
+	// ActionHubCARotationAbandoned records a staged CA destroyed without
+	// being activated.
+	ActionHubCARotationAbandoned Action = "hub_ca.rotation_abandoned"
+	// ActionHubCAEmergencyRotated records an emergency rotation: every CA
+	// replaced at once by a fresh one, and the runs that trusted only the
+	// replaced ones named for their proxy sessions to be ended.
+	ActionHubCAEmergencyRotated Action = "hub_ca.emergency_rotated"
+	// ActionHubCASessionsEnded records a hub member ending the proxy sessions
+	// of runs an emergency rotation named.
+	ActionHubCASessionsEnded Action = "hub_ca.sessions_ended"
 
 	// ── oidc ───────────────────────────────────────────────────────────────
 

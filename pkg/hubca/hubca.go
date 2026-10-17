@@ -37,6 +37,23 @@
 //
 // The CA's private key is opened only in the hub process, to sign leaves. It
 // is in no Spec, no lease, no start frame and no log.
+//
+// # Replacing the CA
+//
+// A CA's key that may have leaked — a backup taken with the root key, a
+// misused KMS identity, a departed operator — is replaced online, in three
+// steps an operator takes with `cloop hub ca rotate` (rotate.go, Task 20438):
+// stage a second CA, which every sandbox dispatched from then on trusts beside
+// the first; activate it once no run dispatched before the stage is still
+// running, when the cluster leader reissues every leaf from it; and retire the
+// first, whose sealed key is destroyed. A process's view of which CAs exist,
+// which one signs and which ones a sandbox is told to trust is a Trust
+// (trust.go), re-read every minute and whenever another process takes a step.
+//
+// A CA minted by a rotation carries X.509 name constraints for the names the
+// monitors are reached at, so even a verifier that trusts it more widely than
+// git's per-URL setting does — Node.js, which trusts it for every host — would
+// refuse a certificate it signed for any other host.
 package hubca
 
 import (
@@ -190,8 +207,9 @@ func keyIdentifier(pub crypto.PublicKey) ([]byte, error) {
 	return sum[:], nil
 }
 
-// mintCA creates a new CA certificate and key.
-func mintCA(now time.Time) (*x509.Certificate, []byte, *ecdsa.PrivateKey, error) {
+// mintCA creates a new CA certificate and key. names, when there are any,
+// become the CA's name constraints (constrain).
+func mintCA(now time.Time, names []string) (*x509.Certificate, []byte, *ecdsa.PrivateKey, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("hubca: generate the CA key: %w", err)
@@ -224,6 +242,11 @@ func mintCA(now time.Time) (*x509.Certificate, []byte, *ecdsa.PrivateKey, error)
 		MaxPathLen:     0,
 		MaxPathLenZero: true,
 		SubjectKeyId:   ski,
+	}
+	if len(names) > 0 {
+		if err := constrain(tmpl, names); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -262,11 +285,14 @@ func (a *Authority) issue(m Monitor, sans []string, now time.Time) (*x509.Certif
 		// saying so in the certificate keeps doctor's arithmetic honest.
 		notAfter = a.cert.NotAfter
 	}
-	cn := string(m)
+	// The common name is the first DNS name, and a leaf that names addresses
+	// only has none: a verifier that finds no DNS name in the leaf checks its
+	// common name against the CA's DNS name constraints instead — GnuTLS, the
+	// TLS library of Debian's and Ubuntu's git, whatever the name looks like —
+	// and a CA constrained to addresses permits no DNS name at all.
+	cn := ""
 	if len(dns) > 0 {
 		cn = dns[0]
-	} else if len(ips) > 0 {
-		cn = ips[0].String()
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
@@ -482,4 +508,50 @@ func matchesKey(cert *x509.Certificate, key crypto.Signer) bool {
 	type equaler interface{ Equal(crypto.PublicKey) bool }
 	pub, ok := key.Public().(equaler)
 	return ok && pub.Equal(cert.PublicKey)
+}
+
+// pemFirst returns the first PEM block of b, encoded again, and the rest.
+func pemFirst(b []byte) ([]byte, []byte) {
+	block, rest := pem.Decode(b)
+	if block == nil {
+		return nil, b
+	}
+	return pem.EncodeToMemory(block), rest
+}
+
+// Serial is a certificate's serial as the hub records it: lowercase hex of
+// its big-endian bytes, the form hub_tls, the trust labels and the audit
+// trail use. (big.Int's Text(16) drops a leading zero nibble, so it is not.)
+func Serial(c *x509.Certificate) string {
+	if c == nil {
+		return ""
+	}
+	return serialHex(c.SerialNumber)
+}
+
+// BundleSerials lists the serials of the certificates in a PEM bundle, in
+// order; a block that does not parse is skipped.
+func BundleSerials(bundle []byte) []string {
+	var out []string
+	rest := bundle
+	for {
+		block, r := pem.Decode(rest)
+		if block == nil {
+			return out
+		}
+		rest = r
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		if c, err := x509.ParseCertificate(block.Bytes); err == nil {
+			out = append(out, Serial(c))
+		}
+	}
+}
+
+// FirstPEM is the first certificate of a PEM bundle, PEM-encoded: the active
+// CA, which State.Bundle puts first.
+func FirstPEM(bundle []byte) []byte {
+	first, _ := pemFirst(bundle)
+	return first
 }

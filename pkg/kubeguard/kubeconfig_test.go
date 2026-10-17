@@ -216,6 +216,48 @@ func TestDeliveredKubeconfigParsesAsAKubeconfig(t *testing.T) {
 	}
 }
 
+// TestASessionCarriesTheBundleItWasMintedWith: while the hub's CA is being
+// rotated, the registry's own bundle is not what a dispatch was told to trust;
+// the hub passes the dispatch's (MintRequest.CABundle), and the kubeconfig
+// carries exactly that (Task 20438).
+func TestASessionCarriesTheBundleItWasMintedWith(t *testing.T) {
+	reg := newTestRegistry(t)
+	reg.CABundle = []byte("-----BEGIN CERTIFICATE-----\nREGISTRYCA\n-----END CERTIFICATE-----\n")
+	two := []byte("-----BEGIN CERTIFICATE-----\nCAONE\n-----END CERTIFICATE-----\n" +
+		"-----BEGIN CERTIFICATE-----\nCATWO\n-----END CERTIFICATE-----\n")
+	data := func(kc []byte) string {
+		var doc struct {
+			Clusters []struct {
+				Cluster struct {
+					CAData string `yaml:"certificate-authority-data"`
+				} `yaml:"cluster"`
+			} `yaml:"clusters"`
+		}
+		if err := yaml.Unmarshal(kc, &doc); err != nil || len(doc.Clusters) != 1 {
+			t.Fatalf("kubeconfig: %v", err)
+		}
+		raw, err := base64.StdEncoding.DecodeString(doc.Clusters[0].Cluster.CAData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	m, err := reg.Mint(MintRequest{Kubeconfig: testKubeconfig(""), CABundle: two})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := data(m.Kubeconfig); got != string(two) {
+		t.Fatalf("the kubeconfig carries %q, want the dispatch's two CAs", got)
+	}
+	plain, err := reg.Mint(MintRequest{Kubeconfig: testKubeconfig("")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := data(plain.Kubeconfig); got != string(reg.CABundle) {
+		t.Fatalf("without a bundle of its own the kubeconfig carries %q, want the registry's", got)
+	}
+}
+
 // TestDeliveredContextDoesNotDefaultToADeniedNamespace: a context pointing at
 // a namespace every request would be refused for is a worse first experience
 // than no default at all.

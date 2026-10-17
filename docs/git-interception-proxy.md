@@ -877,6 +877,11 @@ key retirement counts it. The proxy serves a leaf from it, for the host of
 leader replaces it with 48 hours left, and every member re-reads it each minute
 and serves it per handshake, so nothing is interrupted — a push in flight keeps
 its connection, and the next one verifies the new leaf against the same CA.
+The CA itself is replaced online, staged so that every sandbox trusts the new
+one before any certificate comes from it: `cloop hub ca rotate --stage`, then
+`--activate` once no run dispatched before the stage is running, then
+`--retire-previous` — or `--now` in an emergency. See
+[Rotating the hub CA](operations/runbook.md#rotating-the-hub-ca).
 
 Each dispatch carries the CA's certificate (`executor.Spec.GitCA`, public
 material), and each driver makes the workload trust it for the proxy's URL and

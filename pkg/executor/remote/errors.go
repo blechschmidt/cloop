@@ -121,6 +121,13 @@ var (
 	// a silent drop that would leave the harness refusing the relay.
 	ErrNodeCAUnsupported = errors.New("remote: agent cannot hand the hub's CA to the harness's Node.js")
 
+	// ErrNodeCABundleUnsupported: the hub's CA is being rotated, so the
+	// bundle for the harness's Node.js holds two CAs, and this agent predates
+	// accepting more than one (MinNodeCABundleVersion, Task 20438). The hub
+	// hands such an agent the active CA alone before dispatch; this is the
+	// driver's backstop, never a bundle the agent would refuse to start.
+	ErrNodeCABundleUnsupported = errors.New("remote: agent cannot hand two hub CAs to the harness's Node.js")
+
 	// ErrForwardedDevicesUnsupported: the run's project holds a device
 	// forwarder binding (Task 20430), and this executor cannot attach the
 	// device into a sandbox — its agent predates the device channel

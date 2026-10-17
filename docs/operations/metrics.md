@@ -164,7 +164,9 @@ cloop_secret_kek_rotation_records         cloop_quota_limit
 cloop_secret_kek_rotation_active          cloop_quota_usage
 cloop_sessions_live                       cloop_quota_identities
 cloop_statedb_wal_bytes                   cloop_audit_forward_lag_seconds
-cloop_audit_forward_backlog_rows
+cloop_audit_forward_backlog_rows          cloop_hub_ca_not_after_timestamp_seconds
+cloop_hub_ca_rotation_phase               cloop_hub_ca_rotation_step_age_seconds
+cloop_hub_ca_runs_blocking                cloop_hub_ca_members_behind
 ```
 
 `sum()` and `max()` over the cluster therefore both give the right answer. A
@@ -761,6 +763,61 @@ sum(rate(cloop_kubeguard_denials_total{reason=~"service_account_token_secret|wor
 
 See [the Kubernetes access monitor](../architecture/kubernetes-access.md) for
 what each reason means.
+
+## The hub's certificate authority
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_hub_ca_not_after_timestamp_seconds` | gauge | `slot` |
+| `cloop_hub_ca_rotation_phase` | gauge | `phase` |
+| `cloop_hub_ca_rotation_step_age_seconds` | gauge | — |
+| `cloop_hub_ca_runs_blocking` | gauge | — |
+| `cloop_hub_ca_members_behind` | gauge | — |
+| `cloop_hub_ca_leaves_issued_total` | counter | `monitor`, `reason` |
+| `cloop_hub_ca_trust_adoptions_total` | counter | — |
+| `cloop_hub_ca_sessions_ended_total` | counter | `proxy` |
+
+The CA the hub issues its git proxy's and Kubernetes monitor's certificates
+from under `tls: auto`, and a [rotation](runbook.md#rotating-the-hub-ca) of
+it (Task 20438). The five gauges read the shared database, so the cluster
+leader alone exports them; the counters are each member's own.
+
+`cloop_hub_ca_not_after_timestamp_seconds` is when each CA expires, by
+`slot`: `active` (the one leaves come from), `next` (staged) and `previous`
+(replaced, not yet retired). Replacing the active one is a staged rotation that
+waits for runs, so alert months ahead, not days:
+
+```promql
+cloop_hub_ca_not_after_timestamp_seconds{slot="active"} - time() < 90 * 86400
+```
+
+`cloop_hub_ca_rotation_phase` is 1 for the phase the CA is in — `none` (no CA
+minted), `steady`, `staged`, `activated` — and 0 for the others.
+`cloop_hub_ca_rotation_step_age_seconds` is how long ago the rotation under way
+took its last step. A stage should not outlast the longest
+`session_minutes` a monitor grants, nor a previous CA its activation by much:
+
+```promql
+cloop_hub_ca_rotation_phase{phase=~"staged|activated"} == 1
+  and on() cloop_hub_ca_rotation_step_age_seconds > 6 * 3600
+```
+
+`cloop_hub_ca_runs_blocking` counts the running runs the next step would
+break — while staged, those not given the staged CA, which an activation waits
+for; once activated, those given only the previous one. `cloop_hub_ca_members_behind`
+counts live members that have not adopted the current step, or whose build
+predates rotation, which an activation is refused beside.
+
+`cloop_hub_ca_leaves_issued_total` counts monitor certificates this member
+issued, by `monitor` (`git_proxy`, `kube_guard`) and `reason`: `first`,
+`renewal` (the leader's, two days before expiry), `names` (a member needed a
+name the stored one lacked), `activation` (a rotation made another CA active)
+and `unreadable`. Renewals at about one per monitor per day are normal; a burst
+of `names` is two members taking turns. `cloop_hub_ca_trust_adoptions_total`
+counts each time this member started handing sandboxes a different set of CAs —
+once per rotation step it saw. `cloop_hub_ca_sessions_ended_total` counts the
+proxy sessions this member ended because an emergency rotation (`--now`) named
+their runs, by `proxy` (`git_proxy`, `kube_guard`, `model_relay`).
 
 ## Egress broker
 

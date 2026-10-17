@@ -36,6 +36,10 @@ import (
 // work rather than a renewal.
 const caExpiryWarning = 365 * 24 * time.Hour
 
+// caExpiryFail is when a CA nearing its end fails the doctor: a rotation
+// waits for the runs dispatched before its stage, so it needs days, not hours.
+const caExpiryFail = 30 * 24 * time.Hour
+
 // autoMonitorTLS checks a monitor running under tls: auto and reports whether
 // it will start.
 func autoMonitorTLS(dir string, m hubca.Monitor, check, title string, ep proxyEndpoint, listenAddr,
@@ -97,15 +101,22 @@ func autoMonitorTLS(dir string, m hubca.Monitor, check, title string, ep proxyEn
 			Check: check, Title: title, Severity: SeverityFail,
 			Message: fmt.Sprintf("the hub CA expired at %s, so the %s will not start and %s",
 				caCert.NotAfter.UTC().Format(time.RFC3339), m.Label(), refusal),
-			Remediation: "Give " + section + " a cert_file and key_file while a new hub CA is planned",
+			Remediation: "Replace it at once: `cloop hub ca rotate --now` mints a fresh CA and reissues both " +
+				"monitors' certificates from it (or give " + section + " a cert_file and key_file)",
 		})
 		return false
 	case left < caExpiryWarning:
+		sev := SeverityWarn
+		if left < caExpiryFail {
+			sev = SeverityFail
+		}
 		add(Finding{
-			Check: "hubca.expiry", Title: "Hub certificate authority", Severity: SeverityWarn,
+			Check: "hubca.expiry", Title: "Hub certificate authority", Severity: sev,
 			Message: fmt.Sprintf("the hub CA expires at %s; every sandbox trusts it for the monitors' URLs, "+
-				"so replacing it is planned work, not a renewal", caCert.NotAfter.UTC().Format(time.RFC3339)),
-			Remediation: "Plan the replacement before then",
+				"so replacing it is a staged rotation, not a renewal", caCert.NotAfter.UTC().Format(time.RFC3339)),
+			Remediation: "Rotate it online: `cloop hub ca rotate --stage`, then --activate once the runs " +
+				"dispatched before the stage have finished, then --retire-previous (or Settings → Hub health). " +
+				"See " + hubCADocs,
 		})
 	}
 

@@ -791,11 +791,14 @@ the string a pattern is matched against is `resource` for the core group and
   `key_file` is switched **off** at load rather than serving tokens in the
   clear — never read as `tls: auto`, which is an explicit choice.
 - **`tls: auto` issues the certificate from the hub's own CA** — the one the
-  [git proxy's](git-proxy.md) comes from, minted once per control plane and
-  sealed under `CLOOP_SECRET_KEY` — as a 72-hour leaf for the host of
+  [git proxy's](git-proxy.md) comes from, minted once per control plane,
+  sealed under `CLOOP_SECRET_KEY` and replaced online with
+  [`cloop hub ca rotate`](../operations/runbook.md#rotating-the-hub-ca) — as a 72-hour leaf for the host of
   `advertise_url` (and of a specific `listen_addr`), renewed by the cluster
   leader with two days to spare. The CA is what every kubeconfig the monitor
-  issues carries as `certificate-authority-data`. Needs `CLOOP_SECRET_KEY`;
+  issues carries as `certificate-authority-data` — both CAs, while one is being
+  rotated, so a kubeconfig minted after the stage keeps working across the
+  activation, and the run it was minted for records which. Needs `CLOOP_SECRET_KEY`;
   excludes `cert_file`, `key_file` and `ca_file`.
 - **`ca_file` is the one place this is easier to deploy than the git proxy**
   with an operator's pair. A kubeconfig can carry its own trust anchor, so the

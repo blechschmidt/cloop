@@ -12,6 +12,38 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **The hub's own CA can be replaced online, and in an emergency at once.**
+  Under `tls: auto` the CA the git proxy's and Kubernetes monitor's
+  certificates come from was minted once, valid ten years, and never replaced:
+  a suspected leak of its key — a backup taken with the root key, a misused KMS
+  identity, a departed operator — had no remedy short of rebuilding the control
+  plane. `cloop hub ca rotate --stage` mints a second CA sealed exactly as the
+  first (under the KEK registry, under the KMS when `secrets.kms` is set,
+  rewrapped by key rotation), and from then on every sandbox dispatched trusts
+  both — git's per-URL `sslCAInfo` bundle, the kube monitor kubeconfig's
+  `certificate-authority-data`, Node's CA file, a Pod's lease Secret, a
+  device's or virtual executor's start frame — while each dispatch records which
+  CAs it was given. `--activate` is refused while a run dispatched before the
+  stage is still running, unless `--force`, which names the runs it breaks, and
+  while a hub member has not adopted the stage or runs an older build; the
+  cluster leader then reissues every leaf and every member serves it within a
+  minute. `--retire-previous` drops the old CA from every bundle and destroys
+  its sealed key with `secure_delete` (every write to `hub_tls` now runs with
+  it). `--now` does all three with a fresh CA and every member ends the git
+  proxy, Kubernetes monitor and model relay sessions of the runs that trusted
+  only the replaced CAs, naming them. A CA a rotation mints carries X.509 name
+  constraints for the monitors' names, so it cannot vouch for another host even
+  to Node; moving an advertise URL to a new host is then a rotation. The same
+  steps are in Settings → Hub health; `cloop hub doctor` warns about a stage
+  that outlasts the longest `session_minutes`, a member that predates rotation,
+  a name the CA does not permit, and a CA nearing expiry, naming the command;
+  each step is audited (`hub_ca.rotation_staged`, `…_activated`,
+  `hub_ca.previous_retired`, `…_abandoned`, `hub_ca.emergency_rotated`,
+  `hub_ca.sessions_ended`) and metered (`cloop_hub_ca_*`). Agents speak
+  protocol v25, which lets a device's harness take both CAs for Node; an older
+  device's relayed run is handed the active CA alone and holds an activation
+  back (Task 20438).
+
 - **The git proxy refuses a push that carries a credential the run was
   given.** It used to decide on a push's command list and stream the pack to
   the forge unread, so a workload that committed its leased env secret, the

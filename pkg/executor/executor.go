@@ -1042,6 +1042,18 @@ func (sig Signal) Valid() bool {
 // every label: nothing about how the workload runs depends on it.
 const LabelRunID = "run_id"
 
+// LabelHubCATrust and LabelHubCAUses record which of the hub's own CAs a
+// dispatch was told to trust, and on which paths (Task 20438): the serials,
+// sorted and comma-separated, and a comma-separated subset of git_proxy,
+// kube_guard and node. The hub sets both on every dispatch from a member that
+// holds its CAs — an empty trust when it was given none — and reads them back
+// from the dispatch's executor session when a CA rotation asks which running
+// runs would stop verifying the credential monitors. Bookkeeping only.
+const (
+	LabelHubCATrust = "hub_ca_trust"
+	LabelHubCAUses  = "hub_ca_uses"
+)
+
 // Executor is a pluggable execution backend.
 //
 // Implementations must be safe for concurrent use by multiple goroutines.

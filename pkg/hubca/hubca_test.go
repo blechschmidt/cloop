@@ -102,15 +102,33 @@ func poolOf(t *testing.T, pemBytes []byte) *x509.CertPool {
 	return p
 }
 
-// TestTheCAIsMintedOnceAndAdoptedAfter: the CA is the trust every sandbox
-// holds, so a second open — another member, a restart — must get the same one.
-func TestTheCAIsMintedOnceAndAdoptedAfter(t *testing.T) {
+// TestOpeningTheCAAdoptsTheStoredOne: the CA is the trust every sandbox
+// holds, so a second open — another member, a restart — must get the same one,
+// and opening never replaces it: only a rotation does (Task 20438), after
+// which an open adopts the CA the rotation made active.
+func TestOpeningTheCAAdoptsTheStoredOne(t *testing.T) {
 	f := newFixture(t)
 	first := f.authority(t)
 	second := f.authority(t)
 	if first.Serial() != second.Serial() {
 		t.Fatalf("a second open minted another CA: %s then %s", first.Serial(), second.Serial())
 	}
+	defer func() {
+		env := hubca.Env{Store: f.store, Sealer: f.keyring, Options: f.opts("operator")}
+		staged, err := hubca.Stage(env, hubca.StageRequest{NoNameConstraints: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if again := f.authority(t); again.Serial() != first.Serial() {
+			t.Fatalf("an open after a stage adopted %s, want the still-active %s", again.Serial(), first.Serial())
+		}
+		if _, err := hubca.Activate(env, hubca.ActivateRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		if again := f.authority(t); again.Serial() != staged.CA.Serial {
+			t.Fatalf("an open after the activation adopted %s, want the activated %s", again.Serial(), staged.CA.Serial)
+		}
+	}()
 	if !first.Certificate().IsCA || first.Certificate().MaxPathLen != 0 || !first.Certificate().MaxPathLenZero {
 		t.Errorf("the CA can sign subordinate CAs: IsCA=%v MaxPathLen=%d", first.Certificate().IsCA,
 			first.Certificate().MaxPathLen)

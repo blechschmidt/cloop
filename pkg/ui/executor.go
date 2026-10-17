@@ -612,6 +612,10 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		lease.Close()
 		return nil, executor.Handle{}, err
 	}
+	// Which of the hub's CAs the run was handed, on its spec, so a rotation
+	// of the CA can tell whether activating would break it (Task 20438) —
+	// after the git proxy's trust, the relay's and the lease's kubeconfig.
+	spec = labelHubCATrust(spec, ex)
 	// Whether the spend drain charges this run's ledger or the relay already
 	// charged it (model_relay_spend.go) — recorded either way, so a mark an
 	// earlier relayed run left is cleared — and taken back if the run does
@@ -1043,6 +1047,7 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	if err != nil {
 		return nil, err
 	}
+	spec = labelHubCATrust(spec, ex)
 	// The ceilings apply here too. A subcommand is a smaller workload than a
 	// harness, not an exempt one — `cloop suggest` on a repository whose
 	// sandbox.yaml asks for 900g would otherwise be the way around a cap that

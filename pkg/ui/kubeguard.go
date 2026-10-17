@@ -368,6 +368,10 @@ func (g kubeGuard) GuardKubeconfig(ctx context.Context, req secretbroker.KubeGua
 		actor = workspaceLeaseActor
 	}
 
+	// The hub's CAs as of now, which a rotation changes under the running
+	// monitor (Task 20438): the kubeconfig carries them, and the run's
+	// dispatch records which.
+	bundle, serials := g.svc.kubeGuardBundle()
 	m, err := g.svc.reg.Mint(kubeguard.MintRequest{
 		Kubeconfig: req.Kubeconfig,
 		Policy:     policy,
@@ -378,11 +382,15 @@ func (g kubeGuard) GuardKubeconfig(ctx context.Context, req secretbroker.KubeGua
 		GrantID:    req.GrantID,
 		LeaseID:    req.LeaseID,
 		RunID:      req.RunID,
+		CABundle:   bundle,
 		// Recorded for the process that takes the lease over (Task 20383).
 		Durable: durableSession(req.LeaseID),
 	})
 	if err != nil {
 		return secretbroker.KubeGuardResult{}, err
+	}
+	if len(serials) > 0 {
+		rememberKubeTrust(req.RunID, serials)
 	}
 
 	return secretbroker.KubeGuardResult{

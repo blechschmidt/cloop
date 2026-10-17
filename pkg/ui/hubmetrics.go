@@ -35,6 +35,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/quota"
@@ -176,6 +177,12 @@ func registerHubCollectors() {
 			Name:     "kek_rotation",
 			Families: []*hubmetrics.Metric{hubmetrics.KEKRotationRecords, hubmetrics.KEKRotationActive},
 			Collect:  withScrape(collectKEKRotation),
+		},
+		hubmetrics.CollectorSpec{
+			Name: "hub_ca",
+			Families: []*hubmetrics.Metric{hubmetrics.HubCANotAfter, hubmetrics.HubCARotationPhase,
+				hubmetrics.HubCARotationStepAge, hubmetrics.HubCARunsBlocking, hubmetrics.HubCAMembersBehind},
+			Collect: withScrape(collectHubCA),
 		},
 		hubmetrics.CollectorSpec{
 			Name:     "disk_free",
@@ -453,6 +460,59 @@ func collectKEKRotation(sc *metricsScrape) {
 		active = 1
 	}
 	hubmetrics.KEKRotationActive.Set(active)
+}
+
+// collectHubCA publishes the hub CAs' expiry and where a rotation of them
+// stands (Task 20438), from the shared database: leader only. A hub that has
+// never minted a CA reports phase none and nothing else.
+func collectHubCA(sc *metricsScrape) {
+	if !sc.leader {
+		return
+	}
+	db := sc.controlDB()
+	if db == nil {
+		return
+	}
+	store, err := hubca.NewStore(db)
+	if err != nil {
+		return
+	}
+	st, err := hubca.ReadStatus(hubca.Env{Store: store, Alive: memberAlive()})
+	if err != nil {
+		return
+	}
+	for _, p := range []hubca.Phase{hubca.PhaseNone, hubca.PhaseSteady, hubca.PhaseStaged, hubca.PhaseActivated} {
+		v := 0.0
+		if st.Phase == p {
+			v = 1
+		}
+		hubmetrics.HubCARotationPhase.Set(v, string(p))
+	}
+	if st.Phase == hubca.PhaseNone {
+		return
+	}
+	for _, c := range []*hubca.CAInfo{st.Active, st.Next, st.Previous} {
+		if c != nil {
+			hubmetrics.HubCANotAfter.Set(float64(c.NotAfter.Unix()), string(c.Slot))
+		}
+	}
+	age := 0.0
+	if r := st.Rotation; r != nil {
+		last := r.StagedAt
+		if !r.ActivatedAt.IsZero() {
+			last = r.ActivatedAt
+		}
+		age = time.Since(last).Seconds()
+	}
+	hubmetrics.HubCARotationStepAge.Set(age)
+	hubmetrics.HubCARunsBlocking.Set(float64(len(st.Blocking)))
+	behind := 0
+	for _, m := range st.Members {
+		if !m.CaughtUp {
+			behind++
+		}
+	}
+	hubmetrics.HubCAMembersBehind.Set(float64(behind))
 }
 
 // ── runs ────────────────────────────────────────────────────────────────────

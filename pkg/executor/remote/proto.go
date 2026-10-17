@@ -264,7 +264,15 @@ const (
 	// agent sends the frame only on a v24 session, and an older agent's
 	// sandboxes are filtered exactly as strictly, only unreported — the hub
 	// says so where their refusals would be shown. See MinDenialLogVersion.
-	ProtocolVersion = 24
+	//
+	// v25 lets Spec.GitCA.Node hold two CAs (Task 20438): while the hub
+	// rotates its CA, a sandbox dispatched after the stage trusts both, and so
+	// does the harness's Node.js. No frame changes; an older agent's
+	// validation refuses a Node bundle of more than one certificate, so the
+	// hub hands such an agent the active CA alone and records that the run
+	// trusts only it — an activation then waits for the run, or names it. See
+	// MinNodeCABundleVersion.
+	ProtocolVersion = 25
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -498,6 +506,15 @@ const MinNodeCAVersion = 23
 // SupportsNodeCA reports whether an agent speaking this protocol version
 // honours Spec.GitCA.Node.
 func SupportsNodeCA(version int) bool { return version >= MinNodeCAVersion }
+
+// MinNodeCABundleVersion is the first protocol whose agents accept a bundle
+// for Node.js holding two CAs: the hub's, and during a rotation of it the one
+// replacing it or the one it replaced (Task 20438).
+const MinNodeCABundleVersion = 25
+
+// SupportsNodeCABundle reports whether an agent speaking this protocol version
+// accepts a Node bundle of more than one CA.
+func SupportsNodeCABundle(version int) bool { return version >= MinNodeCABundleVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.

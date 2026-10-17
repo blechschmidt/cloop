@@ -1465,6 +1465,21 @@ store: a server holding another leaf from the same CA — the Kubernetes
 monitor's, say — is refused. A device agent too old to place the CA is refused
 the workload, naming the upgrade; the fallback is never the PAT.
 
+**The CA is replaced online, and the trust a sandbox holds is replaced before
+any certificate is (Task 20438).** `cloop hub ca rotate --stage` mints a second
+CA sealed exactly as the first, and from then on every dispatch carries both —
+git's bundle, a kubeconfig's `certificate-authority-data`, Node's file, a Pod's
+lease Secret, a device's start frame — and records which CAs it was given on
+the spec its executor session keeps. `--activate` moves the leaves to the new CA
+only when no running run's record lacks it, unless forced, which names the runs
+it breaks; and never beside a hub member that has not adopted the stage or
+predates rotation. `--retire-previous` deletes the old CA with secure delete on,
+so its sealed key leaves the database file. A CA a rotation mints is
+name-constrained to the names the monitors are reached at, so even a verifier
+that trusts it for every host — Node — refuses what it signs for any other.
+`--now` does it all at once for a key believed compromised, and every member
+ends the proxy sessions of the runs that trusted only the replaced CAs.
+
 ### The four absences
 
 | Property | Why it holds |
@@ -4155,7 +4170,12 @@ not installed.
 | End to end: a real `git push` to a branch inside the hub's allowlist but outside the grant's branches is refused, and one inside both lands | `pkg/gitproxy: TestPushOutsideAGrantsBranchesIsRefused` |
 | Both halves of a session carry the grant's branches — the lease's (`guardPolicy`) and the workspace's (`gitproxycreds`) — without narrowing the hub's shared policy for the next session | `pkg/ui: TestGuardMintsASessionNarrowedToTheGrantsBranches`, `pkg/executor/gitproxycreds: TestTheSessionIsNarrowedToTheGrantsBranches` |
 | Where no proxy guards a branch-restricted grant, its push is withheld, never delivered unrestricted: an App token is minted read-only, a PAT is not delivered, and a write token minted for a guard that then declines is destroyed at GitHub | `pkg/secretbroker: TestUnguardedAppWithBranchesIsMintedReadOnly`, `TestUnguardedPATWithBranchesIsNotDelivered`, `TestDecliningGuardDestroysAWriteTokenMintedForBranches` |
-| `tls: auto`: the hub's CA is minted once per control plane — members starting together adopt one — and its private key is sealed under the KEK registry, bound to its row and serial, rewrapped by key rotation and counted by retirement | `pkg/hubca: TestConcurrentMembersAgreeOnOneCA`, `TestThePrivateKeysAreSealed`, `TestASealedKeyMovedToAnotherRowDoesNotOpen`, `TestKeyRotationRewrapsTheCA`; `pkg/secretstore: TestRetirementChecksEverySetThatRotates` |
+| `tls: auto`: the hub's CA is minted once per control plane — members starting together adopt one, and opening it never replaces it — and its private key is sealed under the KEK registry, bound to its serial and kept off a leaf's row, rewrapped by key rotation and counted by retirement | `pkg/hubca: TestConcurrentMembersAgreeOnOneCA`, `TestOpeningTheCAAdoptsTheStoredOne`, `TestThePrivateKeysAreSealed`, `TestASealedKeyMovedToAnotherRowDoesNotOpen`, `TestKeyRotationRewrapsTheCA`; `pkg/secretstore: TestRetirementChecksEverySetThatRotates` |
+| Rotating the hub CA (Task 20438): a staged CA is sealed exactly as the first — under the KMS when the store's keys are — and rewrapped by key rotation; every sandbox dispatched after the stage trusts both CAs on every path (git, a kubeconfig, Node, a Pod, a device), and its dispatch records which | `pkg/hubca: TestTheBundleAtEachStep`, `TestAStagedCAIsHeldByTheKMSWhenTheStoreIs`, `TestKeyRotationRewrapsTheStagedCA`; `pkg/kubeguard: TestASessionCarriesTheBundleItWasMintedWith`; `pkg/executor/kubernetes: TestStart_APodDispatchedDuringARotationTrustsBothCAs`; `pkg/executor/remote: TestACurrentAgentIsSentBothCAsForNode`, `TestAnAgentBeforeV25IsNeverSentTwoCAsForNode`; `pkg/ui: TestHubCARotation_ARunSpanningStageAndActivateKeepsCloningAndPushing` |
+| An activation is refused while a run dispatched before the stage is still running — named, with its project, task and executor — unless forced, which records the runs it breaks; and refused beside a hub member that has not adopted the stage or whose build predates rotation, which no flag overrides | `pkg/hubca: TestAnActivationWaitsForRunsDispatchedBeforeTheStage`, `TestMembersAgreeBeforeAStep`; `pkg/ui: TestHubCARotation_AnOlderRunRefusesTheActivation`, `TestHubCARotation_TheKubeMonitorPath`; `cmd: TestHubCARotateThroughTheCLI` |
+| After an activation the leader reissues every leaf from the new CA and every member serves it; a retirement waits for that, then destroys the old CA's sealed key in the database file — every write to `hub_tls` runs with secure delete, so no earlier image of the row survives either | `pkg/hubca: TestRetirementWaitsForTheLeadersLeaf`, `TestAFollowerWaitsForTheLeaderThenStopsWaiting`, `TestTheRetiredCAsKeyIsDestroyedInTheDatabaseFile`; `pkg/statedb: TestARetiredCAsKeyIsGoneFromTheFile`, `TestEveryHubTLSWriteIsSecureDelete` |
+| A CA a rotation mints is name-constrained to the names the monitors are reached at: a certificate it signs for any other host fails verification, and a member reached at a name it does not permit is served a leaf without that name, never one every sandbox refuses | `pkg/hubca: TestAStagedCAIsNameConstrained`, `TestAConstrainedCAIssuesOnlyWhatItPermits` |
+| An emergency rotation replaces every CA at once, reissues the leaves, retires the old CA, and every member ends the git proxy, Kubernetes monitor and model relay sessions of the runs that trusted only the replaced CAs, naming them | `pkg/hubca: TestAnEmergencyReplacesEveryCAAndCutsTheRunsThatTrustThem`; `pkg/ui: TestHubCARotation_AnOlderRunRefusesTheActivation` |
 | `tls: auto`: a leaf verifies for the advertised hosts and nothing else; the leader replaces it with days to spare, every member adopts the replacement, and a TLS connection open across the swap keeps working | `pkg/hubca: TestTheLeafVerifiesForItsNamesOnly`, `TestRenewalOverlapsAndAMemberPicksItUp`, `TestAHandshakeAcrossARenewal` |
 | `tls: auto`: a sandbox's git trusts the hub CA for the proxy's URL only — an image carrying no CA clones and pushes through the proxy, and a second https server with a leaf from the same CA is refused — in a container and on a device through a real agent (and in a Pod, `tests/kube` C1) | `pkg/executor/container: TestContainerGitTrustsTheHubCAForTheProxyOnly`, `pkg/executor/remote: TestLoopbackDeviceTrustsTheHubCAForTheProxyOnly`, `pkg/executor/localprocess: TestHostProcessTrustsTheHubCAForTheProxyOnly` |
 | The CA bundle a dispatch carries admits CA certificates and nothing else, so the CA's private key cannot reach a sandbox or an agent through it | `pkg/executor: TestGitCAValidate` |
@@ -4225,7 +4245,7 @@ end-to-end row runs the built binary with a stub harness that calls it through
 | `max_tokens` is clamped, and an extended-thinking budget is held below it rather than relayed for the API to refuse | `pkg/claudeproxy: TestRunRelay_ThinkingBudgetFollowsAClampedMaxTokens` |
 | The hub's own `anthropic.api_key` is spent only for a project or executor an administrator listed | `pkg/config: TestModelRelayHubCredentialAllowedIsExplicit` |
 | Relay tokens carry a prefix of their own, which a CI relay does not accept, and which every credential scanner recognises | `pkg/claudeproxy: TestRunRelay_PrefixesKeepRelaysApart`; `pkg/redact: TestEveryScannerCoversEveryCredential` |
-| The harness's Node is handed a file holding the hub's CA and nothing else — in a container, on the host, in a Pod and on a device — and an agent too old to place it is never sent a relayed run | `pkg/executor: TestGitCAForNodeHoldsTheHubCAAlone`; `pkg/executor/container: TestStageGitCAHandsTheBundleToNodeOnlyWhenAsked`; `pkg/executor/localprocess: TestHostProcessHandsTheHubCAToNodeOnlyWhenAsked`; `pkg/executor/kubernetes: TestBuildPod_HubCAForNodeReachesTheHarness`; `pkg/executor/remote: TestAnAgentBeforeNodeCAIsRefusedARelayedRun`, `TestACurrentAgentIsSentTheCAForNode` |
+| The harness's Node is handed a file holding the hub's CAs and nothing else — one, or two during a rotation — in a container, on the host, in a Pod and on a device — and an agent too old to place it is never sent a relayed run | `pkg/executor: TestGitCAForNodeHoldsOnlyTheHubCAs`; `pkg/executor/container: TestStageGitCAHandsTheBundleToNodeOnlyWhenAsked`; `pkg/executor/localprocess: TestHostProcessHandsTheHubCAToNodeOnlyWhenAsked`; `pkg/executor/kubernetes: TestBuildPod_HubCAForNodeReachesTheHarness`; `pkg/executor/remote: TestAnAgentBeforeNodeCAIsRefusedARelayedRun`, `TestACurrentAgentIsSentTheCAForNode` |
 | On the git proxy's listener the relay answers its own prefix ahead of git, and git everything else | `pkg/gitproxy: TestRoutesServeTheirPrefixAheadOfGit` |
 | cloop's own `anthropic` provider is pointed at the relay as well, with the session token as its key | `pkg/ui: TestModelRelayEnvForTheAnthropicProvider` |
 | Live, opt-in: real calls relayed to the real API with a real credential — the sandbox's spec holds no credential, a plain and a streamed call are answered, the payer is charged what the API reported, a model outside the allowlist is refused before the API | `pkg/ui: TestLiveModelRelay` |
@@ -4694,15 +4714,18 @@ is bounded by the lease and the budget rather than by a credential's own life;
 keep the git proxy's listener, which the relay shares by default, off networks
 the sandbox does not need.
 
-**Node trusts the hub's CA for every host.** With the relay on the git proxy's
-listener under `tls: auto`, the harness is handed the hub's CA through
-`NODE_EXTRA_CA_CERTS`, and Node adds it to its trust for every TLS connection
-the process makes — not for the relay's URL alone, as git's per-URL setting is
-scoped. The file holds the hub's CA and nothing else
-(`TestGitCAForNodeHoldsTheHubCAAlone`), and the CA's key is sealed on the hub
-and never leaves it, so the trust is worth something only to whoever holds the
-hub's sealing key; but an attacker with that key could present a certificate for
-any host to a relayed harness. `listener: dashboard` with a certificate the
+**Node trusts the hub's CA for every host — until the CA is rotated.** With
+the relay on the git proxy's listener under `tls: auto`, the harness is handed
+the hub's CAs through `NODE_EXTRA_CA_CERTS`, and Node adds them to its trust for
+every TLS connection the process makes — not for the relay's URL alone, as
+git's per-URL setting is scoped. The file holds the hub's CAs and nothing else
+(`TestGitCAForNodeHoldsOnlyTheHubCAs`), and their keys are sealed on the hub. A
+CA a rotation mints is name-constrained to the monitors' names, so Node refuses
+what it signs for any other host (`TestAStagedCAIsNameConstrained`); but the CA
+a control plane mints at its first start carries no constraints, and until its
+first rotation an attacker holding the hub's sealing key could present a
+certificate for any host to a relayed harness — as during a rotation from it,
+whose bundle still holds it. `listener: dashboard` with a certificate the
 sandbox already trusts adds nothing to its trust.
 
 **A revocation cannot reach an offline agent.** It is queued and replayed on
@@ -4790,11 +4813,22 @@ what they buy and what they leave exactly where it was — including that
 (`TestIsVirtualizedRuntime`) and are therefore a claim cloop trusts rather than
 one it verifies.
 
-**Rotation is partly manual.** See [key rotation](../operations/runbook.md#key-rotation)
-for what rotates automatically and what does not: the certificates the hub
-issues its git proxy and Kubernetes monitor renew themselves
-(`TestRenewalOverlapsAndAMemberPicksItUp`), and the CA they chain to is minted
-once and never replaced (`TestTheCAIsMintedOnceAndAdoptedAfter`).
+**The hub CA is replaced only when an operator replaces it, and a backup
+outlives the replacement.** The certificates the hub issues its git proxy and
+Kubernetes monitor renew themselves (`TestRenewalOverlapsAndAMemberPicksItUp`);
+the CA they chain to is never replaced by the hub on its own — opening it adopts
+the one stored (`TestOpeningTheCAAdoptsTheStoredOne`) — so a key that leaked
+without anybody noticing stays trusted until `cloop hub ca rotate` replaces it
+([Rotating the hub CA](../operations/runbook.md#rotating-the-hub-ca)). A run
+dispatched before a stage keeps trusting only the old CA, so an orderly
+activation waits for it and a forced or emergency one breaks it
+(`TestAnActivationWaitsForRunsDispatchedBeforeTheStage`). Retirement destroys
+the old CA's sealed key in the live database file
+(`TestTheRetiredCAsKeyIsDestroyedInTheDatabaseFile`); a backup taken before it
+still holds the key, and with the root key — or the KMS identity — that opened
+it then, still opens it. A device agent before protocol v25 is handed one CA for
+Node, so its relayed runs hold an activation back like older runs, and a hub
+member on a build before rotation blocks one outright.
 
 ---
 

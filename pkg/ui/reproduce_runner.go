@@ -259,6 +259,7 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	}); err != nil {
 		return nil, err
 	}
+	spec = labelHubCATrust(spec, ex)
 	// A reproduction runs under the same ceilings as the run it reproduces.
 	// Exempting it would make the verdict meaningless in the one direction that
 	// matters: a commit that only builds in more memory than its project is

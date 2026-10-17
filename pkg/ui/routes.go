@@ -1398,5 +1398,6 @@ func (s *Server) routeTable() []routeSpec {
 	table = append(table, s.reviewGateRoutes()...)
 	// The hub doctor's checks, run by the hub on itself (Task 20434).
 	table = append(table, s.hubHealthRoutes()...)
+	table = append(table, s.hubCARoutes()...)
 	return append(table, s.iconRoutes()...)
 }

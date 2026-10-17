@@ -1449,7 +1449,10 @@ so, and the project's Claude credential card says *not relayed* and why. So
 does a run on a device whose agent predates protocol v23, when the relay needs
 the harness's Node to trust the hub's CA (the `git_proxy` listener under `tls:
 auto`): that agent cannot hand it over, so the hub journals it and delivers as
-before.
+before. While the hub's CA is being [rotated](../operations/runbook.md#rotating-the-hub-ca),
+an agent before protocol v25 is handed the active CA alone for Node — it cannot
+take two — so its relayed run trusts only that one and holds an activation back
+like a run dispatched before the stage.
 
 **It fails closed.** A relay that should serve a run and cannot — not running,
 its listener absent, its session not minted — refuses the dispatch, naming the

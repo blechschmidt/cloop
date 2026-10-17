@@ -1424,6 +1424,44 @@ These subcommands write to the state database directly rather than through the
 HTTP API, so they require filesystem access to it — the same root-shell caveat
 as `cloop hub token`.
 
+### `cloop hub ca`
+
+The hub's own certificate authority — the one its git proxy's and Kubernetes
+monitor's certificates come from under `tls: auto` — replaced online, in steps
+(Task 20438). The full procedure, the emergency path and what moving an advertise
+URL costs are in the [runbook](../operations/runbook.md#rotating-the-hub-ca);
+Settings → Hub health takes the same steps from the dashboard.
+
+```bash
+cloop hub ca rotate --status                        # where it stands (the default): CAs, members, runs a step waits for
+cloop hub ca rotate --stage                         # mint a new CA; every new sandbox trusts both
+cloop hub ca rotate --stage --name hub.example.com  # …permitting a name beside those the monitors are reached at
+cloop hub ca rotate --activate                      # certificates from the new CA, once no run dispatched before the stage is running
+cloop hub ca rotate --activate --force --yes        # …now, breaking those runs, named
+cloop hub ca rotate --retire-previous --yes         # drop the old CA from every bundle and destroy its key
+cloop hub ca rotate --abort --yes                   # destroy a staged CA that was never activated
+cloop hub ca rotate --now --yes                     # emergency: replace every CA at once, end the old runs' proxy sessions
+```
+
+| Flag | Applies to | Default | Description |
+|------|-----------|---------|-------------|
+| `--stage`, `--activate`, `--retire-previous`, `--status`, `--now`, `--abort` | — | `--status` | The step; exactly one |
+| `--force` | `--activate` | `false` | Activate although runs dispatched before the stage are still running; they stop verifying the monitors and are named on the rotation |
+| `--yes` | `--retire-previous`, `--now`, `--abort`, `--activate --force` | `false` | Confirm a step that destroys a key or breaks runs |
+| `--name` | `--stage`, `--now` | — | A name the new CA's X.509 name constraints permit, beside every name a certificate was issued for and the configured advertise URLs (repeatable) |
+| `--no-name-constraints` | `--stage`, `--now` | `false` | Mint the new CA without name constraints |
+| `--reason` | `--abort` | — | Why, for the audit trail |
+| `--wait` | `--activate`, `--now` | `2m` | How long to wait for every hub member to serve certificates from the new CA (`0`: do not wait) |
+| `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
+| `--port` | all | `8080` | The hub whose per-instance overlay to merge over `config.yaml` when reading `secrets.kms` and the monitors' advertise URLs |
+| `--json` | all | `false` | Machine-readable output |
+
+`--activate` is refused while a run dispatched before the stage is still
+running, and — whatever the flags — while a live hub member has not adopted the
+stage or runs a build that predates rotation. `--retire-previous` is refused
+until every member serves certificates from the new CA. Like `cloop hub key`, it
+writes the state database directly and tells every member on the cluster bus.
+
 #### `cloop hub key escrow`
 
 Every key-encryption key derives from `CLOOP_SECRET_KEY` — unless a KMS holds it

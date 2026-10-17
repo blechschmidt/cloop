@@ -431,6 +431,9 @@ func (s *Server) startClusterBus() {
 	n.Subscribe(busTopicEdit, s.onBusEdit)
 	n.Subscribe(busTopicInvalidate, s.onBusInvalidate)
 	n.Subscribe(busTopicOffboard, s.onBusOffboard)
+	// Another process took a hub CA rotation step (Task 20438): re-read the
+	// CAs now rather than at the next minute's tick.
+	n.Subscribe(busTopicHubCA, onBusHubCA)
 	n.OnBusGap(s.onBusGap)
 	n.OnMembership(s.onMembershipChange)
 }

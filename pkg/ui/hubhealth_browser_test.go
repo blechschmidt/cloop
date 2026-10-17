@@ -32,6 +32,7 @@ type hubHealthBrowserView struct {
 	SectionTop   *int     `json:"section_top"`
 	Viewport     int      `json:"viewport"`
 	Groups       []string `json:"groups"`
+	CA           string   `json:"ca"`
 	Findings     []string `json:"findings"`
 	Links        []string `json:"links"`
 	Injected     int      `json:"injected"`
@@ -169,6 +170,12 @@ ui:
 	if len(a.Groups) != 3 || !strings.HasPrefix(a.Groups[0], "Failing (") || !strings.HasPrefix(a.Groups[1], "Warnings (") ||
 		!strings.HasPrefix(a.Groups[2], "Passing (") {
 		t.Errorf("the findings are grouped as %q, want failing, warnings, passing", a.Groups)
+	}
+	// Below them, the hub's CA (Task 20438): this hub never ran a monitor under
+	// tls: auto, so there is none, and no step to offer.
+	if !strings.Contains(a.CA, "Certificate authority") || !strings.Contains(a.CA, "no CA") ||
+		strings.Contains(a.CA, "Stage a new CA") {
+		t.Errorf("the hub CA section reads %q", a.CA)
 	}
 	if !strings.HasSuffix(got.AdminBefore.BadgeText, " "+strings.TrimSuffix(strings.TrimPrefix(a.Groups[0], "Failing ("), ")")) {
 		t.Errorf("the indicator says %q while the panel lists %q", got.AdminBefore.BadgeText, a.Groups[0])

@@ -8,6 +8,17 @@ package statedb
 // sees a private key in the clear: the key columns hold an envelope sealed
 // under the hub's KEK registry, and a row that would store an empty one is
 // refused so a caller that forgot to seal fails instead of writing nothing.
+//
+// Since Task 20438 the CA is replaced online, through three CA rows: 'ca', the
+// one leaves are issued from; 'ca:next', a CA staged to replace it; and
+// 'ca:previous', the one it replaced, still trusted until it is retired (see
+// migrations/0081_hub_ca_rotation.sql and hub_ca_rotation.go). Retiring a CA
+// deletes its row, and its sealed key is meant to be gone from the file with
+// it. A delete alone does not do that — SQLite leaves the record in the page's
+// free space — and neither does any earlier write: replacing a row, or
+// rewrapping its key under a new KEK, frees an image of it with the envelope
+// in it. So, as for the KEK registry (Task 20433), every write to hub_tls runs
+// on a secure-delete connection (shreddingTx), which zeroes what it frees.
 
 import (
 	"database/sql"
@@ -106,7 +117,7 @@ func (d *DB) InsertHubTLS(row HubTLSRow) (inserted bool, err error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	res, err := d.conn.Exec(`INSERT INTO hub_tls(`+hubTLSColumns+`)
+	res, err := d.secureExec(`INSERT INTO hub_tls(`+hubTLSColumns+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING`,
 		row.ID, row.Kind, row.Serial, row.Issuer, row.CertPEM, row.KeyID, row.WrappedDEK, row.KeySealed,
@@ -141,7 +152,7 @@ func (d *DB) ReplaceHubTLS(next HubTLSRow, expectSerial string) (bool, error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	res, err := d.conn.Exec(`UPDATE hub_tls SET kind = ?, serial = ?, issuer = ?, cert_pem = ?,
+	res, err := d.secureExec(`UPDATE hub_tls SET kind = ?, serial = ?, issuer = ?, cert_pem = ?,
 		key_id = ?, wrapped_dek = ?, key_sealed = ?, sans = ?, not_before = ?, not_after = ?,
 		issued_at = ?, issued_by = ?
 		WHERE id = ? AND serial = ?`,
@@ -181,11 +192,52 @@ func (d *DB) ListHubTLSNotUnderKey(keyID string, limit int) ([]HubTLSRow, error)
 // ReplaceHubTLSSealed swaps a row's key envelope under compare-and-swap on the
 // key id and the exact ciphertext, for the reason ReplaceBrokerSecretSealed
 // gives: a leaf renewed while a rotation was reading it must not have the
-// previous key restored under a fresh wrap.
+// previous key restored under a fresh wrap. On a secure-delete connection,
+// because the image of the row the rewrap frees carries the old envelope.
 func (d *DB) ReplaceHubTLSSealed(id string, expect, next SealedRow) (bool, error) {
-	return d.replaceSealed(
-		`UPDATE hub_tls SET key_id = ?, wrapped_dek = ?, key_sealed = ?
-		 WHERE id = ? AND key_id = ? AND key_sealed = ?`, id, expect, next, "hub certificate")
+	if id == "" {
+		return false, fmt.Errorf("statedb: hub certificate id is empty")
+	}
+	if len(next.Ciphertext) == 0 || len(expect.Ciphertext) == 0 {
+		// An empty expectation binds as NULL and would match nothing: a swap
+		// that silently cannot happen reads as a rotation that converged.
+		return false, fmt.Errorf("statedb: refusing to rewrap hub certificate %s against or onto an empty ciphertext", id)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.secureExec(`UPDATE hub_tls SET key_id = ?, wrapped_dek = ?, key_sealed = ?
+		 WHERE id = ? AND key_id = ? AND key_sealed = ?`,
+		next.KeyID, next.WrappedDEK, next.Ciphertext, id, expect.KeyID, expect.Ciphertext)
+	if err != nil {
+		return false, fmt.Errorf("statedb: rewrap hub certificate %s: %w", id, classifyDriverErr(err))
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("statedb: rewrap hub certificate %s: %w", id, classifyDriverErr(err))
+	}
+	return n > 0, nil
+}
+
+// DeleteHubTLS removes the row by id if, and only if, its serial is still
+// serial, and reports whether it did — on a secure-delete connection, so the
+// row's sealed key is zeroed in the page it leaves rather than left in its
+// free space. pkg/hubca deletes a CA it retires or abandons; nothing deletes a
+// leaf, which is only ever replaced.
+func (d *DB) DeleteHubTLS(id, serial string) (bool, error) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(serial) == "" {
+		return false, errors.New("statedb: deleting a hub certificate needs its id and serial")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.secureExec(`DELETE FROM hub_tls WHERE id = ? AND serial = ?`, id, serial)
+	if err != nil {
+		return false, fmt.Errorf("statedb: delete hub certificate %s: %w", id, classifyDriverErr(err))
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("statedb: delete hub certificate %s: %w", id, classifyDriverErr(err))
+	}
+	return n > 0, nil
 }
 
 // hubTLSQuerier is what the readers here read through.

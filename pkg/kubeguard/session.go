@@ -187,6 +187,12 @@ type MintRequest struct {
 	// RunID names the run the session is for, recorded with it.
 	RunID string
 
+	// CABundle, when set, is the PEM this session's kubeconfig carries as
+	// certificate-authority-data instead of the registry's: the hub's CAs as
+	// the dispatch was told them, which a rotation of the hub's CA changes
+	// under a running monitor (Task 20438).
+	CABundle []byte
+
 	// Durable records the session in the registry's Store (Task 20383), so the
 	// hub process that adopts its run after this one stops can restore it under
 	// the same id and token. The lease path sets it; see durable.go.
@@ -339,7 +345,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	}
 	s.upstream.Store(rc)
 
-	doc, err := r.renderKubeconfig(s, bearerToken(id, secret), rc.Namespace)
+	doc, err := r.renderKubeconfig(s, bearerToken(id, secret), rc.Namespace, req.CABundle)
 	if err != nil {
 		return nil, err
 	}

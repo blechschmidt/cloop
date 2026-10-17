@@ -205,7 +205,10 @@ const READ = `(() => {
     in_settings: !!sec && !!sec.closest('#tab-settings'),
     section_top: r ? Math.round(r.top) : null,
     viewport: window.innerHeight,
-    groups: Array.from(body ? body.querySelectorAll('h4, details > summary') : []).map(h => h.textContent.trim()),
+    groups: Array.from(body ? body.querySelectorAll('h4, details > summary') : [])
+      .filter(h => !h.closest('#hubCASection')).map(h => h.textContent.trim()),
+    // The hub CA's section below the findings (Task 20438).
+    ca: (document.getElementById('hubCASection') || {}).textContent || '',
     findings: Array.from(body ? body.querySelectorAll('.hh-finding') : []).map(f => f.innerText),
     links: Array.from(body ? body.querySelectorAll('a') : []).map(a => a.getAttribute('href')),
     injected: body ? body.querySelectorAll('img, svg, script, iframe, object').length : -1,

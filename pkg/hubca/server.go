@@ -14,19 +14,30 @@ package hubca
 // leader's rule, so a hub that was down for a while comes back with a leaf
 // that has its whole life ahead of it.
 //
+// The same split holds when a rotation activates a new CA (Task 20438). The
+// leader reissues the leaf from the new CA as soon as it sees the activation;
+// a member keeps serving the old CA's leaf meanwhile — every sandbox
+// dispatched since the stage trusts both — and replaces it itself only once
+// the activation is ActivationGrace old and the leader still has not.
+//
 // A replacement never interrupts anything. The listener asks for its
 // certificate per handshake (GetCertificate), so a connection already open —
 // a push half-way through its pack — keeps the leaf it was handed, and the
-// next connection gets the new one, which verifies against the same CA.
+// next connection gets the new one, which verifies against the same CA or,
+// across an activation, against the other CA the sandbox trusts.
 //
 // # Names
 //
 // A replacement carries the names of the leaf it replaces as well as this
 // member's own, up to MaxSANs, so two members whose sandboxes reach the hub by
 // different names cannot take turns issuing a leaf that leaves the other's out.
+// A CA with name constraints signs only the names they permit; a name they
+// refuse is left out of the leaf and reported (Refused), and only a rotation
+// to a CA that permits it can serve it.
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"strings"
@@ -37,11 +48,29 @@ import (
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
+// ActivationGrace is how long after an activation a member that is not the
+// leader waits for the leader to reissue a leaf from the new CA before it
+// does so itself.
+const ActivationGrace = 3 * time.Minute
+
+// Reasons a leaf is issued, on Issued.Reason and in the hub_ca.leaf_issued row.
+const (
+	ReasonFirst      = "first"      // no leaf was stored
+	ReasonRenewal    = "renewal"    // the stored one was near the end of its life
+	ReasonNames      = "names"      // it lacked a name sandboxes reach the monitor at
+	ReasonActivation = "activation" // it came from a CA that no longer signs
+	ReasonUnreadable = "unreadable" // it could not be read or did not verify
+)
+
 // ServerConfig describes one monitor's certificate.
 type ServerConfig struct {
-	Monitor   Monitor
-	Store     *Store
-	Sealer    Sealer
+	Monitor Monitor
+	Store   *Store
+	Sealer  Sealer
+	// Trust is the process's view of the control plane's CAs, which a
+	// rotation changes under a running server. Authority instead pins one CA
+	// for the server's life: a caller without a store.
+	Trust     *Trust
 	Authority *Authority
 	// Want are the names the monitor's sandboxes reach it at: SANsFor.
 	Want    []string
@@ -52,9 +81,13 @@ type ServerConfig struct {
 
 // Server is one monitor's certificate, as its listener serves it.
 type Server struct {
-	cfg ServerConfig
-	mu  sync.Mutex
-	cur atomic.Pointer[Leaf]
+	cfg   ServerConfig
+	trust *Trust
+	mu    sync.Mutex
+	cur   atomic.Pointer[Leaf]
+	// refused is the last list of wanted names the active CA may not vouch
+	// for, reported once per change.
+	refused atomic.Pointer[[]string]
 }
 
 // NewServer settles the monitor's leaf — the stored one, or a new one when it
@@ -64,7 +97,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if !cfg.Monitor.Valid() {
 		return nil, fmt.Errorf("hubca: %q is not a monitor this hub issues for", cfg.Monitor)
 	}
-	if cfg.Store == nil || cfg.Sealer == nil || cfg.Authority == nil {
+	if cfg.Store == nil || cfg.Sealer == nil || (cfg.Trust == nil && cfg.Authority == nil) {
 		return nil, errors.New("hubca: a store, a sealer and the hub CA are required")
 	}
 	want, err := NormalizeSANs(cfg.Want)
@@ -75,8 +108,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("hubca: the %s has no name a sandbox reaches it at", cfg.Monitor.Label())
 	}
 	cfg.Want = want
-	s := &Server{cfg: cfg}
-	if _, err := s.ensure(RenewWithin); err != nil {
+	s := &Server{cfg: cfg, trust: cfg.Trust}
+	if s.trust == nil {
+		s.trust = StaticTrust(cfg.Authority)
+	}
+	if _, err := s.ensure(RenewWithin, true); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -103,56 +139,120 @@ func (s *Server) Monitor() Monitor { return s.cfg.Monitor }
 // Want returns the names this member asked for.
 func (s *Server) Want() []string { return append([]string(nil), s.cfg.Want...) }
 
+// Refused returns the names this member wants that the active CA's name
+// constraints do not permit: names its leaf does not carry.
+func (s *Server) Refused() []string {
+	if p := s.refused.Load(); p != nil {
+		return append([]string(nil), (*p)...)
+	}
+	return nil
+}
+
 // Current returns the leaf being served.
 func (s *Server) Current() *Leaf { return s.cur.Load() }
 
-// CAPEM returns the CA certificate sandboxes are told to trust. Public.
-func (s *Server) CAPEM() []byte { return s.cfg.Authority.CertPEM() }
+// Trust is the view of the CAs this server issues and judges leaves by.
+func (s *Server) Trust() *Trust { return s.trust }
 
-// Renew replaces the leaf when less than RenewWithin of its life remains. It
-// is the cluster leader's duty, and reports whether a leaf was issued.
-func (s *Server) Renew() (bool, error) { return s.ensure(RenewWithin) }
+// CAPEM returns what sandboxes are told to trust: every CA the control plane
+// currently trusts, the active one first. Public.
+func (s *Server) CAPEM() []byte { return s.trust.Bundle() }
+
+// Renew replaces the leaf when less than RenewWithin of its life remains, or
+// when it was not issued by the active CA. It is the cluster leader's duty,
+// and reports whether a leaf was issued.
+func (s *Server) Renew() (bool, error) { return s.ensure(RenewWithin, true) }
 
 // Refresh starts serving the leaf the store holds now, replacing it only when
-// it is within EmergencyWithin of expiry or misses a name this member needs.
-// Every member runs it.
-func (s *Server) Refresh() (bool, error) { return s.ensure(EmergencyWithin) }
+// it is within EmergencyWithin of expiry, misses a name this member needs, or
+// was issued by a CA that no longer signs and the leader has not replaced it
+// within ActivationGrace. Every member runs it.
+func (s *Server) Refresh() (bool, error) { return s.ensure(EmergencyWithin, false) }
 
 // settleAttempts bounds how many times one ensure re-reads after another
 // process replaced the leaf first.
 const settleAttempts = 3
 
-func (s *Server) ensure(margin time.Duration) (bool, error) {
+func (s *Server) ensure(margin time.Duration, leader bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ca := s.cfg.Authority
+	// The CAs first: a leaf judged against a CA another process has since
+	// replaced would be reissued from the replaced one.
+	_, _ = s.trust.Refresh()
 	for attempt := 0; attempt < settleAttempts; attempt++ {
 		now := s.cfg.Options.now()
+		st := s.trust.State()
+		ca := s.trust.Authority()
+		if ca == nil {
+			return false, errors.New("hubca: no hub CA is open to issue from")
+		}
+		want, refused := Permitted(ca.cert, s.cfg.Want)
+		s.noteRefused(refused)
+		if len(want) == 0 {
+			return false, fmt.Errorf("hubca: the hub CA's name constraints permit none of the names the %s is "+
+				"reached at (%s) — rotate the CA with `cloop hub ca rotate --stage --name %s`",
+				s.cfg.Monitor.Label(), strings.Join(s.cfg.Want, ", "), s.cfg.Want[0])
+		}
 		stored, serial, err := loadLeaf(s.cfg.Store, s.cfg.Sealer, s.cfg.Monitor)
 		if err != nil && serial == "" {
 			return false, err
 		}
-		if err == nil && stored.usable(ca, s.cfg.Want, now, margin) {
-			s.adopt(stored)
-			return false, nil
+		reason := ReasonFirst
+		switch {
+		case err != nil:
+			reason = ReasonUnreadable
+		case stored != nil:
+			issuer := st.ByIssuer(stored.Cert)
+			fromActive := issuer != nil && issuer.Serial == ca.Serial()
+			switch {
+			case issuer == nil && stored.usable(ca, nil, now, 0):
+				// Signed by the CA this process has open but not by any CA the
+				// store lists: a static trust (tests, a caller without a
+				// store) or a view a moment behind. Judged as the active CA's.
+				fromActive = true
+			case issuer == nil:
+				// Signed by a CA no longer trusted at all: a retired one.
+				reason = ReasonActivation
+			}
+			acceptable := fromActive
+			if !fromActive && issuer != nil && !leader && !s.activationOverdue(st, now) {
+				// The previous CA's leaf, while the leader has yet to replace
+				// it: every sandbox that could reach this member trusts both.
+				acceptable = true
+			}
+			if acceptable && stored.usableUnder(issuer, ca, want, now, margin) {
+				s.adopt(stored)
+				return false, nil
+			}
+			switch {
+			case reason == ReasonUnreadable:
+			case !fromActive:
+				reason = ReasonActivation
+			case !Covers(stored.Cert, want):
+				reason = ReasonNames
+			default:
+				reason = ReasonRenewal
+			}
 		}
 		var have []string
 		if err == nil && stored != nil && stored.usable(ca, nil, now, 0) {
-			// Still valid under this CA: keep the names it serves.
-			have = stored.SANs()
+			// Still valid under the active CA: keep the names it serves, as
+			// far as the CA permits them.
+			have, _ = Permitted(ca.cert, stored.SANs())
 		}
-		leaf, ok, ierr := issueLeaf(s.cfg.Store, s.cfg.Sealer, ca, s.cfg.Monitor, union(have, s.cfg.Want), serial, s.cfg.Options)
+		leaf, ok, ierr := issueLeaf(s.cfg.Store, s.cfg.Sealer, ca, s.cfg.Monitor, union(have, want), serial, reason, s.cfg.Options)
 		if ierr != nil {
 			return false, ierr
 		}
 		if ok {
 			s.adopt(leaf)
-			s.logf("hubca: issued the %s's certificate %s for %s, valid until %s",
-				s.cfg.Monitor.Label(), shortSerial(leaf.Serial), strings.Join(leaf.SANs(), ", "),
-				leaf.Cert.NotAfter.UTC().Format(time.RFC3339))
+			s.logf("hubca: issued the %s's certificate %s from the hub CA %s for %s, valid until %s (%s)",
+				s.cfg.Monitor.Label(), shortSerial(leaf.Serial), shortSerial(ca.Serial()),
+				strings.Join(leaf.SANs(), ", "), leaf.Cert.NotAfter.UTC().Format(time.RFC3339), reason)
 			return true, nil
 		}
 		// Another process stored one first; read it back and judge it.
+		_, _ = s.trust.Refresh()
 	}
 	// Serving what we have is better than serving nothing; the next refresh
 	// tries again.
@@ -161,6 +261,32 @@ func (s *Server) ensure(margin time.Duration) (bool, error) {
 	}
 	return false, fmt.Errorf("hubca: could not settle the %s's certificate: other hub processes kept replacing it",
 		s.cfg.Monitor.Label())
+}
+
+// activationOverdue reports whether the activation the state records is
+// older than ActivationGrace: the leader should have reissued by now.
+func (s *Server) activationOverdue(st State, now time.Time) bool {
+	r := st.Rotation
+	if r == nil || r.ActivatedAt.IsZero() {
+		// No record of when: an activation seen without one is old enough.
+		return true
+	}
+	return now.Sub(r.ActivatedAt) > ActivationGrace
+}
+
+func (s *Server) noteRefused(refused []string) {
+	prev := s.refused.Load()
+	if prev != nil && strings.Join(*prev, ",") == strings.Join(refused, ",") {
+		return
+	}
+	cp := append([]string(nil), refused...)
+	s.refused.Store(&cp)
+	if len(refused) > 0 {
+		s.logf("hubca: the hub CA's name constraints do not permit %s, which the %s is reached at; its "+
+			"certificate leaves them out, and sandboxes reaching it by them will refuse it — rotate the CA "+
+			"with `cloop hub ca rotate --stage --name %s`", strings.Join(refused, ", "), s.cfg.Monitor.Label(),
+			refused[0])
+	}
 }
 
 func (s *Server) adopt(l *Leaf) {
@@ -181,4 +307,23 @@ func shortSerial(serial string) string {
 		return serial[:12]
 	}
 	return serial
+}
+
+// usableUnder is usable judged against the CA that signed the leaf, issuer —
+// the active one or, until the leader replaces the leaf, the previous one.
+func (l *Leaf) usableUnder(issuer *CAInfo, active *Authority, want []string, now time.Time, margin time.Duration) bool {
+	if issuer == nil || issuer.Serial == active.Serial() {
+		return l.usable(active, want, now, margin)
+	}
+	if l == nil || l.Cert == nil {
+		return false
+	}
+	if now.Before(l.Cert.NotBefore) || !now.Add(margin).Before(l.Cert.NotAfter) || !Covers(l.Cert, want) {
+		return false
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(issuer.Cert)
+	_, err := l.Cert.Verify(x509.VerifyOptions{Roots: pool, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
+	return err == nil
 }
