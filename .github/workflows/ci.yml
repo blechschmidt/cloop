@@ -2524,6 +2524,9 @@ jobs:
           CLOOP_K8S_GC_E2E: "1"
           # Tagged locally and loaded into kind, so IfNotPresent never pulls.
           CLOOP_K8S_ENV_E2E_IMAGE: cloop-e2e-shell:local
+          # The isolation probe's (Task 20439): the hub image built from this
+          # tree, already loaded into kind for the chart, has a cloop with it.
+          CLOOP_K8S_PROBE_E2E_IMAGE: cloop-hub:ci
         run: |
           set -euo pipefail
           docker pull -q alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
@@ -2533,7 +2536,8 @@ jobs:
           for t in TestOwnerReference_RealClusterGarbageCollection \
                    TestLeaseEnv_RealClusterResolvesTheEnvironmentFromTheSecret \
                    TestLeaseEnv_RealClusterNamesTheMissingSecret \
-                   TestStart_RealClusterDeliversTheEnvironmentAndFailsAStrandedHarness; do
+                   TestStart_RealClusterDeliversTheEnvironmentAndFailsAStrandedHarness \
+                   TestIsolationProbe_RealClusterRuntimeClassHandledByRunc; do
             grep -qE "^--- PASS: $t \(" /tmp/realcluster.log || {
               echo "::error::go test succeeded but $t did not pass — it was skipped"
               exit 1
