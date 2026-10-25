@@ -186,6 +186,9 @@ var deferredScripts = []struct{ token, path string }{
 	// when an administrator's Settings opens or the header's indicator is
 	// pressed.
 	{"hubhealth.js", "assets/js/deferred/hubhealth.js"},
+	// A pending task's Split dialog (Task 20154), fetched on the first Split:
+	// deferred by Task 20441 to pay for Decompose beside Add Task.
+	{"split.js", "assets/js/deferred/split.js"},
 }
 
 // pageScripts are scripts a page loads with a script element of its own

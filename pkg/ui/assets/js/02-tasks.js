@@ -281,7 +281,7 @@ function renderTasks(s) {
       '<div class="task-actions">'+
         statusActions+
         (cls !== 'done' && cls !== 'in_progress'
-          ? '<button class="act split"  title="AI-decompose into sub-tasks" data-action="openDecomposeModal" data-arg="'+tid+'">Split</button>' : '')+
+          ? '<button class="act split"  title="AI-split into sub-tasks" data-action="splitTask" data-arg="'+tid+'">Split</button>' : '')+
         '<button class="act edit"   title="Edit"   data-action="openEditModal" data-arg="'+tid+'">Edit</button>'+
         '<button class="act remove" title="Remove" data-action="removeTask" data-arg="'+tid+'">Remove</button>'+
         priorityBadge(t.priority)+

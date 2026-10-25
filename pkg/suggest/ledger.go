@@ -22,12 +22,44 @@ import (
 //     step does not cut the chain.
 //   - A task added before one of its prerequisites gains the dependency when
 //     the prerequisite arrives, provided it has not started yet.
+//   - A plan given a Placement runs at the priority it names rather than at
+//     the tail, and each of its tasks also waits for the tasks it names.
 //
 // A Ledger is not safe for concurrent use.
 type Ledger struct {
 	plan  bool
 	deps  map[int][]int   // plan task → the earlier plan tasks it depends on
 	added map[int]taskRef // suggestion ID → the task it became
+
+	priority int       // > 0: every task of the plan takes it (Placement)
+	after    []taskRef // tasks every task of the plan waits for (Placement)
+}
+
+// Placement is where a plan's tasks join the run queue when the person who
+// asked for the plan has said so. Decompose on the Tasks tab (Task 20441)
+// plans one task typed with a priority and the tasks it waits for, and every
+// task of the plan inherits both: the work it splits up was to run at that
+// priority, and none of it could start before those tasks were finished. The
+// zero value is the default: the queue's tail, in plan order, each task
+// waiting only for the plan's own earlier ones.
+type Placement struct {
+	// Priority, when above 0, is the priority every task of the plan takes.
+	Priority int
+	// After are the tasks every task of the plan waits for, as they were when
+	// the plan was asked for. One deleted since — or whose ID now names a
+	// different task — is dropped rather than followed.
+	After []*pm.Task
+}
+
+// Place sets where the plan's tasks join the queue. It has no effect on
+// brainstormed ideas, which depend on nothing.
+func (l *Ledger) Place(p Placement) {
+	l.priority, l.after = max(p.Priority, 0), nil
+	for _, t := range p.After {
+		if t != nil {
+			l.after = append(l.after, taskRef{t.ID, t.Title, t.Description})
+		}
+	}
 }
 
 // taskRef identifies the task a suggestion became. A task ID is reused once
@@ -62,7 +94,8 @@ func NewLedger(r *Result) *Ledger {
 // Clone returns an independent copy. Apply a clone, and keep it only once
 // the plan it changed has been saved.
 func (l *Ledger) Clone() *Ledger {
-	c := &Ledger{plan: l.plan, deps: l.deps, added: make(map[int]taskRef, len(l.added))}
+	c := &Ledger{plan: l.plan, deps: l.deps, added: make(map[int]taskRef, len(l.added)),
+		priority: l.priority, after: l.after}
 	for k, v := range l.added {
 		c.added[k] = v
 	}
@@ -130,10 +163,24 @@ func (l *Ledger) Apply(plan *pm.Plan, picked []*Suggestion) []*pm.Task {
 		if l.plan {
 			// The queue's tail, not an effort guess: sizing a plan's tasks
 			// independently would let a small late step jump the large
-			// early step it builds on.
-			maxPri++
-			t.Priority = maxPri
+			// early step it builds on. One priority for all of them keeps
+			// that true too: equal priorities run in ID order, which is
+			// plan order.
+			if l.priority > 0 {
+				t.Priority = l.priority
+			} else {
+				maxPri++
+				t.Priority = maxPri
+			}
 			t.DependsOn = l.prereqs(s.ID, live)
+			for _, ref := range l.after {
+				// Never one of the plan's own tasks: deleting the highest task
+				// frees its ID for the next one handed out.
+				if dep, ok := byID[ref.id]; ok && ref.is(dep) && !l.made(ref.id) && !containsInt(t.DependsOn, ref.id) {
+					t.DependsOn = append(t.DependsOn, ref.id)
+				}
+			}
+			sort.Ints(t.DependsOn)
 		}
 		plan.Tasks = append(plan.Tasks, t)
 		byID[t.ID] = t
@@ -163,6 +210,16 @@ func (l *Ledger) Apply(plan *pm.Plan, picked []*Suggestion) []*pm.Task {
 		}
 	}
 	return out
+}
+
+// made reports whether the ledger created task id.
+func (l *Ledger) made(id int) bool {
+	for _, ref := range l.added {
+		if ref.id == id {
+			return true
+		}
+	}
+	return false
 }
 
 // prereqs returns the tasks plan step sid must wait for: the tasks its

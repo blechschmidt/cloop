@@ -846,7 +846,7 @@ const OPENERS = {
     ready: hasText('#dr-overlay', F.transcriptMarker),
   },
   'dc-overlay': {
-    open: async () => { await onTask('openDecomposeModal', F.pendingTaskID); },
+    open: async () => { await onTask('splitTask', F.pendingTaskID); },
     ready: visible('#dc-overlay button'),
   },
   'newfeat-overlay': {

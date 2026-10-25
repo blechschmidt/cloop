@@ -48,6 +48,24 @@ type suggestScenario struct {
 	All        suggestPanelView      `json:"all"`
 	Rendered   []int                 `json:"rendered"`
 	Error      string                `json:"error"`
+
+	// Decompose (Task 20441).
+	Closed           bool          `json:"closed"`
+	Opened           bool          `json:"opened"`
+	Status           string        `json:"status"`
+	FormBefore       []string      `json:"form_before"`
+	FormAfter        []string      `json:"form_after"`
+	Toggle           string        `json:"toggle"`
+	Posts            []suggestPost `json:"posts"`
+	GenerateDisabled bool          `json:"generate_disabled"`
+	AfterOnly        string        `json:"after_only"`
+
+	// The Split dialog, deferred by Task 20441.
+	SplitTitle string        `json:"split_title"`
+	SplitBody  string        `json:"split_body"`
+	Count      string        `json:"count"`
+	Button     string        `json:"button"`
+	SplitPosts []suggestPost `json:"split_posts"`
 }
 
 func runSuggestScenarios(t *testing.T) map[string]suggestScenario {
@@ -229,6 +247,116 @@ func TestDashboard_SuggestPanelPlansARequest(t *testing.T) {
 		var adds []suggestPost
 		if err := json.Unmarshal(l.Adds, &adds); err != nil || len(adds) != 0 {
 			t.Errorf("add all on the next project posted %v (%v)", adds, err)
+		}
+	})
+
+	t.Run("Decompose plans the task typed into Add Task", func(t *testing.T) {
+		d := got["decompose_plans_the_typed_task"]
+		const request = "Add OAuth login\n\nGitHub and Google.\nKeep sessions."
+		if !d.Closed || !d.Opened || d.Toggle != "Hide suggestions" {
+			t.Errorf("the panel was closed %v, then opened %v (toggle %q): the plan has to be on screen", d.Closed, d.Opened, d.Toggle)
+		}
+		if d.Input != request || d.Label != "Tasks in plan:" || d.Placeholder != "auto" {
+			t.Errorf("the panel's request is %q (%q, placeholder %q), want the title and details as a plan of any length",
+				d.Input, d.Label, d.Placeholder)
+		}
+		if d.Status != "Planning tasks with AI..." {
+			t.Errorf("status line %q", d.Status)
+		}
+		if len(d.Posts) != 1 {
+			t.Fatalf("posted %d generations, want 1: %v", len(d.Posts), d.Posts)
+		}
+		want := map[string]any{"count": 0.0, "input": request, "priority": 2.0, "depends_on": []any{1.0, 3.0}}
+		if !reflect.DeepEqual(d.Posts[0].Body, want) {
+			t.Errorf("posted %v, want %v", d.Posts[0].Body, want)
+		}
+		if !strings.Contains(d.Posts[0].URL, "project_idx=1") {
+			t.Errorf("posted to %q, not the project on screen", d.Posts[0].URL)
+		}
+		if !reflect.DeepEqual(d.FormBefore, []string{"  Add OAuth login ", "GitHub and Google.\nKeep sessions.", "2", "1, 3"}) {
+			t.Errorf("before the hub answered the form held %q; it must keep what was typed until then", d.FormBefore)
+		}
+		if !reflect.DeepEqual(d.FormAfter, []string{"", "", "", ""}) {
+			t.Errorf("after the hub took the job the form still holds %q", d.FormAfter)
+		}
+
+		a := got["decompose_a_title_alone"]
+		if len(a.Posts) != 1 || !reflect.DeepEqual(a.Posts[0].Body,
+			map[string]any{"count": 0.0, "input": "Add OAuth login", "priority": 0.0, "depends_on": []any{}}) {
+			t.Errorf("a title alone posted %v", a.Posts)
+		}
+	})
+
+	t.Run("Decompose needs a title", func(t *testing.T) {
+		n := got["decompose_needs_a_title"]
+		if len(n.Posts) != 0 || n.Toast != "Title is required" {
+			t.Errorf("with no title: %d generations posted, toast %q", len(n.Posts), n.Toast)
+		}
+		if !reflect.DeepEqual(n.FormAfter, []string{"   ", "only details", "", ""}) {
+			t.Errorf("the form became %q", n.FormAfter)
+		}
+	})
+
+	t.Run("a refused Decompose keeps what was typed", func(t *testing.T) {
+		r := got["decompose_refused_keeps_the_form"]
+		if !reflect.DeepEqual(r.FormAfter, []string{"Add OAuth login", "", "", "9"}) {
+			t.Errorf("after a refusal the form holds %q", r.FormAfter)
+		}
+		if r.Status != "Error: dependency task 9 does not exist" || !strings.Contains(r.Toast, "dependency task 9 does not exist") {
+			t.Errorf("the refusal reads %q / toast %q", r.Status, r.Toast)
+		}
+		if r.GenerateDisabled {
+			t.Error("Generate stayed disabled after a refused generation")
+		}
+	})
+
+	t.Run("Decompose waits for a running generation", func(t *testing.T) {
+		w := got["decompose_waits_for_a_running_generation"]
+		if len(w.Posts) != 0 || w.Toast != "Suggestions are still being generated" {
+			t.Errorf("while one ran: %d generations posted, toast %q", len(w.Posts), w.Toast)
+		}
+		if len(w.FormAfter) == 0 || w.FormAfter[0] != "Add OAuth login" {
+			t.Errorf("the form became %q", w.FormAfter)
+		}
+	})
+
+	t.Run("a placed plan says where its tasks go", func(t *testing.T) {
+		p := got["plan_says_where_its_tasks_go"]
+		if p.Summary != "OAuth login in four steps\nEach task runs at priority 2 and waits for #1, #3." {
+			t.Errorf("summary %q", p.Summary)
+		}
+		if p.AfterOnly != "OAuth login in four steps\nEach task waits for #5." {
+			t.Errorf("with dependencies alone the summary is %q", p.AfterOnly)
+		}
+	})
+
+	t.Run("the deferred Split dialog proposes and applies", func(t *testing.T) {
+		s := got["split_dialog_is_fetched_and_works"]
+		if s.SplitTitle != "Split Task #4" {
+			t.Errorf("title %q", s.SplitTitle)
+		}
+		if !strings.Contains(s.SplitBody, "First &lt;part&gt;") || strings.Contains(s.SplitBody, "First <part>") ||
+			!strings.Contains(s.SplitBody, `data-change="toggle"`) || !strings.Contains(s.SplitBody, "est: 30m") {
+			t.Errorf("the proposal rendered as %q", s.SplitBody)
+		}
+		if s.Count != "2/3 selected" || s.Button != "Add 2 sub-tasks" {
+			t.Errorf("after dropping one: %q, %q", s.Count, s.Button)
+		}
+		if len(s.SplitPosts) != 2 {
+			t.Fatalf("posted %d requests, want the proposal and the apply: %v", len(s.SplitPosts), s.SplitPosts)
+		}
+		if !strings.HasPrefix(s.SplitPosts[0].URL, "/api/tasks/4/decompose?") {
+			t.Errorf("the proposal went to %q", s.SplitPosts[0].URL)
+		}
+		wantApply := map[string]any{"subtasks": []any{
+			map[string]any{"title": "First <part>", "description": "d1", "role": "backend", "estimated_minutes": 30.0},
+			map[string]any{"title": "Third part", "description": "d3", "role": "", "estimated_minutes": 0.0},
+		}}
+		if !strings.HasPrefix(s.SplitPosts[1].URL, "/api/tasks/4/decompose/apply") || !reflect.DeepEqual(s.SplitPosts[1].Body, wantApply) {
+			t.Errorf("the apply posted %v to %q, want %v", s.SplitPosts[1].Body, s.SplitPosts[1].URL, wantApply)
+		}
+		if s.Toast != "Task #4 split into 2 sub-tasks" {
+			t.Errorf("toast %q", s.Toast)
 		}
 	})
 }

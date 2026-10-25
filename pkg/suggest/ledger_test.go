@@ -256,3 +256,104 @@ func TestLedger_CloneIsIndependent(t *testing.T) {
 		t.Error("the clone did not record what it applied")
 	}
 }
+
+// Decompose (Task 20441): the task typed with a priority and the tasks it
+// waits for became a plan, and every task of the plan inherits both. The
+// plan's own order and dependencies hold as before.
+func TestLedger_APlacementCarriesPriorityAndDependencies(t *testing.T) {
+	r := fourStepPlan()
+	plan := existingPlan()
+	l := NewLedger(r)
+	l.Place(Placement{Priority: 1, After: []*pm.Task{taskByTitle(plan, "old done")}})
+	added := l.Apply(plan, pick(r, 1, 2, 3, 4))
+
+	if len(added) != 4 {
+		t.Fatalf("added %d tasks, want 4", len(added))
+	}
+	for _, a := range added {
+		if a.Priority != 1 {
+			t.Errorf("%s has priority %d, want the 1 typed for the task it came from", a.Title, a.Priority)
+		}
+	}
+	for title, want := range map[string][]int{"config": {1}, "callback": {1, 8}, "button": {1, 8}, "docs": {1, 9, 10}} {
+		if got := depsOf(plan, title); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s depends on %v, want %v", title, got, want)
+		}
+	}
+
+	// Priority 1 puts the plan ahead of the old pending work (priority 2), and
+	// one priority for all of it still runs it in plan order.
+	var order []string
+	for _, tk := range pm.SortByExecutionOrder(plan.Tasks) {
+		if tk.Status == pm.TaskPending {
+			order = append(order, tk.Title)
+		}
+	}
+	if want := []string{"config", "callback", "button", "docs", "old pending"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("run order = %v, want %v", order, want)
+	}
+}
+
+// The tasks a placement names are held to the tasks they were: one deleted
+// before the plan is accepted is dropped, not followed to the stranger that
+// took its ID — nor to one of the plan's own tasks, which take freed IDs too.
+func TestLedger_APlacementFollowsTasksNotIDs(t *testing.T) {
+	r := &Result{Request: "two independent steps", Suggestions: []*Suggestion{
+		{ID: 1, Title: "old pending"}, // the plan names a step like the task it waits for
+		{ID: 2, Title: "second"},
+	}}
+	plan := pm.NewPlan("goal")
+	for id := 1; id <= 6; id++ {
+		plan.Tasks = append(plan.Tasks, &pm.Task{ID: id, Title: "done " + string(rune('0'+id)), Status: pm.TaskDone})
+	}
+	waitFor := &pm.Task{ID: 7, Title: "old pending", Status: pm.TaskPending, Priority: 2}
+	plan.Tasks = append(plan.Tasks, waitFor)
+
+	l := NewLedger(r)
+	l.Place(Placement{After: []*pm.Task{waitFor}})
+	plan.Tasks = plan.Tasks[:6] // #7 deleted before anything was accepted
+
+	first := l.Apply(plan, pick(r, 1))
+	if len(first) != 1 || first[0].ID != 7 {
+		t.Fatalf("the first step became %v, want task 7 (the freed ID)", first)
+	}
+	if got := depsOf(plan, "old pending"); len(got) != 0 {
+		t.Errorf("the step took #7's freed ID and depends on %v", got)
+	}
+	l.Apply(plan, pick(r, 2))
+	if got := depsOf(plan, "second"); len(got) != 0 {
+		t.Errorf("second depends on %v: #7 is the plan's own step now, not the task the placement named", got)
+	}
+
+	// A stranger under the old ID, rather than the plan's own task, is dropped too.
+	plan2 := existingPlan()
+	stale := taskByTitle(plan2, "old pending")
+	l2 := NewLedger(fourStepPlan())
+	l2.Place(Placement{After: []*pm.Task{stale}})
+	plan2.Tasks[1] = &pm.Task{ID: 7, Title: "someone else's", Status: pm.TaskPending}
+	l2.Apply(plan2, pick(fourStepPlan(), 1))
+	if got := depsOf(plan2, "config"); len(got) != 0 {
+		t.Errorf("config depends on %v, but the task it was to wait for is gone", got)
+	}
+}
+
+// Ideas depend on nothing, placed or not; and a clone keeps the placement.
+func TestLedger_APlacementIsAPlansOnly(t *testing.T) {
+	ideas := &Result{Suggestions: []*Suggestion{{ID: 1, Title: "dark mode", Effort: EffortS}}}
+	plan := existingPlan()
+	l := NewLedger(ideas)
+	l.Place(Placement{Priority: 1, After: []*pm.Task{taskByTitle(plan, "old done")}})
+	added := l.Apply(plan, ideas.Suggestions)
+	if len(added) != 1 || added[0].Priority != 3 || len(added[0].DependsOn) != 0 {
+		t.Errorf("a placed idea became %+v, want the effort mapping's priority 3 and no dependencies", added[0])
+	}
+
+	r := fourStepPlan()
+	l = NewLedger(r)
+	l.Place(Placement{Priority: 2, After: []*pm.Task{taskByTitle(plan, "old done")}})
+	plan = existingPlan()
+	got := l.Clone().Apply(plan, pick(r, 1))
+	if len(got) != 1 || got[0].Priority != 2 || !reflect.DeepEqual(got[0].DependsOn, []int{1}) {
+		t.Errorf("a clone applied %+v, want the placement's priority 2 and dependency on 1", got[0])
+	}
+}

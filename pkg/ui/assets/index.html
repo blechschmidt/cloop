@@ -50,6 +50,8 @@
 <meta name="cloop-network-src" content="{{asset:network.js}}">
 <meta name="cloop-execadmin-src" content="{{asset:execadmin.js}}">
 <meta name="cloop-hubhealth-src" content="{{asset:hubhealth.js}}">
+<!-- A pending task's Split dialog, fetched by splitTask (Task 20441). -->
+<meta name="cloop-split-src" content="{{asset:split.js}}">
 </head>
 <body>
 
@@ -587,6 +589,11 @@
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/><path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h2a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1h2v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/></svg>
             <span id="dictateTaskLabel">Dictate</span>
           </button>
+          <!-- Decompose (Task 20441): the task typed here becomes a plan of
+               several, proposed in AI Feature Suggestions below for review
+               before any is added. See decomposeNewTask in 12-task-crud.js. -->
+          <button class="btn" id="decomposeTaskBtn" data-perm="task.mutate" data-action="decomposeNewTask"
+                  title="Have the AI break this task into a plan of smaller tasks, for you to review before any is added">Decompose</button>
           <button class="btn primary" data-perm="task.mutate" data-action="submitAddTask">Add Task</button>
         </div>
       </div>
@@ -1684,22 +1691,6 @@
               title="Discard the existing details and use what you said instead.">Replace</button>
       <button class="btn primary" id="dr-revise-btn" data-action="dictateApplyRevise"
               title="Treat what you said as an instruction and let the model edit the existing details.">Edit with AI</button>
-    </div>
-  </div>
-</div>
-
-<!-- Decompose modal (AI splits a task into sub-tasks; user reviews before applying) -->
-<div id="dc-overlay" data-overlay="class:open" data-action-backdrop="closeDecomposeModal">
-  <div id="dc-modal" role="dialog" aria-modal="true" aria-labelledby="dc-title">
-    <div class="dc-header">
-      <h2 id="dc-title">Decompose Task</h2>
-      <button class="dc-close" data-action="closeDecomposeModal" aria-label="Close">&times;</button>
-    </div>
-    <div id="dc-body" class="dc-body"></div>
-    <div class="modal-footer">
-      <span id="dc-count" style="margin-right:auto;font-size:12px;color:var(--muted)"></span>
-      <button class="btn" data-action="closeDecomposeModal">Cancel</button>
-      <button class="btn primary" id="dc-apply-btn" data-action="applyDecompose" style="display:none">Add sub-tasks</button>
     </div>
   </div>
 </div>

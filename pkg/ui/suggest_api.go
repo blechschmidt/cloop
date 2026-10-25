@@ -12,6 +12,10 @@ package ui
 // left to the request when unset. suggest.Ledger keeps an accepted plan's
 // dependencies intact however its tasks are picked.
 //
+// Decompose, beside Add Task, plans the task typed there the same way (Task
+// 20441): the title and description are the request, and the priority and
+// dependencies typed with them go to every task of the plan.
+//
 // A job is per project. It used to be one hub-wide slot: a second project's
 // brainstorm was refused while the first ran, and /api/suggest/status
 // answered every project with whichever one had run last — text generated
@@ -43,6 +47,9 @@ type suggestJob struct {
 	gen     int
 	count   int    // ideas or plan tasks asked for; 0 lets a plan size itself
 	request string // what is being planned; empty for a brainstorm
+	// place is where a plan's tasks join the queue: the priority and
+	// dependencies typed for the task Decompose broke down (Task 20441).
+	place   suggest.Placement
 	running bool
 	done    bool
 	err     string
@@ -56,12 +63,18 @@ type suggestJob struct {
 
 // status is the job as clients see it. Called with s.suggestMu held.
 func (j *suggestJob) status() map[string]interface{} {
+	after := []int{}
+	for _, t := range j.place.After {
+		after = append(after, t.ID)
+	}
 	st := map[string]interface{}{
 		"gen":         j.gen,
 		"running":     j.running,
 		"done":        j.done,
 		"error":       j.err,
 		"request":     j.request,
+		"priority":    j.place.Priority,
+		"depends_on":  after,
 		"summary":     "",
 		"suggestions": []*suggest.Suggestion{},
 	}
@@ -124,8 +137,9 @@ func suggestCount(n int, plan bool) int {
 }
 
 // handleSuggestGenerate starts a brainstorm, or with an input a plan, for the
-// project in the background (POST /api/suggest/generate {count, input}). The
-// result reaches clients as a suggest_status event.
+// project in the background (POST /api/suggest/generate {count, input,
+// priority, depends_on}; the last two place a plan's tasks, see
+// suggestPlacement). The result reaches clients as a suggest_status event.
 func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
@@ -138,6 +152,10 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Count int    `json:"count"`
 		Input string `json:"input"`
+		// Where a plan's tasks go: Decompose sends what was typed for the
+		// task it breaks down (Task 20441).
+		Priority  int   `json:"priority"`
+		DependsOn []int `json:"depends_on"`
 	}
 	// An empty body is the defaults — a brainstorm of five — as it always was.
 	if !decodeOptionalJSON(w, r, &req) {
@@ -150,6 +168,10 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	count := suggestCount(req.Count, request != "")
 	workDir := s.resolveWorkDir(r)
+	place, ok := suggestPlacement(w, workDir, request, req.Priority, req.DependsOn)
+	if !ok {
+		return
+	}
 
 	// A brainstorm and a plan both call the provider inside the project's
 	// executor, so a sandbox with no Claude login is refused here, with the
@@ -170,7 +192,7 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		s.suggestJobs = make(map[string]*suggestJob)
 	}
 	s.suggestGen++
-	job := &suggestJob{gen: s.suggestGen, count: count, request: request, running: true}
+	job := &suggestJob{gen: s.suggestGen, count: count, request: request, place: place, running: true}
 	s.suggestJobs[workDir] = job
 	s.suggestMu.Unlock()
 	s.broadcastSuggestStatus(workDir)
@@ -240,9 +262,49 @@ func (s *Server) finishSuggest(workDir string, job *suggestJob, result *suggest.
 	job.running, job.done, job.err = false, true, errMsg
 	if result != nil {
 		job.result, job.ledger = result, suggest.NewLedger(result)
+		job.ledger.Place(job.place)
 	}
 	s.suggestMu.Unlock()
 	s.broadcastSuggestStatus(workDir)
+}
+
+// suggestPlacement checks where a plan's tasks are to join the queue, as
+// Decompose asks (Task 20441): at the priority typed for the task it breaks
+// down, where 0 or less is the default as it is for Add Task, and after the
+// tasks typed as its dependencies, which must exist now, as Add Task requires.
+// Those are kept as the tasks they are, so one deleted before the plan is
+// accepted is not followed to whatever takes its ID. Ideas have no place:
+// they depend on nothing and on each other in no order. On failure the
+// response has been written.
+func suggestPlacement(w http.ResponseWriter, workDir, request string, priority int, deps []int) (suggest.Placement, bool) {
+	place := suggest.Placement{Priority: max(priority, 0)}
+	if request == "" {
+		if place.Priority > 0 || len(deps) > 0 {
+			jsonErr(w, "a priority and dependencies place the tasks of a plan: describe the work to plan in input", http.StatusBadRequest)
+			return place, false
+		}
+		return place, true
+	}
+	if len(deps) == 0 {
+		return place, true
+	}
+	ps, err := state.LoadLite(workDir)
+	if err != nil {
+		jsonErr(w, "no project found — run cloop init first", http.StatusNotFound)
+		return place, false
+	}
+	var tasks []*pm.Task
+	if ps.Plan != nil {
+		tasks = ps.Plan.Tasks
+	}
+	if err := validateDependsOn(deps, 0, tasks); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return place, false
+	}
+	for _, id := range deps {
+		place.After = append(place.After, ps.Plan.TaskByID(id))
+	}
+	return place, true
 }
 
 // handleSuggestStatus returns the project's job status and the proposals

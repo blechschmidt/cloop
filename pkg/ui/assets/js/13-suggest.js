@@ -28,7 +28,9 @@ act('syncSuggestMode', function() {
   document.getElementById('suggestCount').placeholder = plan ? 'auto' : '5';
 });
 
-act('runSuggest', function() {
+// place and started are Decompose's: where the plan's tasks are to go, and
+// what to do once the hub has taken the job.
+act('runSuggest', function(place, started) {
   const path  = selectedProjectPath;
   const input = document.getElementById('suggestInput').value.trim();
   const count = Math.max(0, parseInt(document.getElementById('suggestCount').value) || 0);
@@ -44,11 +46,11 @@ act('runSuggest', function() {
   // A reply that lands after the user has moved to another project belongs to
   // the project it was sent from, and must not touch the panel now on screen.
   // The same goes for adds below.
-  api(pUrl('/api/suggest/generate'), {count, input}).then(d => {
-    if (!d.ok && path === selectedProjectPath) {
-      _suggestFail('Error: '+(d.error||'failed'));
-      harnessRefused(d);
-    }
+  api(pUrl('/api/suggest/generate'), Object.assign({count, input}, place)).then(d => {
+    if (path !== selectedProjectPath) return;
+    if (d.ok) { if (started) started(); return; }
+    _suggestFail('Error: '+(d.error||'failed'));
+    harnessRefused(d);
   }).catch(() => { if (path === selectedProjectPath) _suggestFail('Request failed'); });
 });
 
@@ -98,8 +100,11 @@ function applySuggestStatus(d) {
   suggestPlan = !!d.request;
   currentSuggestions = pending.slice();
   const sum = document.getElementById('suggestSummary');
-  sum.textContent = d.summary || '';
-  sum.style.display = d.summary ? '' : 'none';
+  // What Decompose carried over from the task it broke down.
+  const after = (d.depends_on || []).map(n => '#'+n).join(', ');
+  const place = [d.priority && 'runs at priority '+d.priority, after && 'waits for '+after].filter(Boolean).join(' and ');
+  sum.textContent = [d.summary, place && 'Each task '+place+'.'].filter(Boolean).join('\n');
+  sum.style.display = sum.textContent ? '' : 'none';
   renderSuggestions();
   const n = currentSuggestions.length, what = suggestPlan ? 'task' : 'idea';
   toast(n ? (suggestPlan ? 'Planned ' : 'Generated ')+n+' '+what+(n===1?'':'s')+' — review below' : 'No '+what+'s proposed', n ? 'ok' : 'err');
@@ -206,119 +211,8 @@ function resetSuggestPanel() {
   syncSuggestMode();
 }
 
-// ── Decompose (AI splits one task into a plan of sub-tasks) ──────────────────
+// ── Split (AI breaks one task into sub-tasks, Task 20154) ────────────────────
 
-let dcTaskId   = 0;     // parent task being decomposed (0 = modal closed)
-let dcSubtasks = [];    // proposed sub-tasks, each with a _keep selection flag
-let dcBusy     = false; // an AI preview or apply request is in flight
-
-act('openDecomposeModal', function(id) {
-  const tasks = (appState && appState.plan && appState.plan.tasks) || [];
-  const t = tasks.find(x => x.id === id);
-  dcTaskId   = id;
-  dcSubtasks = [];
-  dcBusy     = true;
-  document.getElementById('dc-title').textContent = 'Decompose Task #'+id+(t && t.title ? ' — '+t.title : '');
-  document.getElementById('dc-apply-btn').style.display = 'none';
-  document.getElementById('dc-count').textContent = '';
-  document.getElementById('dc-body').innerHTML =
-    '<div class="dc-spin"><span class="spinner"></span>'+
-    '<span>Asking the AI to break this task into smaller sub-tasks… this can take a minute.</span></div>';
-  openOverlay('dc-overlay', {dismiss: closeDecomposeModal});
-
-  api(pUrl('/api/tasks/'+id+'/decompose'), {}).then(d => {
-    dcBusy = false;
-    if (dcTaskId !== id) return; // modal was closed or reopened for another task
-    if (!d.ok) {
-      document.getElementById('dc-body').innerHTML =
-        '<div class="empty-state"><h3>Decompose failed</h3><p>'+esc(d.error||'unknown error')+'</p></div>';
-      return;
-    }
-    dcSubtasks = (d.subtasks || []).map(st => Object.assign({_keep: true}, st));
-    renderDecomposeList();
-  }).catch(() => {
-    dcBusy = false;
-    if (dcTaskId !== id) return;
-    document.getElementById('dc-body').innerHTML =
-      '<div class="empty-state"><h3>Request failed</h3><p>Could not reach the server.</p></div>';
-  });
-}, NUM);
-
-act('closeDecomposeModal', function() {
-  closeOverlay('dc-overlay');
-  dcTaskId = 0; dcSubtasks = []; dcBusy = false;
-});
-
-function renderDecomposeList() {
-  const body = document.getElementById('dc-body');
-  if (!dcSubtasks.length) {
-    body.innerHTML = '<div class="empty-state"><h3>No sub-tasks proposed</h3>'+
-      '<p>The AI did not propose any sub-tasks for this task. Close the dialog and try again.</p></div>';
-    updateDecomposeFooter();
-    return;
-  }
-  body.innerHTML =
-    '<div class="dc-hint">Review the proposed sub-tasks. Applying adds the selected ones in sequence '+
-    '(each depending on the previous) and marks the parent task as <strong>skipped</strong>.</div>'+
-    dcSubtasks.map((st, i) =>
-      '<label class="dc-sub'+(st._keep?'':' off')+'">'+
-        '<input type="checkbox" '+(st._keep?'checked':'')+' data-action-change="toggleDecomposeSub" data-arg="'+i+'">'+
-        '<div style="flex:1;min-width:0">'+
-          '<div class="dc-sub-title">'+(i+1)+'. '+esc(st.title||'')+'</div>'+
-          (st.description ? '<div class="dc-sub-desc">'+esc(st.description)+'</div>' : '')+
-          ((st.role || st.estimated_minutes) ?
-            '<div class="dc-sub-meta">'+
-              (st.role ? '<span>'+esc(st.role)+'</span>' : '')+
-              (st.estimated_minutes ? '<span>est: '+st.estimated_minutes+'m</span>' : '')+
-            '</div>' : '')+
-        '</div>'+
-      '</label>'
-    ).join('');
-  updateDecomposeFooter();
-}
-
-act('toggleDecomposeSub', function(i) {
-  if (!dcSubtasks[i]) return;
-  dcSubtasks[i]._keep = !dcSubtasks[i]._keep;
-  renderDecomposeList();
-}, NUM);
-
-function updateDecomposeFooter() {
-  const kept = dcSubtasks.filter(st => st._keep).length;
-  const btn = document.getElementById('dc-apply-btn');
-  btn.style.display = dcSubtasks.length ? '' : 'none';
-  btn.disabled = kept === 0 || dcBusy;
-  btn.textContent = kept ? 'Add '+kept+' sub-task'+(kept===1?'':'s') : 'Add sub-tasks';
-  document.getElementById('dc-count').textContent =
-    dcSubtasks.length ? kept+'/'+dcSubtasks.length+' selected' : '';
-}
-
-act('applyDecompose', function() {
-  if (dcBusy || !dcTaskId) return;
-  const id = dcTaskId;
-  const kept = dcSubtasks.filter(st => st._keep).map(st => ({
-    title: st.title || '',
-    description: st.description || '',
-    role: st.role || '',
-    estimated_minutes: st.estimated_minutes || 0
-  }));
-  if (!kept.length) return;
-  dcBusy = true;
-  updateDecomposeFooter();
-  api(pUrl('/api/tasks/'+id+'/decompose/apply'), {subtasks: kept}).then(d => {
-    dcBusy = false;
-    if (!d.ok) {
-      updateDecomposeFooter();
-      toast(d.error||'Apply failed', 'err');
-      return;
-    }
-    closeDecomposeModal();
-    toast('Task #'+d.parent_id+' decomposed into '+(d.added||[]).length+' sub-task'+((d.added||[]).length===1?'':'s'), 'ok');
-    refreshState();
-  }).catch(() => {
-    dcBusy = false;
-    updateDecomposeFooter();
-    toast('Request failed', 'err');
-  });
-});
-
+// The dialog is deferred/split.js, fetched on the first Split: Task 20441 moved
+// it off first paint to pay for Decompose (12-task-crud.js).
+act('splitTask', id => panelAct('split', 'open', id), NUM);

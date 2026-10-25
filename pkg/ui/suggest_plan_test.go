@@ -455,3 +455,119 @@ func TestSuggestGenerate_ValidatesTheInput(t *testing.T) {
 		t.Errorf("an empty body ran %q", got)
 	}
 }
+
+// Decompose (Task 20441): the priority and dependencies typed for the task it
+// breaks down travel with the job — not to the command, which only plans —
+// and every task of the plan takes them when it is added.
+func TestSuggestPlan_DecomposePlacesThePlan(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, []*pm.Task{
+		{ID: 1, Title: "already done", Status: pm.TaskDone, Priority: 1},
+		{ID: 2, Title: "already queued", Status: pm.TaskPending, Priority: 3},
+	})
+	ts := newPlanServer(t, writePlanStub(t, loginPlan), dir)
+	st := generate(t, ts, "", map[string]interface{}{
+		"input": "Add OAuth login", "priority": 2, "depends_on": []int{2},
+	})
+	if got := recordedArgs(t, dir); !reflect.DeepEqual(got, []string{"suggest", "--json", "--input=Add OAuth login"}) {
+		t.Errorf("the command ran with %q; where the tasks go is the hub's to apply", got)
+	}
+	if st["priority"] != 2.0 || !reflect.DeepEqual(st["depends_on"], []interface{}{2.0}) {
+		t.Errorf("status carries priority %v and depends_on %v, want 2 and [2]: the panel says "+
+			"where the tasks will go before any is added", st["priority"], st["depends_on"])
+	}
+
+	code, resp := rawJSON(t, ts, http.MethodPost, "/api/suggest/add",
+		map[string]interface{}{"gen": genOf(t, st), "ids": []int{1, 2, 3, 4}})
+	if code != http.StatusOK {
+		t.Fatalf("add all returned HTTP %d: %v", code, resp)
+	}
+	tasks := loadTasks(t, dir)
+	for title, deps := range map[string][]int{
+		"Add provider config": {2},
+		"Callback handler":    {2, 3},
+		"Login button":        {2, 3},
+		"Document login":      {2, 4, 5},
+	} {
+		tk := tasks[title]
+		if tk == nil {
+			t.Fatalf("task %q was not added", title)
+		}
+		if !reflect.DeepEqual(append([]int(nil), tk.DependsOn...), deps) {
+			t.Errorf("%q depends on %v, want %v: the plan's own order, and the task typed with it", title, tk.DependsOn, deps)
+		}
+		if tk.Priority != 2 {
+			t.Errorf("%q has priority %d, want the 2 typed for the task it came from", title, tk.Priority)
+		}
+	}
+	ps, _ := state.Load(dir)
+	if next := ps.Plan.NextTask(); next == nil || next.Title != "already queued" {
+		t.Errorf("next task is %v; the plan outranks it but waits for it", next)
+	}
+}
+
+// What Decompose may ask for is what Add Task may: dependencies on tasks that
+// exist, each once. And only a plan is placed — ideas depend on nothing.
+func TestSuggestGenerate_ValidatesThePlacement(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, []*pm.Task{
+		{ID: 1, Title: "only", Status: pm.TaskPending, Priority: 1},
+	})
+	ts := newPlanServer(t, writePlanStub(t, loginPlan), dir)
+
+	for name, body := range map[string]map[string]interface{}{
+		"a dependency that does not exist": {"input": "plan it", "depends_on": []int{9}},
+		"a dependency listed twice":        {"input": "plan it", "depends_on": []int{1, 1}},
+		"a dependency that is no task ID":  {"input": "plan it", "depends_on": []int{0}},
+		"a priority for a brainstorm":      {"priority": 1},
+		"dependencies for a brainstorm":    {"depends_on": []int{1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if code, resp := rawJSON(t, ts, http.MethodPost, "/api/suggest/generate", body); code != http.StatusBadRequest {
+				t.Errorf("HTTP %d (%v), want 400", code, resp)
+			}
+		})
+	}
+	if st := apiGET(t, ts, "/api/suggest/status"); st["running"] == true || st["done"] == true {
+		t.Fatalf("a refused request started a job: %v", st)
+	}
+
+	// A priority of 0 or less is the default, as it is for Add Task.
+	st := generate(t, ts, "", map[string]interface{}{"input": "plan it", "priority": -3})
+	if st["priority"] != 0.0 || !reflect.DeepEqual(st["depends_on"], []interface{}{}) {
+		t.Errorf("status carries priority %v and depends_on %v, want the default: 0 and []", st["priority"], st["depends_on"])
+	}
+	code, resp := rawJSON(t, ts, http.MethodPost, "/api/suggest/add", map[string]interface{}{"gen": genOf(t, st), "ids": []int{1}})
+	if code != http.StatusOK {
+		t.Fatalf("add returned HTTP %d: %v", code, resp)
+	}
+	if tk := loadTasks(t, dir)["Add provider config"]; tk == nil || tk.Priority != 2 || len(tk.DependsOn) != 0 {
+		t.Errorf("an unplaced plan's first task is %+v, want the queue's tail (priority 2) and no dependencies", tk)
+	}
+}
+
+// A task the plan was to wait for, removed before the plan is accepted, is not
+// followed to the task that takes its ID next.
+func TestSuggestPlan_ARemovedDependencyIsDropped(t *testing.T) {
+	dir := setupProjectDir(t, cloopGoal, []*pm.Task{
+		{ID: 1, Title: "keep", Status: pm.TaskPending, Priority: 1},
+		{ID: 2, Title: "to be removed", Status: pm.TaskPending, Priority: 2},
+	})
+	ts := newPlanServer(t, writePlanStub(t, loginPlan), dir)
+	gen := genOf(t, generate(t, ts, "", map[string]interface{}{"input": "Add OAuth login", "depends_on": []int{1, 2}}))
+
+	if code, resp := rawJSON(t, ts, http.MethodPost, "/api/task/remove", map[string]interface{}{"id": 2}); code != http.StatusOK {
+		t.Fatalf("remove returned HTTP %d: %v", code, resp)
+	}
+	if code, resp := rawJSON(t, ts, http.MethodPost, "/api/task/add", map[string]interface{}{"title": "a stranger"}); code != http.StatusOK {
+		t.Fatalf("add returned HTTP %d: %v", code, resp)
+	}
+	if tk := loadTasks(t, dir)["a stranger"]; tk == nil || tk.ID != 2 {
+		t.Fatalf("the stranger is %+v; this test needs it to take ID 2", tk)
+	}
+
+	if code, resp := rawJSON(t, ts, http.MethodPost, "/api/suggest/add", map[string]interface{}{"gen": gen, "ids": []int{1}}); code != http.StatusOK {
+		t.Fatalf("add returned HTTP %d: %v", code, resp)
+	}
+	if got := loadTasks(t, dir)["Add provider config"].DependsOn; !reflect.DeepEqual(append([]int(nil), got...), []int{1}) {
+		t.Errorf("the plan's first task depends on %v, want [1]: #2 is someone else's task now", got)
+	}
+}

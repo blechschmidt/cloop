@@ -157,6 +157,22 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Decompose, beside Add Task, plans a task into several before any is
+  added.** A task too big for one agent could only be added whole and split
+  afterwards, or retyped as a request in AI Feature Suggestions, where the
+  priority and dependencies typed for it had no place. Decompose hands the
+  title and description to the planner `cloop suggest --input` runs — on the
+  project's executor, as the panel's Generate does — opens the panel, and
+  empties the form once the hub has the job; the plan's steps are added one at
+  a time or with Add all. `POST /api/suggest/generate` takes `priority` and
+  `depends_on` for a plan, checked as Add Task checks them and refused for a
+  brainstorm, and the job's status reports them: every task of the plan takes
+  that priority and waits for those tasks as well as for the plan's own earlier
+  steps, and one deleted before the plan is accepted is dropped rather than
+  followed to whatever takes its ID. A pending task's Split dialog, now titled
+  Split, loads on demand, and its result is no longer toasted over by
+  "Refreshed" (Task 20441).
+
 - **A connection a sandbox's firewall blocks fails at once, and the run says
   what blocked it.** The firewall ended in a silent drop, so a blocked fetch
   waited out a TCP timeout, the harness retried for minutes, and nothing said

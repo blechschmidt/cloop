@@ -12,7 +12,10 @@
 //   * that the server re-sending a generation after an add neither re-toasts
 //     nor brings back a card this page skipped;
 //   * that leaving a project leaves none of its cards behind to be added to
-//     the next one.
+//     the next one;
+//   * that Decompose, beside Add Task, plans the task typed there through the
+//     same panel, with its priority and dependencies (Task 20441);
+//   * and that the Split dialog still works now that it is a deferred panel.
 //
 // Run by TestDashboard_SuggestPanelPlansARequest. Printed as one JSON document.
 //
@@ -120,6 +123,10 @@ function posts(h, path) {
     .filter(r => r.method === 'POST' && r.url.startsWith(path))
     .map(r => ({url: r.url, body: JSON.parse(r.body || 'null')}));
 }
+
+// addForm reads the Add Task form's four fields.
+const addForm = () => ['newTaskTitle', 'newTaskDesc', 'newTaskPriority', 'newTaskDeps']
+  .map(id => String(el(id).value || ''));
 
 const scenarios = {
   // The count field says what it means for what Generate will do.
@@ -272,6 +279,123 @@ const scenarios = {
     window.addAllSuggestions();
     await globalThis.__settle();
     return Object.assign(after, {adds: posts(h, '/api/suggest/add')});
+  },
+
+  // Decompose (Task 20441): the task typed into Add Task becomes the panel's
+  // request, in a panel it opens, and the priority and dependencies typed with
+  // it are posted alongside. The form empties once the hub has the job.
+  async decompose_plans_the_typed_task() {
+    const h = await boot();
+    await openBeta(h);
+    el('suggestPanel').style.display = 'none'; // closed, as a page starts: Decompose has to open it
+    const closed = !vis('suggestPanel');
+    el('newTaskTitle').value = '  Add OAuth login ';
+    el('newTaskDesc').value = 'GitHub and Google.\nKeep sessions.';
+    el('newTaskPriority').value = '2';
+    el('newTaskDeps').value = '1, 3';
+    h.requests.length = 0;
+    window.decomposeNewTask();
+    const status = String(el('suggestStatusText').textContent || '');
+    const formBefore = addForm();
+    await globalThis.__settle();
+    return Object.assign(panel(), {
+      closed, opened: vis('suggestPanel'), status, form_before: formBefore, form_after: addForm(),
+      toggle: String(el('suggestToggleBtn').textContent || ''), posts: posts(h, '/api/suggest/generate'),
+    });
+  },
+
+  // A title alone is the whole request: no blank lines after it.
+  async decompose_a_title_alone() {
+    const h = await boot();
+    await openBeta(h);
+    el('newTaskTitle').value = 'Add OAuth login';
+    h.requests.length = 0;
+    window.decomposeNewTask();
+    await globalThis.__settle();
+    return Object.assign(panel(), {posts: posts(h, '/api/suggest/generate'), form_after: addForm()});
+  },
+
+  // Like Add Task, Decompose needs a title, and asks for nothing without one.
+  async decompose_needs_a_title() {
+    const h = await boot();
+    await openBeta(h);
+    el('newTaskTitle').value = '   ';
+    el('newTaskDesc').value = 'only details';
+    h.requests.length = 0;
+    window.decomposeNewTask();
+    await globalThis.__settle();
+    return Object.assign(panel(), {posts: posts(h, '/api/suggest/generate'), form_after: addForm()});
+  },
+
+  // A refusal leaves what was typed where it was, and says why.
+  async decompose_refused_keeps_the_form() {
+    const h = await boot();
+    await openBeta(h);
+    h.routes['/api/suggest/generate'] = {error: 'dependency task 9 does not exist'};
+    h.routeStatus['/api/suggest/generate'] = 400;
+    el('newTaskTitle').value = 'Add OAuth login';
+    el('newTaskDeps').value = '9';
+    window.decomposeNewTask();
+    await globalThis.__settle();
+    return Object.assign(panel(), {
+      form_after: addForm(), status: String(el('suggestStatusText').textContent || ''),
+      generate_disabled: !!el('suggestBtn').disabled,
+    });
+  },
+
+  // One generation at a time: while one runs, Decompose asks for nothing and
+  // keeps the form, rather than clearing the cards of the one in flight.
+  async decompose_waits_for_a_running_generation() {
+    const h = await boot();
+    const ws = await openBeta(h);
+    ws.deliver('suggest_status', {gen: 3, running: true, done: false, error: '', request: 'something else',
+      summary: '', suggestions: []});
+    await globalThis.__settle();
+    el('newTaskTitle').value = 'Add OAuth login';
+    h.requests.length = 0;
+    window.decomposeNewTask();
+    await globalThis.__settle();
+    return Object.assign(panel(), {posts: posts(h, '/api/suggest/generate'), form_after: addForm()});
+  },
+
+  // Where the plan's tasks will go is said before any is added.
+  async plan_says_where_its_tasks_go() {
+    const h = await boot();
+    const ws = await openBeta(h);
+    ws.deliver('suggest_status', Object.assign(clone(PLAN), {priority: 2, depends_on: [1, 3]}));
+    await globalThis.__settle();
+    const placed = panel();
+    ws.deliver('suggest_status', Object.assign(clone(PLAN), {gen: 8, depends_on: [5]}));
+    await globalThis.__settle();
+    return Object.assign(placed, {after_only: panel().summary});
+  },
+
+  // The Split dialog (Task 20154) is a deferred panel since Task 20441: the
+  // row's button fetches it, it asks for a proposal, and applying sends the
+  // sub-tasks the user kept.
+  async split_dialog_is_fetched_and_works() {
+    const h = await boot();
+    await openBeta(h);
+    h.routes['/api/tasks/4/decompose/apply'] = {ok: true, parent_id: 4, added: [5, 6]};
+    h.routes['/api/tasks/4/decompose'] = {ok: true, parent_id: 4, parent_title: 'Big task', subtasks: [
+      {title: 'First <part>', description: 'd1', role: 'backend', estimated_minutes: 30},
+      {title: 'Second part', description: 'd2'},
+      {title: 'Third part', description: 'd3'},
+    ]};
+    h.requests.length = 0;
+    await window.splitTask(4);
+    await globalThis.__settle(5);
+    const body = String(el('dc-body').innerHTML || '');
+    const P = await window.panelAct('split');
+    P.toggle('1'); // drop the second
+    const count = String(el('dc-count').textContent || '');
+    const button = String(el('dc-apply-btn').textContent || '');
+    await P.apply();
+    await globalThis.__settle();
+    return {
+      split_title: String(el('dc-title').textContent || ''), split_body: body, count, button,
+      split_posts: posts(h, '/api/tasks/4/decompose'), toast: String(el('toast').textContent || ''),
+    };
   },
 };
 

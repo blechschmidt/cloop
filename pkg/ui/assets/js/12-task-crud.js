@@ -5,20 +5,25 @@ function parseDepsInput(val) {
   return val.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
 }
 
+// The Add Task form's fields, read and emptied by Add Task and Decompose.
+const ADD_TASK_FIELDS = ['newTaskTitle', 'newTaskDesc', 'newTaskPriority', 'newTaskDeps'];
+
+function addTaskForm() {
+  const [title, description, priority, deps] = ADD_TASK_FIELDS.map(id => document.getElementById(id).value);
+  return {title: title.trim(), description: description.trim(),
+          priority: parseInt(priority)||0, depends_on: parseDepsInput(deps)};
+}
+
+function clearAddTask() {
+  ADD_TASK_FIELDS.forEach(id => { document.getElementById(id).value = ''; });
+}
+
 act('submitAddTask', function() {
-  const title = document.getElementById('newTaskTitle').value.trim();
+  const f = addTaskForm(), title = f.title;
   if (!title) { toast('Title is required', 'err'); return; }
-  api(pUrl('/api/task/add'), {
-    title:       title,
-    description: document.getElementById('newTaskDesc').value.trim(),
-    priority:    parseInt(document.getElementById('newTaskPriority').value)||0,
-    depends_on:  parseDepsInput(document.getElementById('newTaskDeps').value),
-  }).then(d => {
+  api(pUrl('/api/task/add'), f).then(d => {
     if (d.ok) {
-      document.getElementById('newTaskTitle').value    = '';
-      document.getElementById('newTaskDesc').value     = '';
-      document.getElementById('newTaskPriority').value = '';
-      document.getElementById('newTaskDeps').value     = '';
+      clearAddTask();
       toast('Task added: '+title, 'ok');
       // Optimistically merge the returned task into appState so the row
       // appears immediately, without waiting for the WS state_diff round-trip
@@ -30,6 +35,26 @@ act('submitAddTask', function() {
       }
     } else toast(d.error||'Add failed', 'err');
   }).catch(() => toast('Request failed', 'err'));
+});
+
+// Decompose (Task 20441): rather than add the task typed above as one, have
+// the AI break it into a plan of several. The title and description become
+// the suggestions panel's request, and the plan arrives there as cards to add
+// one at a time or all at once; the priority and dependencies typed with the
+// task go to each task of the plan. The form empties once the hub has taken
+// the job — the request now sits in the panel — and keeps what was typed if
+// it is refused.
+act('decomposeNewTask', function() {
+  const f = addTaskForm();
+  if (!f.title) { toast('Title is required', 'err'); return; }
+  // One generation at a time per project: Generate is disabled while one runs.
+  if (document.getElementById('suggestBtn').disabled) { toast('Suggestions are still being generated', 'err'); return; }
+  if (document.getElementById('suggestPanel').style.display === 'none') toggleSuggestPanel();
+  document.getElementById('suggestInput').value = f.description ? f.title+'\n\n'+f.description : f.title;
+  document.getElementById('suggestCount').value = '';
+  syncSuggestMode();
+  runSuggest({priority: f.priority, depends_on: f.depends_on}, clearAddTask);
+  document.getElementById('suggestStatusLine').scrollIntoView({block: 'nearest'});
 });
 
 // Ctrl+Enter (Cmd+Enter on a Mac) adds the task from its description box,
