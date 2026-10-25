@@ -12,6 +12,10 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **cloop is built with Go 1.26.10**, for GO-2026-6809 ("Distrust compromised
+  intermediate certificates in crypto/x509"), which the hub CA's leaf
+  verification reaches through `x509.Certificate.Verify`. Go 1.26.9 is
+  affected. `go.mod` now pins `toolchain go1.26.10` (Task 20440).
 - **A runtime's isolation claim is verified instead of believed.** An
   executor's `Virtualized` and `KernelIsolated` were read off its runtime's
   name, so a `daemon.json` alias or a RuntimeClass whose handler is runc ran a
