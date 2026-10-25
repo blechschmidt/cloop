@@ -104,7 +104,7 @@ func (s *Server) handleClusterAutoResume(w http.ResponseWriter, r *http.Request)
 		jsonErr(w, "could not load the project", http.StatusConflict)
 		return
 	}
-	if !st.PauseReason.AutoResumable(s.clock()) || s.projectExecuting(req.Project) {
+	if !s.capPauseCleared(st, s.clock()) || s.projectExecuting(req.Project) {
 		jsonOK(w, map[string]any{"ok": true, "started": false})
 		return
 	}

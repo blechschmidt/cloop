@@ -83,7 +83,8 @@ in `.cloop/config.yaml` directly: the inference parameters (`temperature`,
 `top_p`, `max_tokens`, and `frequency_penalty` for OpenAI), the Claude Code
 subscription caps (`claudecode.max_weekly_pct`, `max_five_hour_pct`,
 `max_weekly_opus_pct`, `max_weekly_sonnet_pct` — also editable from the
-dashboard), and
+dashboard; a run they stop resumes by itself when the window reopens, see
+[Resuming a capped run](../reference/configuration.md#resuming-a-capped-run)), and
 [`claudecode.background.*`](../reference/configuration.md#background-work-left-by-an-agent).
 
 `cloop config show` prints the effective configuration with API keys masked.

@@ -238,6 +238,27 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A run held back to avoid extra usage carries on when its window reopens.**
+  `budget.block_extra_usage` (on by default) stopped a run whose Claude Code
+  five-hour or weekly window was used up from inside the daily budget check, so
+  it was recorded as a spent budget with no reset time. The hub never resumes a
+  spent budget on a timer, so the project sat paused until somebody pressed
+  Run, although the window reopened within hours. The hold is now a
+  subscription cap like `claudecode.max_*_pct`: a window that reopens within 90
+  minutes is waited out in place, and a later one pauses with its reset
+  recorded ("Paused: 5-hour window exhausted, resumes 23:30"), which the hub's
+  auto-resume acts on. It also applies only to `claudecode` runs now. A pause
+  an older build recorded the old way is resumed by the hub once the usage API
+  shows the window open. A snapshot older than its window's reset no longer
+  holds a run. An auto-evolve round is held the same way: a plan that drained
+  as its window ran out used to send the round into the wall and, after three
+  empty answers, close the run as complete, which nothing resumes. A round the
+  provider answers with a limit message now waits or pauses on its reset. Claude Code's "You've hit your session limit · resets 11:30pm
+  (UTC)" is recognised, so a task the limit cuts off goes back to pending and
+  is retried after the reset instead of being recorded as done; other "you've
+  hit your … limit" and "… limit reached · resets" wordings are recognised by
+  shape. A reset is read in the time zone the message names rather than
+  always as UTC (Task 20440).
 - **IPv6 works behind a sandbox firewall.** The bridge filter's hook for
   traffic to the host covered the multicast and link-local ranges neighbour
   discovery uses, so a sandbox on an IPv6-enabled network could not resolve its

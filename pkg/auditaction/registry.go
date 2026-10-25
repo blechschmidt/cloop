@@ -126,7 +126,7 @@ var registry = []Entry{
 		Action:  ActionRunCapPaused,
 		Home:    HomeProject,
 		Entity:  "plan",
-		Trigger: "A Claude Code subscription cap stops the run before it dispatches its next task.",
+		Trigger: "A Claude Code subscription cap stops the run before it dispatches its next task — a configured cap, or a window used up while budget.block_extra_usage holds the run out of extra usage (`cap` 100).",
 		Payload: []string{
 			"project", "windows", "utilization", "cap", "resumes_at", "detail",
 		},
@@ -140,7 +140,7 @@ var registry = []Entry{
 		Action:    ActionRunCapResumed,
 		Home:      HomeProject,
 		Entity:    "plan",
-		Trigger:   "The hub restarts a cap-paused run after its window rolled over, without a human.",
+		Trigger:   "The hub restarts a cap-paused run after its window rolled over, without a human — or, for the extra-usage pause an older build recorded as a spent budget, once the usage API shows the window open (no `resumes_at`).",
 		Payload:   []string{"project", "paused_detail", "resumes_at", "resumed_at"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,

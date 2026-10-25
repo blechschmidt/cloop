@@ -1,12 +1,14 @@
 package ui
 
 import (
+	"errors"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -280,5 +282,105 @@ func TestResumingClearsThePauseReasonOnDisk(t *testing.T) {
 	}
 	if reloaded.PauseReason != nil {
 		t.Errorf("a running project still carries a pause reason: %+v", reloaded.PauseReason)
+	}
+}
+
+// Before Task 20440 a run that budget.block_extra_usage held out of an
+// exhausted window paused as a spent budget, with no reset, in exactly these
+// words. Builds that write it outlive the hub that reads it — a long-lived run
+// keeps the binary it started with, an edge device runs its own — so the sweep
+// recognises the pause and resumes it once the usage API shows the window
+// open again.
+const legacyExtraUsageDetail = "Claude Code 5-hour window exhausted (100%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)"
+
+func TestAutoResumeRestartsAnOlderBuildsExtraUsagePauseOnceTheWindowReopens(t *testing.T) {
+	now := time.Date(2026, 10, 24, 23, 35, 0, 0, time.UTC)
+	dir := pausedProject(t, pausereason.New(pausereason.CodeBudget, legacyExtraUsageDetail))
+
+	tests := []struct {
+		name  string
+		usage *ratelimit.ClaudeUsage
+		err   error
+		want  bool
+	}{
+		{"window still exhausted", &ratelimit.ClaudeUsage{
+			FiveHour: &ratelimit.UsageDetail{Utilization: 100, ResetsAt: now.Add(2 * time.Hour)},
+		}, nil, false},
+		{"another window exhausted", &ratelimit.ClaudeUsage{
+			FiveHour: &ratelimit.UsageDetail{Utilization: 2, ResetsAt: now.Add(5 * time.Hour)},
+			SevenDay: &ratelimit.UsageDetail{Utilization: 100, ResetsAt: now.Add(48 * time.Hour)},
+		}, nil, false},
+		// Unreadable is not reopened: the pause waits for the next sweep, or
+		// for a person, exactly as it did before.
+		{"usage unreadable", nil, errors.New("usage API returned 429"), false},
+		{"window reopened", &ratelimit.ClaudeUsage{
+			FiveHour: &ratelimit.UsageDetail{Utilization: 3, ResetsAt: now.Add(5 * time.Hour)},
+		}, nil, true},
+		// The snapshot still says 100% but its reset has passed: the window it
+		// describes has rolled over.
+		{"stale snapshot past its reset", &ratelimit.ClaudeUsage{
+			FiveHour: &ratelimit.UsageDetail{Utilization: 100, ResetsAt: now.Add(-5 * time.Minute)},
+		}, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, resumed := resumeProbe(t, dir, now)
+			srv.autoResumeUsage = func() (*ratelimit.ClaudeUsage, error) { return tt.usage, tt.err }
+			if got := srv.maybeAutoResume(dir); got != tt.want {
+				t.Fatalf("maybeAutoResume = %v, want %v", got, tt.want)
+			}
+			if tt.want && (len(*resumed) != 1 || (*resumed)[0] != dir) {
+				t.Errorf("resumed %v, want exactly [%s]", *resumed, dir)
+			}
+			if !tt.want && len(*resumed) != 0 {
+				t.Errorf("dispatched %v", *resumed)
+			}
+		})
+	}
+}
+
+func TestAutoResumeStillLeavesASpentBudgetAlone(t *testing.T) {
+	now := time.Date(2026, 10, 24, 23, 35, 0, 0, time.UTC)
+	open := &ratelimit.ClaudeUsage{FiveHour: &ratelimit.UsageDetail{Utilization: 3, ResetsAt: now.Add(5 * time.Hour)}}
+
+	// Recognising the older build's extra-usage pause must not turn every
+	// budget pause into one a timer lifts: these are limits somebody set.
+	for _, detail := range []string{
+		"daily USD budget exceeded: spent $5.0000 of $5.0000 project limit — run 'cloop budget status' for details",
+		"global daily token budget exceeded: 900 of 900 tokens used across all projects — run 'cloop budget status --global' for details",
+		"cost limit reached: $12.40",
+	} {
+		t.Run(detail[:24], func(t *testing.T) {
+			dir := pausedProject(t, pausereason.New(pausereason.CodeBudget, detail))
+			srv, resumed := resumeProbe(t, dir, now)
+			srv.autoResumeUsage = func() (*ratelimit.ClaudeUsage, error) { return open, nil }
+			if srv.maybeAutoResume(dir) || len(*resumed) != 0 {
+				t.Errorf("resumed a run paused for a spent budget (%q)", detail)
+			}
+		})
+	}
+}
+
+func TestLegacyExtraUsagePauseIsRecognisedByItsWording(t *testing.T) {
+	for _, tt := range []struct {
+		reason pausereason.Reason
+		want   bool
+	}{
+		{pausereason.New(pausereason.CodeBudget, legacyExtraUsageDetail), true},
+		{pausereason.New(pausereason.CodeBudget, "Claude Code weekly window exhausted (100%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)"), true},
+		{pausereason.New(pausereason.CodeBudget, "Claude Code weekly Sonnet window exhausted (101%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)"), true},
+		// The same words under another code are not that pause.
+		{pausereason.New(pausereason.CodeAbort, legacyExtraUsageDetail), false},
+		// A budget pause that knows its reset is not one an old build wrote.
+		{pausereason.NewUntil(pausereason.CodeBudget, legacyExtraUsageDetail, time.Now()), false},
+		{pausereason.New(pausereason.CodeBudget, "daily USD budget exceeded"), false},
+	} {
+		r := tt.reason
+		if got := legacyExtraUsagePause(&r); got != tt.want {
+			t.Errorf("legacyExtraUsagePause(%s: %q) = %v, want %v", r.Code, r.Detail, got, tt.want)
+		}
+	}
+	if legacyExtraUsagePause(nil) {
+		t.Error("legacyExtraUsagePause(nil) = true")
 	}
 }

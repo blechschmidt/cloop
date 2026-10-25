@@ -141,6 +141,9 @@ const abortTailLines = 5
 type abortPattern struct {
 	class  AbortClass
 	needle string
+	// re, when set, is matched instead of needle: for a refusal the harness
+	// has worded more than one way, and is likely to reword again.
+	re     *regexp.Regexp
 	reason string
 	// wholeOnly restricts the pattern to responses that are *entirely* the
 	// message. Harness refusals happen before the agent produces anything,
@@ -167,9 +170,20 @@ var abortPatterns = []abortPattern{
 	// --- Usage windows: retryable once the window rolls over. ---
 	{class: AbortUsageLimit, needle: "hit your weekly limit", reason: "weekly subscription limit reached"},
 	{class: AbortUsageLimit, needle: "hit your 5-hour limit", reason: "five-hour subscription limit reached"},
+	// Claude Code's current name for the five-hour window. Missing it is how
+	// a task the limit cut off 39 minutes in was recorded as done, summary
+	// "You've hit your session limit · resets 11:30pm (UTC)" (Task 20440).
+	{class: AbortUsageLimit, needle: "hit your session limit", reason: "five-hour session limit reached"},
 	{class: AbortUsageLimit, needle: "hit your usage limit", reason: "subscription usage limit reached"},
 	{class: AbortUsageLimit, needle: "hit your limit", reason: "subscription limit reached"},
 	{class: AbortUsageLimit, needle: "usage limit reached", reason: "subscription usage limit reached"},
+	// The shapes behind the wordings above, for the next one. The window's
+	// name has changed before ("5-hour" became "session"), and each rename
+	// the needles did not know closed tasks as done. Anchored on the
+	// harness's own phrasing — "you've hit your", "limit reached · resets" —
+	// rather than on "limit", which any transcript about rate limiting says.
+	{class: AbortUsageLimit, re: regexp.MustCompile(`\byou(?:'|’|)ve hit your (?:[a-z0-9]+[ -]){1,3}limit\b|\byou have hit your (?:[a-z0-9]+[ -]){1,3}limit\b`), reason: "subscription limit reached"},
+	{class: AbortUsageLimit, re: regexp.MustCompile(`\blimit reached\s*[·∙•|-]\s*resets?\b`), reason: "subscription limit reached"},
 	{class: AbortUsageLimit, needle: "rate limit exceeded", reason: "provider rate limit exceeded"},
 	{class: AbortUsageLimit, needle: "rate_limit_error", reason: "provider rate limit exceeded"},
 	{class: AbortUsageLimit, needle: "too many requests", reason: "provider rate limit exceeded"},
@@ -230,13 +244,13 @@ func classifyAbortAt(output string, now time.Time) (Abort, bool) {
 		if p.wholeOnly && !whole {
 			continue
 		}
-		if !strings.Contains(lower, p.needle) {
+		if !p.matches(lower) {
 			continue
 		}
 		ab := Abort{
 			Class:    p.class,
 			Reason:   p.reason,
-			Evidence: excerpt(region, p.needle),
+			Evidence: excerpt(region, p.matches),
 		}
 		// Only usage windows publish a reset time; a quota message that
 		// happens to contain a date is not a window that will reopen.
@@ -259,11 +273,19 @@ func tailLines(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// excerpt returns the line containing needle, trimmed and bounded, so the
-// event journal records the provider's own words.
-func excerpt(region, needle string) string {
+// matches reports whether the pattern occurs in lower, a lowercased region.
+func (p abortPattern) matches(lower string) bool {
+	if p.re != nil {
+		return p.re.MatchString(lower)
+	}
+	return strings.Contains(lower, p.needle)
+}
+
+// excerpt returns the first line the pattern matches, trimmed and bounded, so
+// the event journal records the provider's own words.
+func excerpt(region string, matches func(lower string) bool) string {
 	for _, line := range strings.Split(region, "\n") {
-		if strings.Contains(strings.ToLower(line), needle) {
+		if matches(strings.ToLower(line)) {
 			return truncate(strings.TrimSpace(line), 200)
 		}
 	}
@@ -273,9 +295,10 @@ func excerpt(region, needle string) string {
 // resetTimeRe matches the reset clause of a usage-limit message. The observed
 // shapes are "resets 2:50pm (UTC)", "resets 10pm (UTC)" and
 // "resets Aug 28, 10pm (UTC)"; the optional leading month/day group covers the
-// third without requiring a separate pattern.
+// third without requiring a separate pattern. The parenthesised zone is
+// captured too: the harness renders the time in its own zone and names it.
 var resetTimeRe = regexp.MustCompile(
-	`(?i)resets?\s+(?:at\s+)?(?:([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?`)
+	`(?i)resets?\s+(?:at\s+)?(?:([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^()]{1,64})\))?`)
 
 var monthByPrefix = map[string]time.Month{
 	"jan": time.January, "feb": time.February, "mar": time.March,
@@ -293,7 +316,7 @@ func parseResetTime(msg string, now time.Time) (time.Time, bool) {
 	if m == nil {
 		return time.Time{}, false
 	}
-	monthStr, dayStr, hourStr, minStr, ampm := m[1], m[2], m[3], m[4], strings.ToLower(m[5])
+	monthStr, dayStr, hourStr, minStr, ampm, zone := m[1], m[2], m[3], m[4], strings.ToLower(m[5]), m[6]
 
 	hour, err := strconv.Atoi(hourStr)
 	if err != nil {
@@ -321,11 +344,7 @@ func parseResetTime(msg string, now time.Time) (time.Time, bool) {
 		return time.Time{}, false
 	}
 
-	// "(UTC)" is what the harness actually prints. Without it we cannot know
-	// the provider's zone, and assuming the hub's would silently shift the
-	// wait by hours, so treat the timestamp as UTC either way and let the
-	// caller's ceiling bound the damage.
-	loc := time.UTC
+	loc := resetZone(zone)
 	nowIn := now.In(loc)
 
 	if monthStr != "" && dayStr != "" {
@@ -352,6 +371,35 @@ func parseResetTime(msg string, now time.Time) (time.Time, bool) {
 		t = t.AddDate(0, 0, 1)
 	}
 	return t, true
+}
+
+// resetZone is the zone a reset clause's clock time is in.
+//
+// The harness renders the reset in its own time zone and names it in
+// parentheses — "(UTC)" on a host set to UTC, as this hub's is, but
+// "(Europe/Berlin)" on a developer's laptop. Reading every one as UTC put the
+// wait out by the host's offset: east of Greenwich the run came back hours
+// late, and west of it too early — or, when the clock time looked already
+// past, a day late (Task 20440).
+//
+// A zone that is missing or cannot be loaded — an abbreviation, a host without
+// zoneinfo — is read as UTC, as before, and the caller's ceiling bounds the
+// damage.
+func resetZone(name string) *time.Location {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.EqualFold(name, "utc") {
+		return time.UTC
+	}
+	// To LoadLocation "Local" means this process's zone, which is no zone a
+	// harness prints.
+	if strings.EqualFold(name, "local") {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
 }
 
 // CompletionEvidence is what a run left behind, and is the only thing that may

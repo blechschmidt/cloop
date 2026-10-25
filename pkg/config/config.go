@@ -1863,7 +1863,8 @@ func (o OrchestratorConfig) EffectiveTaskTimeoutMinutes() int {
 type UIConfig struct {
 	// AutoResumeOnCapReset lets the hub restart a run that a Claude Code
 	// subscription cap stopped, once the window it was waiting on has rolled
-	// over (Task 20285).
+	// over (Task 20285) — including a run budget.block_extra_usage held out of
+	// an exhausted window (Task 20440).
 	//
 	// A *bool rather than a bool because absent and explicitly-false must
 	// differ: the default is on, so a plain bool's zero value would silently
@@ -3250,6 +3251,11 @@ type BudgetConfig struct {
 	// BlockExtraUsage, when true (default), prevents cloop from running tasks
 	// when doing so would incur Claude Code extra usage (per-token billing
 	// beyond the subscription). Set to false to allow extra usage.
+	//
+	// A run it holds back is not stopped for good: like a subscription cap,
+	// it waits for the exhausted window to reopen when that is near, and
+	// otherwise pauses with the reset recorded, so the hub resumes it then
+	// (ui.auto_resume_on_cap_reset, Task 20440).
 	BlockExtraUsage *bool `yaml:"block_extra_usage,omitempty"`
 }
 

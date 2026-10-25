@@ -498,6 +498,12 @@ type Server struct {
 	// real workload. Nil means the real dispatch.
 	autoResumeStart func(workDir string) error
 
+	// autoResumeUsage replaces the Claude Code usage snapshot the same sweep
+	// reads for a pause recorded by an older build (Task 20440), so a test can
+	// reopen a window without a Claude account. Nil means the cached OAuth
+	// usage. See subscriptionUsage in autoresume.go.
+	autoResumeUsage func() (*ratelimit.ClaudeUsage, error)
+
 	// diskProbe replaces diskusage.Volumes for the hub's free-space checks
 	// (Task 20381) — the admin banner, Settings → Disk & Retention and the
 	// cloop_hub_disk_free_bytes collector — so a test can put the hub's state

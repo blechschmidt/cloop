@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	// The zone cases in TestParseResetTime need zoneinfo; embedding it in the
+	// test binary keeps them independent of the machine's /usr/share/zoneinfo.
+	_ "time/tzdata"
 )
 
 // The strings in this file are verbatim from cloop's own corrupted ledger —
@@ -20,6 +23,10 @@ const (
 	weeklyLimitEvening  = "You've hit your weekly limit · resets 10pm (UTC)"                                             // task 20160
 	weeklyLimitDated    = "You've hit your weekly limit · resets Aug 28, 10pm (UTC)"                                     // tasks 20198–20201
 	harnessRootRefusal  = "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons" // task 20015
+	// Claude Code's current name for the five-hour window. flightctl-multi's
+	// task 3 ran 39 minutes, ended on this, and was recorded as done
+	// (Task 20440).
+	sessionLimitLate = "You've hit your session limit · resets 11:30pm (UTC)"
 )
 
 func TestClassifyAbort(t *testing.T) {
@@ -36,6 +43,15 @@ func TestClassifyAbort(t *testing.T) {
 		{"ledger: weekly limit with reset", weeklyLimitEvening, true, AbortUsageLimit},
 		{"ledger: weekly limit with dated reset", weeklyLimitDated, true, AbortUsageLimit},
 		{"ledger: harness refused under root", harnessRootRefusal, true, AbortHarnessRefusal},
+		{"ledger: session limit with reset", sessionLimitLate, true, AbortUsageLimit},
+
+		// --- Wordings the harness has not used here yet, caught by shape:
+		// the window's name has changed before, and each rename the needles
+		// did not know was a task cut off and recorded as done. ---
+		{"another window's name", "You've hit your Opus limit · resets 3pm (UTC)", true, AbortUsageLimit},
+		{"a two-word window name", "You’ve hit your weekly Opus limit · resets Oct 30, 10pm (UTC)", true, AbortUsageLimit},
+		{"older 'limit reached' shape", "5-hour limit reached ∙ resets 3pm", true, AbortUsageLimit},
+		{"org quota still wins over the shape", "You've hit your org's monthly usage limit · resets Nov 1", true, AbortQuotaExceeded},
 
 		// --- Empty output is its own class, not a no-evidence fallthrough. ---
 		{"empty output", "", true, AbortEmptyOutput},
@@ -84,6 +100,13 @@ func TestClassifyAbort(t *testing.T) {
 		{
 			name:   "ordinary completion summary",
 			output: "Refactored the executor placement logic and added three tests.",
+			wantOK: false,
+		},
+		{
+			// The shapes above are anchored on the harness's own phrasing, so
+			// prose about limits in general does not trip them.
+			name:   "summary advising about a rate limit",
+			output: "Added retries: if you hit your API rate limit the client now backs off and the limit is reached less often.",
 			wantOK: false,
 		},
 		{
@@ -201,6 +224,33 @@ func TestParseResetTime(t *testing.T) {
 			// Evaluated against a December "now" below.
 			wantOK: true,
 		},
+		// The harness prints the reset in its own zone and names it. Read as
+		// UTC, east of Greenwich the run came back hours late, and west of it
+		// the time looked past and was taken for tomorrow's (Task 20440).
+		{
+			name:   "zone east of UTC",
+			msg:    "You've hit your session limit · resets 4pm (Europe/Berlin)",
+			want:   time.Date(2026, time.August, 27, 14, 0, 0, 0, time.UTC), // 16:00 CEST
+			wantOK: true,
+		},
+		{
+			name:   "zone west of UTC whose clock time looks past in UTC",
+			msg:    "You've hit your session limit · resets 9am (America/Los_Angeles)",
+			want:   time.Date(2026, time.August, 27, 16, 0, 0, 0, time.UTC), // 09:00 PDT, not tomorrow
+			wantOK: true,
+		},
+		{
+			name:   "dated reset in a named zone",
+			msg:    "You've hit your weekly limit · resets Aug 28, 10pm (Asia/Tokyo)",
+			want:   time.Date(2026, time.August, 28, 13, 0, 0, 0, time.UTC),
+			wantOK: true,
+		},
+		{
+			name:   "unloadable zone reads as UTC, as before",
+			msg:    "You've hit your limit · resets 2:50pm (Mars/Olympus_Mons)",
+			want:   time.Date(2026, time.August, 27, 14, 50, 0, 0, time.UTC),
+			wantOK: true,
+		},
 		{name: "no reset clause", msg: orgMonthlyQuota, wantOK: false},
 		{name: "vague reset", msg: "resets soon", wantOK: false},
 		{name: "weekday, not a time", msg: "resets Monday", wantOK: false},
@@ -243,6 +293,20 @@ func TestClassifyAbort_CarriesResetTime(t *testing.T) {
 	want := time.Date(2026, time.August, 28, 22, 0, 0, 0, time.UTC)
 	if !ab.RetryAfter.Equal(want) {
 		t.Errorf("RetryAfter = %s, want %s", ab.RetryAfter, want)
+	}
+
+	// The live case behind Task 20440: cut off at 23:26:50, four minutes
+	// before the window reopened — a wait the run sits out in place.
+	cutOff := time.Date(2026, time.October, 24, 23, 26, 50, 0, time.UTC)
+	session, ok := classifyAbortAt(sessionLimitLate, cutOff)
+	if !ok || session.Class != AbortUsageLimit {
+		t.Fatalf("session limit classified as %+v (ok=%v), want a usage limit", session, ok)
+	}
+	if want := time.Date(2026, time.October, 24, 23, 30, 0, 0, time.UTC); !session.RetryAfter.Equal(want) {
+		t.Errorf("session limit RetryAfter = %s, want %s", session.RetryAfter, want)
+	}
+	if wait, pause := abortWait(session, cutOff, maxAbortWait, abortBackoff); pause || wait > 4*time.Minute {
+		t.Errorf("abortWait = %s (pause=%v), want a wait of about three minutes in place", wait, pause)
 	}
 
 	// A quota is not a window that reopens, so it must not carry one even

@@ -25,8 +25,10 @@ type Code string
 
 const (
 	// CodeUsageCap is a Claude Code subscription window whose configured
-	// per-project cap has been reached. This is the one pause that reliably
-	// ends on its own, which is why it carries ResumesAt.
+	// per-project cap has been reached, or that is exhausted outright while
+	// budget.block_extra_usage keeps the run from spilling into extra usage
+	// (Task 20440). This is the one pause that reliably ends on its own, which
+	// is why it carries ResumesAt.
 	CodeUsageCap Code = "usage_cap"
 	// CodeBudget is a configured spend limit: the daily/global budget in
 	// pkg/budget, or a per-task cost ceiling.

@@ -204,7 +204,8 @@ func (o *Orchestrator) scheduleAbortRetry(ctx context.Context, s *state.ProjectS
 			color.New(color.FgYellow).Printf("⏸ Pausing run: %s. Resolve it and run cloop again.\n", ab.Reason)
 		} else {
 			color.New(color.FgYellow).Printf(
-				"⏸ Pausing run: %s; it does not reset until %s (%s away). Run cloop again after that.\n",
+				"⏸ Pausing run: %s; it does not reset until %s (%s away). "+
+					"A hub resumes it then (ui.auto_resume_on_cap_reset); without one, run cloop again after that.\n",
 				ab.Reason, ab.RetryAfter.UTC().Format(time.RFC1123), wait.Round(time.Minute))
 		}
 		return true, nil

@@ -11,7 +11,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/notify"
-	"github.com/blechschmidt/cloop/pkg/ratelimit"
 )
 
 // DailyStats holds today's aggregated usage figures.
@@ -234,42 +233,18 @@ func Enforce(workDir string, cfg config.BudgetConfig, notifyCfg config.NotifyCon
 
 	// Claude Code subscription usage caps live in cfg.ClaudeCode.Max*Pct and are
 	// enforced by orchestrator.enforceClaudeCodeLimits via
-	// ratelimit.EnforceClaudeCodeLimits. We deliberately do not duplicate that
+	// ratelimit.EnforceSubscriptionLimits. We deliberately do not duplicate that
 	// check here — having two parallel enforcement paths caused user confusion
 	// when caps configured in the Budget tab and the Claude Code 'Set Caps'
 	// modal shadowed each other. See Task 20074.
-
-	// Block when subscription windows are exhausted to prevent incurring
-	// extra usage (per-token billing). This allows extra usage to stay
-	// enabled globally on the Claude account for interactive use while
-	// preventing cloop from consuming it.
-	blockExtra := cfg.ShouldBlockExtraUsage()
-	if blockExtra {
-		// Use the cached fetcher so the per-task budget gate doesn't hammer
-		// the OAuth usage API — the orchestrator calls Check before every
-		// task and a parallel plan can fire many concurrent checks.
-		usage, usageErr := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
-		if usageErr == nil && usage != nil {
-			if usage.FiveHour != nil && usage.FiveHour.Utilization >= 100 {
-				return fmt.Errorf(
-					"Claude Code 5-hour window exhausted (%.0f%%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)",
-					usage.FiveHour.Utilization,
-				)
-			}
-			if usage.SevenDay != nil && usage.SevenDay.Utilization >= 100 {
-				return fmt.Errorf(
-					"Claude Code weekly window exhausted (%.0f%%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)",
-					usage.SevenDay.Utilization,
-				)
-			}
-			if usage.SevenDaySonnet != nil && usage.SevenDaySonnet.Utilization >= 100 {
-				return fmt.Errorf(
-					"Claude Code weekly Sonnet window exhausted (%.0f%%) — pausing to avoid extra usage (set budget.block_extra_usage: false to allow)",
-					usage.SevenDaySonnet.Utilization,
-				)
-			}
-		}
-	}
+	//
+	// budget.block_extra_usage is enforced there too, and no longer here
+	// (Task 20440). Checked here, an exhausted subscription window came back as
+	// a plain error and paused the run as a budget pause: no reset time, and a
+	// spent budget is a pause the hub must never resume on a timer, so the run
+	// sat until somebody pressed Run although the window reopened by itself
+	// within five hours. Next to the caps it carries the window's reset, is
+	// waited out when that is near, and is resumed by the hub when it is not.
 
 	return nil
 }

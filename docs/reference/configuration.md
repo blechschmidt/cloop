@@ -2945,8 +2945,20 @@ what was already collected with `cloop hub telemetry prune`. See
 #### Resuming a capped run
 
 A run stopped by a Claude Code subscription cap records *when* the window it hit
-reopens, because the OAuth usage API reports each window's reset. The hub sweeps
+reopens, because the OAuth usage API reports each window's reset. That covers
+both kinds of cap: a configured `claudecode.max_*_pct`, and a window used up
+entirely while `budget.block_extra_usage` (on by default) keeps the run from
+spilling into extra usage. A window that reopens within 90 minutes is waited out
+by the run itself, which then carries on. A later one pauses the run, shown as
+*Paused: 5-hour window exhausted, resumes 23:30* in the dashboard. The hub sweeps
 every five minutes and restarts such runs once that instant has passed.
+
+A task the harness cuts off at the limit, ending on *"You've hit your session
+limit · resets 11:30pm (UTC)"*, goes back to pending rather than being recorded
+as done. The run retries it after the reset the message names, read in the time
+zone the message gives. An auto-evolve round is held the same way, both before
+it starts and when the provider answers it with a limit message, so a plan that
+drains as its window runs out pauses rather than ending as complete.
 
 ```yaml
 ui:
@@ -2963,6 +2975,13 @@ rejected credential is never restarted on a timer — each of those is a decisio
 that a resume would override, and none of them ends by itself. A cap whose reset
 the API did not report is also left alone: without a reset there is nothing to
 say the wall has moved.
+
+Builds from before Task 20440 recorded the extra-usage hold as a spent budget
+with no reset: *"Claude Code 5-hour window exhausted (100%) — pausing to avoid
+extra usage …"*. A run keeps the build it started with, and an edge device runs
+its own, so such pauses still appear after the hub is upgraded. The hub
+recognises that wording and restarts the run once the usage API shows no window
+exhausted. Every other budget pause stays put.
 
 Default-on is deliberate. The alternative is what it replaced: an unattended
 fleet parked for the rest of a weekly window over a condition that had already

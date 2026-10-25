@@ -111,6 +111,20 @@ func (o *Orchestrator) handleUsageCap(ctx context.Context, s *state.ProjectState
 	return stop, nil
 }
 
+// evolveRefused is what evolvePM returns for a round the subscription turned
+// away: the provider answered with a usage-limit message instead of tasks.
+//
+// Counted as an ordinary empty round, as it used to be, three of these in a
+// row closed the run as complete — a status nothing resumes — so a plan that
+// drained just as its window ran out stopped evolving for good (Task 20440).
+// The loops wait it out, or pause until its reset, with scheduleAbortRetry,
+// as they do for a task the same message cut short.
+type evolveRefused struct{ ab Abort }
+
+func (e *evolveRefused) Error() string {
+	return "evolve round refused by the provider: " + e.ab.String()
+}
+
 // auditCapPause writes the run.cap_paused row. Best-effort: a project whose DB
 // handle was already closed still pauses correctly, it just does not leave a
 // trail, and failing the pause over a missing audit row would be worse.

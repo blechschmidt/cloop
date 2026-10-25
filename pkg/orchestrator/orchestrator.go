@@ -467,6 +467,11 @@ type Orchestrator struct {
 	// sleeping until one really rolls over. Nil means time.Now. See now().
 	testNow func() time.Time
 
+	// testUsage replaces the OAuth usage snapshot the subscription check
+	// reads, so a test can exhaust a window without a Claude account. Nil
+	// means ratelimit.FetchOrCachedUsage. See subscriptionUsage.
+	testUsage func() (*ratelimit.ClaudeUsage, error)
+
 	// diskProbe replaces diskusage.Volumes for the free-space floor (Task
 	// 20381), so a test can put a volume below the floor without filling one;
 	// testDiskPoll shortens the minute a disk_low pause waits between checks.
@@ -1163,15 +1168,27 @@ func (o *Orchestrator) SetProvider(name string) {
 	}
 }
 
-// enforceClaudeCodeLimits checks the per-project claudecode subscription caps
-// against the latest cached usage data (refreshing from the OAuth API if no
-// cache is available). Returns nil when the active provider is not claudecode,
-// when no caps are configured, when usage data is unavailable, or when no cap
-// has been reached.
+// enforceClaudeCodeLimits checks the per-project claudecode subscription caps,
+// and — under budget.block_extra_usage, on by default — whether a window is
+// exhausted outright, against the latest cached usage data (refreshing from
+// the OAuth API if no cache is available). Returns nil when the active
+// provider is not claudecode, when neither is configured, when usage data is
+// unavailable, or when nothing has been reached; otherwise a
+// *ratelimit.CapExceededError carrying each window's reset, for
+// handleUsageCap.
+//
+// The exhausted-window check used to run inside budget.Enforce, whose plain
+// error paused the run as a spent budget — the one kind of pause the hub must
+// never resume on a timer — so a project held back to avoid extra usage stayed
+// paused long after its five-hour window had reopened (Task 20440). It only
+// ever concerned Claude Code's own subscription, and now, like the caps, it is
+// only checked for a run whose provider is claudecode.
 func (o *Orchestrator) enforceClaudeCodeLimits() error {
 	cc := o.config.ClaudeCode
-	if cc.MaxWeeklyPct <= 0 && cc.MaxFiveHourPct <= 0 &&
-		cc.MaxWeeklyOpusPct <= 0 && cc.MaxWeeklySonnetPct <= 0 {
+	capsSet := cc.MaxWeeklyPct > 0 || cc.MaxFiveHourPct > 0 ||
+		cc.MaxWeeklyOpusPct > 0 || cc.MaxWeeklySonnetPct > 0
+	blockExtra := o.config.Budget.ShouldBlockExtraUsage()
+	if !capsSet && !blockExtra {
 		return nil
 	}
 	// Only enforce when the active provider is claudecode.
@@ -1186,17 +1203,37 @@ func (o *Orchestrator) enforceClaudeCodeLimits() error {
 	// least ratelimit.MinUsageCacheTTL (currently one minute) — important
 	// because enforceClaudeCodeLimits runs before *every* task in a parallel
 	// PM plan and would otherwise hammer the OAuth usage API.
-	usage, err := ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
+	usage, err := o.subscriptionUsage()
 	if err != nil && usage == nil {
 		// Best-effort: when both fresh fetch and cache fail, skip enforcement
 		// rather than blocking work on a monitoring outage. But say so — caps
 		// the operator configured are not being applied right now, and a dead
 		// credential can keep it that way indefinitely. This one went unnoticed
 		// for four days (Task 20202) precisely because it was silent.
-		o.warnCapsUnenforced(err)
+		//
+		// Only for configured caps. block_extra_usage is on for every project
+		// that never mentions it, including ones whose Claude Code signs in
+		// with an API key and has no subscription usage to read; warning for
+		// those would bury the step log in a condition nobody can act on. The
+		// budget check it replaces was silent here too.
+		if capsSet {
+			o.warnCapsUnenforced(err)
+		}
 		return nil
 	}
-	return ratelimit.EnforceClaudeCodeLimits(cc, usage)
+	// Judged as of now: a window whose reset has passed since the snapshot
+	// was taken has reopened, whatever the snapshot still says about it.
+	return ratelimit.EnforceSubscriptionLimits(cc, blockExtra, usage.At(o.now()))
+}
+
+// subscriptionUsage is the snapshot the subscription check reads: the cached
+// OAuth usage, refreshed when older than ratelimit.MinUsageCacheTTL, unless a
+// test supplied its own.
+func (o *Orchestrator) subscriptionUsage() (*ratelimit.ClaudeUsage, error) {
+	if o.testUsage != nil {
+		return o.testUsage()
+	}
+	return ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
 }
 
 // capWarnInterval throttles the unenforced-caps warning. The check runs before
@@ -1751,6 +1788,22 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				} else if waited {
 					continue
 				}
+				// And the subscription, for the same reason (Task 20440): a
+				// cap or an exhausted window holds an evolve round as it
+				// holds a task. Unchecked, a plan that drained as its window
+				// ran out sent the round into the wall, got the limit message
+				// back and no tasks, and after three such rounds closed the
+				// run as complete, which nothing resumes.
+				if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
+					stop, err := o.handleUsageCap(ctx, s, ccErr)
+					if err != nil {
+						return errors.Join(ccErr, err)
+					}
+					if stop {
+						return ccErr
+					}
+					continue
+				}
 			}
 			// A run that ends here stores that it did before saying so. One
 			// that goes on to evolve announces only what the tasks already
@@ -1810,6 +1863,20 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				o.persistBestEffort(s, "the run's status (evolving)",
 					"it only tells the dashboard which phase is running, and the next write replaces it")
 				n, err := o.evolvePM(ctx)
+				// A round the subscription refused found nothing, like any
+				// empty round — but only once the window it hit has been
+				// waited out, or recorded for the hub to resume.
+				var refused *evolveRefused
+				if errors.As(err, &refused) {
+					stop, perr := o.scheduleAbortRetry(ctx, s, refused.ab, nil)
+					if perr != nil {
+						return perr
+					}
+					if stop {
+						return nil
+					}
+					n, err = 0, nil
+				}
 				if err != nil {
 					// The discovered tasks did not reach the database: the
 					// run stops on that, not on the evolve round.
@@ -1946,12 +2013,13 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			return budgetErr
 		}
 
-		// Per-project claudecode subscription cap enforcement. A cap whose
-		// window reopens soon is waited out in place rather than ending the
-		// run; a distant one pauses with the reset recorded as resumes_at, so
-		// the hub can restart it without a human (Task 20285). Shared by both
-		// loops so the sequential and parallel paths cannot disagree about
-		// what a cap means.
+		// Per-project claudecode subscription cap enforcement, and the
+		// block_extra_usage hold on an exhausted window (Task 20440). A cap
+		// whose window reopens soon is waited out in place rather than ending
+		// the run; a distant one pauses with the reset recorded as resumes_at,
+		// so the hub can restart it without a human (Task 20285). Shared by
+		// both loops so the sequential and parallel paths cannot disagree
+		// about what a cap means.
 		if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
 			stop, err := o.handleUsageCap(ctx, s, ccErr)
 			if err != nil {
@@ -4164,6 +4232,22 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				} else if waited {
 					continue
 				}
+				// And the subscription, for the same reason (Task 20440): a
+				// cap or an exhausted window holds an evolve round as it
+				// holds a task. Unchecked, a plan that drained as its window
+				// ran out sent the round into the wall, got the limit message
+				// back and no tasks, and after three such rounds closed the
+				// run as complete, which nothing resumes.
+				if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
+					stop, err := o.handleUsageCap(ctx, s, ccErr)
+					if err != nil {
+						return errors.Join(ccErr, err)
+					}
+					if stop {
+						return ccErr
+					}
+					continue
+				}
 			}
 			// A run that ends here stores that it did before saying so. One
 			// that goes on to evolve announces only what the tasks already
@@ -4209,6 +4293,20 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				o.persistBestEffort(s, "the run's status (evolving)",
 					"it only tells the dashboard which phase is running, and the next write replaces it")
 				n, err := o.evolvePM(ctx)
+				// A round the subscription refused found nothing, like any
+				// empty round — but only once the window it hit has been
+				// waited out, or recorded for the hub to resume.
+				var refused *evolveRefused
+				if errors.As(err, &refused) {
+					stop, perr := o.scheduleAbortRetry(ctx, s, refused.ab, nil)
+					if perr != nil {
+						return perr
+					}
+					if stop {
+						return nil
+					}
+					n, err = 0, nil
+				}
 				if err != nil {
 					// The discovered tasks did not reach the database: the
 					// run stops on that, not on the evolve round.
@@ -4299,12 +4397,13 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			return budgetErr
 		}
 
-		// Per-project claudecode subscription cap enforcement. A cap whose
-		// window reopens soon is waited out in place rather than ending the
-		// run; a distant one pauses with the reset recorded as resumes_at, so
-		// the hub can restart it without a human (Task 20285). Shared by both
-		// loops so the sequential and parallel paths cannot disagree about
-		// what a cap means.
+		// Per-project claudecode subscription cap enforcement, and the
+		// block_extra_usage hold on an exhausted window (Task 20440). A cap
+		// whose window reopens soon is waited out in place rather than ending
+		// the run; a distant one pauses with the reset recorded as resumes_at,
+		// so the hub can restart it without a human (Task 20285). Shared by
+		// both loops so the sequential and parallel paths cannot disagree
+		// about what a cap means.
 		if ccErr := o.enforceClaudeCodeLimits(); ccErr != nil {
 			stop, err := o.handleUsageCap(ctx, s, ccErr)
 			if err != nil {
@@ -5692,6 +5791,20 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	// during the evolve AI call are accounted for — preventing ID reuse.
 	s.SyncFromDisk()
 	newTasks, err := pm.ParseEvolveTasks(s.Goal, result.Output, s.Plan)
+	if err != nil || len(newTasks) == 0 {
+		// No tasks, and possibly not because the project is finished: a
+		// round sent into an exhausted window comes back as "You've hit your
+		// session limit · resets …". Only an answer with no tasks in it is
+		// asked, so a discovered task that merely mentions rate limits is
+		// never mistaken for a refusal.
+		if ab, refused := ClassifyAbort(result.Output); refused && ab.Class == AbortUsageLimit {
+			o.persistBestEffort(s, "an evolve round's bookkeeping (its step and tokens)",
+				"no task and no plan content changed, and the next write stores them too")
+			o.queueFailed(evolveQueueID, abortSummaryForQueue(ab))
+			dimColor.Printf("  Evolve round refused: %s\n", ab.Reason)
+			return 0, &evolveRefused{ab: ab}
+		}
+	}
 	if err != nil {
 		o.persistBestEffort(s, "an evolve round's bookkeeping (its step and tokens)",
 			"no task and no plan content changed, and the next write stores them too")

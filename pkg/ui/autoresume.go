@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
+	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -30,6 +32,12 @@ import (
 // or describes a run that was not meant to continue (plan-only, an operator's
 // Stop) — resuming those on a timer would override the intent that stopped
 // them. AutoResumable enforces that; this file must not widen it.
+//
+// The one exception is not a widening but a misfiling: before Task 20440 a run
+// that budget.block_extra_usage held out of an exhausted subscription window
+// was recorded as a budget pause. It is a usage cap in all but its code, and
+// capPauseCleared recognises it by its wording and resumes it once the usage
+// API shows the window open again. Any other budget pause stays put.
 
 // autoResumeCheckInterval is how often the sweep asks "has any window rolled
 // over?". Five minutes bounds the lateness of a resume without making the
@@ -120,8 +128,10 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 	}
 
 	// AutoResumable is the whole policy: paused, for a usage cap, with a
-	// reset that is now in the past. Everything else stays paused.
-	if !st.PauseReason.AutoResumable(s.clock()) {
+	// reset that is now in the past. Everything else stays paused — bar the
+	// one pause an older build recorded as a budget pause for what was
+	// really an exhausted window (see capPauseCleared).
+	if !s.capPauseCleared(st, s.clock()) {
 		return false
 	}
 
@@ -142,17 +152,72 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 	}
 
 	var resumesAt time.Time
+	fields := map[string]interface{}{"project": workDir, "detail": reason.Label()}
 	if reason.ResumesAt != nil {
 		resumesAt = *reason.ResumesAt
+		fields["resumes_at"] = resumesAt.UTC().Format(time.RFC3339)
 	}
-	s.log().Info(logger.EventSessionStart, 0, "auto-resume: subscription window reopened, run restarted",
-		map[string]interface{}{
-			"project":    workDir,
-			"detail":     reason.Label(),
-			"resumes_at": resumesAt.UTC().Format(time.RFC3339),
-		})
+	s.log().Info(logger.EventSessionStart, 0, "auto-resume: subscription window reopened, run restarted", fields)
 	s.auditAutoResume(workDir, reason, resumesAt)
 	return true
+}
+
+// capPauseCleared reports whether st is paused for a subscription window that
+// has reopened by now.
+//
+// For a pause this build's orchestrator recorded, that is AutoResumable: the
+// window's reset is in the reason. The other case is a pause recorded before
+// Task 20440 by a run holding an exhausted window off to avoid extra usage —
+// filed as a spent budget with no reset, so on its own terms nothing could
+// ever resume it. Builds keep writing it after the hub that reads it moves on:
+// a long-lived run keeps the binary it started with, and an edge device runs
+// its own. For that pause the hub asks the usage API instead, and restarts the
+// run once no window is exhausted any more. The run it starts is this build's,
+// which records a proper usage-cap pause should the wall still be there.
+func (s *Server) capPauseCleared(st *state.ProjectState, now time.Time) bool {
+	if st == nil {
+		return false
+	}
+	if st.PauseReason.AutoResumable(now) {
+		return true
+	}
+	if st.Status != "paused" || !legacyExtraUsagePause(st.PauseReason) {
+		return false
+	}
+	usage, err := s.subscriptionUsage()
+	if err != nil || usage == nil {
+		// Unreadable is not reopened: the pause stays for the next sweep, or
+		// for the person who presses Run, exactly as before.
+		return false
+	}
+	return len(ratelimit.CheckExhaustedWindows(usage.At(now))) == 0
+}
+
+// legacyExtraUsagePause recognises the pause budget.Enforce recorded before
+// Task 20440 moved the extra-usage check next to the subscription caps: code
+// budget, no reset time, and a detail naming an exhausted window — "Claude
+// Code 5-hour window exhausted (100%) — pausing to avoid extra usage (set
+// budget.block_extra_usage: false to allow)". Every other budget pause is a
+// spend limit somebody set, and stays a human's to clear.
+func legacyExtraUsagePause(r *pausereason.Reason) bool {
+	if r == nil || r.Code != pausereason.CodeBudget || r.ResumesAt != nil {
+		return false
+	}
+	d := r.Detail
+	return strings.HasPrefix(d, "Claude Code ") &&
+		strings.Contains(d, " window exhausted (") &&
+		strings.Contains(d, "pausing to avoid extra usage")
+}
+
+// subscriptionUsage is the Claude Code usage the sweep judges an older
+// build's pause by: the hub's own account, which is the one a resumed run
+// runs on, since startAutoResumeRun pins no per-user Claude home. Cached for
+// ratelimit.MinUsageCacheTTL like every other reader of it.
+func (s *Server) subscriptionUsage() (*ratelimit.ClaudeUsage, error) {
+	if s.autoResumeUsage != nil {
+		return s.autoResumeUsage()
+	}
+	return ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
 }
 
 // repauseIfOverDiskLimit gives a cap pause whose resume was refused because
@@ -167,7 +232,7 @@ func (s *Server) repauseIfOverDiskLimit(workDir string, err error) {
 		return
 	}
 	st, lerr := state.Load(workDir)
-	if lerr != nil || st == nil || st.Status != "paused" || !st.PauseReason.AutoResumable(s.clock()) {
+	if lerr != nil || st == nil || st.Status != "paused" || !s.capPauseCleared(st, s.clock()) {
 		return
 	}
 	st.SetPaused(diskLimitPause(overLimit.Breach))

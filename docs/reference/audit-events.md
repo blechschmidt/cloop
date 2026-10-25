@@ -129,8 +129,8 @@ Payload keys:
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
 | `run.adopt_requested` | `plan` | project | stable | Somebody asks a project's running host-process run to adopt the hub's build at its next task boundary. |
-| `run.cap_paused` | `plan` | project | stable | A Claude Code subscription cap stops the run before it dispatches its next task. |
-| `run.cap_resumed` | `plan` | project | stable | The hub restarts a cap-paused run after its window rolled over, without a human. |
+| `run.cap_paused` | `plan` | project | stable | A Claude Code subscription cap stops the run before it dispatches its next task — a configured cap, or a window used up while budget.block_extra_usage holds the run out of extra usage (`cap` 100). |
+| `run.cap_resumed` | `plan` | project | stable | The hub restarts a cap-paused run after its window rolled over, without a human — or, for the extra-usage pause an older build recorded as a spent budget, once the usage API shows the window open (no `resumes_at`). |
 | `run.firewall_denied` | `plan` | project | stable | A run ends whose sandbox firewall refused connections: one row per deny path that refused any, with the totals. |
 | `run.reexecuted` | `plan` | project | stable | A run replaces its own image with a newer build at a task boundary, keeping its process. |
 
