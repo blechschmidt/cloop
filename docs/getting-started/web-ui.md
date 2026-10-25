@@ -185,6 +185,18 @@ Task** appends it immediately. The description box takes as many lines as the
 brief needs — Enter starts a new one there, and Ctrl+Enter (⌘+Enter on a Mac)
 adds the task, as Enter does in the title.
 
+**Decompose**, beside Add Task, is for a task too big to hand an agent in one
+go. Instead of adding what you typed as one task, it has the AI break it into a
+plan of several, and nothing is added until you say so: the title and
+description become the request in **AI Feature Suggestions** below, which opens
+on its own, and the plan arrives there as numbered steps to add one at a time
+or with **Add all**. Every task of the plan takes the priority you typed, and
+waits for the tasks you named under *Depends on* as well as for the plan's own
+earlier steps; the panel says so above the steps. With no priority typed, the
+plan joins the end of the queue in order, like any other. The form empties once
+the hub has started planning, and keeps what you typed if it refuses — one plan
+or brainstorm runs per project at a time.
+
 **AI Feature Suggestions**, below the form, proposes tasks for you to review.
 Leave its text box empty and **Generate** brainstorms ideas from the project
 goal; the number beside it says how many, five when blank. Describe what you
@@ -195,14 +207,17 @@ that say which steps they come *after*. **Add as task**, **Skip** and **Add
 all** work the same for both. A plan's tasks join the end of the queue in plan
 order and keep their dependencies on each other, in whatever order you add them
 and through any you skip. On the command line this is
-[`cloop suggest --input`](../reference/commands.md#cloop-suggest).
+[`cloop suggest --input`](../reference/commands.md#cloop-suggest). Both run on
+the project's executor, like its runs.
 
 **Editing** happens in a modal with title, description, priority, dependencies
 and a per-task **Max minutes** budget (`0` inherits the project default).
 The per-row buttons set status directly, and a row carries the ones that make
 sense for the status it has: **Done**, **Skip**, **Fail**, **Split**, **Edit**
 and **Remove** on a pending task, with **Reset** replacing Done and Split once
-it has finished. **Remove** asks for confirmation first.
+it has finished. **Remove** asks for confirmation first. **Split** is Decompose
+for a task already in the list: it proposes sub-tasks to keep or drop, and
+applying adds the ones you kept in sequence and marks the task itself skipped.
 
 **Reordering** is drag and drop, and the list is the run queue: tasks run top to
 bottom, and dragging a row rewrites the priorities the scheduler reads. This

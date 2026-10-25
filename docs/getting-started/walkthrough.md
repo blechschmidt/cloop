@@ -239,6 +239,9 @@ highest) and a comma-separated list of task IDs to depend on. **Add Task**
 appends it immediately, to a running plan as readily as to an idle one. The
 description is the brief the agent works from, so its box takes several lines:
 Enter starts a new one, and Ctrl+Enter (⌘+Enter on a Mac) adds the task.
+**Decompose**, beside it, takes the same fields but plans them instead: the AI
+breaks the task into several, proposed below the form for you to add one by one
+or all at once, each with the priority and dependencies you typed.
 
 **The list is the run queue.** Tasks run top to bottom, and dragging a row
 rewrites the priorities the scheduler reads — while a run is in flight, too,

@@ -612,7 +612,7 @@ cloop prioritize --provider anthropic
 
 ### `cloop suggest`
 
-Brainstorm feature ideas for the project, or break a request of your own into a plan of tasks. Each proposal is reviewed interactively, and the accepted ones become PM tasks. The dashboard's **AI Feature Suggestions** panel on the Tasks tab runs the same command.
+Brainstorm feature ideas for the project, or break a request of your own into a plan of tasks. Each proposal is reviewed interactively, and the accepted ones become PM tasks. The dashboard's **AI Feature Suggestions** panel on the Tasks tab runs the same command, and so does **Decompose** beside Add Task, which plans the task typed there and gives every task of the plan the priority and dependencies typed with it.
 
 ```bash
 cloop suggest                                      # brainstorm 5 ideas
