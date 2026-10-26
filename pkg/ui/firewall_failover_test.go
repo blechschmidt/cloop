@@ -77,7 +77,7 @@ func TestFirewall_FailoverComposesForTheReplacement(t *testing.T) {
 		Session: claimedSession(t, dir, executor.Session{ID: "s-1", ExecutorID: "gone", ProjectPath: dir,
 			Spec: executor.Spec{WorkDir: dir, Argv: []string{"cloop", "run"}, EgressRules: &stale,
 				Labels: map[string]string{"project": dir}}})}
-	_ = redispatchSession(context.Background(), dir, ev, srv)
+	_, _ = redispatchSession(context.Background(), dir, ev, srv)
 	select {
 	case got := <-target.got:
 		if got.EgressRules == nil || !fwpolicy.Equal(*got.EgressRules, rules) || got.EgressBound == nil {

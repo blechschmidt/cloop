@@ -503,9 +503,11 @@ type Server struct {
 
 	// autoResumeUsage replaces the Claude Code usage snapshot the same sweep
 	// reads for a pause recorded by an older build (Task 20440), so a test can
-	// reopen a window without a Claude account. Nil means the cached OAuth
-	// usage. See subscriptionUsage in autoresume.go.
-	autoResumeUsage func() (*ratelimit.ClaudeUsage, error)
+	// reopen a window without a Claude account. It is asked for the login
+	// under configDir — the Claude home the resume acts on, "" for the hub's
+	// own (Task 20443). Nil means the cached OAuth usage. See
+	// subscriptionUsage in autoresume.go.
+	autoResumeUsage func(configDir string) (*ratelimit.ClaudeUsage, error)
 
 	// diskProbe replaces diskusage.Volumes for the hub's free-space checks
 	// (Task 20381) — the admin banner, Settings → Disk & Retention and the

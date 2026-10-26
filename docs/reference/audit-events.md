@@ -138,13 +138,13 @@ Payload keys:
 
 - `run.adopt_requested` — `project`, `request_id`, `pid`, `run_build`, `hub_build`, `behind`
 - `run.cap_paused` — `project`, `windows`, `utilization`, `cap`, `resumes_at`, `detail`
-- `run.cap_resumed` — `project`, `paused_detail`, `resumes_at`, `resumed_at`
+- `run.cap_resumed` — `project`, `paused_detail`, `resumes_at`, `resumed_at`, `acted_for`, `acted_for_basis`
 - `run.firewall_denied` — `project`, `run_id`, `executor_id`, `rule`, `why`, `count`, `destinations`, `top`, `first_seen`, `last_seen`, `fingerprint`
 - `run.reexecuted` — `project`, `run_id`, `pid`, `from`, `to`, `reason`, `reexecs`
 
 - `run.adopt_requested` — Gated like starting a run. The request names the run's process, so it is acted on by that run or by none; what the run then did is its run.reexecuted row, or a refusal in the project's journal.
 - `run.cap_paused` — Distinct from state.save's bare "paused" status because a cap is the one pause that ends by itself: `resumes_at` is the window's reset from the OAuth usage API, and it is what run.cap_resumed is later matched against.
-- `run.cap_resumed` — The only action recording work that a machine started on its own initiative, so "who restarted this project" stays answerable from the trail alone.
+- `run.cap_resumed` — The only action recording work that a machine started on its own initiative, so "who restarted this project" stays answerable from the trail alone. On a hub with single sign-on `acted_for` names whom the run acts for, on their own Claude account, and `acted_for_basis` how that was decided: `starter`, the person the resumed run was started for as recorded at its dispatch (no `acted_for` when it was started acting for no one), `owner`, the project's owner, for a run older than that record, or `unknown`, nobody nameable, on an executor that needs no Claude home. A resume that could not act for them is not restarted, and leaves no row.
 - `run.firewall_denied` — Aggregated per run and rule (Task 20437), never per packet: `count` is the refusals the sandbox's packet log reported — rate-limited to ten a second per deny path, so a flood is at least this many — `destinations` how many distinct destinations, `top` up to eight of them as `dst:port/proto`. `rule` is the deny path's tag (`default`, `deny:<prefix>`, `meta:<prefix>`, `block:<prefix>`, `xlat:<prefix>`), or `unitemised` for what the run's capped aggregate counted without itemising; `why` is the hub's sentence for it. Each destination is also a `network_blocked` row in the run's history. Absent for a run on Kubernetes, whose NetworkPolicy has no portable log, and for one on a device whose agent predates protocol v24.
 - `run.reexecuted` — Written by the new image. Together with task.dispatch it answers "which build ran this task": a run's tasks before this row ran on `from`, after it on `to`.
 
@@ -225,7 +225,7 @@ Payload keys:
 - `executor.cordon` — `action`, `executor_id`, `reason`, `state`
 - `executor.drain` — `action`, `executor_id`, `reason`, `state`
 - `executor.enroll` — `action`, `executor_id`, `name`, `expires_at`, `workdir_root`, `labels`
-- `executor.failover` — `session_id`, `from`, `to`, `attempt`, `max_attempts`, `project_path`, `task_id`, `running_tasks`, `placed`, `error`
+- `executor.failover` — `session_id`, `from`, `to`, `attempt`, `max_attempts`, `project_path`, `task_id`, `running_tasks`, `placed`, `acted_for`, `error`
 - `executor.failover_exhausted` — `session_id`, `from`, `attempt`, `max_attempts`, `project_path`, `running_tasks`, `nodes`, `error`
 - `executor.firewall` — `action`, `executor_id`, `from`, `to`, `fingerprint`, `cleared`, `constrained`
 - `executor.isolation_verdict` — `runtime`, `claim`, `verdict`, `status`, `previous_verdict`, `previous_status`, `point`, `detail`
@@ -242,7 +242,7 @@ Payload keys:
 - `executor.audience` — `action` is "admit" or "withdraw"; `restricted` is whether the executor is access-controlled *after* the change, and `members` how many principals remain. Withdrawing the last entry sets restricted=false, which widens the executor to the whole fleet — the one edit here that grants rather than revokes.
 - `executor.bind` — Where a project's code runs is the most consequential setting on the hub, which is why the creation-dialog path emits this too.
 - `executor.enroll` — `action` repeats the verb without the family prefix — `enroll`, not `executor.enroll`.
-- `executor.failover` — `placed` distinguishes a successful move from one with nowhere to go; then `to` is empty and `error` says why. A session past executors.failover.max_attempts is recorded as executor.failover_exhausted instead.
+- `executor.failover` — `placed` distinguishes a successful move from one with nowhere to go; then `to` is empty and `error` says why. On a hub with single sign-on `acted_for` names whom the replacement acts for — the person who started the run it continues, whose Claude account it runs on — and is absent when it acts for no one. A session past executors.failover.max_attempts is recorded as executor.failover_exhausted instead.
 - `executor.failover_exhausted` — `nodes` names every executor the run was lost on, oldest first, each with when it went unreachable. A workload that takes down every node it lands on ends here instead of on the next node.
 - `executor.firewall` — `from` and `to` describe the whole rule set — allowlist, denylist, ports, resolvers and the public-Internet switch — so a widened device is legible from this row alone. `cleared` is true when the rule set was removed, which leaves the device bounded only by its configuration. `constrained` counts the virtual executors and project rule sets the save narrowed to fit; each of those has its own row (`executor.virtual` with action "constrain", `project.firewall` with action "constrain").
 - `executor.isolation_verdict` — `claim` is what the runtime's name claims (vm, userspace-kernel, host-kernel) and `verdict` what the probe found; `status` is contradicted when the evidence shows less isolation than the claim, which refuses projects that require kernel isolation or virtualization. `previous_*` are empty for an executor's first verdict. A probe that could not run is recorded on the evidence row, not here.

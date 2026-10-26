@@ -265,6 +265,11 @@ type runVerdict struct {
 	// run's session, and nothing carried the run on. Detail names the
 	// executor and why the run stopped there.
 	Lost bool
+	// StarterUnavailable reports that what stopped a lost run there was its
+	// replacement being refused, because it could not act for the person who
+	// started the run (Task 20443): the run is paused starter_unavailable,
+	// not executor_lost, since a person starting it is what it waits for.
+	StarterUnavailable bool
 	// DiskLimit is the measurement its executor stopped the run at, when the
 	// workspace grew past its disk limit (Task 20405). The run is paused, not
 	// retried, and the task it was running goes back to pending saying so.
@@ -293,6 +298,9 @@ func (v runVerdict) stop() *taskrecover.Stop {
 // dashboard shows. A stop the operator asked for is not a fault and should not
 // be dressed as one; everything else is a run that ended without saying so.
 func deadRunPauseReason(v runVerdict) pausereason.Reason {
+	if v.Lost && v.StarterUnavailable {
+		return pausereason.New(pausereason.CodeStarterUnavailable, v.Detail)
+	}
 	if v.Lost {
 		return pausereason.New(pausereason.CodeExecutorLost, v.Detail)
 	}

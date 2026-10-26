@@ -302,45 +302,14 @@ func kubeShareOwnerDenied(db *statedb.DB, sec secretbroker.Secret) string {
 	if db == nil {
 		return "the hub could not check whether its owner " + owner + " is still allowed on it"
 	}
-	unchecked := func(err error) string {
+	standing, err := readOwnerStanding(db, owner)
+	if err != nil {
 		return fmt.Sprintf("the hub could not check whether its owner %s is still allowed on it: %v", owner, err)
 	}
-	bindings, err := db.ListRoleBindings()
-	if err != nil {
-		return unchecked(err)
-	}
-	var deny *statedb.RoleBindingRow
-	for i, b := range bindings {
-		if b.Effect != statedb.RoleEffectDeny || b.Project != "" || b.Executor != "" {
-			continue
-		}
-		key := ""
-		switch b.Claim {
-		case "email":
-			key = strings.ToLower(strings.TrimSpace(b.Value))
-		case "sub":
-			key = "sub:" + strings.TrimSpace(b.Value)
-		}
-		if key != "" && key == owner {
-			deny = &bindings[i]
-			break
-		}
-	}
-	users, err := db.ListSCIMUsers()
-	if err != nil {
-		return unchecked(err)
-	}
-	var deactivated *statedb.SCIMUserRow
-	for i, u := range users {
-		if !u.Active && scimUserIs(u, owner) {
-			deactivated = &users[i]
-			break
-		}
-	}
-	if deny == nil && deactivated == nil {
+	if !standing.denied() {
 		return ""
 	}
-	if deactivated != nil && deactivated.OffboardedAt.IsZero() {
+	if deactivated := standing.deactivated; standing.suspended() {
 		on := ""
 		if !deactivated.DeactivatedAt.IsZero() {
 			on = " on " + deactivated.DeactivatedAt.UTC().Format("2006-01-02")
@@ -353,15 +322,82 @@ func kubeShareOwnerDenied(db *statedb.DB, sec secretbroker.Secret) string {
 			"by %s (%s); a held credential is evidence, not one to keep alive", owner,
 			hold.PlacedAt.UTC().Format("2006-01-02"), hold.PlacedBy, hold.Reason)
 	}
-	if deactivated != nil {
+	if deactivated := standing.deactivated; deactivated != nil {
 		return fmt.Sprintf("its owner %s was offboarded on %s, after the identity provider deactivated them",
 			owner, deactivated.OffboardedAt.UTC().Format("2006-01-02"))
 	}
-	why := strings.TrimSpace(deny.Reason)
-	if why == "" {
-		why = "no reason recorded"
+	return fmt.Sprintf("its owner %s is denied on this hub by a role binding (%s)", owner, standing.denyReason())
+}
+
+// ownerStanding is what the control plane holds against a person the hub
+// would spend a credential of, or act for: a global deny role binding on their
+// email or subject, which an offboarding writes and a suspension at the
+// identity provider mostly does, and a provisioned user the identity provider
+// deactivated who is them — a suspension that resolved neither an email nor a
+// subject writes its deny on a username or oid claim, which no owner key can
+// be compared with. Either is enough to refuse. Shared by the Kubernetes share
+// renewal (Task 20420) and the account an automatic resume acts on (Task
+// 20443), so the two cannot come to disagree about who is still allowed.
+type ownerStanding struct {
+	deny        *statedb.RoleBindingRow
+	deactivated *statedb.SCIMUserRow
+}
+
+// denied reports whether the hub must not act for them.
+func (o ownerStanding) denied() bool { return o.deny != nil || o.deactivated != nil }
+
+// suspended reports a deactivation at the identity provider that no
+// offboarding has followed: a reactivation undoes it.
+func (o ownerStanding) suspended() bool {
+	return o.deactivated != nil && o.deactivated.OffboardedAt.IsZero()
+}
+
+// denyReason is the deny binding's recorded reason, or a placeholder.
+func (o ownerStanding) denyReason() string {
+	if o.deny == nil {
+		return "no reason recorded"
 	}
-	return fmt.Sprintf("its owner %s is denied on this hub by a role binding (%s)", owner, why)
+	if why := strings.TrimSpace(o.deny.Reason); why != "" {
+		return why
+	}
+	return "no reason recorded"
+}
+
+// readOwnerStanding reads owner's standing — a normalised owner key
+// (secretbroker.NormalizeOwner) — from the control plane's database.
+func readOwnerStanding(db *statedb.DB, owner string) (ownerStanding, error) {
+	var out ownerStanding
+	bindings, err := db.ListRoleBindings()
+	if err != nil {
+		return out, err
+	}
+	for i, b := range bindings {
+		if b.Effect != statedb.RoleEffectDeny || b.Project != "" || b.Executor != "" {
+			continue
+		}
+		key := ""
+		switch b.Claim {
+		case "email":
+			key = strings.ToLower(strings.TrimSpace(b.Value))
+		case "sub":
+			key = "sub:" + strings.TrimSpace(b.Value)
+		}
+		if key != "" && key == owner {
+			out.deny = &bindings[i]
+			break
+		}
+	}
+	users, err := db.ListSCIMUsers()
+	if err != nil {
+		return out, err
+	}
+	for i, u := range users {
+		if !u.Active && scimUserIs(u, owner) {
+			out.deactivated = &users[i]
+			break
+		}
+	}
+	return out, nil
 }
 
 // scimUserIs reports whether provisioned user u is the hub identity owner.

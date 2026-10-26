@@ -715,7 +715,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		return nil, executor.Handle{}, refuseUnrecordedDispatch(ex, handle.ID, lease, egress, "", err)
 	}
 	// Whom the run was started for, which its automatic resume acts for.
-	clear.started()
+	clear.started(runID)
 	go func() {
 		wipeLeaseOnExit(ex, handle.ID, lease, egress)
 		// The workload is over: nothing is left for the intent to name.

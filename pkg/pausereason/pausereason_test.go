@@ -151,6 +151,7 @@ func TestCodesOrder(t *testing.T) {
 		"approval", "abort", "cancelled", "plan_only",
 		"idle", "operator", "stale", "state_not_persisted",
 		"uncommitted_work", "disk_low", "executor_lost", "disk_limit",
+		"starter_unavailable",
 	}
 	got := Codes()
 	if len(got) != len(want) {
@@ -160,6 +161,19 @@ func TestCodesOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("Codes()[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+// A run the hub could not carry on for its starter waits for a person: it is
+// neither resumed on a timer nor a live run waiting in place (Task 20443).
+func TestStarterUnavailableWaitsForAPerson(t *testing.T) {
+	r := NewUntil(CodeStarterUnavailable, "alice@example.com, who started this run, is not allowed on this hub",
+		time.Now().Add(-time.Hour))
+	if r.AutoResumable(time.Now()) || r.RunWaits() {
+		t.Errorf("starter_unavailable: AutoResumable=%v RunWaits=%v, want neither", r.AutoResumable(time.Now()), r.RunWaits())
+	}
+	if got := (&Reason{Code: CodeStarterUnavailable}).Label(); got != "starter's Claude account unavailable" {
+		t.Errorf("Label() = %q", got)
 	}
 }
 

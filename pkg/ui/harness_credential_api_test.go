@@ -441,8 +441,9 @@ func TestHarnessCredentialRunRefusedThenStartedOnceGranted(t *testing.T) {
 	}
 	// Its automatic resume would act for alice, who started it — not for the
 	// project's owner, and not for nobody — so it resumes on her credential.
-	if who := h.srv.harnessWhoForResume(h.srv.WorkDir); !who.personal || who.identity != "alice@corp.example" {
-		t.Errorf("a resume of alice's run acts for %+v", who)
+	if acct := h.srv.resumeAccountFor(h.srv.WorkDir); !acct.who.personal || acct.who.identity != "alice@corp.example" ||
+		acct.basis != actedForStarter {
+		t.Errorf("a resume of alice's run acts for %+v (%s)", acct.who, acct.basis)
 	}
 	// Let the run settle before the project directory is removed.
 	deadline := time.Now().Add(10 * time.Second)

@@ -66,9 +66,12 @@ var bareDispatchers = map[string]bool{
 var settlingPrimitives = map[string]bool{"startWorkloadAs": true, "runWorkloadEnvFor": true}
 
 // preflightConstructors build the clearance whose settle runs the preflight.
+// newResumeClearance is the automatic resume's and a failover's: the same
+// preflight, acting for the run's recorded starter (Task 20443).
 var preflightConstructors = map[string]bool{
 	"harnessClearanceFor": true, "newHarnessClearance": true,
 	"leaseClearanceFor": true, "newLeaseClearance": true,
+	"newResumeClearance": true,
 }
 
 // rawDispatch is the key suffix for an executor.Run or Executor.Start call

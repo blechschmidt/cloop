@@ -83,7 +83,9 @@ func (s *Server) clusterInternalBypass(next http.Handler) http.Handler {
 // handleClusterAutoResume restarts a cap-paused project on the leader's
 // behalf: the project's agent is connected here, so only this member can
 // dispatch to it. Everything the leader checked is checked again — the state
-// may have changed in the round trip.
+// may have changed in the round trip — and the resume acts for the run's
+// starter as this member resolves them (Task 20443): the record is the shared
+// control plane's, the Claude home this member's own.
 func (s *Server) handleClusterAutoResume(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Project string `json:"project"`
@@ -104,12 +106,12 @@ func (s *Server) handleClusterAutoResume(w http.ResponseWriter, r *http.Request)
 		jsonErr(w, "could not load the project", http.StatusConflict)
 		return
 	}
-	if !s.capPauseCleared(st, s.clock()) || s.projectExecuting(req.Project) {
+	if _, ok := s.autoResumeReady(req.Project, st); !ok {
 		jsonOK(w, map[string]any{"ok": true, "started": false})
 		return
 	}
 	if err := s.startAutoResumeRun(req.Project); err != nil {
-		s.repauseIfOverDiskLimit(req.Project, err)
+		s.holdRefusedResume(req.Project, err)
 		jsonErr(w, err.Error(), http.StatusConflict)
 		return
 	}

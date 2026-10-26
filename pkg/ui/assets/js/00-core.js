@@ -1042,6 +1042,7 @@ const pauseReasonLabels = {
   disk_low: 'disk space low',
   executor_lost: 'executor lost',
   disk_limit: 'workspace over its disk limit',
+  starter_unavailable: "starter's Claude account unavailable",
 };
 
 // pauseReasonText renders a pause reason as one line of prose:

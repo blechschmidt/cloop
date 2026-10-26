@@ -101,6 +101,15 @@ const (
 	// human decides — free space in the workspace or raise the limit, then
 	// press Run. A workspace still over the limit is refused at the next start.
 	CodeDiskLimit Code = "disk_limit"
+	// CodeStarterUnavailable is a run the hub would have carried on by itself
+	// — an automatic resume after a usage cap, a failover's replacement — but
+	// could not act for the person who started it (Task 20443): on a hub with
+	// single sign-on their Claude Code home is gone (they were offboarded), they
+	// are denied on the hub, or nobody can be named. Carrying on would have
+	// spent the hub's shared login, or another person's. The detail names who
+	// and why. A human decides: start the run as themselves, which acts on
+	// their own account.
+	CodeStarterUnavailable Code = "starter_unavailable"
 )
 
 // ExitStateNotPersisted is the exit status of a `cloop run` that stopped for
@@ -114,22 +123,23 @@ const ExitStateNotPersisted = 74
 // codeLabels is the operator-facing noun for each code, used when a Reason
 // carries no detail of its own.
 var codeLabels = map[Code]string{
-	CodeUsageCap:          "subscription usage cap reached",
-	CodeBudget:            "budget limit reached",
-	CodeTokenBudget:       "token budget reached",
-	CodeStepLimit:         "step limit reached",
-	CodeApproval:          "waiting for approval",
-	CodeAbort:             "run aborted",
-	CodeCancelled:         "run interrupted",
-	CodePlanOnly:          "plan-only mode",
-	CodeIdle:              "no runnable tasks",
-	CodeOperator:          "stopped by operator",
-	CodeStale:             "previous run ended unexpectedly",
-	CodeStateNotPersisted: "run progress could not be saved",
-	CodeUncommittedWork:   "work left uncommitted",
-	CodeDiskLow:           "disk space low",
-	CodeExecutorLost:      "executor lost",
-	CodeDiskLimit:         "workspace over its disk limit",
+	CodeUsageCap:           "subscription usage cap reached",
+	CodeBudget:             "budget limit reached",
+	CodeTokenBudget:        "token budget reached",
+	CodeStepLimit:          "step limit reached",
+	CodeApproval:           "waiting for approval",
+	CodeAbort:              "run aborted",
+	CodeCancelled:          "run interrupted",
+	CodePlanOnly:           "plan-only mode",
+	CodeIdle:               "no runnable tasks",
+	CodeOperator:           "stopped by operator",
+	CodeStale:              "previous run ended unexpectedly",
+	CodeStateNotPersisted:  "run progress could not be saved",
+	CodeUncommittedWork:    "work left uncommitted",
+	CodeDiskLow:            "disk space low",
+	CodeExecutorLost:       "executor lost",
+	CodeDiskLimit:          "workspace over its disk limit",
+	CodeStarterUnavailable: "starter's Claude account unavailable",
 }
 
 // Known reports whether c is a code this package defines. The persistence
@@ -148,6 +158,7 @@ func Codes() []Code {
 		CodeApproval, CodeAbort, CodeCancelled, CodePlanOnly,
 		CodeIdle, CodeOperator, CodeStale, CodeStateNotPersisted,
 		CodeUncommittedWork, CodeDiskLow, CodeExecutorLost, CodeDiskLimit,
+		CodeStarterUnavailable,
 	}
 }
 

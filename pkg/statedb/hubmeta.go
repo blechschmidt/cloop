@@ -26,6 +26,7 @@ package statedb
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -98,6 +99,92 @@ func (d *DB) SetHubMeta(key, value string) error {
 		return fmt.Errorf("statedb: set hub meta %s: %w", key, classifyDriverErr(err))
 	}
 	return nil
+}
+
+// SetHubMetas writes several hub-scoped metadata values in one transaction,
+// so a reader sees all of them or none: a record kept across two keys — one a
+// newer build reads, one an older build still does — is never read half
+// rewritten (Task 20443).
+func (d *DB) SetHubMetas(values map[string]string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	full := make([]string, len(keys))
+	for i, k := range keys {
+		f, err := hubMetaKey(k)
+		if err != nil {
+			return err
+		}
+		full[i] = f
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("statedb: set hub meta: %w", classifyDriverErr(err))
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for i, k := range keys {
+		if _, err := tx.Exec(
+			`INSERT INTO metadata(key, value) VALUES (?,?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, full[i], values[k],
+		); err != nil {
+			return fmt.Errorf("statedb: set hub meta %s: %w", k, classifyDriverErr(err))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("statedb: set hub meta: %w", classifyDriverErr(err))
+	}
+	return nil
+}
+
+// HubMetas reads several hub-scoped metadata values in one statement — one
+// snapshot of the database, so values SetHubMetas wrote together are read
+// together. A key with no value is absent from the map.
+func (d *DB) HubMetas(keys ...string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(keys) == 0 {
+		return out, nil
+	}
+	short := make(map[string]string, len(keys))
+	args := make([]any, len(keys))
+	marks := make([]string, len(keys))
+	for i, k := range keys {
+		f, err := hubMetaKey(k)
+		if err != nil {
+			return nil, err
+		}
+		short[f] = k
+		args[i] = f
+		marks[i] = "?"
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	rows, err := d.conn.Query(`SELECT key, value FROM metadata WHERE key IN (`+strings.Join(marks, ",")+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("statedb: hub meta: %w", classifyDriverErr(err))
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, fmt.Errorf("statedb: hub meta: %w", classifyDriverErr(err))
+		}
+		out[short[key]] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("statedb: hub meta: %w", classifyDriverErr(err))
+	}
+	return out, nil
 }
 
 // SetHubMetaIfAbsent writes value only when key has no value yet, and returns

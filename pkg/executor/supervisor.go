@@ -170,6 +170,12 @@ type FailoverEvent struct {
 	// Reason renders Err for the event payload.
 	Reason string    `json:"reason,omitempty"`
 	At     time.Time `json:"at"`
+	// ActedFor is whom the replacement the handler started acts for — the
+	// person who started the run it continues, as the control plane recorded
+	// it (Task 20443) — or "" when it acts for no one or none was started. Set
+	// by the handler, and read by the sink that records the failover: only
+	// the control plane knows it.
+	ActedFor string `json:"acted_for,omitempty"`
 }
 
 // FailoverHandler settles a claimed session. It is supplied by the control
@@ -183,7 +189,11 @@ type FailoverEvent struct {
 // failure. Returning an error records the failover as unplaced; it does not
 // release the claim, because releasing it would re-arm the double-execution
 // risk the claim exists to prevent.
-type FailoverHandler func(ctx context.Context, ev FailoverEvent) error
+//
+// ev is the event the sink then records. The handler may note on it what only
+// the control plane knows — ActedFor; the supervisor's own fields are the
+// supervisor's, and Err and Reason are set from the returned error.
+type FailoverHandler func(ctx context.Context, ev *FailoverEvent) error
 
 // DefaultMaxFailoverAttempts is how many times a session is re-dispatched
 // after the executor running it went unreachable, when nothing configures it
@@ -724,7 +734,7 @@ func (sv *Supervisor) failOverSession(ctx context.Context, tr Transition, sess S
 	// The handler settles every claimed session — it is what marks the tasks
 	// a lost node was running — and re-dispatches only a placed one.
 	if sv.failover != nil {
-		if err := sv.failover(ctx, ev); err != nil && ev.Err == nil {
+		if err := sv.failover(ctx, &ev); err != nil && ev.Err == nil {
 			ev.Err = err
 			ev.Reason = err.Error()
 		}

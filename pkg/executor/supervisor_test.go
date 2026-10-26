@@ -1085,7 +1085,7 @@ func runConcurrentFailover(t *testing.T, n, nsess int, weakenGuard bool) failove
 					{Executor: spare, Health: Health{ExecutorID: spare.ID(), State: NodeReady}},
 				}
 			}),
-			WithFailoverHandler(func(_ context.Context, ev FailoverEvent) error {
+			WithFailoverHandler(func(_ context.Context, ev *FailoverEvent) error {
 				hmu.Lock()
 				handled[ev.Session.ID]++
 				hmu.Unlock()
@@ -1247,7 +1247,7 @@ func TestFailoverRecordsUnplacedSessions(t *testing.T) {
 		WithCandidateSource(func() []Candidate {
 			return []Candidate{{Executor: dead, Health: Health{State: NodeUnreachable}}}
 		}),
-		WithFailoverHandler(func(_ context.Context, ev FailoverEvent) error {
+		WithFailoverHandler(func(_ context.Context, ev *FailoverEvent) error {
 			handlerRuns++
 			if ev.To != "" || ev.Err == nil {
 				t.Errorf("handler given target %q, err %v — an unplaced session has neither a target nor no reason", ev.To, ev.Err)
@@ -1442,7 +1442,7 @@ func TestFailoverUsesTheRegistryPoolByDefault(t *testing.T) {
 		WithHealthStore(health),
 		WithSessionStore(store),
 		WithEventSink(sink),
-		WithFailoverHandler(func(context.Context, FailoverEvent) error { return nil }),
+		WithFailoverHandler(func(context.Context, *FailoverEvent) error { return nil }),
 	)
 
 	sv.ProbeOnce(context.Background())

@@ -12,6 +12,28 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A run the hub carries on by itself acts on its starter's Claude account,
+  not the hub's shared login.** The automatic resume after a usage cap — since
+  Task 20440 after every exhausted five-hour window too — the cluster member a
+  resume is handed to, and a failover's replacement dispatched with no
+  environment resolver, so on a hub with sign-in a resumed run on the hub's
+  host inherited the `cloop ui` process's own login and ambient token: on
+  :8888 it ran on no `CLAUDE_CONFIG_DIR` of its own, while the run its starter
+  pressed carried theirs. Each now acts for the person the control plane
+  recorded starting the run (else the project's owner) and pins their Claude
+  home exactly as their own Run does; an isolating executor still gets their
+  grants through the broker. An older build's extra-usage pause clears by that
+  person's own usage windows. The record names the run it was written for, so
+  a `cloop run` started from a shell is not carried on as whoever last pressed
+  Run on the hub. No home is ever created for a resume: when the starter's
+  home is gone, they are denied (hub-wide or on the project) or left off the
+  executor's access list, or nobody can be named, the run stays paused with
+  the new reason
+  `starter_unavailable` — "starter's Claude account unavailable" — naming
+  them, journaled, and is not retried; whether and why the hub denies someone
+  stays in its log. `run.cap_resumed` and `executor.failover` record
+  `acted_for`, and a `tests/arch` gate refuses a production dispatch that
+  passes no resolver (Task 20443).
 - **The dashboard's model calls run where the project runs, on the caller's
   Claude account.** The Split preview, dictation's Revise, the blocker
   analysis and the plan assistant built the project's provider inside the hub

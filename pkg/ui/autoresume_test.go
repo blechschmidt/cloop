@@ -325,7 +325,7 @@ func TestAutoResumeRestartsAnOlderBuildsExtraUsagePauseOnceTheWindowReopens(t *t
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, resumed := resumeProbe(t, dir, now)
-			srv.autoResumeUsage = func() (*ratelimit.ClaudeUsage, error) { return tt.usage, tt.err }
+			srv.autoResumeUsage = func(string) (*ratelimit.ClaudeUsage, error) { return tt.usage, tt.err }
 			if got := srv.maybeAutoResume(dir); got != tt.want {
 				t.Fatalf("maybeAutoResume = %v, want %v", got, tt.want)
 			}
@@ -353,7 +353,7 @@ func TestAutoResumeStillLeavesASpentBudgetAlone(t *testing.T) {
 		t.Run(detail[:24], func(t *testing.T) {
 			dir := pausedProject(t, pausereason.New(pausereason.CodeBudget, detail))
 			srv, resumed := resumeProbe(t, dir, now)
-			srv.autoResumeUsage = func() (*ratelimit.ClaudeUsage, error) { return open, nil }
+			srv.autoResumeUsage = func(string) (*ratelimit.ClaudeUsage, error) { return open, nil }
 			if srv.maybeAutoResume(dir) || len(*resumed) != 0 {
 				t.Errorf("resumed a run paused for a spent budget (%q)", detail)
 			}

@@ -21,6 +21,7 @@ key: the switch is OIDC itself.
 - [The ambient token outranks the directory](#the-ambient-token-outranks-the-directory)
 - [What is scoped, and to what](#what-is-scoped-and-to-what)
 - [Isolating executors do not get a directory](#isolating-executors-do-not-get-a-directory)
+- [Resumed and failed-over runs](#resumed-and-failed-over-runs)
 - [Callers with no identity](#callers-with-no-identity)
 - [Deprovisioning a user](#deprovisioning-a-user)
 - [What this does not do](#what-this-does-not-do)
@@ -206,7 +207,7 @@ time a user sees it.
 | The classified auth-failure cache (1 min) behind the re-authenticate banner | `AuthFailureIn`, `ReauthRequiredIn` |
 | The transient fetch-error backoff (30 s) | same file |
 | In-flight `claude auth login` sessions | keyed by owner key in `claudecodeauth.Manager` |
-| Dispatched runs | `startWorkloadAs` — `/api/run`, project run, and new-project autorun |
+| Dispatched runs | `startWorkloadAs` — `/api/run`, project run, and new-project autorun; and, acting for the run's recorded starter, the automatic resume after a usage cap, the cluster member a resume is handed to, and a failover's replacement (see [resumed and failed-over runs](#resumed-and-failed-over-runs)) |
 | Provider-invoking subcommands | `runCloopSubcommandFor` — the Tasks tab's **brainstorm** (`cloop suggest`), the assistant chat (`cloop do`), and since Task 20442 the **Split** preview (`cloop task decompose --dry-run --json`), dictation's **Revise** (`cloop task revise`), the **blocker analysis** (`cloop task ai-blocker --json`) and the **plan assistant** (`cloop plan chat`), all of which spend tokens on the caller's behalf |
 | Inline replays | `inlineClaudeEnv` — the provider-call and task replays call the provider in the hub's own process, so the caller's directory and cleared ambient tokens go into that call's environment (`provider.Options.Env`); claudecode's retry after a 401 does not swap the hub's own refreshed token into such a call |
 | A sandboxed run's personal Claude credential | `harnessClearance` — counted for, and leased to, only runs its owner starts (see [isolating executors](#isolating-executors-do-not-get-a-directory)) |
@@ -325,10 +326,11 @@ its owner's subscription for every member's runs, and a project holding two
 people's tokens would authenticate with whichever the lease rendered last. On the
 host it would also undo this page's work: a leased token is appended after
 `ScopeHarnessEnv`'s cleared assignment, and the last occurrence of a key is the
-one exec keeps. An automatic resume acts for whoever started the run it resumes,
-recorded in the hub's own database at dispatch — never in the project's tree,
-which the sandbox can write. A static-token or service-token run acts for no
-one, so only a shared credential satisfies it. If a deployment needs per-user
+one exec keeps. An automatic resume, and a failover's replacement, act for
+whoever started the run they continue, recorded in the hub's own database at
+dispatch — never in the project's tree, which the sandbox can write (see
+[resumed and failed-over runs](#resumed-and-failed-over-runs)). A static-token or
+service-token run acts for no one, so only a shared credential satisfies it. If a deployment needs per-user
 billing end to end, each user grants their own; if it needs a team account, a
 maintainer grants a shared one.
 
@@ -378,6 +380,105 @@ for what a run shows.
 
 ---
 
+## Resumed and failed-over runs
+
+Three dispatches happen with nobody asking: the [automatic
+resume](../reference/configuration.md#resuming-a-capped-run) after a usage cap —
+since Task 20440 also after every exhausted five-hour window that held a run out
+of extra usage — the cluster member a leader hands that resume to, and a
+[failover](../architecture/executors.md#the-replacement-is-the-projects-run-task-20396)'s
+replacement. Until Task 20443 they handed the dispatcher no account at all, so on
+a hub with single sign-on a resumed run on the hub's own host inherited the
+`cloop ui` process's environment. Measured on a live hub: the service ran with
+`HOME=/root` and no `CLAUDE_CONFIG_DIR`, the run a person started carried their
+directory and its own token, and the run the hub resumed carried neither — it
+ran on the shared login this page exists to remove, on somebody else's
+subscription, or failed as not logged in.
+
+They act for the person who started the run they continue
+(`pkg/ui/resume_account.go`):
+
+| | |
+| --- | --- |
+| **Whom** | the identity the control plane recorded when that run was dispatched — `harness.initiator.run:<project>` in the hub's own database, never the project's tree, which the sandbox can write — or, for a run older than that record, the project's owner. The record names the run it was written for: a paused run that recorded itself (`run_owner`) well after that dispatch — a `cloop run` started from a shell, even one that took up the hub's run id from the placement record — is not carried on as whoever last pressed Run here. `run_owner` is in the project's tree, which the run can write, so this keeps the hub from misattributing a run; it is no boundary against a workload on the hub's own host, which can read every home there |
+| **Which account** | placed exactly as a request's is (`claudeEnvFor`): on an executor that shares the hub's filesystem, that person's directory, with the ambient token cleared; on an isolating one, no directory — the lease delivers the project's grants as before, a personal one counted for that person |
+| **Which usage** | the extra-usage pause an older build recorded clears by that person's own windows, read under their directory — never by the hub's own login's |
+| **The trail** | `run.cap_resumed` carries `acted_for` and `acted_for_basis` (`starter`, `owner` or `unknown`); a failover's `executor.failover` row carries `acted_for`, and its Event History row says whom the replacement acts for. A resume records the basis it acted on, never more: an owner fallback stays one, and a run nobody could be named for stays unknown |
+
+**A resume never creates a directory.** One is made when its owner signs in or
+starts something; a machine acting for them later finds it or does not. The
+dispatch is refused — settled with the rest of the [preflight](#checked-before-dispatch),
+against the executor it resolved, before anything is leased — when:
+
+- their directory is gone — offboarding removed it, or they never signed in
+  here — and the run would share the hub's filesystem, where the directory is
+  what it would use;
+- the hub denies them — a deny binding on them, hub-wide or on this project,
+  or a deactivation at the identity provider — on any executor, since an
+  isolating run would still spend their personal grants;
+- the executor is restricted to an access list that can be shown not to
+  admit them — every entry names a person by the key the hub knows them by
+  (their email, or their subject when the identity provider released no
+  email), and none of them is the starter: the 403 their own Run would get. A
+  group or role entry, or a subject entry for someone known by email, may
+  admit them by a claim of their sign-in, which a resume does not have, and
+  the list is left to admit them as it did when they started the run;
+- nobody can be named — no record and a project with no owner, a record of a
+  different run than the one paused, or the hub's two records disagreeing (an
+  older hub build dispatched since) — on the hub's filesystem, where the
+  alternative is the hub's own login;
+- the extra-usage pause an older build recorded has no usage to be judged by:
+  nobody's directory to read it under;
+- the control plane cannot be read. That one is refused and not held: the
+  next sweep asks again.
+
+Then the run waits paused *starter's Claude account unavailable*
+(`starter_unavailable`), naming the person, and the project's Event History
+says why. It is not resumed on a timer: whoever presses Run starts it as
+themselves, on their own account. The reason the project's readers see is
+deliberately the same for a directory that is gone and a person the hub denies
+— *has no Claude Code login on this hub that the hub may use for them* —
+because whether and why the hub denies someone (an offboarding's reason, a
+legal hold, a suspension at the identity provider) is for its operators, and
+goes to the hub's log only. Should a dispatch ever pair such an account with a
+clearance that does not check it, its pin still names no login:
+`CLAUDE_CONFIG_DIR` points under `/dev/null`, where nobody can create it, and
+the ambient token is cleared.
+
+A run started by a caller that acts for no one ([below](#callers-with-no-identity))
+ran on the hub's own login, and its resume does too: it acts for the same
+nobody. A hub without single sign-on has one operator and one login, which
+every run, resumed or not, uses as before.
+
+`tests/arch` keeps it that way (`TestEveryDispatchPinsAClaudeAccount`): no
+production dispatch passes a nil environment resolver except listed ones that
+run no model, and a dispatch acting for a recorded starter pins that same
+account. The behaviour is pinned by `TestAutoResumeActsOnTheStartersClaudeAccount`
+(a stub `claude` sees each starter's directory and no ambient token),
+`TestLegacyPauseClearsByTheStartersUsage`, `TestAnOffboardedStartersRunStaysPaused`,
+`TestALegacyPauseOfAnOffboardedStarterIsHeld`,
+`TestARunStartedOutsideTheHubIsNotCarriedOnAsTheLastStarter`,
+`TestAResumeRecordsTheBasisItActedOn`, `TestARecordAnOlderBuildOverwroteIsNotTrusted`,
+`TestProjectDeniesAndExecutorAccessListsRefuseTheResume`,
+`TestATransientControlPlaneErrorDoesNotHoldTheRun`,
+`TestFailoverOntoAHostSharingExecutorCarriesTheStartersHome` and
+`TestFailoverForAStarterWithNoHomeStaysPaused`.
+
+Two gaps remain by design. A build too old to record its own run (before Task
+20389) cannot be told apart from the run the record describes, so a run such a
+build started from a shell in a project the hub also runs is carried on as the
+hub's last starter; a hub keeps a run's build for as long as the run lives, and
+the next run starts on the hub's. A shell's run started within a minute of
+the hub's dispatch cannot be told from it either. And a resume re-checks the
+person against the hub's deny list and the executor's user entries, not
+against everything that let them start the run: their groups and roles are
+claims of a sign-in, which a machine acting for them does not have, so a person
+removed from a project's members — or from the group a role mapping or an
+access list names — is still acted for until a deny binding names them.
+Offboarding writes one.
+
+---
+
 ## Callers with no identity
 
 With OIDC on, `claudeScopeFor` **fails closed**. "I could not tell who you are"
@@ -402,7 +503,10 @@ unattended caller's runs are not attributed to any user**. If that matters,
 either give automation its own project on an isolating executor with its own
 grant, or do not leave a host credential for it to fall back to. Runs started
 outside HTTP entirely — `cloop run` on the hub, a scheduled job — are in the
-same position for the same reason.
+same position for the same reason. A run one of those callers started is
+resumed after a usage cap, or failed over, on the host credential too — it is
+the account the run started on — while a run a person started never is (see
+[resumed and failed-over runs](#resumed-and-failed-over-runs)).
 
 ---
 
@@ -462,6 +566,10 @@ $ rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/cloop/claude-identities/$slug"
 Removing a directory is safe while the hub is running — a request from that
 identity would recreate an empty one, and the user would simply be logged out —
 but after an offboarding there is none: the identity is denied.
+
+A run of theirs waiting at a usage cap is not resumed afterwards, on the hub's
+login or anyone else's: it stays paused *starter's Claude account unavailable*
+until a colleague starts it as themselves (Task 20443).
 
 ---
 

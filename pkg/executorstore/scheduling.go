@@ -634,6 +634,11 @@ func (s *Scheduler) ExecutorFailover(ev executor.FailoverEvent) {
 			payload["to"] = ev.To
 		}
 		payload["placed"] = ev.To != "" && ev.Err == nil
+		// Whom the replacement acts for (Task 20443): the person who started
+		// the run it continues, whose Claude account it runs on.
+		if ev.ActedFor != "" {
+			payload["acted_for"] = ev.ActedFor
+		}
 	}
 
 	_ = s.db.AppendAuditEvent(&statedb.AuditEvent{

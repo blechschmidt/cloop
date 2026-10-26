@@ -75,6 +75,15 @@ type CapResumeInput struct {
 	ResumesAt time.Time
 	ResumedAt time.Time
 	Actor     string
+	// ActedFor is whom the resumed run acts for, on a hub with single
+	// sign-on (Task 20443): the owner key of the person who started the run
+	// it resumes, whose Claude account it runs on, or "" when that run was
+	// started acting for no one. ActedForBasis says how it was decided —
+	// "starter", as recorded at that run's dispatch, or "owner", the
+	// project's owner, for a run older than the record — and is "" on a hub
+	// without single sign-on, where neither is recorded.
+	ActedFor      string
+	ActedForBasis string
 }
 
 // AuditCapResume records the hub restarting a cap-paused run with no human in
@@ -87,6 +96,12 @@ func AuditCapResume(d *DB, in CapResumeInput) {
 	payload := map[string]any{"project": in.ProjectPath}
 	if in.PausedDetail != "" {
 		payload["paused_detail"] = in.PausedDetail
+	}
+	if in.ActedForBasis != "" {
+		payload["acted_for_basis"] = in.ActedForBasis
+		if in.ActedFor != "" {
+			payload["acted_for"] = in.ActedFor
+		}
 	}
 	if !in.ResumesAt.IsZero() {
 		payload["resumes_at"] = in.ResumesAt.UTC().Format(time.RFC3339)

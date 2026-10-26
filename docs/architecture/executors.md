@@ -2434,7 +2434,9 @@ transition → unreachable
                       ├─ placed, no task quarantined → the run starts again as the
                       │                                project's run (see below)
                       └─ otherwise, or the replacement refused → the project is paused
-                                                                executor_lost
+                                                                executor_lost (starter_unavailable
+                                                                when it could not act for the
+                                                                run's starter)
                         └─ EventSink.ExecutorFailover(ev)  → executor.failover or
                                                              executor.failover_exhausted
 ```
@@ -2530,7 +2532,11 @@ project showed "running" for as long as the hub lived.
   binding, and its session is recorded as the next attempt of the stranded one's
   chain — which is what the cap counts. Everything else is the ordinary
   dispatch: the harness-credential preflight (acting, like the automatic
-  resume, for whoever started the run), a fresh lease checked against the grants
+  resume, for whoever started the run — on their Claude home where the
+  replacement shares the hub's filesystem, and refused, the project paused
+  `starter_unavailable`, where it cannot act for them; see [resumed and
+  failed-over runs](../security/claude-code-identity.md#resumed-and-failed-over-runs)),
+  a fresh lease checked against the grants
   as they stand, a fresh project seed of the plan the failover just settled, the
   sandbox, firewall levels, egress session, workspace and ceilings composed for
   the replacement, the revocation guarantee, and a placement record naming the

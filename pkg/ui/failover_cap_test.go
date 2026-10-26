@@ -830,10 +830,10 @@ func TestRedispatchRefusesAnExhaustedSession(t *testing.T) {
 		From: r.nodes[0].id, To: r.nodes[1].id,
 		Session: executor.Session{ID: id, Spec: executor.Spec{WorkDir: r.dir, Argv: []string{"cloop", "run"}}},
 	}
-	if err := redispatchSession(context.Background(), r.dir, ev, r.srv); err == nil {
+	if _, err := redispatchSession(context.Background(), r.dir, ev, r.srv); err == nil {
 		t.Fatal("an exhausted session was re-dispatched on a forged event")
 	}
-	if err := r.srv.startReplacement(context.Background(), r.dir, ev); err == nil {
+	if _, err := r.srv.startReplacement(context.Background(), r.dir, ev); err == nil {
 		t.Fatal("an exhausted session was re-dispatched through the agent-owner path")
 	}
 	if r.nodes[1].startCount() != 0 {

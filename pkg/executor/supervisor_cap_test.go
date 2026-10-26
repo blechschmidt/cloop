@@ -50,9 +50,9 @@ func (f *capFixture) supervisor(t *testing.T, limit func() int, extra ...Supervi
 				{Executor: spare, Health: Health{ExecutorID: spare.ID(), State: NodeReady}},
 			}
 		}),
-		WithFailoverHandler(func(_ context.Context, ev FailoverEvent) error {
+		WithFailoverHandler(func(_ context.Context, ev *FailoverEvent) error {
 			f.mu.Lock()
-			f.handled = append(f.handled, ev)
+			f.handled = append(f.handled, *ev)
 			f.mu.Unlock()
 			return nil
 		}),
@@ -102,6 +102,23 @@ func TestFailoverAtTheCapStillRedispatches(t *testing.T) {
 	}
 	if ev.Unreachable.IsZero() {
 		t.Error("the event does not say when the node went unreachable")
+	}
+}
+
+// TestTheSinkRecordsWhomTheReplacementActsFor: whom a replacement acts for is
+// the control plane's to know (Task 20443) — the person who started the run it
+// continues. The handler notes it on the event, and the sink that records the
+// failover sees it.
+func TestTheSinkRecordsWhomTheReplacementActsFor(t *testing.T) {
+	f := newCapFixture(1, 1)
+	sv := f.supervisor(t, func() int { return 2 }, WithFailoverHandler(func(_ context.Context, ev *FailoverEvent) error {
+		ev.ActedFor = "alice@example.com"
+		return nil
+	}))
+	sv.ProbeOnce(context.Background())
+	evs := f.sink.failoverEvents()
+	if len(evs) != 1 || evs[0].To != "edge-spare" || evs[0].ActedFor != "alice@example.com" {
+		t.Fatalf("the sink recorded %+v, want the placed failover, acting for alice", evs)
 	}
 }
 
@@ -372,9 +389,9 @@ func TestFailoverNeverBringsAnIsolatedRunOntoTheHost(t *testing.T) {
 		WithSessionStore(f.store),
 		WithEventSink(f.sink),
 		WithFailoverLimit(func() int { return 2 }),
-		WithFailoverHandler(func(_ context.Context, ev FailoverEvent) error {
+		WithFailoverHandler(func(_ context.Context, ev *FailoverEvent) error {
 			f.mu.Lock()
-			f.handled = append(f.handled, ev)
+			f.handled = append(f.handled, *ev)
 			f.mu.Unlock()
 			return nil
 		}),

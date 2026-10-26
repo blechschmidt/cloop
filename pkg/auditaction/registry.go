@@ -141,11 +141,16 @@ var registry = []Entry{
 		Home:      HomeProject,
 		Entity:    "plan",
 		Trigger:   "The hub restarts a cap-paused run after its window rolled over, without a human — or, for the extra-usage pause an older build recorded as a spent budget, once the usage API shows the window open (no `resumes_at`).",
-		Payload:   []string{"project", "paused_detail", "resumes_at", "resumed_at"},
+		Payload:   []string{"project", "paused_detail", "resumes_at", "resumed_at", "acted_for", "acted_for_basis"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "The only action recording work that a machine started on its own initiative, " +
-			"so \"who restarted this project\" stays answerable from the trail alone.",
+			"so \"who restarted this project\" stays answerable from the trail alone. On a hub with single sign-on " +
+			"`acted_for` names whom the run acts for, on their own Claude account, and `acted_for_basis` how that " +
+			"was decided: `starter`, the person the resumed run was started for as recorded at its dispatch (no " +
+			"`acted_for` when it was started acting for no one), `owner`, the project's owner, for a run older than " +
+			"that record, or `unknown`, nobody nameable, on an executor that needs no Claude home. A resume that " +
+			"could not act for them is not restarted, and leaves no row.",
 	},
 	{
 		Action:    ActionRunAdoptRequested,
@@ -575,10 +580,12 @@ var registry = []Entry{
 		Home:      HomeControlPlane,
 		Entity:    "executor_session",
 		Trigger:   "A session is moved off an executor that stopped answering, or fails to be placed anywhere.",
-		Payload:   []string{"session_id", "from", "to", "attempt", "max_attempts", "project_path", "task_id", "running_tasks", "placed", "error"},
+		Payload:   []string{"session_id", "from", "to", "attempt", "max_attempts", "project_path", "task_id", "running_tasks", "placed", "acted_for", "error"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "`placed` distinguishes a successful move from one with nowhere to go; then `to` is empty and `error` says why. " +
+			"On a hub with single sign-on `acted_for` names whom the replacement acts for — the person who started the " +
+			"run it continues, whose Claude account it runs on — and is absent when it acts for no one. " +
 			"A session past executors.failover.max_attempts is recorded as executor.failover_exhausted instead.",
 	},
 	{

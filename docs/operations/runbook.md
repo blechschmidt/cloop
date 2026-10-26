@@ -3004,6 +3004,10 @@ on, for the reason the badge gives:
 | task N is quarantined as a suspected node killer | two executors went down under that task — see the next section |
 | the replacement on X could not start | the replacement was refused like any run would be — the Event History row says why (no Claude credential granted for X, a sandbox X cannot honour, …) |
 
+A replacement refused because it could not act for the person who started the
+run is paused *starter's Claude account unavailable* instead; see the next
+section.
+
 The Event History has a `failover` row saying "Executor X was lost …" with the
 full reason. To go on: bring the executor back, or bind the project to another
 one, and press Run — an ordinary dispatch. If the device does come back, it is
@@ -3013,6 +3017,50 @@ the plan, and its credentials were released when it was lost.
 A project whose run *was* failed over keeps running on the replacement; its
 Event History says "Run failed over from executor X to Y", the live log marks
 where one run ended and the other began, and Stop stops the replacement.
+
+### A paused run is not resumed: its starter's Claude account is unavailable
+
+The status badge reads "starter's Claude account unavailable", naming a person.
+The run had stopped at a usage cap whose window has reopened, or its executor was
+lost and another could take it — both runs the hub carries on by itself — but on
+a hub with single sign-on such a run acts for the person who started it, on
+their own Claude account (Task 20443), and the hub could not act for them:
+
+| The reason says | What it means |
+| --- | --- |
+| has no Claude Code login on this hub that the hub may use for them | their Claude home is gone — an offboarding removed it — or they never signed in here, and the run would share the hub's filesystem, where that home is what it uses; or the hub denies them — a deny binding on them, hub-wide or on the project, or a deactivation at the identity provider. Which one is in the hub's log (`auto-resume: held`, or `ui: failover of …`), never in the project's reason |
+| may not use the executor this project runs on | the executor is restricted to an access list whose entries all name people by email (or all by subject) and none of them is the starter — the 403 their own Run would get. Add them, or press Run as someone on the list |
+| nobody is recorded as having started this run | a run older than the record of its starter, in a project with no owner |
+| this run was not started from this hub | the paused run recorded itself (`run_owner`) well after the hub last dispatched the project — a `cloop run` from a shell — so whoever last pressed Run here is not whom it acts for |
+| nobody could be named as having started this run | a resume carried such a run on where no Claude home was needed, or the hub's two records of the starter disagree because an older hub build dispatched the project since |
+| … whose usage could show the window reopened | an older build's extra-usage pause, which clears by the starter's own usage windows, for a starter with no home here to read them under |
+
+A control plane the hub could not read just now refuses the resume without
+holding the run: the pause stays a usage cap, and the next sweep asks again.
+
+The project's Event History has the full sentence: a `session_paused` row
+("Auto-resume held: …") for a resume, a `failover` row for a lost executor. The
+pause is not auto-resumable, so the sweep leaves it alone. To go on, press Run:
+the run starts acting for you, on your own account. Before Task 20443 the hub
+restarted such runs on the `cloop ui` process's own environment — the shared
+login per-user mode exists to remove.
+
+Whom a project's next resume would act for is in the control plane, read-only:
+
+```bash
+sqlite3 -readonly .cloop/state.db \
+  "select key, value from metadata where key like 'hub.harness.initiator.run:%'"
+```
+
+Each value names the person (`identity`), how they were decided (`basis`:
+`starter`, `owner` or `unknown`) and the run it describes (`run_id`). An empty
+identity on the `starter` basis is a run started acting for no one — the static
+bearer token or a service token — which resumes on the hub's own login, as it
+started. Builds before Task 20443 kept only the bare identity, under
+`hub.harness.initiator:<project>`; it is still written beside the record for
+them. Each `run.cap_resumed` audit row names whom that resume acted for
+(`acted_for`, `acted_for_basis`), and each placed `executor.failover` row whom
+the replacement did.
 
 ### A task is quarantined as a suspected node killer
 

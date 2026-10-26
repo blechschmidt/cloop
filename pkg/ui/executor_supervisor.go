@@ -358,9 +358,12 @@ func watchSessionExit(dir string, ex executor.Executor, handleID, sessionID stri
 // to settle — see settleFailover. A placed one is started again as the
 // project's run (failover_runs.go, Task 20396); every other one — and one
 // whose replacement could not start — ends with its executor, and the project
-// is settled paused with an executor_lost reason rather than left "running".
+// is settled paused with an executor_lost reason rather than left "running"
+// (starter_unavailable when the replacement could not act for the person who
+// started the run, Task 20443).
 func failoverHandler(dir string) executor.FailoverHandler {
-	return func(ctx context.Context, ev executor.FailoverEvent) error {
+	return func(ctx context.Context, claimed *executor.FailoverEvent) error {
+		ev := *claimed
 		// Before settling, which may hand the project to nobody: the server
 		// following the stranded run is found by that run.
 		s := failoverServer(dir, ev.From, ev.Session.HandleID, executorstore.FailoverProjectPath(ev.Session))
@@ -371,7 +374,11 @@ func failoverHandler(dir string) executor.FailoverHandler {
 		out := settleFailover(dir, ev)
 		cause := failoverStopCause(ev, out)
 		if cause == nil {
-			if cause = redispatchSession(ctx, dir, ev, s); cause == nil {
+			var actedFor string
+			if actedFor, cause = redispatchSession(ctx, dir, ev, s); cause == nil {
+				// Whom the replacement acts for, on the event the failover's
+				// audit row is written from (Task 20443).
+				claimed.ActedFor = actedFor
 				return nil
 			}
 		}
@@ -419,25 +426,38 @@ func requireRequeued(dir, sessionID string) error {
 // redispatchSession starts the stranded workload's run again on the
 // replacement node, as the project's run, on the hub member able to start it:
 // this one, or — for an edge agent connected to another member — that one
-// (Task 20354). s is this process's hub; the run is followed there.
-func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEvent, s *Server) error {
+// (Task 20354). s is this process's hub; the run is followed there. It returns
+// whom the replacement acts for: the person who started the run it continues,
+// "" for no one (Task 20443).
+func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEvent, s *Server) (string, error) {
 	if ev.To == "" {
-		return fmt.Errorf("failover: no replacement executor for session %s", ev.Session.ID)
+		return "", fmt.Errorf("failover: no replacement executor for session %s", ev.Session.ID)
 	}
 	if ev.Exhausted {
-		return fmt.Errorf("failover: session %s is exhausted; nothing re-dispatches it", ev.Session.ID)
+		return "", fmt.Errorf("failover: session %s is exhausted; nothing re-dispatches it", ev.Session.ID)
 	}
 	// The claim's record, not the event, decides (Task 20391). The event can
 	// arrive from another hub member (agentOpRedispatch), and whatever it
 	// says, a session the claim closed as failover_exhausted — or one already
 	// replaced — is never started again here.
 	if err := requireRequeued(dir, ev.Session.ID); err != nil {
-		return err
+		return "", err
+	}
+	// A starter the replacement could act for on no executor at all — denied
+	// on the hub, or a control plane that cannot say who they are — is
+	// refused here, before the run goes anywhere, so the refusal settles the
+	// project as what it is whichever member would have started it. The
+	// member that dispatches checks again, against the executor it resolves.
+	if s != nil {
+		if acct := s.resumeAccountFor(executorstore.FailoverProjectPath(ev.Session)); acct.unavailable != nil &&
+			acct.unavailable.AnyExecutor {
+			return "", fmt.Errorf("failover: the replacement on %s was not started: %w", ev.To, acct.unavailable)
+		}
 	}
 	// A replacement that is an edge agent connected to another hub member
 	// can only be started there (Task 20354), and is followed there.
-	if routed, err := redispatchOnAgentOwner(ctx, ev); routed {
-		return err
+	if routed, actedFor, err := redispatchOnAgentOwner(ctx, ev); routed {
+		return actedFor, err
 	}
 	// Everything a run started by a person passes — the harness credential,
 	// a fresh lease, the sandbox, the firewall levels composed for the
@@ -446,5 +466,6 @@ func redispatchSession(ctx context.Context, dir string, ev executor.FailoverEven
 	// failover placed it on. Before Task 20396 this replayed the stored spec,
 	// which lacks the leased credentials and the project seed by design, so
 	// a replacement on an isolating executor started without either.
-	return s.startReplacement(ctx, dir, ev)
+	acct, err := s.startReplacement(ctx, dir, ev)
+	return acct.actedFor(), err
 }

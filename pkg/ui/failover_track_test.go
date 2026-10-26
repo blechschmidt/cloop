@@ -40,6 +40,9 @@ import (
 type seedNode struct {
 	id   string
 	kind string
+	// host makes it a device that shares the hub's filesystem — payloads on
+	// the device's host, a Claude home meaningful there — sent no seed.
+	host bool
 
 	mu        sync.Mutex
 	down      bool
@@ -80,6 +83,15 @@ func newSeedNode(t *testing.T, id string) *seedNode {
 func (n *seedNode) ID() string   { return n.id }
 func (n *seedNode) Kind() string { return n.kind }
 func (n *seedNode) Capabilities() executor.Capabilities {
+	n.mu.Lock()
+	host := n.host
+	n.mu.Unlock()
+	if host {
+		return executor.Capabilities{
+			Isolation: executor.IsolationNone, SharesHostFilesystem: true, SupportsStream: true, MaxConcurrent: 4,
+			Platform: "linux", Arch: "amd64",
+		}
+	}
 	return executor.Capabilities{
 		Isolation: executor.IsolationContainer, SupportsStream: true, MaxConcurrent: 4,
 		SupportsWorkspaceProvisioning: true, SupportsProjectSeed: true, ReturnsProjectState: true,
@@ -868,7 +880,7 @@ func TestFailoverNeverMovesARunOntoARestrictedExecutor(t *testing.T) {
 		ID: row.ID, ExecutorID: row.ExecutorID, HandleID: row.HandleID, ProjectPath: row.ProjectPath, Attempt: row.Attempt,
 		Spec: executor.Spec{WorkDir: row.ProjectPath, Argv: []string{"cloop", "run"}, Labels: map[string]string{"project": r.dir}},
 	}}
-	if err := r.srv.startReplacement(context.Background(), r.dir, ev); err == nil || !strings.Contains(err.Error(), "access list") {
+	if _, err := r.srv.startReplacement(context.Background(), r.dir, ev); err == nil || !strings.Contains(err.Error(), "access list") {
 		t.Fatalf("a replacement routed to the restricted executor = %v, want a refusal naming its access list", err)
 	}
 	if got := r.nodes[1].startCount(); got != 0 {

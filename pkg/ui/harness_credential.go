@@ -39,6 +39,7 @@ package ui
 // tokens would run on whichever the lease happened to render last.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -296,40 +297,52 @@ func (s *Server) harnessWhoForNobody() harnessWho {
 	return harnessWho{personal: s.oidcEnabled()}
 }
 
-// harnessWhoForResume is whom an automatic resume of workDir's run acts for:
-// whoever started the run being resumed, as the control plane recorded at its
-// dispatch (recordHarnessInitiator), so a run that authenticated with its
-// starter's personal credential resumes on it rather than being refused on
-// every sweep, and a member's run resumes as that member rather than as the
-// project's owner. With no record — a run older than the record — the project's
-// owner, who is also who the resume bills.
-func (s *Server) harnessWhoForResume(workDir string) harnessWho {
-	who := harnessWho{personal: s.oidcEnabled()}
-	if !who.personal {
-		return who
-	}
-	if id, ok := recordedHarnessInitiator(workDir); ok {
-		who.identity = id
-		return who
-	}
-	for _, e := range s.allProjectEntries() {
-		if e.Path == workDir {
-			who.identity = secretbroker.NormalizeOwner(e.Owner)
-			break
-		}
-	}
-	return who
+// harnessInitiatorKey is the control-plane metadata key holding whom workDir's
+// last run was started for — whom an automatic resume or a failover of it acts
+// for (resumeAccountFor). In the hub's database, never the project's: the
+// project's tree is the sandbox's to write, and a run that could rewrite whom
+// its resume acts for could pick whose personal credential — or, on the hub's
+// own host, whose Claude home — it gets.
+//
+// It holds the bare identity, which is what builds before Task 20443 read and
+// write. harnessInitiatorRunKey holds the whole record beside it.
+func harnessInitiatorKey(workDir string) string { return "harness.initiator:" + workDir }
+
+// harnessInitiatorRunKey holds the record of whom workDir's last run was
+// started for, with the run it describes (Task 20443): a harnessInitiator as
+// JSON. Read in preference to harnessInitiatorKey, and written with it in one
+// transaction, so the two disagree only when an older build rewrote the bare
+// identity since.
+func harnessInitiatorRunKey(workDir string) string { return "harness.initiator.run:" + workDir }
+
+// harnessInitiator is whom a dispatch of a project's run was started for.
+type harnessInitiator struct {
+	// Identity is the owner key it acts for; "" for no one.
+	Identity string `json:"identity"`
+	// Basis is how Identity was decided: actedForStarter for a run a caller
+	// started — a person, or a token that acts for no one — and, for a run
+	// the hub carried on by itself, the basis that dispatch had, carried
+	// forward so a guess is never promoted to a fact (newResumeClearance).
+	Basis string `json:"basis"`
+	// RunID is the run the record describes; At, when it was dispatched.
+	RunID string    `json:"run_id,omitempty"`
+	At    time.Time `json:"at,omitempty"`
+	// Stale, never stored, says the bare identity beside the record names
+	// somebody else: a build before Task 20443 dispatched a run since, and
+	// rewrote only that.
+	Stale bool `json:"-"`
 }
 
-// harnessInitiatorKey is the control-plane metadata key holding whom workDir's
-// last run was started for. In the hub's database, never the project's: the
-// project's tree is the sandbox's to write, and a run that could rewrite whom
-// its resume acts for could pick whose personal credential it gets.
-func harnessInitiatorKey(workDir string) string { return "harness.initiator:" + workDir }
+// errInitiatorUnreadable is a record of whom a run was started for that is
+// there and cannot be decoded: reading it again will not help.
+var errInitiatorUnreadable = errors.New("the record of whom the run was started for is unreadable")
 
 // recordHarnessInitiator remembers whom a run of workDir was started for.
 // Best effort: a resume that finds no record acts for the project's owner.
-func recordHarnessInitiator(workDir, identity string) {
+// An Identity of "" records a run started acting for no one — the static
+// bearer token, a service token — which its resume carries on acting for,
+// on the hub's own login as it started.
+func recordHarnessInitiator(workDir string, rec harnessInitiator) {
 	dir := controlPlaneDir()
 	if dir == "" || workDir == "" {
 		return
@@ -339,12 +352,55 @@ func recordHarnessInitiator(workDir, identity string) {
 		return
 	}
 	defer db.Close()
-	if err := db.SetHubMeta(harnessInitiatorKey(workDir), identity); err != nil {
+	if rec.Basis == "" {
+		rec.Basis = actedForStarter
+	}
+	blob, err := json.Marshal(rec)
+	if err == nil {
+		// Both at once: a reader comparing them must never see one rewritten
+		// and not the other (readHarnessInitiator's Stale).
+		err = db.SetHubMetas(map[string]string{
+			harnessInitiatorRunKey(workDir): string(blob),
+			harnessInitiatorKey(workDir):    rec.Identity,
+		})
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "ui: record whom the run of %s acts for: %v\n", workDir, err)
 	}
 }
 
-// recordedHarnessInitiator reads what recordHarnessInitiator wrote.
+// readHarnessInitiator reads what recordHarnessInitiator wrote: the whole
+// record, or — from a build before Task 20443 — the bare identity, which
+// names its starter and no run.
+func readHarnessInitiator(db *statedb.DB, workDir string) (harnessInitiator, bool, error) {
+	var rec harnessInitiator
+	// One read of both, as they were written together.
+	values, err := db.HubMetas(harnessInitiatorRunKey(workDir), harnessInitiatorKey(workDir))
+	if err != nil {
+		return rec, false, err
+	}
+	blob, ok := values[harnessInitiatorRunKey(workDir)]
+	identity, hasIdentity := values[harnessInitiatorKey(workDir)]
+	if ok {
+		if err := json.Unmarshal([]byte(blob), &rec); err != nil {
+			return harnessInitiator{}, false, fmt.Errorf("%w (%s): %v", errInitiatorUnreadable, workDir, err)
+		}
+		if rec.Basis == "" {
+			rec.Basis = actedForStarter
+		}
+		// This build writes both in one transaction; a different identity
+		// beside the record was written later, by an older build that knows
+		// only that key.
+		rec.Stale = hasIdentity && secretbroker.NormalizeOwner(identity) != secretbroker.NormalizeOwner(rec.Identity)
+		return rec, true, nil
+	}
+	if !hasIdentity {
+		return rec, false, nil
+	}
+	return harnessInitiator{Identity: identity, Basis: actedForStarter}, true, nil
+}
+
+// recordedHarnessInitiator is the identity readHarnessInitiator reads.
 func recordedHarnessInitiator(workDir string) (string, bool) {
 	dir := controlPlaneDir()
 	if dir == "" || workDir == "" {
@@ -355,11 +411,11 @@ func recordedHarnessInitiator(workDir string) (string, bool) {
 		return "", false
 	}
 	defer db.Close()
-	value, ok, err := db.HubMeta(harnessInitiatorKey(workDir))
+	rec, ok, err := readHarnessInitiator(db, workDir)
 	if err != nil {
 		return "", false
 	}
-	return value, ok
+	return rec.Identity, ok
 }
 
 // counts reports whether a grant over a secret owned by owner may stand in for
@@ -864,6 +920,16 @@ type harnessClearance struct {
 	// check says the workload runs a harness, so a sandbox that would get no
 	// credential is refused rather than only kept from other people's.
 	check bool
+	// account, for a run the hub carries on by itself — an automatic resume,
+	// a failover's replacement — is whom it acts for, with no request to ask
+	// (Task 20443). A dispatch it cannot act for is refused here, against the
+	// executor resolved, before anything is minted: a host-sharing one when
+	// its starter's Claude home is gone, any one when they are denied.
+	account *resumeAccount
+	// basis is how who was decided, for the record started leaves: "" — a
+	// caller asked, so they are the starter — or, for a run the hub carries
+	// on by itself, the account's, carried forward.
+	basis string
 
 	mu     sync.Mutex
 	report *harnessReport
@@ -906,6 +972,9 @@ func (c *harnessClearance) settle(ex executor.Executor, workDir string) (map[str
 	if workDir != c.workDir {
 		return nil, fmt.Errorf("ui: a harness clearance built for %q was settled for %q", c.workDir, workDir)
 	}
+	if err := c.account.check(ex); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.report == nil || c.report.ExecutorID != ex.ID() {
@@ -915,14 +984,19 @@ func (c *harnessClearance) settle(ex executor.Executor, workDir string) (map[str
 	return c.report.Withhold, c.report.refusal()
 }
 
-// started records, once a run is under way, whom it was started for — what an
-// automatic resume of it acts for (harnessWhoForResume). Only a harness run on
-// a hub with single sign-on has an answer worth keeping.
-func (c *harnessClearance) started() {
+// started records, once run runID is under way, whom it was started for —
+// what an automatic resume or a failover of it acts for (resumeAccountFor).
+// Only a harness run on a hub with single sign-on has an answer worth
+// keeping. A run the hub carried on by itself records the basis it acted on
+// (newResumeClearance), never more: an owner fallback stays one, and nobody
+// nameable stays unknown.
+func (c *harnessClearance) started(runID string) {
 	if c == nil || !c.check || !c.who.personal {
 		return
 	}
-	recordHarnessInitiator(c.workDir, c.who.identity)
+	recordHarnessInitiator(c.workDir, harnessInitiator{
+		Identity: c.who.identity, Basis: c.basis, RunID: runID, At: time.Now().UTC(),
+	})
 }
 
 // refuseWithoutHarnessCredential answers a 409 before anything is claimed,

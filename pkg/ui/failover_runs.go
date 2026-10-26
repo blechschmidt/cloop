@@ -56,6 +56,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
+	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -169,48 +170,48 @@ func redispatchArgs(spec executor.Spec) ([]string, error) {
 }
 
 // startReplacement starts a claimed session's run again on ev.To, as the
-// project's run, and follows it here. It is what the failover handler calls
-// when the replacement can be started from this process, and what
-// agentOpRedispatch calls on the member holding the replacement agent's
-// socket.
-func (s *Server) startReplacement(ctx context.Context, dir string, ev executor.FailoverEvent) error {
+// project's run, and follows it here, returning whom it acts for. It is what
+// the failover handler calls when the replacement can be started from this
+// process, and what agentOpRedispatch calls on the member holding the
+// replacement agent's socket.
+func (s *Server) startReplacement(ctx context.Context, dir string, ev executor.FailoverEvent) (*resumeAccount, error) {
 	if s == nil {
-		return fmt.Errorf("failover: no hub server in this process follows runs, so session %s is not re-dispatched", ev.Session.ID)
+		return nil, fmt.Errorf("failover: no hub server in this process follows runs, so session %s is not re-dispatched", ev.Session.ID)
 	}
 	// The claim's record decides (Task 20391), on this path too: an event
 	// routed from another member is re-checked against the store here.
 	if err := requireRequeued(dir, ev.Session.ID); err != nil {
-		return err
+		return nil, err
 	}
 	if err := ev.Session.Spec.Validate(); err != nil {
 		// A session with no recorded spec cannot be re-dispatched. Its tasks
 		// are already back to pending, so the run is recoverable by hand.
-		return fmt.Errorf("failover: session %s has no re-dispatchable spec: %w", ev.Session.ID, err)
+		return nil, fmt.Errorf("failover: session %s has no re-dispatchable spec: %w", ev.Session.ID, err)
 	}
 	args, err := redispatchArgs(ev.Session.Spec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	projectPath := executorstore.FailoverProjectPath(ev.Session)
 	// A project removed from the hub since its run started is not brought
 	// back by a failover, and a member is not steered into dispatching in a
 	// directory that is not one of its projects.
 	if !hasProjectDB(projectPath) || !s.isRegisteredProject(projectPath) {
-		return fmt.Errorf("failover: session %s belongs to %s, which this hub no longer serves", ev.Session.ID, projectPath)
+		return nil, fmt.Errorf("failover: session %s belongs to %s, which this hub no longer serves", ev.Session.ID, projectPath)
 	}
 	target, err := executor.Get(ev.To)
 	if err != nil {
-		return fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
+		return nil, fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
 	}
 	// Placement already passes over a restricted executor; this is the
 	// dispatch path's own copy of the rule, for an event routed from another
 	// member or an access list added since.
 	if !failoverPlaceable(target) {
-		return fmt.Errorf("failover: replacement executor %s is restricted to an access list, which a failover "+
+		return nil, fmt.Errorf("failover: replacement executor %s is restricted to an access list, which a failover "+
 			"cannot check against the person who started the run", ev.To)
 	}
 	if other, ok := s.otherLiveRun(projectPath, ev.From, ev.Session.HandleID); ok {
-		return fmt.Errorf("failover: %w (%s), so session %s is not re-dispatched", errProjectRunningAgain, other, ev.Session.ID)
+		return nil, fmt.Errorf("failover: %w (%s), so session %s is not re-dispatched", errProjectRunningAgain, other, ev.Session.ID)
 	}
 
 	labels := map[string]string{"handler": "failover"}
@@ -219,19 +220,22 @@ func (s *Server) startReplacement(ctx context.Context, dir string, ev executor.F
 	}
 	// Billed and credentialed as the automatic resume is (autoresume.go): a
 	// machine restarting a run someone else started acts for whoever started
-	// it, as the control plane recorded at that dispatch.
+	// it, as the control plane recorded at that dispatch — on their Claude
+	// home where the replacement shares this host (Task 20443), and refused
+	// rather than run on the hub's own login where it cannot.
 	payer := s.runIdentity(nil, projectPath)
 	s.openSpendCursor(projectPath, payer)
-	ex, handle, err := startWorkloadAs(nil, newHarnessClearance(projectPath, s.harnessWhoForResume(projectPath), ""), payer,
+	acct := s.resumeAccountFor(projectPath)
+	ex, handle, err := startWorkloadAs(acct.envFor, newResumeClearance(acct), payer,
 		projectPath, append([]string{s.selfExe()}, args...), labels, asReplacementFor(target, ev.Session))
 	if err != nil {
-		return fmt.Errorf("failover: start the replacement on %s: %w", ev.To, err)
+		return nil, fmt.Errorf("failover: start the replacement on %s: %w", ev.To, err)
 	}
 	if err := s.followReplacement(projectPath, ev, ex, handle); err != nil {
-		return err
+		return nil, err
 	}
-	journalFailedOver(projectPath, ev, ex.ID())
-	return nil
+	journalFailedOver(projectPath, ev, ex.ID(), acct)
+	return acct, nil
 }
 
 // failoverPlaceable reports whether a failover may move a run onto ex.
@@ -603,9 +607,12 @@ func lostRunDetail(ev executor.FailoverEvent, out failoverOutcome, cause error) 
 		return fmt.Sprintf("executor %s stopped answering and no executor could take the run", ev.From)
 	case errors.Is(cause, errProjectRunningAgain):
 		return fmt.Sprintf("executor %s stopped answering; another run of the project took over", ev.From)
-	default:
-		return fmt.Sprintf("executor %s stopped answering and the replacement on %s could not start", ev.From, ev.To)
 	}
+	if su, ok := errStarterUnavailable(cause); ok {
+		return fmt.Sprintf("executor %s stopped answering, and its replacement on %s was not started: %s; "+
+			"press Run to start it as yourself", ev.From, ev.To, su.Error())
+	}
+	return fmt.Sprintf("executor %s stopped answering and the replacement on %s could not start", ev.From, ev.To)
 }
 
 // exhaustedDetail is the pause reason's detail for a run whose executor was
@@ -676,7 +683,12 @@ func settleLostRun(s *Server, dir string, ev executor.FailoverEvent, out failove
 	if loss, ok := lossOfHandle(dir, ev.From, ev.Session.HandleID); ok && loss.Replaced() {
 		return
 	}
-	verdict := runVerdict{Detail: lostRunDetail(ev, out, cause), Lost: true}
+	su, starterGone := errStarterUnavailable(cause)
+	if starterGone {
+		fmt.Fprintf(os.Stderr, "ui: failover of %s: the replacement on %s was not started: %s\n",
+			projectPath, ev.To, su.logDetail())
+	}
+	verdict := runVerdict{Detail: lostRunDetail(ev, out, cause), Lost: true, StarterUnavailable: starterGone}
 	running := errors.Is(cause, errProjectRunningAgain)
 	journalLost(projectPath, ev, cause, running)
 	if s == nil {
@@ -692,7 +704,7 @@ func settleLostRun(s *Server, dir string, ev executor.FailoverEvent, out failove
 		if o.Alive {
 			s.noticeRunLost(o.InstanceID, runLossNotice{
 				Project: projectPath, Executor: ev.From, Handle: ev.Session.HandleID,
-				Settle: !running, Detail: verdict.Detail,
+				Settle: !running, Detail: verdict.Detail, StarterUnavailable: starterGone,
 			})
 			return
 		}
@@ -727,6 +739,10 @@ type runLossNotice struct {
 	Settle bool `json:"settle,omitempty"`
 	// Detail is the pause reason's detail when settling.
 	Detail string `json:"detail,omitempty"`
+	// StarterUnavailable settles the project starter_unavailable rather than
+	// executor_lost: a replacement was placed, and refused because it could
+	// not act for the person who started the run (Task 20443).
+	StarterUnavailable bool `json:"starter_unavailable,omitempty"`
 }
 
 // noticeRunLost sends a runLossNotice to one member.
@@ -750,7 +766,7 @@ func (s *Server) applyRunLossNotice(p runLossNotice) {
 	if !ok || !loss.Claimed() {
 		return
 	}
-	verdict := runVerdict{Detail: p.Detail, Lost: true}
+	verdict := runVerdict{Detail: p.Detail, Lost: true, StarterUnavailable: p.StarterUnavailable}
 	switch {
 	case verdict.Detail != "":
 	case p.To != "":
@@ -934,15 +950,23 @@ func failoverDetails(ev executor.FailoverEvent) map[string]any {
 	return d
 }
 
-// journalFailedOver records that the run continues on another executor.
-func journalFailedOver(projectPath string, ev executor.FailoverEvent, to string) {
+// journalFailedOver records that the run continues on another executor, and
+// whom it acts for there.
+func journalFailedOver(projectPath string, ev executor.FailoverEvent, to string, acct *resumeAccount) {
 	d := failoverDetails(ev)
 	d["to"] = to
+	for k, v := range acct.auditFields() {
+		d[k] = v
+	}
+	actingFor := ""
+	if who := acct.describe(); who != "" {
+		actingFor = ", " + who
+	}
 	state.LogEventDetails(projectPath, state.EventRow{
 		Type: state.EventFailover,
 		Step: state.NoStep,
-		Message: fmt.Sprintf("Run failed over from executor %s to %s: %s stopped answering, and the run continues on %s.",
-			ev.From, to, ev.From, to),
+		Message: fmt.Sprintf("Run failed over from executor %s to %s: %s stopped answering, and the run continues on %s%s.",
+			ev.From, to, ev.From, to, actingFor),
 	}, d)
 }
 
@@ -952,8 +976,20 @@ func journalLost(projectPath string, ev executor.FailoverEvent, cause error, run
 	if cause != nil {
 		why = strings.TrimPrefix(cause.Error(), "failover: ")
 	}
+	d := failoverDetails(ev)
 	msg := fmt.Sprintf("Executor %s was lost and the run was not re-dispatched: %s. The project is paused; "+
 		"bring the executor back or bind the project to another, then press Run.", ev.From, why)
+	if su, ok := errStarterUnavailable(cause); ok {
+		// A replacement was there to take the run, and was refused because
+		// it could not act for its starter (Task 20443).
+		msg = fmt.Sprintf("Executor %s was lost and the run was not re-dispatched to %s: %s. The project is "+
+			"paused. %s", ev.From, ev.To, su.Error(), su.Remediation())
+		d["pause_code"] = string(pausereason.CodeStarterUnavailable)
+		if su.Identity != "" {
+			d["starter"] = su.Identity
+			d["starter_basis"] = su.Basis
+		}
+	}
 	if runningAgain {
 		msg = fmt.Sprintf("Executor %s was lost; its run was not re-dispatched because another run of the project "+
 			"is already executing it.", ev.From)
@@ -962,5 +998,5 @@ func journalLost(projectPath string, ev executor.FailoverEvent, cause error, run
 		Type:    state.EventFailover,
 		Step:    state.NoStep,
 		Message: msg,
-	}, failoverDetails(ev))
+	}, d)
 }

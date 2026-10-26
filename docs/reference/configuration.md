@@ -2983,6 +2983,24 @@ its own, so such pauses still appear after the hub is upgraded. The hub
 recognises that wording and restarts the run once the usage API shows no window
 exhausted. Every other budget pause stays put.
 
+**Whose account a resume runs on.** On a hub with single sign-on a resumed run
+acts for the person who started the run it resumes — recorded in the hub's own
+database when that run was dispatched, or, for a run older than the record, the
+project's owner — and runs on that person's Claude account: on an executor that
+shares the hub's filesystem, their own Claude home with the hub's ambient token
+cleared, exactly as when they pressed Run; on an isolating one, the credential
+the project is granted for them. The older build's pause above is judged by that
+person's own usage windows, not the hub's. A resume never creates a Claude home
+and never falls back to the hub's own login: when the person's home is gone
+(they were offboarded, or never signed in here), the hub denies them, or nobody
+can be named — a run started from a shell with `cloop run` is not the hub's to
+name anyone for — the run stays paused as *starter's Claude account
+unavailable*, naming them, and the project's Event History says why. Press Run
+to start it as yourself. A run started by a token that acts for no one — the static bearer
+token, a service token — ran on the hub's own login and resumes on it. A
+failover's replacement follows the same rules. See [resumed and failed-over
+runs](../security/claude-code-identity.md#resumed-and-failed-over-runs).
+
 Default-on is deliberate. The alternative is what it replaced: an unattended
 fleet parked for the rest of a weekly window over a condition that had already
 cleared, and whose exact clearing time the hub already knew.

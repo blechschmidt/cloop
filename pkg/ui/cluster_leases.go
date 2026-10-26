@@ -247,12 +247,14 @@ func (s *Server) handleClusterAgentOp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// This member holds the replacement agent's socket, so it starts the
-		// replacement and follows it as the project's run (Task 20396).
-		if err := s.startReplacement(r.Context(), controlPlaneDir(), *op.Failover); err != nil {
+		// replacement and follows it as the project's run (Task 20396), and
+		// says whom it acts for (Task 20443).
+		acct, err := s.startReplacement(r.Context(), controlPlaneDir(), *op.Failover)
+		if err != nil {
 			jsonErr(w, err.Error(), http.StatusConflict)
 			return
 		}
-		jsonOK(w, map[string]any{"ok": true})
+		jsonOK(w, map[string]any{"ok": true, "acted_for": acct.actedFor()})
 	default:
 		jsonErr(w, "unknown agent operation", http.StatusBadRequest)
 	}
@@ -434,23 +436,29 @@ func (s *Server) agentHeldByPeer(ex executor.Executor) (string, bool) {
 // redispatchOnAgentOwner hands a failed-over session to the member holding
 // its replacement executor's agent, when that is not this member. routed
 // reports whether it did; err is that member's answer.
-func redispatchOnAgentOwner(ctx context.Context, ev executor.FailoverEvent) (routed bool, err error) {
+func redispatchOnAgentOwner(ctx context.Context, ev executor.FailoverEvent) (routed bool, actedFor string, err error) {
 	n := currentCluster()
 	if n == nil || ev.To == "" {
-		return false, nil
+		return false, "", nil
 	}
 	agent := agentForExecutor(ev.To, n)
 	if agent == "" {
-		return false, nil
+		return false, "", nil
 	}
 	o, found, lerr := n.Lookup(ownerAgent, agent)
 	if lerr != nil || !found || o.Self || !o.Alive {
-		return false, nil
+		return false, "", nil
 	}
 	ev.Err = nil
-	return true, n.Call(ctx, o.Member, http.MethodPost, clusterAPIAgentOp, clusterAgentOp{
+	// The member that starts the replacement says whom it acts for, from the
+	// shared record (Task 20443); a member older than that says nothing.
+	var reply struct {
+		ActedFor string `json:"acted_for"`
+	}
+	err = n.Call(ctx, o.Member, http.MethodPost, clusterAPIAgentOp, clusterAgentOp{
 		Op: agentOpRedispatch, Agent: ev.To, Failover: &ev,
-	}, nil)
+	}, &reply)
+	return true, reply.ActedFor, err
 }
 
 // agentForExecutor is Server.agentForExecutorID for callers without a Server.

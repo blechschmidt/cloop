@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
@@ -50,6 +51,10 @@ const autoResumeCheckInterval = 5 * time.Minute
 // do first (stale_recovery.go), and resuming a project while that is still
 // deciding what the last run left behind would race it.
 const autoResumeStartupDelay = 45 * time.Second
+
+// errResumeDeclined is the answer of a cluster member that was handed a resume
+// and, checking again, did not start it.
+var errResumeDeclined = errors.New("auto-resume: the member holding the project's executor did not restart the run")
 
 // autoResumeEnabled reports whether the hub may restart cap-paused runs.
 // Default on — see config.UIConfig.AutoResumeOnCapReset for why.
@@ -126,28 +131,19 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 	if err != nil || st == nil {
 		return false
 	}
-
-	// AutoResumable is the whole policy: paused, for a usage cap, with a
-	// reset that is now in the past. Everything else stays paused — bar the
-	// one pause an older build recorded as a budget pause for what was
-	// really an exhausted window (see capPauseCleared).
-	if !s.capPauseCleared(st, s.clock()) {
-		return false
-	}
-
-	// A project someone already restarted by hand needs no help, and starting
-	// a second harness in one working directory is the race handleRun refuses
-	// for the same reason: both schedule from the same plan and overwrite each
-	// other's status writes.
-	if s.projectExecuting(workDir) {
+	acct, ok := s.autoResumeReady(workDir, st)
+	if !ok {
 		return false
 	}
 
 	reason := st.PauseReason
 	if err := s.startAutoResumeRun(workDir); err != nil {
+		if errors.Is(err, errResumeDeclined) {
+			return false
+		}
 		s.log().Warn(logger.EventSessionStart, 0, "auto-resume: could not restart cap-paused run",
 			map[string]interface{}{"project": workDir, "error": err.Error()})
-		s.repauseIfOverDiskLimit(workDir, err)
+		s.holdRefusedResume(workDir, err)
 		return false
 	}
 
@@ -157,13 +153,99 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 		resumesAt = *reason.ResumesAt
 		fields["resumes_at"] = resumesAt.UTC().Format(time.RFC3339)
 	}
+	for k, v := range acct.auditFields() {
+		fields[k] = v
+	}
 	s.log().Info(logger.EventSessionStart, 0, "auto-resume: subscription window reopened, run restarted", fields)
-	s.auditAutoResume(workDir, reason, resumesAt)
+	s.auditAutoResume(workDir, reason, resumesAt, acct)
 	return true
 }
 
+// autoResumeReady reports whether workDir's run, as st records it, is to be
+// restarted now, and whom the restart acts for (resume_account.go). The sweep
+// and the cluster member it hands a resume to both ask it, the member again
+// because the state may have changed in the round trip.
+//
+// AutoResumable is the policy: paused, for a usage cap, with a reset that is
+// now in the past. Everything else stays paused — bar the one pause an older
+// build recorded as a budget pause for what was really an exhausted window
+// (see capPauseCleared).
+//
+// A resume that could not act for the run's starter is settled here as the
+// pause that actually holds it (holdRefusedResume), before the usage API is
+// asked: for an older build's pause that read would be made under the very
+// home that is missing, and could only ever answer "unknown".
+func (s *Server) autoResumeReady(workDir string, st *state.ProjectState) (*resumeAccount, bool) {
+	now := s.clock()
+	if !resumablePause(st, now) {
+		return nil, false
+	}
+	// A project someone already restarted by hand needs no help, and starting
+	// a second harness in one working directory is the race handleRun refuses
+	// for the same reason: both schedule from the same plan and overwrite each
+	// other's status writes.
+	if s.projectExecuting(workDir) {
+		return nil, false
+	}
+	acct := s.resumeAccountFor(workDir)
+	if err := s.resumeRefusalFor(workDir, acct); err != nil {
+		s.holdRefusedResume(workDir, err)
+		return nil, false
+	}
+	// An older build's pause clears by the starter's own usage windows. With
+	// no account to read them under — nobody nameable, a home that is gone,
+	// on an executor that would not have used it — nothing could ever show
+	// the window reopened, and the pause is held as what it is rather than
+	// left looking like a budget nobody can raise.
+	if !st.PauseReason.AutoResumable(now) {
+		if _, ok := acct.usageDir(); !ok {
+			s.holdRefusedResume(workDir, acct.noUsage())
+			return nil, false
+		}
+	}
+	if !s.capPauseCleared(st, now, acct) {
+		return nil, false
+	}
+	return acct, true
+}
+
+// resumablePause reports whether st is paused for a subscription window the
+// hub restarts runs after: a usage cap whose reset has passed, or the
+// extra-usage pause an older build recorded, whatever its window says now.
+func resumablePause(st *state.ProjectState, now time.Time) bool {
+	if st == nil {
+		return false
+	}
+	if st.PauseReason.AutoResumable(now) {
+		return true
+	}
+	return st.Status == "paused" && legacyExtraUsagePause(st.PauseReason)
+}
+
+// resumeRefusalFor is the refusal a dispatch of workDir acting for acct would
+// meet on the executor the project resolves to now, or nil. The dispatch
+// settles the same check against the executor it resolves itself, and that is
+// the guarantee; this answers early, so the refusal becomes the pause that
+// holds the run instead of a failure every sweep repeats. A project that
+// resolves no executor is left to the dispatch, whose refusal names its own,
+// more fundamental, reason.
+func (s *Server) resumeRefusalFor(workDir string, acct *resumeAccount) error {
+	if acct == nil || !acct.who.personal {
+		return nil
+	}
+	if acct.unavailable != nil && acct.unavailable.AnyExecutor {
+		return acct.unavailable
+	}
+	registerBuiltinExecutors()
+	ex, err := executor.Resolve(workDir)
+	if err != nil || ex == nil {
+		return nil
+	}
+	return acct.check(ex)
+}
+
 // capPauseCleared reports whether st is paused for a subscription window that
-// has reopened by now.
+// has reopened by now, judged for the account the resume would act on.
 //
 // For a pause this build's orchestrator recorded, that is AutoResumable: the
 // window's reset is in the reason. The other case is a pause recorded before
@@ -174,7 +256,12 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 // its own. For that pause the hub asks the usage API instead, and restarts the
 // run once no window is exhausted any more. The run it starts is this build's,
 // which records a proper usage-cap pause should the wall still be there.
-func (s *Server) capPauseCleared(st *state.ProjectState, now time.Time) bool {
+//
+// The windows asked about are the starter's own (Task 20443): read under the
+// Claude home the resume acts on, or the hub's own login where that is the
+// account the run used. Another account's windows say nothing about this
+// run's — the hub's own login on a hub with single sign-on is nobody's.
+func (s *Server) capPauseCleared(st *state.ProjectState, now time.Time, acct *resumeAccount) bool {
 	if st == nil {
 		return false
 	}
@@ -184,7 +271,12 @@ func (s *Server) capPauseCleared(st *state.ProjectState, now time.Time) bool {
 	if st.Status != "paused" || !legacyExtraUsagePause(st.PauseReason) {
 		return false
 	}
-	usage, err := s.subscriptionUsage()
+	configDir, ok := acct.usageDir()
+	if !ok {
+		// No account to read: the pause stays for a person, as it always did.
+		return false
+	}
+	usage, err := s.subscriptionUsage(configDir)
 	if err != nil || usage == nil {
 		// Unreadable is not reopened: the pause stays for the next sweep, or
 		// for the person who presses Run, exactly as before.
@@ -210,14 +302,72 @@ func legacyExtraUsagePause(r *pausereason.Reason) bool {
 }
 
 // subscriptionUsage is the Claude Code usage the sweep judges an older
-// build's pause by: the hub's own account, which is the one a resumed run
-// runs on, since startAutoResumeRun pins no per-user Claude home. Cached for
-// ratelimit.MinUsageCacheTTL like every other reader of it.
-func (s *Server) subscriptionUsage() (*ratelimit.ClaudeUsage, error) {
+// build's pause by: that of the login under configDir, the Claude home the
+// resume acts on — "" for the hub's own (resumeAccount.usageDir).
+func (s *Server) subscriptionUsage(configDir string) (*ratelimit.ClaudeUsage, error) {
 	if s.autoResumeUsage != nil {
-		return s.autoResumeUsage()
+		return s.autoResumeUsage(configDir)
 	}
-	return ratelimit.FetchOrCachedUsage("", ratelimit.MinUsageCacheTTL)
+	return resumeAccountUsage(configDir)
+}
+
+// holdRefusedResume gives a cap pause whose resume was refused the pause that
+// actually holds it, when the refusal is one waiting will not change: a
+// workspace over its disk limit (Task 20405), or a starter the resume cannot
+// act for (Task 20443). Left as a cap pause, every sweep would try again — and
+// be refused — while the badge kept saying the subscription was the reason.
+// Neither is auto-resumable, so each waits for a person.
+//
+// A refusal the next sweep may not meet — the control plane could not be read
+// just now — is logged and left: the pause stays the cap pause it was.
+func (s *Server) holdRefusedResume(workDir string, err error) {
+	if su, ok := errStarterUnavailable(err); ok {
+		if su.Transient {
+			s.log().Warn(logger.EventSessionStart, 0, "auto-resume: whom the run acts for could not be read; trying again next sweep",
+				map[string]interface{}{"project": workDir, "reason": su.logDetail()})
+			return
+		}
+		s.repauseForStarter(workDir, su)
+		return
+	}
+	s.repauseIfOverDiskLimit(workDir, err)
+}
+
+// repauseForStarter records that a cap-paused run cannot be resumed for the
+// person who started it: paused starter_unavailable, naming them and why, and
+// journaled. Never resumed on the hub's shared login instead.
+func (s *Server) repauseForStarter(workDir string, su *starterUnavailableError) {
+	st, lerr := state.Load(workDir)
+	if lerr != nil || st == nil || st.Status != "paused" || !resumablePause(st, s.clock()) {
+		return
+	}
+	prior := st.PauseReason.Label()
+	st.SetPaused(su.pause())
+	if serr := st.SaveDirect(); serr != nil {
+		s.log().Warn(logger.EventSessionStart, 0, "auto-resume: could not record why the run cannot be resumed",
+			map[string]interface{}{"project": workDir, "error": serr.Error()})
+		return
+	}
+	s.log().Warn(logger.EventSessionStart, 0, "auto-resume: held, the run's starter cannot be acted for",
+		map[string]interface{}{"project": workDir, "starter": su.Identity, "reason": su.logDetail()})
+	details := map[string]any{
+		"pause_code": string(pausereason.CodeStarterUnavailable),
+		"via":        "auto_resume",
+		"was":        prior,
+	}
+	if su.Identity != "" {
+		details["starter"] = su.Identity
+		details["starter_basis"] = su.Basis
+	}
+	state.LogEventDetails(workDir, state.EventRow{
+		Type: state.EventSessionPaused,
+		Step: state.NoStep,
+		Message: fmt.Sprintf("Auto-resume held: the run is paused for a subscription window the hub restarts "+
+			"it after (%s), but %s. %s", prior, su.Error(), su.Remediation()),
+	}, details)
+	s.broadcastStateDiff(workDir, st)
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
 }
 
 // repauseIfOverDiskLimit gives a cap pause whose resume was refused because
@@ -232,7 +382,7 @@ func (s *Server) repauseIfOverDiskLimit(workDir string, err error) {
 		return
 	}
 	st, lerr := state.Load(workDir)
-	if lerr != nil || st == nil || st.Status != "paused" || !s.capPauseCleared(st, s.clock()) {
+	if lerr != nil || st == nil || st.Status != "paused" || !resumablePause(st, s.clock()) {
 		return
 	}
 	st.SetPaused(diskLimitPause(overLimit.Breach))
@@ -246,11 +396,11 @@ func (s *Server) repauseIfOverDiskLimit(workDir string, err error) {
 	s.broadcastProjectsUpdate()
 }
 
-// auditAutoResume records that a machine, not a person, started this run.
-// Best-effort: a project whose control-plane DB cannot be opened is still
-// resumed, because refusing to work when the trail is unwritable would turn a
-// logging fault into an availability one.
-func (s *Server) auditAutoResume(workDir string, reason *pausereason.Reason, resumesAt time.Time) {
+// auditAutoResume records that a machine, not a person, started this run, and
+// whom it acted for. Best-effort: a project whose control-plane DB cannot be
+// opened is still resumed, because refusing to work when the trail is
+// unwritable would turn a logging fault into an availability one.
+func (s *Server) auditAutoResume(workDir string, reason *pausereason.Reason, resumesAt time.Time, acct *resumeAccount) {
 	db, err := statedb.Open(state.DBPath(workDir))
 	if err != nil {
 		return
@@ -259,12 +409,37 @@ func (s *Server) auditAutoResume(workDir string, reason *pausereason.Reason, res
 	// A cap pause and its resume are two halves of one story about this plan,
 	// so they have to land in the same chain the pause did — the project's.
 	db.AsProject()
-	statedb.AuditCapResume(db, statedb.CapResumeInput{
+	in := statedb.CapResumeInput{
 		ProjectPath:  workDir,
 		PausedDetail: reason.Label(),
 		ResumesAt:    resumesAt,
 		ResumedAt:    s.clock(),
-	})
+	}
+	if acct != nil && acct.who.personal {
+		in.ActedFor, in.ActedForBasis = acct.who.identity, acct.basis
+	}
+	statedb.AuditCapResume(db, in)
+}
+
+// handOffAutoResume asks member m, which holds the connection to workDir's
+// executor, to restart its run. The member checks everything again and may
+// decline — the state moved, or it holds the run because it cannot act for
+// its starter (Task 20443) — and a resume it did not start is not one to
+// record: errResumeDeclined.
+func (s *Server) handOffAutoResume(m hubcluster.Member, workDir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var reply struct {
+		Started *bool `json:"started"`
+	}
+	if err := s.clusterNode().Call(ctx, m, http.MethodPost, clusterAPIAutoResume,
+		map[string]string{"project": workDir}, &reply); err != nil {
+		return err
+	}
+	if reply.Started != nil && !*reply.Started {
+		return errResumeDeclined
+	}
+	return nil
 }
 
 // startAutoResumeRun dispatches the harness for a project with no HTTP request
@@ -273,9 +448,11 @@ func (s *Server) auditAutoResume(workDir string, reason *pausereason.Reason, res
 // There is no authenticated caller to attribute this to — the trigger is a
 // timer. runIdentity(nil, workDir) resolves the project's registered owner, so
 // the run is still billed to whoever owns the project rather than vanishing
-// into the local identity; and claudeEnvResolver is nil-tolerant, so a
-// per-user Claude scope simply is not pinned, exactly as for any other
-// non-interactive dispatch.
+// into the local identity. Whom it acts for, and on which Claude account, is
+// the person who started the run it resumes (resumeAccountFor, Task 20443):
+// their home on an executor that shares this filesystem, as handleRun would
+// have pinned it for them; a refusal when that cannot be — never the hub's
+// own login in their place.
 func (s *Server) startAutoResumeRun(workDir string) error {
 	if s.autoResumeStart != nil {
 		return s.autoResumeStart(workDir)
@@ -285,10 +462,7 @@ func (s *Server) startAutoResumeRun(workDir string) error {
 	// dispatched by the hub member holding that agent's socket (Task 20354).
 	// That member re-checks everything before starting anything.
 	if m, ok := s.dispatchMember(workDir); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		return s.clusterNode().Call(ctx, m, http.MethodPost, clusterAPIAutoResume,
-			map[string]string{"project": workDir}, nil)
+		return s.handOffAutoResume(m, workDir)
 	}
 
 	if owner, err := s.claimRun(workDir, "auto_resume"); err != nil {
@@ -300,11 +474,13 @@ func (s *Server) startAutoResumeRun(workDir string) error {
 
 	exe := s.selfExe()
 	// The resume acts for whoever started the run it resumes, as recorded at
-	// that run's dispatch, so a run on its starter's personal Claude credential
-	// resumes on it (Task 20379). A refusal leaves the project paused; the
-	// sweep logs it and tries again on its next tick, by when someone may have
-	// granted one.
-	ex, handle, err := startWorkloadAs(nil, newHarnessClearance(workDir, s.harnessWhoForResume(workDir), ""), payer, workDir,
+	// that run's dispatch: on their personal Claude credential where a sandbox
+	// is granted one (Task 20379), and on their Claude home where the run
+	// shares this host (Task 20443). A missing grant leaves the project
+	// paused, and the sweep tries again on its next tick, by when someone may
+	// have granted one; a starter it cannot act for is a pause of its own.
+	acct := s.resumeAccountFor(workDir)
+	ex, handle, err := startWorkloadAs(acct.envFor, newResumeClearance(acct), payer, workDir,
 		[]string{exe, "run"}, map[string]string{"handler": "auto_resume"}, s.recordingRun(workDir, "auto_resume"))
 	if err != nil {
 		s.releaseRunClaim(workDir)

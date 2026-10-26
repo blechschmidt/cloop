@@ -815,12 +815,12 @@ func TestClearanceRecordsWhomARunWasStartedFor(t *testing.T) {
 	if _, ok := recordedHarnessInitiator(project); ok {
 		t.Fatal("a record before any run")
 	}
-	newLeaseClearance(project, harnessWho{identity: "bob@corp.example", personal: true}).started()
-	newHarnessClearance(project, harnessWho{identity: "bob@corp.example"}, "").started()
+	newLeaseClearance(project, harnessWho{identity: "bob@corp.example", personal: true}).started("run-1")
+	newHarnessClearance(project, harnessWho{identity: "bob@corp.example"}, "").started("run-2")
 	if _, ok := recordedHarnessInitiator(project); ok {
 		t.Fatal("a workload that runs no harness, or a hub without sign-on, recorded an initiator")
 	}
-	newHarnessClearance(project, harnessWho{identity: "alice@corp.example", personal: true}, "").started()
+	newHarnessClearance(project, harnessWho{identity: "alice@corp.example", personal: true}, "").started("run-3")
 	if id, ok := recordedHarnessInitiator(project); !ok || id != "alice@corp.example" {
 		t.Fatalf("recorded initiator = %q, %v", id, ok)
 	}
