@@ -193,6 +193,24 @@ async function main() {
     };
   }
 
+  // 6c. The model call runs on the project's executor (Task 20442). A sandbox
+  //     with no Claude login refuses it with the 409 every dispatch uses, and
+  //     the dialog that grants a credential opens — the chooser stays, as for
+  //     any other failure, and the toast is the short one, not the reason.
+  {
+    await boot(EXISTING, {ok: false, code: 'harness_credential_missing',
+      error: 'No active grant gives the sandbox a Claude credential.'}, 409);
+    window.openDictateApply(HEARD);
+    await globalThis.__settle(2);
+    window.dictateApplyRevise();
+    await globalThis.__settle(8);
+    out.revise_harness_refusal = {
+      chooser_open: chooser(),
+      details: desc().value,
+      toast: String(document.getElementById('toast').textContent || ''),
+    };
+  }
+
   // 6b. Cancelling while the model is thinking. The reply still arrives — the
   //     request was already in flight — and must be dropped: by the time it
   //     lands the user has dismissed the dialog and may have typed something

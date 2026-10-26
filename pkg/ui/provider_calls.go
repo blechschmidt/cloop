@@ -195,6 +195,12 @@ func (s *Server) handleProviderCallReplay(w http.ResponseWriter, r *http.Request
 	}
 
 	workDir := s.resolveWorkDir(r)
+	// The replay runs the provider here, in the hub's process: with
+	// claudecode, `claude` on the hub's host (Task 20442). Refused where the
+	// project's own runs could not run there, before anything is read.
+	if denyInlineModelCall(w, workDir, "provider call replay") {
+		return
+	}
 	original, err := state.LoadProviderCall(workDir, id)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusNotFound)
@@ -259,6 +265,8 @@ func (s *Server) handleProviderCallReplay(w http.ResponseWriter, r *http.Request
 		Timeout:      30 * time.Second,
 		SystemPrompt: replaySystem,
 		WorkDir:      workDir,
+		// On the caller's Claude account, not the hub's (Task 20442).
+		Env: s.inlineClaudeEnv(r),
 	}
 	// Tag the replay with the originating task so the new audit row is
 	// correlated. Replays without a task originate from the inspector itself.

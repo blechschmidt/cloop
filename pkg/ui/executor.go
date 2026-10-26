@@ -947,7 +947,12 @@ func runWorkloadEnv(ctx context.Context, workDir string, argv, extraEnv []string
 // clear is settled here exactly as startWorkloadAs settles it: a helper
 // subcommand that calls the provider (`cloop suggest`, `cloop do`) needs the
 // harness credential as much as a run does. Nil for one that calls none.
-func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFor func(executor.Executor) []string, clear *harnessClearance, labels map[string]string) ([]byte, error) {
+//
+// opts reach executor.Run: executor.WithOutput relays the output while the
+// workload still runs (Task 20442). A workload that started and then failed is
+// reported as a *workloadEndedError, so a caller can tell "it ran and failed"
+// from "it was never started", which jsonWorkloadErr renders.
+func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFor func(executor.Executor) []string, clear *harnessClearance, labels map[string]string, opts ...executor.RunOption) ([]byte, error) {
 	registerBuiltinExecutors()
 	// Same re-check as startWorkloadAs, for the same reason (Task 20418).
 	if err := checkDispatchConfinement(workDir); err != nil {
@@ -1076,13 +1081,25 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	// What its pushes are scanned for, for the length of the call (Task
 	// 20436).
 	defer registerRunPushScan(runID, workDir, lease, spec)()
-	res, runErr := executor.Run(ctx, ex, spec)
+	res, runErr := executor.Run(ctx, ex, spec, opts...)
 	if runErr != nil {
 		auditImageDenial(workDir, runErr)
 		journalDiskLimitRefusal(workDir, runErr)
+		if res.Handle.ID != "" {
+			runErr = &workloadEndedError{err: runErr}
+		}
 	}
 	return res.Output, runErr
 }
+
+// workloadEndedError is a helper workload that was started and did not end
+// well: it exited non-zero, was killed, or was stopped when its context ended.
+// Everything else runWorkloadEnvFor returns refused to start it. It changes no
+// message and hides nothing from errors.Is and errors.As.
+type workloadEndedError struct{ err error }
+
+func (e *workloadEndedError) Error() string { return e.err.Error() }
+func (e *workloadEndedError) Unwrap() error { return e.err }
 
 // drainToStderr copies a workload's output stream to the UI server's stderr,
 // reproducing what `cmd.Stdout = os.Stderr` did before. Runs until the

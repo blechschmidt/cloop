@@ -33,7 +33,7 @@ function deferredPanel(name, helpers) {
 let _ph;
 function panelHelpers() {
   return _ph || (_ph = {
-    api, apiMethod, authHeaders, parse: parseAPIResponse, esc, toast, canGlobal, pUrl, relTime, refreshState, applyPermissionGating,
+    api, apiMethod, authHeaders, parse: parseAPIResponse, esc, toast, canGlobal, pUrl, relTime, refreshState, applyPermissionGating, harnessRefused,
     mount: mountPanel, panel: deferredPanel, fmtBytes: _duFmtBytes,
     execAt: _execAt, execKind: _execKindLabel, execErr: _execDetailErrText,
     fleet: d => d ? _renderAutoUpdateBar(fleetAutoUpdate = d) : fleetAutoUpdate, oidc: () => myOIDC,

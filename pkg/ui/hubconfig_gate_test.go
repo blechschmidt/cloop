@@ -61,13 +61,10 @@ var configLoadSites = []configCallSite{
 	// Project-scope reads: provider, model and step timeout.
 	{"resolveProviderName", 1, "the provider a project's run will use, which `cloop run` reads from its config.yaml"},
 	{"resolveProjectModel", 1, "the model a project's run will use"},
-	{"buildProjectProvider", 1, "builds a provider from a project's own settings and keys"},
 	{"marshalStateForWire", 1, "a project's step_timeout, as its run will apply it"},
 	{"(*Server).handleState", 1, "a project's model, for the dashboard's state view"},
 	{"(*Server).handleConfig", 1, "a project's provider settings, for the provider picker"},
 	{"(*Server).handleConfigSet", 1, "loads a project's config.yaml to rewrite it from itself (provider keys)"},
-	{"(*Server).handleTaskBlocker", 1, "builds a provider from a project's settings"},
-	{"(*Server).handlePlanChat", 1, "builds a provider from a project's settings"},
 	{"(*Server).handleReplayRunCreate", 1, "builds a replay provider from a project's settings"},
 	{"(*Server).handleProviderCallReplay", 1, "builds a replay provider from a project's settings"},
 	// Project-scope reads: budget, Claude Code caps.

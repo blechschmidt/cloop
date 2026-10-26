@@ -397,6 +397,24 @@ const scenarios = {
       split_posts: posts(h, '/api/tasks/4/decompose'), toast: String(el('toast').textContent || ''),
     };
   },
+
+  // The proposal is asked of the project's executor (Task 20442). A sandbox
+  // with no Claude login refuses it: the Split dialog says why, and the one
+  // that grants a credential opens over it.
+  async split_refused_for_want_of_a_claude_login() {
+    const h = await boot();
+    await openBeta(h);
+    h.routes['/api/tasks/4/decompose'] = {error: 'No active grant gives the sandbox a Claude credential.',
+      code: 'harness_credential_missing'};
+    h.routeStatus['/api/tasks/4/decompose'] = 409;
+    h.requests.length = 0;
+    await window.splitTask(4);
+    await globalThis.__settle(5);
+    return {
+      closed: !window.isOverlayOpen('dc-overlay'), toast: String(el('toast').textContent || ''),
+      split_body: String(el('dc-body').innerHTML || ''), split_posts: posts(h, '/api/tasks/4/decompose'),
+    };
+  },
 };
 
 (async () => {

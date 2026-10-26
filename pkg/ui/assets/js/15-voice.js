@@ -805,8 +805,9 @@ act('dictateApplyRevise', function() {
     if (!d || !d.ok || !d.description) {
       // Leaves the dialog open on purpose. The model is the only part of this
       // that can fail, and Replace and Add to the end are still right there —
-      // closing would make the user say the sentence again to reach them.
-      toast((d && (d.message || d.error)) || 'Editing the details failed', 'err');
+      // closing would make the user say the sentence again to reach them. A
+      // sandbox with no Claude login opens the dialog that grants one.
+      if (!harnessRefused(d)) toast((d && (d.message || d.error)) || 'Editing the details failed', 'err');
       return;
     }
     closeDictateApply();

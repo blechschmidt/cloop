@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/clijson"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/decompose"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -24,7 +25,24 @@ var (
 	decomposeProvider string
 	decomposeModel    string
 	decomposeTimeout  string
+	decomposeJSON     bool
 )
+
+// decomposePreview is what `cloop task decompose --dry-run --json` reports:
+// the dashboard's Split preview, which the hub dispatches to the project's
+// executor rather than calling the model itself (Task 20442).
+type decomposePreview struct {
+	ParentID    int                    `json:"parent_id"`
+	ParentTitle string                 `json:"parent_title"`
+	SubTasks    []decomposePreviewTask `json:"subtasks"`
+}
+
+type decomposePreviewTask struct {
+	Title            string `json:"title"`
+	Description      string `json:"description"`
+	Role             string `json:"role,omitempty"`
+	EstimatedMinutes int    `json:"estimated_minutes,omitempty"`
+}
 
 var taskDecomposeCmd = &cobra.Command{
 	Use:   "decompose <id>",
@@ -49,19 +67,30 @@ Examples:
   cloop task decompose 5 --provider anthropic --model claude-opus-4-5`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// With --json every failure is reported framed too, so the hub shows
+		// the reason rather than whatever else shared the output stream.
+		fail := func(err error) error {
+			if decomposeJSON {
+				return failFramed(err)
+			}
+			return err
+		}
+		if decomposeJSON && !decomposeDryRun {
+			return fail(fmt.Errorf("--json reports a preview: pass --dry-run as well"))
+		}
 		workdir, _ := os.Getwd()
 
 		s, err := state.Load(workdir)
 		if err != nil {
-			return err
+			return fail(err)
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fail(fmt.Errorf("no task plan found — run 'cloop run --pm' to create one"))
 		}
 
 		taskID, err := strconv.Atoi(args[0])
 		if err != nil {
-			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
+			return fail(fmt.Errorf("invalid task ID %q: must be a number", args[0]))
 		}
 
 		// Validate task exists.
@@ -73,20 +102,20 @@ Examples:
 			}
 		}
 		if rootTask == nil {
-			return fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound)
+			return fail(fmt.Errorf("task %d not found: %w", taskID, statedb.ErrTaskNotFound))
 		}
 
 		if decomposeDepth < 1 {
 			decomposeDepth = 1
 		}
 		if decomposeDepth > 5 {
-			return fmt.Errorf("--depth must be between 1 and 5")
+			return fail(fmt.Errorf("--depth must be between 1 and 5"))
 		}
 
 		// Build provider.
 		cfg, err := config.Load(workdir)
 		if err != nil {
-			return fmt.Errorf("loading config: %w", err)
+			return fail(fmt.Errorf("loading config: %w", err))
 		}
 		applyEnvOverrides(cfg)
 
@@ -119,29 +148,53 @@ Examples:
 		}
 
 		provCfg := provider.ProviderConfig{
-			Name:             pName,
-			AnthropicAPIKey:  cfg.Anthropic.APIKey,
-			AnthropicBaseURL: cfg.Anthropic.BaseURL,
-			OpenAIAPIKey:     cfg.OpenAI.APIKey,
-			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
-			OllamaBaseURL:    cfg.Ollama.BaseURL,
+			Name:              pName,
+			AnthropicAPIKey:   cfg.Anthropic.APIKey,
+			AnthropicBaseURL:  cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:      cfg.OpenAI.APIKey,
+			OpenAIBaseURL:     cfg.OpenAI.BaseURL,
+			OllamaBaseURL:     cfg.Ollama.BaseURL,
+			MockResponsesFile: cfg.Mock.ResponsesFile,
 		}
 		prov, err := provider.Build(provCfg)
 		if err != nil {
-			return fmt.Errorf("provider: %w", err)
+			return fail(fmt.Errorf("provider: %w", err))
 		}
 
 		timeout := 5 * time.Minute
 		if decomposeTimeout != "" {
 			timeout, err = time.ParseDuration(decomposeTimeout)
 			if err != nil {
-				return fmt.Errorf("invalid timeout: %w", err)
+				return fail(fmt.Errorf("invalid timeout: %w", err))
 			}
 		}
 
 		opts := provider.Options{
 			Model:   model,
+			WorkDir: workdir,
 			Timeout: timeout,
+		}
+
+		if decomposeJSON {
+			// One level, whatever --depth says: a preview proposes sub-tasks
+			// for the task asked about, and nothing is injected to recurse into.
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			res, err := decompose.Decompose(ctx, prov, opts, s.Plan, taskID)
+			if err != nil {
+				return fail(err)
+			}
+			out := decomposePreview{ParentID: res.Parent.ID, ParentTitle: res.Parent.Title,
+				SubTasks: make([]decomposePreviewTask, 0, len(res.SubTasks))}
+			for _, st := range res.SubTasks {
+				out.SubTasks = append(out.SubTasks, decomposePreviewTask{
+					Title:            st.Title,
+					Description:      st.Description,
+					Role:             string(st.Role),
+					EstimatedMinutes: st.EstimatedMinutes,
+				})
+			}
+			return clijson.Emit(os.Stdout, out)
 		}
 
 		// Deep-copy plan so we can preview before committing.
@@ -264,5 +317,6 @@ func init() {
 	taskDecomposeCmd.Flags().StringVar(&decomposeProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
 	taskDecomposeCmd.Flags().StringVar(&decomposeModel, "model", "", "Model override for the AI provider")
 	taskDecomposeCmd.Flags().StringVar(&decomposeTimeout, "timeout", "5m", "Timeout per AI call (e.g. 2m, 300s)")
+	taskDecomposeCmd.Flags().BoolVar(&decomposeJSON, "json", false, "With --dry-run, report the proposal as framed JSON (for the hub)")
 	taskCmd.AddCommand(taskDecomposeCmd)
 }

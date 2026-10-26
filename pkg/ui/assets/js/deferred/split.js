@@ -41,6 +41,10 @@
         if (!d.ok) {
           el('dc-body').innerHTML =
             '<div class="empty-state"><h3>Split failed</h3><p>' + esc(d.error || 'unknown error') + '</p></div>';
+          // The proposal is made on the project's executor (Task 20442): one
+          // with no Claude login also opens, over this, the dialog that grants
+          // one — as Revise does.
+          h.harnessRefused(d);
           return;
         }
         subtasks = (d.subtasks || []).map(s => Object.assign({_keep: true}, s));

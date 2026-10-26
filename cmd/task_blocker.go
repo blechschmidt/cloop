@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/blocker"
+	"github.com/blechschmidt/cloop/pkg/clijson"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -57,20 +57,30 @@ Examples:
 		if !blockerAll && len(args) != 1 {
 			return fmt.Errorf("provide a task-id or use --all")
 		}
+		// A single task's --json report is what the dashboard's blocker
+		// analysis reads back from the project's executor (Task 20442), so it
+		// is framed (pkg/clijson), and so is every failure on the way to it.
+		framed := blockerJSON && !blockerAll
+		fail := func(err error) error {
+			if framed {
+				return failFramed(err)
+			}
+			return err
+		}
 
 		workdir, _ := os.Getwd()
 
 		s, err := state.Load(workdir)
 		if err != nil {
-			return err
+			return fail(err)
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fail(fmt.Errorf("no task plan found — run 'cloop run --pm' to create one"))
 		}
 
 		cfg, err := config.Load(workdir)
 		if err != nil {
-			return fmt.Errorf("loading config: %w", err)
+			return fail(fmt.Errorf("loading config: %w", err))
 		}
 		applyEnvOverrides(cfg)
 
@@ -103,23 +113,24 @@ Examples:
 		}
 
 		provCfg := provider.ProviderConfig{
-			Name:             pName,
-			AnthropicAPIKey:  cfg.Anthropic.APIKey,
-			AnthropicBaseURL: cfg.Anthropic.BaseURL,
-			OpenAIAPIKey:     cfg.OpenAI.APIKey,
-			OpenAIBaseURL:    cfg.OpenAI.BaseURL,
-			OllamaBaseURL:    cfg.Ollama.BaseURL,
+			Name:              pName,
+			AnthropicAPIKey:   cfg.Anthropic.APIKey,
+			AnthropicBaseURL:  cfg.Anthropic.BaseURL,
+			OpenAIAPIKey:      cfg.OpenAI.APIKey,
+			OpenAIBaseURL:     cfg.OpenAI.BaseURL,
+			OllamaBaseURL:     cfg.Ollama.BaseURL,
+			MockResponsesFile: cfg.Mock.ResponsesFile,
 		}
 		prov, err := provider.Build(provCfg)
 		if err != nil {
-			return fmt.Errorf("provider: %w", err)
+			return fail(fmt.Errorf("provider: %w", err))
 		}
 
 		timeout := 3 * time.Minute
 		if blockerTimeout != "" {
 			timeout, err = time.ParseDuration(blockerTimeout)
 			if err != nil {
-				return fmt.Errorf("invalid timeout: %w", err)
+				return fail(fmt.Errorf("invalid timeout: %w", err))
 			}
 		}
 
@@ -134,12 +145,12 @@ Examples:
 		// Single task mode
 		taskID, err := strconv.Atoi(args[0])
 		if err != nil || taskID < 1 {
-			return fmt.Errorf("invalid task-id: %s", args[0])
+			return fail(fmt.Errorf("invalid task-id: %s", args[0]))
 		}
 
 		task := s.Plan.TaskByID(taskID)
 		if task == nil {
-			return fmt.Errorf("task #%d not found: %w", taskID, statedb.ErrTaskNotFound)
+			return fail(fmt.Errorf("task #%d not found: %w", taskID, statedb.ErrTaskNotFound))
 		}
 
 		cyan := color.New(color.FgCyan, color.Bold)
@@ -168,13 +179,11 @@ Examples:
 
 		report, err := blocker.Analyze(ctx, prov, model, timeout, task, s.Plan, workdir)
 		if err != nil {
-			return fmt.Errorf("blocker analysis failed: %w", err)
+			return fail(fmt.Errorf("blocker analysis failed: %w", err))
 		}
 
 		if blockerJSON {
-			data, _ := json.MarshalIndent(report, "", "  ")
-			fmt.Println(string(data))
-			return nil
+			return clijson.Emit(os.Stdout, report)
 		}
 
 		printBlockerReport(report)

@@ -37,6 +37,7 @@ type dictateApplyResult struct {
 	Posts       []dictateApplyPost `json:"posts"`
 	Add         bool               `json:"add"`
 	Edit        bool               `json:"edit"`
+	Toast       string             `json:"toast"`
 	Error       string             `json:"error"`
 }
 
@@ -83,7 +84,7 @@ func runDictateApplyScenarios(t *testing.T) map[string]dictateApplyResult {
 	for _, name := range []string{
 		"both_microphones_revealed", "asks_before_overwriting", "replace_overwrites",
 		"append_keeps_existing", "revise_sends_the_draft", "empty_details_do_not_ask",
-		"revise_failure_keeps_the_chooser", "cancelled_revision_is_dropped",
+		"revise_failure_keeps_the_chooser", "revise_harness_refusal", "cancelled_revision_is_dropped",
 		"closing_the_editor_dismisses_the_chooser",
 	} {
 		if _, ok := results[name]; !ok {
@@ -209,6 +210,19 @@ func TestDashboard_DictatedDetailsAskBeforeOverwriting(t *testing.T) {
 		}
 		if r.Details != existing {
 			t.Errorf("a failed revision changed the details to %q", r.Details)
+		}
+	})
+
+	// Task 20442: the model call is made where the project runs, so it can be
+	// refused for want of a Claude login there. That opens the dialog that
+	// grants one; the chooser and the details stay as they were.
+	t.Run("a sandbox with no Claude login offers the credential dialog", func(t *testing.T) {
+		r := got["revise_harness_refusal"]
+		if !r.ChooserOpen || r.Details != existing {
+			t.Errorf("chooser open %v, details %q: a refusal must leave both as they were", r.ChooserOpen, r.Details)
+		}
+		if r.Toast != "Refused: this sandbox has no usable Claude credential" {
+			t.Errorf("toast %q, want the credential dialog's short refusal", r.Toast)
 		}
 	})
 

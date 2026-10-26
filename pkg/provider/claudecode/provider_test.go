@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -580,6 +581,49 @@ func TestComplete_RetryUsesRefreshedToken(t *testing.T) {
 	}
 	if got[1] != "rotated-token" {
 		t.Errorf("retry should use the refreshed token, got %q", got[1])
+	}
+}
+
+// TestComplete_RetryKeepsAPinnedCallOnItsAccount: a call whose environment
+// pins another account's configuration directory — a hub replaying a provider
+// call for one of its users (Task 20442) — must not be retried with this
+// process's own refreshed token, which would outrank that directory and spend
+// the process's login instead.
+func TestComplete_RetryKeepsAPinnedCallOnItsAccount(t *testing.T) {
+	binDir, attempts := recordingClaudeScript(t,
+		"    echo '"+authFailOutput+"'\n    exit 1",
+		"    echo ok\n    exit 0",
+	)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	var refreshed atomic.Int32
+	stubRefresher(t, func() string { refreshed.Add(1); return "host-token" })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pinned := []string{"CLAUDE_CODE_OAUTH_TOKEN=", "CLAUDE_CONFIG_DIR=" + t.TempDir()}
+	if _, err := New().Complete(ctx, "test", provider.Options{Env: pinned}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := attempts()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 invocations, got %d: %v", len(got), got)
+	}
+	for i, tok := range got {
+		if tok == "host-token" {
+			t.Errorf("attempt %d ran on this process's refreshed token, not the pinned account", i+1)
+		}
+	}
+	if n := refreshed.Load(); n != 0 {
+		t.Errorf("the refresher ran %d time(s) for a call pinned to another account", n)
+	}
+
+	// The process's own directory, named explicitly, is no other account.
+	if pinsOtherConfigDir([]string{"CLAUDE_CONFIG_DIR="}) {
+		t.Error("an empty pin matched this process's empty directory as another account")
+	}
+	if pinsOtherConfigDir(nil) {
+		t.Error("no pin at all counted as another account")
 	}
 }
 

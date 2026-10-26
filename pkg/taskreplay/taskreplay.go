@@ -60,6 +60,11 @@ type Options struct {
 	// When nil, EquivalenceScore is left at 0 and EquivalenceRationale is empty.
 	Judge      provider.Provider
 	JudgeModel string
+
+	// Env is added to the environment of a provider that runs a program, for
+	// both calls — what pins a hub's replay to the Claude account of the user
+	// who asked for it (Task 20442). See provider.Options.Env.
+	Env []string
 }
 
 // Result captures the outcome of one replay against a single task.
@@ -153,6 +158,7 @@ func ReplayTask(ctx context.Context, workDir string, taskID int, opts Options) (
 		Model:     opts.TargetModel,
 		MaxTokens: maxTokens,
 		Timeout:   timeout,
+		Env:       opts.Env,
 	})
 	res.Duration = time.Since(start)
 
@@ -176,7 +182,7 @@ func ReplayTask(ctx context.Context, workDir string, taskID int, opts Options) (
 	// Optional AI judge: skipped on call failure (no replayed output) and when
 	// no judge provider was configured.
 	if opts.Judge != nil && res.ReplayedOutput != "" {
-		score, rationale, jerr := judgeEquivalence(ctx, opts.Judge, opts.JudgeModel, task, originalOutput, res.ReplayedOutput)
+		score, rationale, jerr := judgeEquivalence(ctx, opts.Judge, opts.JudgeModel, opts.Env, task, originalOutput, res.ReplayedOutput)
 		if jerr != nil {
 			// Don't fail the whole replay because the judge tripped — record
 			// in Err only when the primary call also failed.
@@ -294,7 +300,7 @@ func judgePrompt(task *pm.Task, original, replayed string) string {
 }
 
 // judgeEquivalence calls the judge provider and parses the reply.
-func judgeEquivalence(ctx context.Context, judge provider.Provider, model string, task *pm.Task, original, replayed string) (int, string, error) {
+func judgeEquivalence(ctx context.Context, judge provider.Provider, model string, env []string, task *pm.Task, original, replayed string) (int, string, error) {
 	if judge == nil {
 		return 0, "", nil
 	}
@@ -304,6 +310,7 @@ func judgeEquivalence(ctx context.Context, judge provider.Provider, model string
 		Model:     model,
 		MaxTokens: 256,
 		Timeout:   60 * time.Second,
+		Env:       env,
 	})
 	if err != nil {
 		return 0, "", err

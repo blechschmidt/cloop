@@ -20,22 +20,33 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
-	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
-// splitFakeProviderName is the provider a Split proposal comes from here: the
-// dialog asks the project's own provider.
-const splitFakeProviderName = "split-fake"
+// splitProposal is what the Split dialog is proposed here: the answer of
+// `cloop task decompose <id> --dry-run --json`, which the hub asks of the
+// project's executor (Task 20442), framed as pkg/clijson frames it.
+const splitProposal = `{"parent_id":2,"parent_title":"Migrate the database","subtasks":[` +
+	`{"title":"Write the migration","description":"One file per table.","role":"backend","estimated_minutes":40},` +
+	`{"title":"Backfill the old rows","description":"In batches."},` +
+	`{"title":"Verify the row counts","description":"Before and after."}]}`
 
-type splitStubProvider struct{}
-
-func (splitStubProvider) Name() string         { return splitFakeProviderName }
-func (splitStubProvider) DefaultModel() string { return "fake-1" }
-func (splitStubProvider) Complete(context.Context, string, provider.Options) (*provider.Result, error) {
-	return &provider.Result{Provider: splitFakeProviderName, Output: `[` +
-		`{"title":"Write the migration","description":"One file per table.","role":"backend","estimated_minutes":40},` +
-		`{"title":"Backfill the old rows","description":"In batches."},` +
-		`{"title":"Verify the row counts","description":"Before and after."}]`}, nil
+// withSplitAnswer wraps the stand-in for `cloop suggest` so that `cloop task
+// decompose` answers with splitProposal and everything else reaches it.
+func withSplitAnswer(t *testing.T, planStub string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cloop-split-stub")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = task ] && [ \"$2\" = decompose ]; then\n" +
+		"  echo '<<<cloop-json:begin>>>'\n" +
+		"  cat <<'CLOOP_SPLIT'\n" + splitProposal + "\nCLOOP_SPLIT\n" +
+		"  echo '<<<cloop-json:end>>>'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exec " + shellQuote(planStub) + " \"$@\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 type decomposeBox struct {
@@ -105,15 +116,9 @@ func TestDecompose_InBrowser(t *testing.T) {
 		{ID: 2, Title: "Migrate the database", Description: "Move every table to the new schema.",
 			Status: pm.TaskPending, Priority: 3},
 	})
-	provider.Register(splitFakeProviderName, func(provider.ProviderConfig) (provider.Provider, error) {
-		return splitStubProvider{}, nil
-	})
-	if err := os.WriteFile(filepath.Join(dir, ".cloop", "config.yaml"),
-		[]byte("provider: "+splitFakeProviderName+"\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	// Decompose's plan comes from the stand-in for `cloop suggest`.
-	ts := newPlanServer(t, writePlanStub(t, loginPlan), dir)
+	// Decompose's plan comes from the stand-in for `cloop suggest`, and
+	// Split's proposal from the one for `cloop task decompose`.
+	ts := newPlanServer(t, withSplitAnswer(t, writePlanStub(t, loginPlan)), dir)
 
 	// Bounded: a Chrome that stalls must fail this test, not eat the suite.
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)

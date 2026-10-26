@@ -12,6 +12,35 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **The dashboard's model calls run where the project runs, on the caller's
+  Claude account.** The Split preview, dictation's Revise, the blocker
+  analysis and the plan assistant built the project's provider inside the hub
+  and called it there. With claudecode, the default, that was `claude --print
+  --permission-mode bypassPermissions` in the project directory with the hub's
+  whole environment: on a hub with `executors.allow_host_process: false`, or
+  for a project bound to a sandbox, anyone who could edit a task got an agent
+  with every tool on the hub's host, prompted with text they wrote — and anyone
+  who could read one, through the blocker analysis, which hung off a `GET`. On
+  a hub with sign-in each spent the hub's own Claude login, not the caller's,
+  and a sandboxed project's `base_url` could be sent an API key from the hub's
+  environment. Each is now a cloop subcommand dispatched to the project's
+  executor like a brainstorm, after the harness preflight (a sandbox with no
+  Claude login is a 409 `harness_credential_missing`), with the caller's
+  `CLAUDE_CONFIG_DIR` and no ambient token — in a sandbox, with none of the
+  hub's environment; on the host executor, with what the project's own runs
+  there get: `cloop task decompose --dry-run --json`, a hidden `cloop task
+  revise`, `cloop task ai-blocker --json` and a hidden `cloop plan chat`, whose
+  answer the hub relays as the executor delivers it. The analysis is `POST /api/tasks/{id}/blocker` (`task.mutate`);
+  the `GET` only detects, and answers 405 to `analyze=true`. The provider-call
+  and task replays, which still call a provider in the hub, are refused for a
+  project bound to an isolating executor as well as under strict mode, and run
+  on the caller's account; claudecode's retry after a 401 no longer swaps the
+  hub's own refreshed token into a call pinned to another account.
+  `tests/security`'s call-graph gate missed all of it because the calls went
+  through the `provider.Provider` interface: it now resolves a call on any
+  interface declared in the module to every implementation in the module, with
+  the executor drivers still the boundary, which also brought the dashboard's
+  offboarding and SCIM's delete under its gated-step proofs (Task 20442).
 - **cloop is built with Go 1.26.10**, for GO-2026-6809 ("Distrust compromised
   intermediate certificates in crypto/x509"), which the hub CA's leaf
   verification reaches through `x509.Certificate.Verify`. Go 1.26.9 is
@@ -256,7 +285,21 @@ schema and the hub's HTTP API may change in any release.
   labels the hub records for the executor it dry-runs, and
   `cloop egress test --to executor:<id>` tests with them (Task 20432).
 
+### Changed
+
+- **`cloop task ai-blocker <id> --json` frames its report** between
+  `<<<cloop-json:begin>>>` and `<<<cloop-json:end>>>`, as `cloop suggest --json`
+  does, and reports a failure the same way, so the hub can read it back from
+  the project's executor. A script that piped the bare JSON to a parser reads
+  the lines between the markers instead (Task 20442).
+
 ### Fixed
+
+- **The plan assistant answers when the project's provider is claudecode.** The
+  assistant relayed only what the provider streamed token by token and dropped
+  the finished answer, and claudecode streams nothing, so with the default
+  provider every question came back empty. The answer now arrives whole when
+  nothing was streamed (Task 20442).
 
 - **A run held back to avoid extra usage carries on when its window reopens.**
   `budget.block_extra_usage` (on by default) stopped a run whose Claude Code

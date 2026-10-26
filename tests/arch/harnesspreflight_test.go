@@ -47,6 +47,8 @@ var clearanceArg = map[string]int{
 	"startWorkloadAs":       1,
 	"runWorkloadEnvFor":     4,
 	"runCloopSubcommandFor": 5,
+	// The plan assistant's streaming form of the above (Task 20442).
+	"streamCloopSubcommandFor": 5,
 }
 
 // bareDispatchers dispatch without a clearance. They are wrappers that pass

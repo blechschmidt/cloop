@@ -256,8 +256,14 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	// cross-process flock. When peers lost the same race, they coalesce here
 	// and all receive the winner's token, so a whole parallel round recovers
 	// on a single exchange rather than N competing ones.
+	//
+	// Not for a call pinned to another account (Task 20442): the refresher
+	// rotates this process's own credential, and its token would outrank the
+	// directory the caller named — a hub replaying a call for one of its users
+	// would spend its own login. That call's retry re-reads the pinned
+	// directory instead, which recovers the same lost race.
 	var fresh string
-	if refreshCredential != nil {
+	if refreshCredential != nil && !pinsOtherConfigDir(opts.Env) {
 		fresh = refreshCredential()
 	}
 
@@ -269,6 +275,19 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 		return retryRes, fmt.Errorf("%w (retried once after refreshing credentials)", retryErr)
 	}
 	return retryRes, nil
+}
+
+// pinsOtherConfigDir reports whether env — what a caller adds to this call's
+// environment — pins the CLI to a configuration directory other than this
+// process's own.
+func pinsOtherConfigDir(env []string) bool {
+	dir, set := "", false
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok {
+			dir, set = v, true
+		}
+	}
+	return set && strings.TrimSpace(dir) != strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
 }
 
 // runCLI performs a single claude CLI invocation. tokenOverride, when

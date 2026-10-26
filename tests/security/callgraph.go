@@ -93,6 +93,11 @@ type node struct {
 	// spawns names the process-spawning function referenced directly here,
 	// if any.
 	spawns string
+	// abstract marks a method of an interface declared in this module: it has
+	// no body, and its callees are the module's implementations of it
+	// (interfaceEdges). The executor boundary applies to those, not to it —
+	// see searchFrom.
+	abstract bool
 }
 
 // Graph is a whole-module function reference graph.
@@ -203,7 +208,148 @@ func LoadGraph() (*Graph, error) {
 	if len(g.nodes) == 0 {
 		return nil, fmt.Errorf("graph is empty — the guard would silently pass")
 	}
+	for iface, m := range interfaceEdges(pkgs) {
+		n := g.nodes[iface]
+		if n == nil {
+			n = &node{key: iface, pkgPath: m.pkgPath, callees: map[string]bool{}}
+			g.nodes[iface] = n
+		}
+		n.abstract = true
+		for impl := range m.impls {
+			n.callees[impl] = true
+		}
+	}
 	return g, nil
+}
+
+// ---------------------------------------------------------------------------
+// Calls through an interface
+// ---------------------------------------------------------------------------
+//
+// A call on an interface value names the interface's method, which has no
+// body: on its own the reference graph ends there. That is how four dashboard
+// endpoints ran the Claude Code harness on the hub's host for months without
+// this check noticing (Task 20442): each built the project's provider and
+// called Complete through provider.Provider, and claudecode's Complete — the
+// one that execs `claude` — was never an edge from anywhere.
+//
+// So a method of an interface declared in this module is resolved to every
+// type in the module that implements the interface: class-hierarchy analysis,
+// limited to the module's own interfaces, whose implementations are code this
+// module ships. It over-approximates — a handler holding a mock provider is
+// charged with what claudecode does — which is the safe direction, and the one
+// the reference graph already takes. Implementations under pkg/executor are
+// still the boundary: a call through executor.Executor reaches the drivers'
+// Start and stops there, as a direct call to one does.
+
+// ifaceMethod is one method of a module interface and what implements it.
+type ifaceMethod struct {
+	// pkgPath declares the interface.
+	pkgPath string
+	// impls are the FullNames of the implementing methods.
+	impls map[string]bool
+}
+
+var (
+	ifaceEdgesOnce sync.Once
+	ifaceEdgesMemo map[string]ifaceMethod
+)
+
+// interfaceEdges maps each method of each interface declared in the module to
+// the module's implementations of it, keyed by FullName. Computed once per
+// test binary, like the load: every graph gets the same edges.
+func interfaceEdges(pkgs []*packages.Package) map[string]ifaceMethod {
+	ifaceEdgesOnce.Do(func() { ifaceEdgesMemo = computeInterfaceEdges(pkgs) })
+	return ifaceEdgesMemo
+}
+
+func computeInterfaceEdges(pkgs []*packages.Package) map[string]ifaceMethod {
+	var ifaces, concretes []*types.Named
+	seen := map[*types.Package]bool{}
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if !strings.HasPrefix(p.PkgPath, ModulePath) || p.Types == nil || seen[p.Types] {
+			return
+		}
+		seen[p.Types] = true
+		scope := p.Types.Scope()
+		for _, name := range scope.Names() {
+			tn, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok || tn.IsAlias() {
+				continue
+			}
+			named, ok := tn.Type().(*types.Named)
+			if !ok || named.TypeParams().Len() > 0 {
+				continue // generic types are instantiated elsewhere; none needs this yet
+			}
+			if types.IsInterface(named) {
+				ifaces = append(ifaces, named)
+			} else {
+				concretes = append(concretes, named)
+			}
+		}
+	})
+
+	// Index the concrete types by the names in their pointer method sets, so
+	// an interface is checked only against types that have all its names.
+	byName := map[string][]*types.Named{}
+	for _, c := range concretes {
+		ms := types.NewMethodSet(types.NewPointer(c))
+		for i := 0; i < ms.Len(); i++ {
+			name := ms.At(i).Obj().Name()
+			byName[name] = append(byName[name], c)
+		}
+	}
+
+	out := map[string]ifaceMethod{}
+	for _, in := range ifaces {
+		it, ok := in.Underlying().(*types.Interface)
+		if !ok || it.NumMethods() == 0 {
+			continue // no method to call through
+		}
+		// The rarest of its method names bounds the candidates.
+		var candidates []*types.Named
+		for i := 0; i < it.NumMethods(); i++ {
+			list := byName[it.Method(i).Name()]
+			if i == 0 || len(list) < len(candidates) {
+				candidates = list
+			}
+		}
+		for _, c := range candidates {
+			var recv types.Type
+			switch {
+			case types.Implements(c, it):
+				recv = c
+			case types.Implements(types.NewPointer(c), it):
+				recv = types.NewPointer(c)
+			default:
+				continue
+			}
+			ms := types.NewMethodSet(recv)
+			for i := 0; i < it.NumMethods(); i++ {
+				m := it.Method(i)
+				if m.Pkg() == nil || !strings.HasPrefix(m.Pkg().Path(), ModulePath) {
+					continue // embedded from a dependency: calls to it are not edges
+				}
+				sel := ms.Lookup(m.Pkg(), m.Name())
+				if sel == nil {
+					continue
+				}
+				impl, ok := sel.Obj().(*types.Func)
+				if !ok {
+					continue
+				}
+				e, ok := out[m.FullName()]
+				if !ok {
+					e = ifaceMethod{pkgPath: m.Pkg().Path(), impls: map[string]bool{}}
+					out[m.FullName()] = e
+				}
+				if impl.FullName() != m.FullName() {
+					e.impls[impl.FullName()] = true
+				}
+			}
+		}
+	}
+	return out
 }
 
 // addPackage walks one package's syntax and records a node per function.
@@ -423,7 +569,7 @@ func (g *Graph) FindBackgroundSpawns(doors map[string]string) (spawns []Violatio
 					continue
 				}
 				next := g.nodes[c]
-				if next == nil || inExecutorBoundary(next.pkgPath) {
+				if next == nil || (inExecutorBoundary(next.pkgPath) && !next.abstract) {
 					continue
 				}
 				if _, isHandler := g.handlers[c]; isHandler {
@@ -497,7 +643,10 @@ func (g *Graph) searchFrom(start string) (Violation, bool) {
 			if next == nil {
 				continue // declared in a package we do not audit
 			}
-			if inExecutorBoundary(next.pkgPath) {
+			// An interface method declared under pkg/executor is not a door: a
+			// type outside the boundary may implement it. Its implementations
+			// are judged one by one.
+			if inExecutorBoundary(next.pkgPath) && !next.abstract {
 				continue // the sanctioned door
 			}
 			parent[c] = cur

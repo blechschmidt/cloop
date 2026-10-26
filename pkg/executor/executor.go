@@ -1196,6 +1196,28 @@ type RunResult struct {
 // error message lives — survives.
 const runOutputCap = 4 << 20
 
+// RunOption adjusts how Run observes a workload.
+type RunOption func(*runOptions)
+
+type runOptions struct {
+	onOutput func(LogLine)
+}
+
+// WithOutput hands fn every chunk of the workload's output as Run receives
+// it, in order, on Run's own goroutine, before Run returns (Task 20442).
+//
+// It is for a caller that relays a result while it is still being produced —
+// the plan assistant streams the answer of a model call made on the project's
+// executor. Run still collects everything it relays, so the returned Output is
+// the same with or without fn. fn must not block for long: Run reads the
+// workload's stream only between calls, and a stalled consumer makes the
+// driver drop chunks (RunResult.Dropped). Output that arrives after ctx has
+// fired is collected but not relayed: the caller that cancelled is not
+// listening.
+func WithOutput(fn func(LogLine)) RunOption {
+	return func(o *runOptions) { o.onOutput = fn }
+}
+
 // Run starts spec on ex, collects its combined output, and blocks until the
 // workload finishes.
 //
@@ -1208,9 +1230,13 @@ const runOutputCap = 4 << 20
 // The returned error is non-nil when the workload could not be started, when
 // ctx fired, or when the workload exited non-zero; RunResult is still
 // populated in the latter two cases so callers can show the output.
-func Run(ctx context.Context, ex Executor, spec Spec) (RunResult, error) {
+func Run(ctx context.Context, ex Executor, spec Spec, opts ...RunOption) (RunResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	var o runOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 	if ex == nil {
 		return RunResult{}, fmt.Errorf("%w: nil executor", ErrExecutorNotFound)
@@ -1273,6 +1299,9 @@ collect:
 				// Keep the tail: errors surface at the end of output.
 				buf = buf[len(buf)-runOutputCap:]
 				result.Dropped = true
+			}
+			if o.onOutput != nil {
+				o.onOutput(line)
 			}
 		case <-ctx.Done():
 			ctxErr = ctx.Err()

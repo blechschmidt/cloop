@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-307 endpoints, by the permission each one requires:
+308 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -113,7 +113,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `secret.request` | 5 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
-| `task.mutate` | 28 |
+| `task.mutate` | 29 |
 | `token.admin` | 6 |
 | `user.manage` | 24 |
 | `view.prefs` | 2 |
@@ -361,6 +361,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/tasks/{id}/attachments/{aid}` | `project.read` | project |
 | DELETE | `/api/tasks/{id}/attachments/{aid}` | `task.mutate` | project |
 | GET | `/api/tasks/{id}/blocker` | `project.read` | project |
+| POST | `/api/tasks/{id}/blocker` | `task.mutate` | project |
 | POST | `/api/tasks/{id}/clear-aborted` | `task.mutate` | project |
 | POST | `/api/tasks/{id}/decompose` | `task.mutate` | project |
 | POST | `/api/tasks/{id}/decompose/apply` | `task.mutate` | project |

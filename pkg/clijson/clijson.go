@@ -150,6 +150,48 @@ func Unmarshal(buf []byte, v any) error {
 	return nil
 }
 
+// ChunkMarker opens a line carrying one piece of a result the command streams
+// while it still runs (Task 20442): the plan assistant's answer, token by
+// token, from a model call made on the project's executor. The frame above
+// carries the finished result; a chunk only lets the reader show it sooner.
+//
+// A chunk is one line, so the reader can relay it the moment the line is
+// complete. Its payload is compact JSON, which escapes the newlines of the text
+// it carries — and, encoding/json escaping '<' and '>', can never contain the
+// marker itself.
+const ChunkMarker = "<<<cloop-json:chunk>>>"
+
+// EmitChunk writes v to w as one streamed chunk, in a single Write for the
+// reason Emit uses one.
+func EmitChunk(w io.Writer, v any) error {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("clijson: marshalling chunk: %w", err)
+	}
+	line := make([]byte, 0, len(ChunkMarker)+len(body)+1)
+	line = append(line, ChunkMarker...)
+	line = append(line, body...)
+	line = append(line, '\n')
+	if _, err := w.Write(line); err != nil {
+		return fmt.Errorf("clijson: writing chunk: %w", err)
+	}
+	return nil
+}
+
+// ChunkPayload returns the JSON a line written by EmitChunk carries, and
+// whether line is one. The marker may follow a diagnostic that left its line
+// unfinished, so it is looked for anywhere in the line — the last occurrence,
+// since the payload cannot contain it and a diagnostic quoting it can only
+// come first.
+func ChunkPayload(line []byte) ([]byte, bool) {
+	i := bytes.LastIndex(line, []byte(ChunkMarker))
+	if i < 0 {
+		return nil, false
+	}
+	payload := bytes.TrimSpace(line[i+len(ChunkMarker):])
+	return payload, len(payload) > 0
+}
+
 // snippetLimit bounds how much of the offending output an error quotes. Long
 // enough to show a warning line or a stack frame, short enough that the string
 // stays readable in a browser toast and in a log line.

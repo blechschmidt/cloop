@@ -280,6 +280,15 @@ var gatedEndpoints = []struct {
 		handler: "(*github.com/blechschmidt/cloop/pkg/ui.Server).handleReplayRunCreate",
 	},
 	{
+		// Re-runs a recorded provider call in the hub's process: with
+		// claudecode, `claude` on the host (Task 20442).
+		name:    "provider call replay",
+		method:  http.MethodPost,
+		path:    "/api/provider-calls/1/replay",
+		body:    `{}`,
+		handler: "(*github.com/blechschmidt/cloop/pkg/ui.Server).handleProviderCallReplay",
+	},
+	{
 		// Reconstructing a task's prompt collects repository context, which
 		// shells out to git in the project directory (Task 20221).
 		name:    "task provenance",

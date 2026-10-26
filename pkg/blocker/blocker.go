@@ -128,6 +128,7 @@ func Analyze(ctx context.Context, p provider.Provider, model string, timeout tim
 
 	result, err := p.Complete(ctx, prompt, provider.Options{
 		Model:   model,
+		WorkDir: workDir,
 		Timeout: timeout,
 	})
 	if err != nil {

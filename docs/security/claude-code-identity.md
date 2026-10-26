@@ -207,7 +207,8 @@ time a user sees it.
 | The transient fetch-error backoff (30 s) | same file |
 | In-flight `claude auth login` sessions | keyed by owner key in `claudecodeauth.Manager` |
 | Dispatched runs | `startWorkloadAs` — `/api/run`, project run, and new-project autorun |
-| Provider-invoking subcommands | `runCloopSubcommandFor` — the Tasks tab's **brainstorm** (`cloop suggest`) and the assistant chat (`cloop do`), both of which spend tokens on the caller's behalf |
+| Provider-invoking subcommands | `runCloopSubcommandFor` — the Tasks tab's **brainstorm** (`cloop suggest`), the assistant chat (`cloop do`), and since Task 20442 the **Split** preview (`cloop task decompose --dry-run --json`), dictation's **Revise** (`cloop task revise`), the **blocker analysis** (`cloop task ai-blocker --json`) and the **plan assistant** (`cloop plan chat`), all of which spend tokens on the caller's behalf |
+| Inline replays | `inlineClaudeEnv` — the provider-call and task replays call the provider in the hub's own process, so the caller's directory and cleared ambient tokens go into that call's environment (`provider.Options.Env`); claudecode's retry after a 401 does not swap the hub's own refreshed token into such a call |
 | A sandboxed run's personal Claude credential | `harnessClearance` — counted for, and leased to, only runs its owner starts (see [isolating executors](#isolating-executors-do-not-get-a-directory)) |
 
 Two consequences worth stating outright. One user's expired token no longer

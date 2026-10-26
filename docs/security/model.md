@@ -535,7 +535,7 @@ being bypassed (`pkg/executor/policy.go`):
 | Resolution | `Registry.Resolve` refuses a resolved executor with no isolation | `*HostExecutionDeniedError` + isolated alternatives |
 | Placement | `Select` rejects candidates on `ConstraintHostPolicy` | no failover lands on the host |
 | Driver | `localprocess.Start` re-checks before spawning | backstop for direct callers |
-| HTTP | five host-touching endpoints check `denyHostSideEffect` | HTTP 409 naming `allow_host_process` |
+| HTTP | eight host-touching endpoints check `denyHostSideEffect` | HTTP 409 naming `allow_host_process` |
 | Step | an operation that must not be refused checks the policy inside its one host-touching step | the step is skipped and reported; the rest of the operation proceeds |
 
 The policy is a **ratchet**: `ApplyHostExecutionPolicy` only ever tightens.
@@ -543,12 +543,19 @@ Passing `true` after `false` is a no-op, so a later config reload, a
 partially-applied YAML edit, or a race between two goroutines cannot re-open
 host execution for the process's lifetime.
 
-Five endpoints legitimately touch the host — Claude Code auth (status, login
-start, login code, logout) and replay-run creation. They are not exempt: they are
-*gated*, and `tests/security/callgraph.go:39-48` names each one with the reason
-it is allowed to exist. `TestGatedListsAgree` fails if that list and the list of
-gated HTTP routes ever diverge, so a new gated handler cannot be added on one
-side only.
+Eight endpoints legitimately touch the host: Claude Code auth (status, login
+start, login code, logout), which acts on the hub's own login; the two inline
+replays — a task replay and a provider-call replay, which compare a provider's
+answers by calling it in the hub's process; and task provenance and reproduce,
+which run read-only git on the hub. They are not exempt: they are *gated*, and
+`gatedHostExecution` in `tests/security/callgraph_test.go` names each one with
+the reason it is allowed to exist. `TestGatedListsAgree` fails if that list and
+the list of gated HTTP routes ever diverge, so a new gated handler cannot be
+added on one side only. The two replays are refused for one more reason
+(`denyInlineModelCall`): a project bound to an executor that keeps its runs off
+the hub's host, on a hub that allows host execution too
+(`TestInlineReplaysStayOffTheHubForAProjectInASandbox`), and they run the
+provider on the caller's Claude account rather than the hub's.
 
 One operation cannot be gated that way, because refusing it would be the
 failure: offboarding has to destroy a departed person's Claude Code login on a
@@ -560,9 +567,11 @@ the handler that reaches it in `gatedHostSteps`, beside `gatedHostExecution`,
 and `TestGatedStepsRunNothingUnderStrictMode` drives it through a real peer call
 between two hub members: under strict mode the stand-in `claude` is never run
 and the home is still removed, and with host execution allowed the same request
-does run it — so the proof cannot pass because the step never ran. Because the
-check is in the step, it also covers the dashboard's own offboarding, which
-reaches the step through an interface the reference graph does not follow.
+does run it — so the proof cannot pass because the step never ran. The
+dashboard's own offboarding and a user deleted through SCIM reach the same step
+through `offboard.ClaudeHomes`, an interface the reference graph follows since
+Task 20442; both are listed beside it, each with a proof of its own that drives
+the real request.
 
 The hub also runs code no request asked for: its startup reconciliation, the
 fifteen-minute sweep, its watchers and its cluster bus. The same gate follows
@@ -572,6 +581,42 @@ at three doors, each with its reason and proof (`sanctionedHostDoors`): the
 worktree sweep's git and its repository probe, which run with a closed
 environment and `executor.HardenedGitConfig` under a deadline, and the cluster
 bus's half of offboarding, which is the gated step above.
+
+### Model calls the dashboard makes
+
+Four dashboard features put a question to the project's model: the Split
+dialog's proposal (`POST /api/tasks/{id}/decompose`), dictation's Revise
+(`POST /api/tasks/{id}/revise`), the blocker analysis
+(`POST /api/tasks/{id}/blocker`) and the plan assistant (`POST /api/chat/plan`).
+Each is a workload since Task 20442, dispatched like a brainstorm or a run: a
+cloop subcommand — `task decompose <id> --dry-run --json`, `task revise`,
+`task ai-blocker <id> --json`, `plan chat --json` — on the executor the
+project is bound to, after the harness preflight, with the caller's Claude
+account (`CLAUDE_CONFIG_DIR` on the host executor, a granted credential in a
+sandbox, a 409 `harness_credential_missing` before anything starts without
+one). The hub reads the framed result back (`pkg/clijson`) and checks it again,
+since it came from whatever cloop the executor runs; the plan assistant relays
+the answer's chunks as the executor delivers them.
+
+Until then each built the project's provider inside the hub and called it in
+the hub's process. With claudecode, the default, that was `claude --print
+--permission-mode bypassPermissions` in the project directory with the hub's
+whole environment: on a strict hub, or for a project bound to a sandbox, anyone
+who could edit a task — and, for the blocker analysis, which hung off a `GET`,
+anyone who could read one — got an agent with every tool on the hub's host,
+prompted with text they wrote; on a hub with sign-in it spent the hub's own
+login for everyone. The call-graph check above missed all four, because the
+call went through the `provider.Provider` interface and the reference graph
+ended at a method with no body. It now resolves a call on any interface
+declared in the module to every implementation in the module
+(class-hierarchy analysis), with the executor drivers still the boundary, so a
+handler reaching claudecode's `Complete` through the interface fails with the
+chain (`TestInterfaceCallsAreResolved`). With nowhere isolating to run, a strict
+hub refuses all four (`TestModelCallsNeverRunOnTheHubUnderStrictMode`); on a hub
+with sign-in each runs on the account of the person who asked, with no ambient
+token (`TestHubModelCallsRunOnTheCallersClaudeAccount`); and the analysis is
+`task.mutate`, while detection stays a read
+(`TestBlocker_AViewerCannotStartTheAnalysis`).
 
 ### Git the hub runs for a feature
 
@@ -3570,7 +3615,11 @@ what it is looking for.
 | Under strict mode, `Resolve` returns `*HostExecutionDeniedError` naming isolated alternatives | `TestStrictModeRefusesAtResolve` |
 | Tightening the policy evicts drivers already registered | `TestApplyHostExecutionPolicyEvictsHostDrivers` |
 | The policy ratchets — it can never be loosened back | `TestPolicyOnlyTightens` |
-| Each of the five host-touching endpoints returns 409 naming `allow_host_process` | `TestGatedHandlersRefuseUnderStrictMode` |
+| A call on an interface declared in the module reaches every implementation in it — claudecode's `Complete` through `provider.Provider` — while the executor drivers stay the boundary | `TestInterfaceCallsAreResolved` |
+| Each of the eight host-touching endpoints returns 409 naming `allow_host_process` | `TestGatedHandlersRefuseUnderStrictMode` |
+| The Split preview, Revise, the blocker analysis and the plan assistant run nothing on the hub under strict mode — refused with nowhere isolating to go, dispatched to the sandbox a project is bound to — and refuse a sandbox with no Claude login | `TestModelCallsNeverRunOnTheHubUnderStrictMode` |
+| On a hub with sign-in those four, and the provider-call replay, run on the caller's Claude account with no ambient credential | `TestHubModelCallsRunOnTheCallersClaudeAccount` |
+| The inline replays are refused for a project bound to an isolating executor, whatever the host policy | `TestInlineReplaysStayOffTheHubForAProjectInASandbox` |
 | The gated-endpoint list and the gated-call-graph list cannot drift apart | `TestGatedListsAgree` |
 | A handler that touches the host in one step of an operation that must not be refused spawns nothing under strict mode, through the real handler, and does spawn it otherwise | `TestGatedStepsRunNothingUnderStrictMode` |
 | Every gated step has its proof, and every proof its exemption | `TestGatedStepListsAgree` |
@@ -4503,6 +4552,18 @@ Every paragraph below cites the test or code that pins its residual, and
 `TestEveryResidualRiskCitesEvidence` in `tests/docs` fails CI when a paragraph
 cites nothing that exists. A fix that retires a residual changes the test that
 pinned it, so the fix cannot land until its paragraph is rewritten with it.
+
+**The inline replays still call a provider in the hub's process.** The
+provider-call replay and the task replay compare a provider's answers side by
+side, so they run it where the hub runs, on a hub that allows host execution
+and for a project whose runs go to the host executor: with claudecode,
+`claude` on the hub's host, pinned to the caller's Claude account on a hub with
+sign-in, and with the rest of the hub's environment, so a project's
+`anthropic.base_url` can be sent an API key that came from it. That is what the
+project's own runs on that executor already get, and it needs `task.mutate`;
+strict mode and a binding to an isolating executor refuse both
+(`TestGatedHandlersRefuseUnderStrictMode`,
+`TestInlineReplaysStayOffTheHubForAProjectInASandbox`).
 
 **Moving the store onto a KMS stops future copies, not past ones; and a running
 hub holds its keys in memory.** With `secrets.kms` (Task 20433) a copy of the

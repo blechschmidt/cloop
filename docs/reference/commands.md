@@ -48,6 +48,22 @@ cloop task ai-risk-matrix           cloop task ai-standup      cloop task ai-wha
 cloop plan ai-brief                 cloop plan ai-epic         cloop plan ai-roadmap
 ```
 
+### Model calls the dashboard dispatches
+
+The dashboard does not call a project's model itself: its Split preview,
+dictation's Revise, the blocker analysis and the plan assistant run these on
+the project's executor, with the caller's Claude account, and read the result
+back from a framed JSON payload (`pkg/clijson`). `cloop task revise` and
+`cloop plan chat` are hidden — their arguments are the hub's to build — and with
+`--json`, `cloop task ai-blocker <id>` frames its report too:
+
+```bash
+cloop task decompose <id> --dry-run --json
+cloop task revise <id> --instruction=… --description=… [--title=…] --json
+cloop task ai-blocker <id> --json
+cloop plan chat --message=… [--history='[{"role":"user","content":"…"}]'] --json
+```
+
 ---
 
 ## Commands Reference

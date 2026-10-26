@@ -122,10 +122,16 @@ act('submitAssistantChat', async function() {
     });
     if (resp.status === 401) { handleUnauthorized(resp); return; }
     if (!resp.ok || !resp.body) {
+      // A refusal is JSON. The model call runs on the project's executor
+      // (Task 20442), so one with no Claude login opens the dialog that
+      // grants one.
       const errText = await resp.text().catch(() => 'Request failed');
-      bubbleDiv.textContent = errText;
+      let d = null;
+      try { d = JSON.parse(errText); } catch (e) {}
+      bubbleDiv.textContent = (d && d.error) || errText;
       bubbleDiv.classList.add('error');
       assistantStreaming = false;
+      harnessRefused(d);
       return;
     }
 

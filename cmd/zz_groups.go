@@ -301,6 +301,10 @@ var taskCommandGroups = map[string]string{
 	"query":            groupTaskShape,
 	"summarize":        groupTaskShape,
 	"narrative":        groupTaskShape,
+	// revise is the dashboard's dictated Revise, which the hub runs on the
+	// project's executor (Task 20442). Hidden like reproduce-exec: its argv is
+	// the hub's to build.
+	"revise": groupTaskShape,
 
 	// Verify and analyze — evidence about a task that already ran.
 	"stats":          groupTaskVerify,
@@ -346,6 +350,9 @@ var planCommandGroups = map[string]string{
 
 	"critique": groupPlanAI,
 	"edit":     groupPlanAI,
+	// The dashboard's plan assistant, run on the project's executor (Task
+	// 20442). Hidden: its argv is the hub's to build.
+	"chat": groupPlanAI,
 
 	// Hidden — see hiddenAIHelpers.
 	"ai-brief":   groupPlanAI,

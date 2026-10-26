@@ -220,3 +220,52 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	c.writes++
 	return c.buf.Write(p)
 }
+
+// A streamed chunk is one line the reader can act on as soon as it is
+// complete (Task 20442), found however it shares the stream.
+func TestChunkRoundTripsAndSurvivesItsNeighbours(t *testing.T) {
+	var buf bytes.Buffer
+	buf.WriteString("warning: a diagnostic first\n")
+	if err := EmitChunk(&buf, map[string]string{"token": "line one\nline <two> & three"}); err != nil {
+		t.Fatal(err)
+	}
+	buf.WriteString("a diagnostic that leaves its line open: ")
+	if err := EmitChunk(&buf, map[string]string{"token": "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Emit(&buf, payload{Summary: "done"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for _, line := range bytes.Split(buf.Bytes(), []byte("\n")) {
+		raw, ok := ChunkPayload(line)
+		if !ok {
+			continue
+		}
+		var c struct{ Token string }
+		if err := json.Unmarshal(raw, &c); err != nil {
+			t.Fatalf("chunk %q: %v", line, err)
+		}
+		got = append(got, c.Token)
+	}
+	if len(got) != 2 || got[0] != "line one\nline <two> & three" || got[1] != "second" {
+		t.Fatalf("chunks %q", got)
+	}
+	// The frame is still the result, chunks or not.
+	var p payload
+	if err := Unmarshal(buf.Bytes(), &p); err != nil || p.Summary != "done" {
+		t.Fatalf("frame after chunks: %+v %v", p, err)
+	}
+	// A chunk's text cannot forge the marker: encoding/json escapes '<'.
+	var one bytes.Buffer
+	if err := EmitChunk(&one, map[string]string{"token": ChunkMarker + `{"token":"forged"}`}); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(one.String(), ChunkMarker); n != 1 {
+		t.Fatalf("a chunk carrying the marker shows it %d times: %q", n, one.String())
+	}
+	if _, ok := ChunkPayload([]byte("no marker here")); ok {
+		t.Error("a line without the marker was read as a chunk")
+	}
+}

@@ -44,7 +44,14 @@ var gatedHostExecution = map[string]string{
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleClaudeCodeAuthLoginCode": "completes `claude auth login` for the control plane's own identity",
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleClaudeCodeAuthLogout":    "runs `claude auth logout` against the control plane's credentials",
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleReplayRunCreate": "replays a task inline, and context collection shells out to git in the " +
-		"project directory; migrating this to a dispatched workload is tracked work",
+		"project directory; migrating this to a dispatched workload is tracked work. Its target provider runs in " +
+		"the hub's process too — claudecode's `claude` on the host — so it is also refused for a project bound " +
+		"to an isolating executor, and pinned to the caller's Claude account (Task 20442)",
+	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleProviderCallReplay": "re-runs a recorded provider call in the " +
+		"hub's process to compare the answers side by side; with claudecode that is `claude` on the host. Gated by " +
+		"denyInlineModelCall — refused under strict mode and for a project bound to an isolating executor — and " +
+		"pinned to the caller's Claude account (Task 20442). Seen since the reference graph follows " +
+		"provider.Provider",
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleTaskProvenance": "reconstructs a task's prompt, and pm.ExecuteTaskPrompt's context " +
 		"collection shells out to `git diff` in the project directory — the same " +
 		"path handleReplayRunCreate is listed for. Read-only, and no harness runs here",
@@ -69,15 +76,23 @@ var gatedHostExecution = map[string]string{
 // that nothing is spawned then — and that the same request does spawn it
 // otherwise, so the proof cannot pass because the step never ran at all.
 //
-// The dashboard's own offboarding (handleUserOffboard) reaches the same step
-// through an interface this reference graph does not follow, and is covered by
-// the same check because the check lives in the step rather than in a caller.
+// The dashboard's own offboarding and SCIM's delete reach the same step
+// through offboard.ClaudeHomes, an interface the reference graph follows since
+// Task 20442, and the check that covers them is the same one, in the step.
 var gatedHostSteps = map[string]string{
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleClusterOffboardClaude": "a hub member's half of an " +
 		"offboarding (Task 20400): it removes the departed identity's Claude Code homes in its own tree and, as " +
 		"a best-effort step before that, runs `claude auth logout` scoped to each home so the session is revoked " +
 		"at Anthropic as well. offboard.LocalClaude skips the logout when executor.HostExecutionAllowed() is " +
 		"false and still removes the home — refusing the request would leave the refresh token on disk",
+	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleUserOffboard": "the dashboard's offboarding (Task 20400) " +
+		"severs the departed identity's Claude Code login on this member with the step above " +
+		"(offboard.LocalClaude): the home is removed either way, and `claude auth logout` runs only when " +
+		"executor.HostExecutionAllowed(). Refusing the offboarding on a strict hub would leave every credential " +
+		"the person held",
+	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleSCIMUserDelete": "a user deleted at the identity " +
+		"provider is offboarded (Task 20415) through the same step, for the same reason: the provider's delete " +
+		"must sever the person on a strict hub too",
 }
 
 // sanctionedHostDoors are the functions where the hub's background code runs a
@@ -400,4 +415,74 @@ func (g *Graph) cleanHandlerKey(t *testing.T) string {
 	}
 	sort.Strings(keys)
 	return keys[0]
+}
+
+// TestInterfaceCallsAreResolved is the meta-test for the interface resolution
+// (Task 20442). Four dashboard endpoints ran the Claude Code harness on the
+// hub's host through provider.Provider, and this check passed, because a call
+// on an interface ended at a method with no body. It must now reach every
+// implementation the module has, report a handler that calls through the
+// interface with the chain into the implementation that spawns, and still stop
+// at the executor boundary for an interface whose implementations are drivers —
+// while following one that is not.
+func TestInterfaceCallsAreResolved(t *testing.T) {
+	g, err := LoadGraph()
+	if err != nil {
+		t.Fatalf("build reference graph: %v", err)
+	}
+	const (
+		complete   = "(github.com/blechschmidt/cloop/pkg/provider.Provider).Complete"
+		claudeCode = "(*github.com/blechschmidt/cloop/pkg/provider/claudecode.Provider).Complete"
+		start      = "(github.com/blechschmidt/cloop/pkg/executor.Executor).Start"
+	)
+	iface := g.nodes[complete]
+	if iface == nil || !iface.abstract {
+		t.Fatalf("%s is not an interface node of the graph: calls through provider.Provider end there again", complete)
+	}
+	if !iface.callees[claudeCode] {
+		t.Fatalf("%s does not lead to %s; its implementations: %v", complete, claudeCode, iface.callees)
+	}
+	if n := g.nodes[start]; n == nil || len(n.callees) < 3 {
+		t.Fatalf("%s resolves to too few drivers (%v): the resolution is not finding implementations", start, n)
+	}
+
+	victim := g.cleanHandlerKey(t)
+	reported := func() *Violation {
+		for _, v := range g.FindSpawnReachable() {
+			if handlerKey(v.Handler) == victim {
+				return &v
+			}
+		}
+		return nil
+	}
+
+	// Through the interface: reported, with the implementation on the path.
+	g.nodes[victim].callees[complete] = true
+	v := reported()
+	if v == nil {
+		t.Fatalf("a handler calling %s was not reported: the interface call is not followed", complete)
+	}
+	var through bool
+	for _, step := range v.Path {
+		through = through || step == claudeCode
+	}
+	if !through {
+		t.Errorf("the reported chain does not name claudecode's Complete, the hop to fix:\n%s", v)
+	}
+	delete(g.nodes[victim].callees, complete)
+
+	// executor.Executor's drivers are the boundary: no violation through Start.
+	g.nodes[victim].callees[start] = true
+	if v := reported(); v != nil {
+		t.Errorf("a call through executor.Executor was reported, so the drivers are no longer the boundary:\n%s", v)
+	}
+	// An implementation of it outside pkg/executor is code like any other.
+	const outside = ModulePath + "/pkg/elsewhere.(*impostor).Start"
+	g.nodes[outside] = &node{key: outside, pkgPath: ModulePath + "/pkg/elsewhere",
+		callees: map[string]bool{}, spawns: "os/exec.Command"}
+	g.nodes[start].callees[outside] = true
+	if v := reported(); v == nil {
+		t.Error("an executor.Executor implemented outside pkg/executor was not followed: the interface " +
+			"node itself is being treated as the boundary")
+	}
 }

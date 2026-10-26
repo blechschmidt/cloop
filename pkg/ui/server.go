@@ -2,6 +2,7 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,7 +31,9 @@ import (
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/boundedread"
+	"github.com/blechschmidt/cloop/pkg/chat"
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
+	"github.com/blechschmidt/cloop/pkg/clijson"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/decompose"
@@ -4262,55 +4265,20 @@ func checkDecomposable(t *pm.Task) error {
 	return nil
 }
 
-// buildProjectProvider builds the AI provider and model configured for the
-// project at workDir, mirroring the CLI resolution order: config.yaml
-// provider > state provider > claudecode default; per-provider config model
-// > state model.
-func buildProjectProvider(workDir string, ps *state.ProjectState) (provider.Provider, string, error) {
-	cfg, err := config.Load(workDir)
-	if err != nil {
-		return nil, "", fmt.Errorf("loading config: %w", err)
-	}
-	pName := cfg.Provider
-	if pName == "" && ps != nil {
-		pName = ps.Provider
-	}
-	if pName == "" {
-		pName = "claudecode"
-	}
-	prov, err := provider.Build(provider.ProviderConfig{
-		Name:             pName,
-		AnthropicAPIKey:  cfg.Anthropic.APIKey,
-		AnthropicBaseURL: cfg.Anthropic.BaseURL,
-		OpenAIAPIKey:     cfg.OpenAI.APIKey,
-		OpenAIBaseURL:    cfg.OpenAI.BaseURL,
-		OllamaBaseURL:    cfg.Ollama.BaseURL,
-	})
-	if err != nil {
-		return nil, "", err
-	}
-	model := ""
-	switch pName {
-	case "anthropic":
-		model = cfg.Anthropic.Model
-	case "openai":
-		model = cfg.OpenAI.Model
-	case "ollama":
-		model = cfg.Ollama.Model
-	case "claudecode":
-		model = cfg.ClaudeCode.Model
-	}
-	if model == "" && ps != nil {
-		model = ps.Model
-	}
-	return prov, model, nil
-}
-
 // handleTaskDecompose asks the AI to break a task into 3-7 sub-tasks and
 // returns the proposal WITHOUT mutating the plan
 // (POST /api/tasks/{id}/decompose). The client reviews the proposal and
 // applies a possibly filtered subset via /api/tasks/{id}/decompose/apply.
+//
+// The model call is `cloop task decompose <id> --dry-run --json` on the
+// project's executor, with the caller's Claude account (Task 20442; see
+// model_calls.go), never a provider built in the hub.
 func (s *Server) handleTaskDecompose(w http.ResponseWriter, r *http.Request) {
+	// Dispatched like a run, so it goes where a run would: the member holding
+	// an edge agent's connection (Task 20354).
+	if s.routeDispatch(w, r, s.resolveWorkDir(r)) {
+		return
+	}
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil || id <= 0 {
 		jsonErr(w, "invalid task id", http.StatusBadRequest)
@@ -4336,40 +4304,55 @@ func (s *Server) handleTaskDecompose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prov, model, err := buildProjectProvider(workDir, ps)
-	if err != nil {
-		jsonErr(w, "provider: "+err.Error(), http.StatusInternalServerError)
+	clear := s.harnessClearanceFor(r, workDir)
+	if s.refuseWithoutHarnessCredential(w, clear) {
+		return
+	}
+	out, err := runCloopSubcommandFor(r.Context(), s.selfExe(), workDir, decomposePreviewTimeout,
+		s.claudeEnvResolver(r), clear, "task", "decompose", strconv.Itoa(id), "--dry-run", "--json",
+		"--timeout", decomposeCallTimeout.String())
+	var res struct {
+		SubTasks []decomposeSubtaskWire `json:"subtasks"`
+	}
+	if !readModelCall(w, out, err, "", &res) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), decomposePreviewTimeout)
-	defer cancel()
-	opts := provider.Options{
-		Model:   model,
-		WorkDir: workDir,
-		Timeout: 4 * time.Minute,
-	}
-	res, err := decompose.Decompose(ctx, prov, opts, ps.Plan, id)
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	subs := make([]decomposeSubtaskWire, 0, len(res.SubTasks))
-	for _, st := range res.SubTasks {
-		subs = append(subs, decomposeSubtaskWire{
-			Title:            st.Title,
-			Description:      st.Description,
-			Role:             string(st.Role),
-			EstimatedMinutes: st.EstimatedMinutes,
-		})
-	}
 	jsonOK(w, map[string]interface{}{
 		"ok":           true,
-		"parent_id":    res.Parent.ID,
-		"parent_title": res.Parent.Title,
-		"subtasks":     subs,
+		"parent_id":    task.ID,
+		"parent_title": task.Title,
+		"subtasks":     cleanDecomposeProposal(res.SubTasks),
 	})
+}
+
+// cleanDecomposeProposal keeps what a proposal from an executor may carry into
+// the dialog: titled sub-tasks, at most decomposeMaxSubtasks of them, with a
+// role the plan knows, no negative estimate and text of a task's size — the
+// checks apply makes, made before the dialog shows them, since the proposal
+// came from whatever cloop the executor runs.
+func cleanDecomposeProposal(in []decomposeSubtaskWire) []decomposeSubtaskWire {
+	validRoles := make(map[string]bool, len(pm.ValidRoles()))
+	for _, role := range pm.ValidRoles() {
+		validRoles[role] = true
+	}
+	out := make([]decomposeSubtaskWire, 0, len(in))
+	for _, st := range in {
+		st.Title = truncateRunes(strings.TrimSpace(st.Title), maxProposedTitleRunes)
+		if st.Title == "" {
+			continue
+		}
+		st.Description = truncateRunes(strings.TrimSpace(st.Description), pm.MaxReviseDescriptionRunes)
+		if !validRoles[st.Role] {
+			st.Role = ""
+		}
+		st.EstimatedMinutes = max(st.EstimatedMinutes, 0)
+		out = append(out, st)
+		if len(out) == decomposeMaxSubtasks {
+			break
+		}
+	}
+	return out
 }
 
 // handleTaskDecomposeApply injects reviewed sub-tasks into the plan
@@ -4958,17 +4941,26 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
-// handleTaskBlocker runs blocker detection (and optionally AI analysis) for a task
-// (GET /api/tasks/{id}/blocker).
-// Query params:
+// handleTaskBlocker runs blocker detection for a task (GET
+// /api/tasks/{id}/blocker): the heuristics only — stalled, failed
+// dependencies, a "blocked" annotation — which call no model and change
+// nothing, so a viewer may run them.
 //
-//	analyze=true   — also call the AI for root-cause + actions (requires provider config)
-//	apply=true     — annotate the task with the AI recommendation (requires analyze=true)
+// The AI analysis that used to hang off ?analyze=true is POST on the same path
+// since Task 20442 (handleTaskBlockerAnalyze): it spends a model call, and on
+// the old route anyone with read could have one made — on the hub's host, by
+// the hub's provider. A GET still asking for it is told where it went.
 func (s *Server) handleTaskBlocker(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil || id <= 0 {
 		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+	if q := r.URL.Query(); q.Get("analyze") == "true" || q.Get("apply") == "true" {
+		w.Header().Set("Allow", "GET, POST")
+		jsonErr(w, "GET only detects blockers; the AI analysis spends a model call and is "+
+			"POST /api/tasks/{id}/blocker (task.mutate)", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -4983,68 +4975,85 @@ func (s *Server) handleTaskBlocker(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
+	jsonOK(w, blocker.Detect(workDir, task, ps.Plan))
+}
 
-	info := blocker.Detect(workDir, task, ps.Plan)
+// handleTaskBlockerAnalyze asks the AI for a blocked task's root cause, three
+// unblocking actions and a retry/skip/reassign recommendation
+// (POST /api/tasks/{id}/blocker, optional body {"apply": true}, or
+// ?apply=true). With apply the recommendation is added to the task as an
+// annotation, which is why this is task.mutate.
+//
+// The model call is `cloop task ai-blocker <id> --json` on the project's
+// executor, with the caller's Claude account (Task 20442; see model_calls.go).
+func (s *Server) handleTaskBlockerAnalyze(w http.ResponseWriter, r *http.Request) {
+	if s.routeDispatch(w, r, s.resolveWorkDir(r)) {
+		return
+	}
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil || id <= 0 {
+		jsonErr(w, "invalid task id", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Apply bool `json:"apply"`
+	}
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	apply := req.Apply || r.URL.Query().Get("apply") == "true"
 
-	// Detection-only response
-	if r.URL.Query().Get("analyze") != "true" {
-		jsonOK(w, info)
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	if _, err := ps.RequireTask(id); err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 
-	// AI analysis requested — need a provider
-	cfg, cfgErr := config.Load(workDir)
-	if cfgErr != nil {
-		jsonErr(w, "config load error: "+cfgErr.Error(), http.StatusInternalServerError)
+	clear := s.harnessClearanceFor(r, workDir)
+	if s.refuseWithoutHarnessCredential(w, clear) {
+		return
+	}
+	out, err := runCloopSubcommandFor(r.Context(), s.selfExe(), workDir, blockerDispatchTimeout,
+		s.claudeEnvResolver(r), clear, "task", "ai-blocker", strconv.Itoa(id), "--json",
+		"--timeout", blockerCallTimeout.String())
+	var report blocker.BlockerReport
+	if !readModelCall(w, out, err, "analysis error: ", &report) {
+		return
+	}
+	if !checkBlockerReport(&report) {
+		jsonErr(w, "analysis error: the analysis named no root cause and no action", http.StatusBadGateway)
 		return
 	}
 
-	pName := cfg.Provider
-	if pName == "" {
-		pName = "claudecode"
-	}
-	provCfg := provider.ProviderConfig{
-		Name:             pName,
-		AnthropicAPIKey:  cfg.Anthropic.APIKey,
-		AnthropicBaseURL: cfg.Anthropic.BaseURL,
-		OpenAIAPIKey:     cfg.OpenAI.APIKey,
-		OpenAIBaseURL:    cfg.OpenAI.BaseURL,
-		OllamaBaseURL:    cfg.Ollama.BaseURL,
-	}
-	prov, provErr := provider.Build(provCfg)
-	if provErr != nil {
-		jsonErr(w, "provider error: "+provErr.Error(), http.StatusInternalServerError)
+	// Read again: the analysis took minutes, and the plan may have moved
+	// meanwhile. What is reported, and annotated, is the task as it is now.
+	ps, err = state.Load(workDir)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-
-	model := ""
-	switch pName {
-	case "anthropic":
-		model = cfg.Anthropic.Model
-	case "openai":
-		model = cfg.OpenAI.Model
-	case "ollama":
-		model = cfg.Ollama.Model
-	case "claudecode":
-		model = cfg.ClaudeCode.Model
-	}
-
-	ctx := r.Context()
-	report, analyzeErr := blocker.Analyze(ctx, prov, model, 3*time.Minute, task, ps.Plan, workDir)
-	if analyzeErr != nil {
-		jsonErr(w, "analysis error: "+analyzeErr.Error(), http.StatusInternalServerError)
+	task, err := ps.RequireTask(id)
+	if err != nil {
+		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
+	report.TaskID, report.TaskTitle = task.ID, task.Title
+	report.Detection = blocker.Detect(workDir, task, ps.Plan)
 
-	// --apply: annotate the task
-	if r.URL.Query().Get("apply") == "true" {
+	if apply {
 		annotation := "[ai-blocker] Recommendation: " + strings.ToUpper(report.Recommendation) +
 			". Root cause: " + report.RootCause
 		pm.AddAnnotation(task, "ai-blocker", annotation)
 		if saveErr := ps.SaveDirect(); saveErr != nil {
-			jsonErr(w, "save failed: "+saveErr.Error(), http.StatusInternalServerError)
+			jsonErr(w, "save failed: "+saveErr.Error(), statedb.HTTPStatus(saveErr))
 			return
 		}
+		s.broadcastStateDiff(workDir, ps)
 	}
 
 	jsonOK(w, report)
@@ -5596,13 +5605,22 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 // handlePlanChat streams an AI response that is contextualised with the full
 // plan (tasks, statuses, annotations) via SSE.
 // POST /api/chat/plan  {"message":"...","history":[{"role":"user","content":"..."},...]}
+//
+// The model call is `cloop plan chat --json` on the project's executor, with
+// the caller's Claude account (Task 20442; see model_calls.go). The
+// subcommand writes each token its provider streams as a framed chunk line,
+// which is relayed here as a `token` event as soon as the executor delivers
+// it, and the whole answer last — all a provider that does not stream, or an
+// executor that delivers output only at the end, produces, and then the whole
+// answer is the one token. A refusal to dispatch is answered before the stream
+// starts, with the status its kind carries.
 func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
+	if s.routeDispatch(w, r, s.resolveWorkDir(r)) {
+		return
+	}
 	var req struct {
-		Message string `json:"message"`
-		History []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"history"`
+		Message string             `json:"message"`
+		History []chat.PlanMessage `json:"history"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -5612,6 +5630,15 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg := strings.TrimSpace(req.Message)
+	if len(msg) > maxPlanChatMessageBytes {
+		jsonErr(w, fmt.Sprintf("message too long (max %d KiB)", maxPlanChatMessageBytes>>10), http.StatusBadRequest)
+		return
+	}
+	history, err := json.Marshal(chat.RecentPlanHistory(req.History, planChatHistoryBytes))
+	if err != nil {
+		jsonErr(w, "history: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -5620,112 +5647,9 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	workDir := s.resolveWorkDir(r)
-	cfg, err := config.Load(workDir)
-	if err != nil {
-		jsonErr(w, "config load failed", http.StatusInternalServerError)
+	clear := s.harnessClearanceFor(r, workDir)
+	if s.refuseModelCallDispatch(w, clear) {
 		return
-	}
-
-	// Build plan context.
-	var sysB strings.Builder
-	sysB.WriteString("You are a plan-aware AI assistant for the cloop AI product manager.\n")
-	sysB.WriteString("You help the user understand, analyse, and improve their project plan.\n")
-	sysB.WriteString("Be concise, practical, and reference specific task IDs when relevant.\n\n")
-
-	ps, _ := state.Load(workDir)
-	if ps != nil && ps.Plan != nil {
-		sysB.WriteString("## Current Plan\n")
-		sysB.WriteString("**Goal:** " + ps.Goal + "\n\n")
-		total := len(ps.Plan.Tasks)
-		done, inProg, failed, pending := 0, 0, 0, 0
-		for _, t := range ps.Plan.Tasks {
-			switch t.Status {
-			case pm.TaskDone:
-				done++
-			case pm.TaskInProgress:
-				inProg++
-			case pm.TaskFailed:
-				failed++
-			default:
-				pending++
-			}
-		}
-		fmt.Fprintf(&sysB, "**Progress:** %d/%d done, %d in-progress, %d pending, %d failed\n\n",
-			done, total, inProg, pending, failed)
-		sysB.WriteString("### Tasks\n")
-		for _, t := range ps.Plan.Tasks {
-			fmt.Fprintf(&sysB, "- [#%d] **%s** — status: `%s`, priority: %d", t.ID, t.Title, t.Status, t.Priority)
-			if t.Assignee != "" {
-				fmt.Fprintf(&sysB, ", assignee: %s", t.Assignee)
-			}
-			if t.EstimatedMinutes > 0 {
-				fmt.Fprintf(&sysB, ", est: %dm", t.EstimatedMinutes)
-			}
-			if t.ActualMinutes > 0 {
-				fmt.Fprintf(&sysB, ", actual: %dm", t.ActualMinutes)
-			}
-			if len(t.DependsOn) > 0 {
-				fmt.Fprintf(&sysB, ", depends on: %v", t.DependsOn)
-			}
-			if t.Pinned {
-				sysB.WriteString(", pinned")
-			}
-			sysB.WriteString("\n")
-			if t.Description != "" {
-				fmt.Fprintf(&sysB, "  %s\n", t.Description)
-			}
-			if len(t.Annotations) > 0 {
-				sysB.WriteString("  annotations:\n")
-				for _, a := range t.Annotations {
-					fmt.Fprintf(&sysB, "    • [%s] %s\n", a.Author, a.Text)
-				}
-			}
-		}
-	} else {
-		sysB.WriteString("No plan is currently initialised for this project.\n")
-	}
-
-	// Build conversation prompt.
-	var convB strings.Builder
-	for _, h := range req.History {
-		switch h.Role {
-		case "user":
-			fmt.Fprintf(&convB, "Human: %s\n\n", h.Content)
-		case "assistant":
-			fmt.Fprintf(&convB, "Assistant: %s\n\n", h.Content)
-		}
-	}
-	fmt.Fprintf(&convB, "Human: %s\n\nAssistant: ", msg)
-
-	// Build provider.
-	pName := cfg.Provider
-	if pName == "" {
-		pName = "claudecode"
-	}
-	provCfg := provider.ProviderConfig{
-		Name:             pName,
-		AnthropicAPIKey:  cfg.Anthropic.APIKey,
-		AnthropicBaseURL: cfg.Anthropic.BaseURL,
-		OpenAIAPIKey:     cfg.OpenAI.APIKey,
-		OpenAIBaseURL:    cfg.OpenAI.BaseURL,
-		OllamaBaseURL:    cfg.Ollama.BaseURL,
-	}
-	prov, buildErr := provider.Build(provCfg)
-	if buildErr != nil {
-		jsonErr(w, "provider: "+buildErr.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	model := ""
-	switch pName {
-	case "anthropic":
-		model = cfg.Anthropic.Model
-	case "openai":
-		model = cfg.OpenAI.Model
-	case "ollama":
-		model = cfg.Ollama.Model
-	case "claudecode":
-		model = cfg.ClaudeCode.Model
 	}
 
 	// Start SSE response.
@@ -5734,36 +5658,98 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	flusher.Flush()
 
-	// Derive a cancellable ctx so a wedged-client write inside OnToken can
-	// short-circuit the in-flight provider call instead of letting the
-	// server keep streaming bytes nobody will ever read.
+	// Derive a cancellable ctx so a wedged-client write can stop the
+	// workload instead of letting it keep producing tokens nobody will read.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	opts := provider.Options{
-		Model:        model,
-		SystemPrompt: sysB.String(),
-		WorkDir:      workDir,
-		Timeout:      2 * time.Minute,
-		OnToken: func(token string) {
-			d, _ := json.Marshal(map[string]string{"token": token})
-			// Per-token write with deadline (sseWriteTimeout). On
-			// failure (peer wedged, conn dropped), cancel the parent
-			// ctx so prov.Complete returns promptly and we don't
-			// continue serializing tokens to a dead connection.
-			if werr := writeSSE(w, flusher, "event: token\ndata: %s\n\n", d); werr != nil {
-				cancel()
-			}
-		},
+	relay := &planChatRelay{send: func(token string) {
+		d, _ := json.Marshal(map[string]string{"token": token})
+		// Per-token write with deadline (sseWriteTimeout). On failure (peer
+		// wedged, conn dropped), cancel ctx so the workload is stopped.
+		if werr := writeSSE(w, flusher, "event: token\ndata: %s\n\n", d); werr != nil {
+			cancel()
+		}
+	}}
+	out, callErr := streamCloopSubcommandFor(ctx, s.selfExe(), workDir, planChatDispatchTimeout,
+		s.claudeEnvResolver(r), clear, relay.write, "plan", "chat", "--message="+msg,
+		"--history="+string(history), "--timeout", planChatCallTimeout.String(), "--json")
+	if ctx.Err() != nil {
+		return // the client went away, or stopped reading: nobody is there to tell
 	}
 
-	_, callErr := prov.Complete(ctx, convB.String(), opts)
-	if callErr != nil {
-		d, _ := json.Marshal(map[string]string{"error": callErr.Error()})
+	answer, failure := planChatOutcome(out, callErr)
+	if failure != "" {
+		d, _ := json.Marshal(map[string]string{"error": failure})
 		_ = writeSSE(w, flusher, "event: error\ndata: %s\n\n", d)
-	} else {
-		_ = writeSSE(w, flusher, "event: done\ndata: {}\n\n")
+		return
 	}
+	// What the stream did not carry: all of it from a provider that does not
+	// stream, the rest of it if chunks were lost on the way.
+	if rest, ok := strings.CutPrefix(answer, relay.sent.String()); ok && rest != "" {
+		relay.send(rest)
+	}
+	_ = writeSSE(w, flusher, "event: done\ndata: {}\n\n")
+}
+
+// planChatRelay turns the subcommand's output, as the executor delivers it,
+// into tokens: it reassembles lines and sends the token of each framed chunk
+// line. Everything else on the stream — diagnostics, the final frame — is left
+// to planChatOutcome.
+type planChatRelay struct {
+	send    func(string)
+	pending []byte
+	sent    strings.Builder
+}
+
+func (p *planChatRelay) write(text string) {
+	p.pending = append(p.pending, text...)
+	for {
+		nl := bytes.IndexByte(p.pending, '\n')
+		if nl < 0 {
+			// Bounded: an unfinished line this long is no chunk worth
+			// waiting for, and the final frame still carries the answer.
+			if len(p.pending) > maxPlanChatLineBytes {
+				p.pending = p.pending[:0]
+			}
+			return
+		}
+		line := p.pending[:nl]
+		p.pending = p.pending[nl+1:]
+		payload, ok := clijson.ChunkPayload(line)
+		if !ok {
+			continue
+		}
+		var chunk struct {
+			Token string `json:"token"`
+		}
+		if json.Unmarshal(payload, &chunk) != nil || chunk.Token == "" {
+			continue
+		}
+		p.sent.WriteString(chunk.Token)
+		p.send(chunk.Token)
+	}
+}
+
+// planChatOutcome reads the plan assistant's answer from the subcommand's
+// output, or why there is none.
+func planChatOutcome(out []byte, callErr error) (answer, failure string) {
+	var res struct {
+		Answer string `json:"answer"`
+		Error  string `json:"error"`
+	}
+	if payload, err := clijson.Extract(out); err == nil && json.Unmarshal(payload, &res) == nil {
+		if res.Error != "" {
+			return "", res.Error
+		}
+		if callErr == nil {
+			return res.Answer, ""
+		}
+	}
+	if callErr != nil {
+		return "", modelCallReason(out, callErr)
+	}
+	return "", "the assistant returned no answer"
 }
 
 // handleReset resets the project state by running `cloop reset`.
@@ -6666,9 +6652,11 @@ func (s *Server) handleReplayRunGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 	// Replay assembles task context in-process, which shells out to git in
-	// the project directory. That is host execution driven by an HTTP
-	// request, so strict mode refuses it.
-	if denyHostSideEffect(w, workDir, "git (inline task replay)") {
+	// the project directory, and calls the target provider in the hub's
+	// process — with claudecode, `claude` on the hub's host. That is host
+	// execution driven by an HTTP request, so strict mode refuses it, and so
+	// does a project whose own runs are kept off the host (Task 20442).
+	if denyInlineModelCall(w, workDir, "git (inline task replay)") {
 		return
 	}
 
@@ -6734,6 +6722,8 @@ func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 		Timeout:     5 * time.Minute,
 		Judge:       judge,
 		JudgeModel:  judgeModel,
+		// On the caller's Claude account, not the hub's (Task 20442).
+		Env: s.inlineClaudeEnv(r),
 	})
 	if err != nil {
 		jsonErr(w, "replay: "+err.Error(), http.StatusInternalServerError)

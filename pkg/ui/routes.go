@@ -687,7 +687,11 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "PUT /api/tasks/{id}", Handler: s.handlePutTask, Perm: task, Scope: scopeProject},
 		{Pattern: "PATCH /api/tasks/{id}", Handler: s.handlePutTask, Perm: task, Scope: scopeProject},
 		{Pattern: "DELETE /api/tasks/{id}", Handler: s.handleDeleteTask, Perm: task, Scope: scopeProject},
+		// Detecting a blocker reads the plan; analysing one spends a model call
+		// on the project's executor and may annotate the task, so it is
+		// `task`, like the Split preview below (Task 20442).
 		{Pattern: "GET /api/tasks/{id}/blocker", Handler: s.handleTaskBlocker, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/tasks/{id}/blocker", Handler: s.handleTaskBlockerAnalyze, Perm: task, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/details", Handler: s.handleTaskDetails, Perm: read, Scope: scopeProject},
 		// What the task's runs' firewalls and the egress proxy refused (Task
 		// 20437): its details' Network section.

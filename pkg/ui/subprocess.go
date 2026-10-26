@@ -95,14 +95,26 @@ func fixedEnv(extraEnv []string) func(executor.Executor) []string {
 // preflight, so a sandbox with no Claude login is refused before it starts
 // (Task 20379). A subcommand that calls no provider passes a nil clear.
 func runCloopSubcommandFor(ctx context.Context, exe, workDir string, timeout time.Duration, envFor func(executor.Executor) []string, clear *harnessClearance, args ...string) ([]byte, error) {
+	return streamCloopSubcommandFor(ctx, exe, workDir, timeout, envFor, clear, nil, args...)
+}
+
+// streamCloopSubcommandFor is runCloopSubcommandFor that also hands the
+// subcommand's output to onOutput as the executor delivers it, for a handler
+// that relays a result while it is still being produced — the plan assistant
+// (Task 20442). A nil onOutput relays nothing.
+func streamCloopSubcommandFor(ctx context.Context, exe, workDir string, timeout time.Duration, envFor func(executor.Executor) []string, clear *harnessClearance, onOutput func(string), args ...string) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	var opts []executor.RunOption
+	if onOutput != nil {
+		opts = append(opts, executor.WithOutput(func(l executor.LogLine) { onOutput(l.Text) }))
+	}
 	out, runErr := runWorkloadEnvFor(cctx, workDir, append([]string{exe}, args...), envFor, clear,
-		map[string]string{"handler": "subcommand"})
+		map[string]string{"handler": "subcommand"}, opts...)
 
 	// Distinguish ctx-driven kills from actual workload failures so the
 	// caller can render a more accurate error string ("client cancelled" vs

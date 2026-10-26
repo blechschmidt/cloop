@@ -359,4 +359,16 @@ func TestDashboard_SuggestPanelPlansARequest(t *testing.T) {
 			t.Errorf("toast %q", s.Toast)
 		}
 	})
+
+	t.Run("a Split refused for want of a Claude login offers one", func(t *testing.T) {
+		s := got["split_refused_for_want_of_a_claude_login"]
+		if s.Error != "" {
+			t.Fatalf("the scenario threw: %s", s.Error)
+		}
+		if len(s.SplitPosts) != 1 || s.Closed || s.Toast != "Refused: this sandbox has no usable Claude credential" ||
+			!strings.Contains(s.SplitBody, "Split failed") || !strings.Contains(s.SplitBody, "No active grant") {
+			t.Errorf("posts %v, Split closed %v, toast %q, body %q: want one proposal asked, the dialog left open "+
+				"saying why, and the credential dialog's refusal", s.SplitPosts, s.Closed, s.Toast, s.SplitBody)
+		}
+	})
 }
