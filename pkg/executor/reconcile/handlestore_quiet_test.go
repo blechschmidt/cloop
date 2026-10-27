@@ -1,12 +1,14 @@
 package reconcile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // Handle persistence is best-effort, so its failures are warnings rather than
@@ -75,6 +77,46 @@ func TestHandleStoreCreatesADatabaseUnderAnExistingCloopDir(t *testing.T) {
 	}
 	if _, err := os.Stat(state.DBPath(dir)); err != nil {
 		t.Errorf("the database must have been created: %v", err)
+	}
+}
+
+// TestHandleStoreLeavesASchemaRefusalToTheCommand: a database migrated past
+// this build — a rolled-back binary on an upgraded hub — is refused by every
+// command with the guard's own sentence. Warning about handle persistence first
+// with that same sentence printed the refusal twice (Task 20452, found by the
+// upgrade rehearsal running the latest release on a database main migrated).
+func TestHandleStoreLeavesASchemaRefusalToTheCommand(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := state.DBPath(dir)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		t.Fatalf("mkdir .cloop: %v", err)
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	_ = db.Close()
+	conn, err := statedb.OpenConn(dbPath, statedb.ReadWrite)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := conn.Exec(`INSERT INTO schema_migrations (version, applied_at, name, applied_by, compat)
+		SELECT MAX(version) + 1, '2026-10-27T18:00:00Z', 'from_a_newer_build.sql', 'v9.9.9', 'breaking'
+		FROM schema_migrations`); err != nil {
+		t.Fatalf("record a newer migration: %v", err)
+	}
+	_ = conn.Close()
+	if _, err := statedb.Open(dbPath); !errors.Is(err, statedb.ErrSchemaTooNew) {
+		t.Fatalf("the database is not refused as newer than this build: %v", err)
+	}
+
+	logs, gotStore := captureLogs(t, dir)
+
+	if logs != "" {
+		t.Errorf("a database this build refuses must be left to the command to report, got:\n%s", logs)
+	}
+	if gotStore {
+		t.Error("want a nil store when the database is refused")
 	}
 }
 

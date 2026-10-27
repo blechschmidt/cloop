@@ -150,6 +150,11 @@ schema and the hub's HTTP API may change in any release.
   its hub process; that is now stated as a residual risk and pinned by a test
   (Task 20451).
 
+- **A command run against a database migrated past its binary says so once.**
+  Every command first printed the whole refusal as an
+  `executor: handle persistence unavailable` warning about surviving restarts,
+  and then refused with the same sentence (Task 20452).
+
 ### Changed
 
 - **Hub health no longer costs a doctor run and two identity-provider fetches

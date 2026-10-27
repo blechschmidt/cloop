@@ -132,7 +132,14 @@ func (o Options) handleStore(dir string) executor.HandleStore {
 		// nothing to persist. A database that *does* exist and still will not
 		// open is corruption, a permissions problem or a lock, and that is
 		// worth saying out loud (Task 20294).
-		if projectExists {
+		//
+		// Except a database migrated past this build. The command refuses it
+		// itself, with the guard's whole sentence — which migrations, applied
+		// by which build, and the way back — so a warning carrying that
+		// sentence first made every command of a rolled-back binary print the
+		// refusal twice, the first time as if it were about restarts
+		// (Task 20452).
+		if projectExists && !errors.Is(err, statedb.ErrSchemaTooNew) {
 			o.logf("executor: handle persistence unavailable (%v); "+
 				"workloads dispatched by this process will not survive a restart", err)
 		}
