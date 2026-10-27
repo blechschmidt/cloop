@@ -195,14 +195,11 @@ func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex exec
 	}
 	// The verdict on one of cloop's own images, and the digest verified (Task
 	// 20453): onto every task artifact and task.dispatch row of the run.
+	// A device that ran its own copy of an unverified tag leaves PinnedImage
+	// empty: the hub never saw which digest that was.
 	if p := h.ImageProvenance; p != nil {
 		rec.ImageProvenance = string(p.Status)
 		rec.VerifiedDigest = p.VerifiedDigest()
-		if rec.PinnedImage == "" && p.Digest != "" {
-			// A device pins an unverified tag in its own store, so its handle
-			// names no image; the record says what the hub resolved instead.
-			rec.PinnedImage = p.Ref
-		}
 	}
 	if rec.StartedAt.IsZero() {
 		rec.StartedAt = time.Now()

@@ -154,10 +154,18 @@ func (e *Executor) authorizeRunImage(ctx context.Context, spec *executor.Spec,
 		return nil, fmt.Errorf("remote: check %s for %s against the workflow that publishes cloop's images: %w",
 			image, subject, err)
 	}
-	imagepolicy.RecordProvenance(recordAs, p)
 	if p.Verified() {
 		spec.Image = p.Ref
+	} else {
+		// Not verified: the device pins the tag in its own store, so the
+		// dispatch names the tag and the digest checked is the registry's,
+		// which the device's copy need not be. The record says so rather
+		// than naming a digest that may not be what ran.
+		p.Ref = image
+		p.Warning = strings.Replace(p.Warning, " on "+subject+": ",
+			" on "+subject+", from the device's own copy of the tag: ", 1)
 	}
+	imagepolicy.RecordProvenance(recordAs, p)
 	return &p, nil
 }
 

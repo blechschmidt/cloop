@@ -37,12 +37,12 @@ func TestTheVerifiedDigestReachesTheRunsRecord(t *testing.T) {
 	}
 
 	// A device that ran its own copy of an unverified tag: the handle names no
-	// image, and the record says what the hub resolved and found.
+	// image, and the record claims none — the registry's digest, which the hub
+	// checked, need not be the device's copy.
 	h = executor.Handle{ID: "h2", StartedAt: time.Now(), ImageProvenance: harnessProvenance(imagepolicy.ProvenanceUnsigned)}
 	recordSandboxProvenance(dir, nil, nil, h, "alice", "run_2", nil)
 	rec, _ = artifact.LoadSandboxRun(dir)
-	if rec.ImageProvenance != "unsigned" || rec.VerifiedDigest != "" ||
-		rec.PinnedImage != "ghcr.io/blechschmidt/cloop-harness@"+harnessDigest {
+	if rec.ImageProvenance != "unsigned" || rec.VerifiedDigest != "" || rec.PinnedImage != "" {
 		t.Fatalf("unverified record = %+v", rec)
 	}
 }

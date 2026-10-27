@@ -173,6 +173,12 @@ func TestAnUnsignedDeviceImageWarnsOrIsRefused(t *testing.T) {
 			if h.ImageProvenance == nil || h.ImageProvenance.Verified() || !strings.Contains(h.ImageProvenance.Warning, c.why) {
 				t.Errorf("warn: handle provenance = %+v", h.ImageProvenance)
 			}
+			// The dispatch named the tag, and the record says the device ran
+			// its own copy of it — never the registry's digest as what ran.
+			if p := h.ImageProvenance; p.Ref != executor.DefaultHarnessImage ||
+				!strings.Contains(p.Warning, "from the device's own copy of the tag") || h.Image != "" {
+				t.Errorf("warn: provenance ref %q, warning %q, handle image %q", p.Ref, p.Warning, h.Image)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			lines, err := ex.Stream(ctx, h.ID)

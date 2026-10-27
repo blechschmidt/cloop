@@ -23,7 +23,7 @@ on any failure.
 | `image_provenance: required`, the device's image unsigned (`cloop-harness:latest`) | **409** under the `image-provenance` rule naming the setting, and no container created on the device |
 | `required`, the device's image signed (`cloop-harness:edge`) | the device creates its sandbox from `repo@<digest>` — the digest the registry serves, asked independently — and from no tag; the run's `.cloop/sandbox-run.json` records `image_provenance: verified` and that digest; the task is **done** |
 | `warn`, the hub's pin repointed at the edge identity (`CLOOP_PROVENANCE_IMAGES_IDENTITY`) | the same signed image is wrongly signed: **409**, "not from the workflow that publishes them", nothing created |
-| `warn`, the device's image unsigned | runs the device's own copy of the tag, the journal carries `image_provenance` "ran without a signature", the task is **done** |
+| `warn`, the device's image unsigned | runs the device's own copy of the tag; the journal carries `image_provenance` "ran without a signature … from the device's own copy of the tag", and the run's record names no digest — the registry's, which the hub checked, need not be the device's copy |
 
 ## Running it
 

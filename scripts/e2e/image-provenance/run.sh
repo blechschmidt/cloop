@@ -224,8 +224,15 @@ created=$(creates "$since")
 echo "created on the device: $created"
 check "the device ran its own copy of the tag" grep -qxF "$UNSIGNED" <<<"$created"
 echo "journal: $(journal image_provenance | head -c 400)"
-check "the run's journal carries the warning" grep -q "without a signature" <(journal image_provenance)
-check "the task is done on the hub" test "$(task_status)" = done
+check "the run's journal carries the warning, naming the device's own copy" \
+	grep -q "without a signature on .*from the device's own copy of the tag" <(journal image_provenance)
+check "the run's record claims no digest the hub did not dispatch" python3 -c 'import json,sys
+r = json.load(open(sys.argv[1] + "/.cloop/sandbox-run.json"))
+sys.exit(0 if r.get("image_provenance") == "unsigned" and not r.get("verified_digest") and not r.get("pinned_image") else 1)' "$PROJ"
+# The device's copy of the tag is whatever it pulled, possibly a release far
+# older than this hub, so how its own cloop fares with the run is not this
+# check's question.
+echo "task 2 on the device's own copy: $(task_status)"
 
 say "hub log (provenance lines)"
 grep -i 'provenance\|signature\|cosign' "$ROOT/hub.log" | tail -n 12 | cut -c1-260 || true
