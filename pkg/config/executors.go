@@ -222,6 +222,11 @@ func ValidateExecutors(e ExecutorsConfig) error {
 			"whose isolation claim was never verified, or %q (the default) to admit them with a warning",
 			strings.TrimSpace(v), executor.IsolationEvidencePolicyRequired, executor.IsolationEvidencePolicyWarn)
 	}
+	if v := e.ImageProvenance; !executor.ValidImageProvenancePolicy(v) {
+		return fmt.Errorf("executors.image_provenance: %q is not a policy; use %q to refuse any of cloop's "+
+			"own images whose signature was not verified, or %q (the default) to run them with a warning",
+			strings.TrimSpace(v), executor.ImageProvenancePolicyRequired, executor.ImageProvenancePolicyWarn)
+	}
 	if v := e.Failover.MaxAttempts; v != nil && !ValidFailoverMaxAttempts(*v) {
 		return FailoverMaxAttemptsError(*v)
 	}
@@ -285,6 +290,14 @@ func ExecutorWarnings(e ExecutorsConfig) []string {
 		out = append(out, fmt.Sprintf("executors.isolation_evidence is %q, which is not a policy, so "+
 			"executors whose isolation was never verified are admitted with a warning; use %q to refuse "+
 			"them, or remove the key.", strings.TrimSpace(v), executor.IsolationEvidencePolicyRequired))
+	}
+
+	// The same for image provenance: an unknown policy is the default, which
+	// runs an unverified image of cloop's own with a warning.
+	if v := e.ImageProvenance; !executor.ValidImageProvenancePolicy(v) {
+		out = append(out, fmt.Sprintf("executors.image_provenance is %q, which is not a policy, so cloop's "+
+			"own images run with a warning when their signature cannot be verified; use %q to refuse them, "+
+			"or remove the key.", strings.TrimSpace(v), executor.ImageProvenancePolicyRequired))
 	}
 
 	// A write-back mode this hub does not know returns nothing, which is the

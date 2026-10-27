@@ -229,8 +229,10 @@ func bootstrapExecutors(dir string) {
 			if ceiling, err := cfg.Executors.Limits.Ceiling(); err == nil {
 				executor.ApplyResourceCeiling(ceiling)
 			}
-			// And the same isolation evidence policy (Task 20439).
+			// And the same isolation evidence policy (Task 20439), and image
+			// provenance policy (Task 20453).
 			executor.ApplyIsolationEvidencePolicy(cfg.Executors.IsolationEvidence)
+			executor.ApplyImageProvenancePolicy(cfg.Executors.ImageProvenance)
 		}
 	}
 	registerBuiltinExecutors()

@@ -25,6 +25,9 @@ func TestSandboxFrontmatterRoundTrips(t *testing.T) {
 		RequestedImage: "python:3.12",
 		PinnedImage:    "python@sha256:deadbeef",
 		SetupHash:      "setup999",
+		// The verdict on one of cloop's own images (Task 20453).
+		ImageProvenance: "verified",
+		VerifiedDigest:  "sha256:deadbeef",
 	}
 
 	got, ok := ParseSandboxFrontmatter("---\n" + want.frontmatter() + "---\n\nbody\n")
@@ -33,7 +36,8 @@ func TestSandboxFrontmatterRoundTrips(t *testing.T) {
 	}
 	if got.ExecutorID != want.ExecutorID || got.ExecutorKind != want.ExecutorKind ||
 		got.SpecHash != want.SpecHash || got.RequestedImage != want.RequestedImage ||
-		got.PinnedImage != want.PinnedImage || got.SetupHash != want.SetupHash {
+		got.PinnedImage != want.PinnedImage || got.SetupHash != want.SetupHash ||
+		got.ImageProvenance != want.ImageProvenance || got.VerifiedDigest != want.VerifiedDigest {
 		t.Errorf("round trip lost data:\n got %+v\nwant %+v", got, want)
 	}
 }
@@ -48,6 +52,7 @@ func TestSandboxFrontmatterEveryWrittenKeyIsRead(t *testing.T) {
 	full := SandboxRecord{
 		ExecutorID: "e", ExecutorKind: "k", SpecHash: "s",
 		RequestedImage: "r", PinnedImage: "p@sha256:x", SetupHash: "h",
+		ImageProvenance: "verified", VerifiedDigest: "sha256:x",
 	}
 	// sandbox_reproducible is derived from PinnedImage rather than stored, so
 	// it is written but deliberately not read back.

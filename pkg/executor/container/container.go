@@ -253,12 +253,27 @@ type Options struct {
 	// ImagePolicy constrains the images a *project* may name in its
 	// .cloop/sandbox.yaml (Task 20177). The zero value constrains nothing.
 	//
-	// It deliberately does not apply to Image above. That reference is the
-	// operator's own choice, made in the same file as the policy; running it
-	// through an allowlist the same person wrote would be a lint, not a
-	// control, and with a safe chart default of "digests only" it would refuse
-	// the hub's own tagged image at boot.
+	// It does not apply to Image above unless the policy says
+	// govern_operator_images (Task 20453). That reference is the operator's
+	// own choice, made in the same file as the policy; running it through an
+	// allowlist the same person wrote is a lint rather than a control, and
+	// with a safe chart default of "digests only" it would refuse the hub's
+	// own tagged image at boot — so it is opt-in.
 	ImagePolicy imagepolicy.Policy
+
+	// VerifyOwnImages has every image from one of cloop's own repositories
+	// — the default Image, one configured explicitly, or one a project names
+	// — resolved to its digest in the local store, verified with cosign
+	// against the workflow that publishes it, and run by that digest (Task
+	// 20453). A signature that is present and wrong refuses the start; an
+	// unsigned or unverifiable image runs with a warning, or is refused when
+	// executor.ImageProvenanceRequired.
+	//
+	// The hub's drivers set it (pkg/executor/reconcile). A device's agent
+	// leaves it off: the hub verified the digest it dispatched there, and a
+	// device checking its own image would be a device deciding its own
+	// containment.
+	VerifyOwnImages bool
 }
 
 // Normalize fills in defaults and validates. It returns a copy so a caller's
@@ -349,6 +364,11 @@ type Executor struct {
 	// Never nil for an executor built by New; a nil one fails closed, which
 	// is what a struct-literal Executor in a test should do.
 	verifier imagepolicy.Verifier
+	// provenance verifies cloop's own images when opts.VerifyOwnImages. The
+	// process's shared verifier for an executor built by New, so its cache
+	// of verdicts is shared with every other driver in the hub. A nil one
+	// verifies nothing: the image is unverifiable, warned or refused.
+	provenance imagepolicy.ProvenanceVerifier
 
 	mu      sync.Mutex
 	handles map[string]*record
@@ -467,6 +487,7 @@ func New(opts Options) (*Executor, error) {
 		// cosign — and re-contact the transparency log — for every task in a
 		// project that runs the same image all day.
 		verifier:    imagepolicy.NewCosignVerifier(),
+		provenance:  imagepolicy.SharedProvenanceVerifier(),
 		handles:     make(map[string]*record),
 		store:       norm.HandleStore,
 		leases:      executor.NewLeaseIndex(),
@@ -1009,6 +1030,11 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// operator looking for why a run started on the wrong code will look.
 		rec.bus.Emit(prelude.String())
 	}
+	// One of cloop's own images that ran unverified says so at the top of
+	// the run's log, beside the journal entry the hub writes (Task 20453).
+	if w := provenanceWarning(image.Provenance); w != "" {
+		rec.bus.Emit("[cloop] warning: " + w + "\n")
+	}
 
 	e.mu.Lock()
 	e.handles[rec.id] = rec
@@ -1101,7 +1127,18 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// single point of control.
 		StartedAt: rec.startedAt,
 		Image:     req.Image,
+		// What the image's check found, when it is one of cloop's own.
+		ImageProvenance: image.Provenance,
 	}, nil
+}
+
+// provenanceWarning is the run's warning for an unverified image of cloop's
+// own, empty for a verified one or an image that is not cloop's.
+func provenanceWarning(p *imagepolicy.Provenance) string {
+	if p == nil {
+		return ""
+	}
+	return p.Warning
 }
 
 // sandboxUser returns the "uid:gid" a rootful runtime should run the workload

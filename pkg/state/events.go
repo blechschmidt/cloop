@@ -73,6 +73,7 @@ const (
 	EventGitPushRefused    = statedb.EventGitPushRefused
 	EventNetworkBlocked    = statedb.EventNetworkBlocked
 	EventIsolationEvidence = statedb.EventIsolationEvidence
+	EventImageProvenance   = statedb.EventImageProvenance
 	EventLeaseTakeover     = statedb.EventLeaseTakeover
 )
 

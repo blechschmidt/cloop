@@ -2,7 +2,8 @@
 #
 # The runtime stage is distroless on purpose, and it costs something: there is
 # no shell, no package manager, no curl and no git in the final image. That is
-# the point. A hub configured with executors.allow_host_process=false has
+# the point. The one program beside cloop is cosign, which verifies signatures
+# and executes nothing (Task 20453). A hub configured with executors.allow_host_process=false has
 # already promised never to run a harness on its own host; an image that
 # contains no way to execute anything makes that promise structural instead of
 # a config value. It also means `docker exec -it … sh` does not work, which is
@@ -95,6 +96,43 @@ RUN mkdir -p /skel/projects
 # the ordinary shape of automated enrollment (compose, cloud-init, Ansible), so
 # the image provides somewhere for it to land.
 RUN mkdir -p /skel-run/enroll
+
+# ── Stage 1b: cosign, for the hub ───────────────────────────────────────────
+# The hub verifies cloop's own images against the workflow that publishes them
+# before a sandbox runs one (Task 20453), and a project's image when
+# sandbox.image_policy.require_signature asks it to — with cosign, a separate
+# program rather than a library linked into the process that holds every
+# lease (pkg/imagepolicy/cosign.go says why). The runtime stage has no package
+# manager to install it with, so it is fetched here and copied in.
+#
+# Pinned twice: by version, and by the SHA-256 of each architecture's release
+# binary, as sigstore's cosign_checksums.txt for that version lists it. A
+# rebuild of an old tag installs the same bytes or fails here, whatever GitHub
+# serves by then. The version is the one .github/workflows/publish-images.yml
+# signs with (pkg/provenance's workflow_drift_test.go holds them equal). To
+# move it, take both sums from the new version's cosign_checksums.txt.
+#
+# The release binaries are static — they run on the distroless base, where a
+# dynamically linked one would not — and 145 MB each, 60 MB compressed.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS cosign
+
+ARG TARGETARCH
+ARG COSIGN_VERSION=v3.1.4
+ARG COSIGN_SHA256_AMD64=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+ARG COSIGN_SHA256_ARM64=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
+
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) sum="$COSIGN_SHA256_AMD64" ;; \
+      arm64) sum="$COSIGN_SHA256_ARM64" ;; \
+      *) echo "no cosign checksum is pinned for $arch" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /out; \
+    curl -fsSL --retry 3 -o /out/cosign \
+      "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${arch}"; \
+    echo "${sum}  /out/cosign" | sha256sum -c -; \
+    chmod 0755 /out/cosign
 
 # ── Stage 2: executor agent ─────────────────────────────────────────────────
 # A *different* base from the hub, and deliberately so.
@@ -364,6 +402,9 @@ LABEL org.opencontainers.image.title="cloop hub" \
       org.opencontainers.image.base.name="gcr.io/distroless/static-debian12:nonroot"
 
 COPY --from=build /out/cloop /usr/local/bin/cloop
+# cosign, which the hub runs to verify image signatures (Task 20453): `cloop
+# hub doctor` reports it, and its version, as images.provenance.
+COPY --from=cosign /out/cosign /usr/local/bin/cosign
 
 # `cloop ui` resolves .cloop relative to the process working directory — there
 # is no --workdir flag — so WORKDIR *is* the state-directory selector. The

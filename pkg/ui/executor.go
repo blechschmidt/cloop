@@ -749,6 +749,9 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		}()
 	}
 	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs())
+	// One of cloop's own images that ran unverified, on the run's journal
+	// (Task 20453).
+	journalImageProvenance(workDir, ex, handle)
 	if len(spec.ProjectSeed) > 0 {
 		// The project went out as a copy, so its outcome has to come back:
 		// remember what runEnded will need to merge it (run_result.go).

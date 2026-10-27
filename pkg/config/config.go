@@ -765,6 +765,19 @@ type ExecutorsConfig struct {
 	// evidence.
 	IsolationEvidence string `yaml:"isolation_evidence,omitempty"`
 
+	// ImageProvenance decides what a dispatch does with one of cloop's own
+	// images — ghcr.io/blechschmidt/cloop, cloop-harness, cloop-harness-copilot
+	// — whose digest could not be verified against the workflow that publishes
+	// them (Task 20453): "warn", the default, runs it with a warning on the
+	// run and in `cloop hub doctor`; "required" refuses it. A signature that
+	// is present and not that workflow's refuses the dispatch either way. See
+	// pkg/imagepolicy/provenance.go.
+	//
+	// Applied as a ratchet (executor.ApplyImageProvenancePolicy), like
+	// IsolationEvidence: one project's config.yaml cannot relax a hub that
+	// requires verified images.
+	ImageProvenance string `yaml:"image_provenance,omitempty"`
+
 	// OrphanSweepIntervalMinutes is how often the hub re-runs the orphan sweep
 	// that collects workloads it is no longer tracking. Absent uses
 	// reconcile.DefaultSweepInterval (15 minutes); an explicit 0 disables it.
@@ -1176,6 +1189,8 @@ func (e ExecutorsConfig) ApplyRatchets() {
 	}
 	// Nor stop a hub requiring isolation evidence from requiring it.
 	executor.ApplyIsolationEvidencePolicy(e.IsolationEvidence)
+	// Nor one requiring verified images of cloop's own (Task 20453).
+	executor.ApplyImageProvenancePolicy(e.ImageProvenance)
 }
 
 // FailoverConfig bounds executor failover (Task 20391).

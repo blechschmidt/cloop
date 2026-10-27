@@ -78,6 +78,15 @@ type SandboxRecord struct {
 	// SetupHash identifies the setup: commands baked into a derived image,
 	// empty when the spec has none.
 	SetupHash string `json:"setup_sha256,omitempty"`
+	// ImageProvenance is the verdict on the image when it is one of cloop's
+	// own (Task 20453): "verified" when cosign verified its digest against
+	// the workflow that publishes cloop's images, otherwise "unsigned",
+	// "unverifiable" or — on a dispatch that was refused, so never on a run
+	// that started — "mismatch". Empty for any other image.
+	ImageProvenance string `json:"image_provenance,omitempty"`
+	// VerifiedDigest is the digest that was verified, empty unless
+	// ImageProvenance is "verified".
+	VerifiedDigest string `json:"verified_digest,omitempty"`
 	// Warnings are the clamps applied while parsing the spec.
 	Warnings []string `json:"warnings,omitempty"`
 	// StartedAt is when the workload began.
@@ -258,6 +267,12 @@ func (r SandboxRecord) frontmatter() string {
 	if r.SetupHash != "" {
 		fmt.Fprintf(&b, "sandbox_setup_sha256: %q\n", r.SetupHash)
 	}
+	if r.ImageProvenance != "" {
+		fmt.Fprintf(&b, "sandbox_image_provenance: %q\n", r.ImageProvenance)
+	}
+	if r.VerifiedDigest != "" {
+		fmt.Fprintf(&b, "sandbox_image_verified_digest: %q\n", r.VerifiedDigest)
+	}
 	return b.String()
 }
 
@@ -275,6 +290,9 @@ var frontmatterKeys = map[string]func(*SandboxRecord, string){
 	"sandbox_image_requested": func(r *SandboxRecord, v string) { r.RequestedImage = v },
 	"sandbox_image":           func(r *SandboxRecord, v string) { r.PinnedImage = v },
 	"sandbox_setup_sha256":    func(r *SandboxRecord, v string) { r.SetupHash = v },
+
+	"sandbox_image_provenance":      func(r *SandboxRecord, v string) { r.ImageProvenance = v },
+	"sandbox_image_verified_digest": func(r *SandboxRecord, v string) { r.VerifiedDigest = v },
 }
 
 // maxFrontmatterBytes bounds how far into an artifact the frontmatter scan

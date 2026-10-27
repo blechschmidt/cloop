@@ -122,6 +122,11 @@ type HubOptions struct {
 	// cosign, for tests. Nil uses the real ones; see Options.
 	ImageResolver imagepolicy.Resolver
 	ImageVerifier imagepolicy.Verifier
+	// VerifyOwnImages has every executor this hub builds check cloop's own
+	// images before a dispatch (Task 20453); ProvenanceVerifier stands in for
+	// cosign there, for tests. See Options.
+	VerifyOwnImages    bool
+	ProvenanceVerifier imagepolicy.ProvenanceVerifier
 	// ResultBudget bounds the returned work every executor this hub builds
 	// may have it hold in memory (Task 20399). Nil uses the process-wide
 	// DefaultResultBudget, whose limits the caller sets from
@@ -262,6 +267,8 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 		ImagePolicy:        h.opts.ImagePolicy,
 		ImageResolver:      h.opts.ImageResolver,
 		ImageVerifier:      h.opts.ImageVerifier,
+		VerifyOwnImages:    h.opts.VerifyOwnImages,
+		ProvenanceVerifier: h.opts.ProvenanceVerifier,
 		ResultBudget:       h.opts.ResultBudget,
 		Now:                h.opts.Now,
 	}

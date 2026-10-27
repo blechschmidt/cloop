@@ -498,6 +498,7 @@ func Run(ctx context.Context, dir string, cfg *config.Config, opts Options) *Rep
 		executors:     checkExecutors,
 		networkPolicy: checkNetworkPolicyEnforcement,
 		smoke:         checkSmoke,
+		verifyImages:  verifyOwnImagesNow,
 	}
 	for _, s := range steps(dir, cfg, opts, wal, rep, set) {
 		s.run(ctx, add)

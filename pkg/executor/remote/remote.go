@@ -245,6 +245,18 @@ type Options struct {
 	// ImageVerifier checks a digest's signature. Nil runs cosign on the hub,
 	// through a verifier every executor shares. Tests inject their own.
 	ImageVerifier imagepolicy.Verifier
+	// VerifyOwnImages has the hub check every image of cloop's own a
+	// dispatch's sandbox will run — the device's sandbox image, a virtual
+	// executor's, the default, or one a project names — against the workflow
+	// that publishes them, resolving a tag at its registry, and dispatch the
+	// verified digest (Task 20453). The hub sets it (pkg/ui); an executor
+	// built outside one, and every test that is not about this, leaves it
+	// off and asks no registry anything.
+	VerifyOwnImages bool
+	// ProvenanceVerifier checks one of cloop's own images against the
+	// workflow that publishes them. Nil runs cosign on the hub through the
+	// process's shared verifier. Tests inject their own.
+	ProvenanceVerifier imagepolicy.ProvenanceVerifier
 	// ResultBudget bounds the returned work — write-back bundles and project
 	// state documents — this executor may have the hub hold in memory while
 	// it waits to be collected (Task 20399). Nil draws on the process-wide
@@ -803,6 +815,18 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		return executor.Handle{}, err
 	}
 	spec.Image = image
+	// And the image the sandbox runs when it is cloop's own — the device's,
+	// a virtual executor's, the default, or the project's — verified against
+	// the workflow that publishes it, and dispatched as the verified digest
+	// (Task 20453); an operator's image that is not cloop's, under the
+	// project rules when the policy governs operator images.
+	prov, err := e.authorizeRunImage(ctx, &spec, sandbox, virtual)
+	if err != nil {
+		return executor.Handle{}, err
+	}
+	if prov.Verified() {
+		verified = true
+	}
 
 	// Convert and bound the credential files here, before a credential is leased
 	// or a handle row is written, so a lease that cannot fit in a start frame
@@ -917,6 +941,11 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 			State:      executor.StatePending,
 			StartedAt:  now,
 		},
+	}
+	// One of cloop's own images that runs unverified says so at the top of
+	// the run's log (Task 20453).
+	if prov != nil && prov.Warning != "" {
+		hs.bus.Emit("[cloop] warning: " + prov.Warning + "\n")
 	}
 	e.mu.Lock()
 	e.handles[handleID] = hs
@@ -1143,6 +1172,8 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		PID:       started.PID,
 		StartedAt: startedAt,
 		Image:     ranImage(spec, verified),
+		// What the check of one of cloop's own images found (Task 20453).
+		ImageProvenance: prov,
 	}, nil
 }
 

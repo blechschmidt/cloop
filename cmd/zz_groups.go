@@ -389,13 +389,14 @@ var hubCommandGroups = map[string]string{
 	"ca":      groupHubAccess,
 	"scim":    groupHubAccess,
 
-	"doctor":      groupHubOperate,
-	"healthcheck": groupHubOperate,
-	"lease":       groupHubOperate,
-	"cluster":     groupHubOperate,
-	"audit":       groupHubOperate,
-	"retention":   groupHubOperate,
-	"telemetry":   groupHubOperate,
+	"doctor":       groupHubOperate,
+	"healthcheck":  groupHubOperate,
+	"verify-image": groupHubOperate,
+	"lease":        groupHubOperate,
+	"cluster":      groupHubOperate,
+	"audit":        groupHubOperate,
+	"retention":    groupHubOperate,
+	"telemetry":    groupHubOperate,
 }
 
 var remoteGroups = []*cobra.Group{

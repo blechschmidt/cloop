@@ -66,8 +66,8 @@ var registry = []Entry{
 		Trigger: "A task is handed to an executor, recording where it will run and what it was given.",
 		Payload: []string{
 			"task_id", "title", "project", "run_id", "executor_id", "executor_kind",
-			"isolation", "requested_image", "pinned_image", "spec_sha256",
-			"setup_sha256", "lease_ids",
+			"isolation", "requested_image", "pinned_image", "image_provenance",
+			"verified_digest", "spec_sha256", "setup_sha256", "lease_ids",
 		},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,

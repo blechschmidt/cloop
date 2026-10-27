@@ -656,6 +656,10 @@ func reconcileContainer(ctx context.Context, cfg *config.Config, store executor.
 	// governs every backend identically, so it is attached here rather than in
 	// DriverOptions, which only sees executors.container.
 	driverOpts.ImagePolicy = cfg.Sandbox.ImagePolicy.Policy()
+	// The hub's driver verifies cloop's own images against the workflow that
+	// publishes them before running one (Task 20453); a device's leaves it
+	// to the hub that dispatched there.
+	driverOpts.VerifyOwnImages = true
 	// The control plane the driver must never bind a project over (Task
 	// 20418). Set before Ensure for the same reason as the store below.
 	driverOpts.ControlPlaneDir = opts.ControlPlaneDir
@@ -782,6 +786,8 @@ func reconcileKubernetes(ctx context.Context, dir string, cfg *config.Config, st
 	}
 	// Same policy, same section, both backends — see reconcileContainer.
 	driverOpts.ImagePolicy = cfg.Sandbox.ImagePolicy.Policy()
+	// And the same check of cloop's own images (Task 20453).
+	driverOpts.VerifyOwnImages = true
 	// Before Ensure, so New rehydrates from it; see reconcileContainer.
 	driverOpts.HandleStore = store
 	d.ID = driverOpts.ID

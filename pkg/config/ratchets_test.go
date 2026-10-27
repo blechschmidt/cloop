@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
@@ -66,5 +68,58 @@ func TestApplyRatchetsInstallsTheIsolationEvidencePolicy(t *testing.T) {
 	if w := ExecutorWarnings(ExecutorsConfig{IsolationEvidence: "strict"}); len(w) == 0 ||
 		!strings.Contains(strings.Join(w, " "), "isolation_evidence") {
 		t.Errorf("no warning for an unknown policy: %v", w)
+	}
+}
+
+// TestApplyRatchetsInstallsTheImageProvenancePolicy: executors.image_provenance
+// rides the same method (Task 20453), and a later "warn" cannot relax it.
+func TestApplyRatchetsInstallsTheImageProvenancePolicy(t *testing.T) {
+	prev := executor.SetImageProvenanceRequired(false)
+	t.Cleanup(func() { executor.SetImageProvenanceRequired(prev) })
+
+	ExecutorsConfig{ImageProvenance: executor.ImageProvenancePolicyWarn}.ApplyRatchets()
+	if executor.ImageProvenanceRequired() {
+		t.Fatal("warn installed required")
+	}
+	ExecutorsConfig{ImageProvenance: executor.ImageProvenancePolicyRequired}.ApplyRatchets()
+	if !executor.ImageProvenanceRequired() {
+		t.Fatal("image_provenance: required was not installed")
+	}
+	ExecutorsConfig{ImageProvenance: executor.ImageProvenancePolicyWarn}.ApplyRatchets()
+	if !executor.ImageProvenanceRequired() {
+		t.Fatal("a later warn relaxed the policy")
+	}
+	if err := ValidateExecutors(ExecutorsConfig{ImageProvenance: "strict"}); err == nil ||
+		!strings.Contains(err.Error(), "image_provenance") {
+		t.Errorf("an unknown policy validated: %v", err)
+	}
+	if err := ValidateExecutors(ExecutorsConfig{ImageProvenance: "required"}); err != nil {
+		t.Errorf("required: %v", err)
+	}
+	if w := ExecutorWarnings(ExecutorsConfig{ImageProvenance: "strict"}); len(w) == 0 ||
+		!strings.Contains(strings.Join(w, " "), "image_provenance") {
+		t.Errorf("no warning for an unknown policy: %v", w)
+	}
+}
+
+// TestGovernOperatorImagesReachesThePolicy: the YAML key reaches the policy the
+// drivers enforce, and changes no verdict on a project's image.
+func TestGovernOperatorImagesReachesThePolicy(t *testing.T) {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte("sandbox:\n  image_policy:\n    allowed_registries: [ghcr.io]\n"+
+		"    govern_operator_images: true\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Sandbox.ImagePolicy.Policy()
+	if !p.GovernOperatorImages || !p.GovernsOperatorImage("ghcr.io/acme/base:1") {
+		t.Fatalf("govern_operator_images did not reach the policy: %+v", p)
+	}
+	if p.GovernsOperatorImage("ghcr.io/blechschmidt/cloop-harness:latest") {
+		t.Error("cloop's own image is governed by the project rules; it has its own pin")
+	}
+	ungoverned := p
+	ungoverned.GovernOperatorImages = false
+	if p.Fingerprint() != ungoverned.Fingerprint() {
+		t.Error("govern_operator_images changed the fingerprint of a verdict it does not affect")
 	}
 }

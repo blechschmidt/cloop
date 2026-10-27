@@ -267,8 +267,10 @@ func checkCosign(p imagepolicy.Policy, cfg *config.Config, devices bool, opts Op
 // drivers run them as configured — the policy governs the images a project
 // names in .cloop/sandbox.yaml, which is the untrusted input; applying an
 // allowlist to the operator's own choice, made in the same file, would be a
-// lint, not a control (see container.Options.ImagePolicy). The doctor used to
-// report them as "refused by this hub's own policy", which the hub never does.
+// lint, not a control (see container.Options.ImagePolicy) — unless the policy
+// says govern_operator_images, and cloop's own images are held to their
+// publishing workflow's pin either way (Task 20453). The doctor used to report
+// them as "refused by this hub's own policy", which the hub never did.
 func checkConfiguredImages(cfg *config.Config, p imagepolicy.Policy, add addFn) {
 	type candidate struct{ field, ref string }
 	var cands []candidate
@@ -281,9 +283,23 @@ func checkConfiguredImages(cfg *config.Config, p imagepolicy.Policy, add addFn) 
 	for _, c := range cands {
 		msg := fmt.Sprintf("%s (%s) is the operator's own and runs as configured; the image policy "+
 			"governs the images projects name", c.field, c.ref)
+		switch {
+		case imagepolicy.IsOwnImage(c.ref):
+			// Checked against the workflow that publishes it instead (Task
+			// 20453); images.provenance reports the verdict.
+			msg = fmt.Sprintf("%s (%s) is one of cloop's own images, verified against the workflow that "+
+				"publishes them before a sandbox runs it (images.provenance)", c.field, c.ref)
+		case p.GovernOperatorImages:
+			msg = fmt.Sprintf("%s (%s) is the operator's own, and govern_operator_images holds it to the "+
+				"image policy", c.field, c.ref)
+		}
 		details := map[string]any{"image": c.ref}
 		if dec, err := p.Evaluate(c.ref); err != nil && !dec.Allowed {
-			msg += "; a project naming this image would be refused: " + dec.Reason
+			if p.GovernsOperatorImage(c.ref) {
+				msg += "; the policy refuses it, so every run on that executor is refused: " + dec.Reason
+			} else {
+				msg += "; a project naming this image would be refused: " + dec.Reason
+			}
 			details["refused_for_projects"] = dec.Reason
 		}
 		add(Finding{

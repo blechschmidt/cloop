@@ -113,7 +113,7 @@ const DefaultID = "kubernetes"
 // back on, so the image must actually contain the harness. This default is a
 // placeholder that an operator is expected to replace; preflight and
 // `cloop executor test` say so.
-const DefaultImage = "ghcr.io/blechschmidt/cloop-harness:latest"
+const DefaultImage = executor.DefaultHarnessImage
 
 const (
 	// DefaultNamespace is where Pods land when the config names no namespace.
@@ -312,7 +312,18 @@ type Options struct {
 	// has no store the control plane can read, so a tag in a Pod spec is
 	// resolved by a kubelet, on a node, at a time nobody controls. Setting
 	// require_digest is the only way to make a Kubernetes run reproducible.
+	//
+	// It reaches Image above only under govern_operator_images (Task 20453).
 	ImagePolicy imagepolicy.Policy
+
+	// VerifyOwnImages checks every image from one of cloop's own repositories
+	// against the workflow that publishes it before a Pod runs it (Task
+	// 20453). Only a digest can be checked here — the cluster's image store
+	// belongs to its nodes, so there is nothing to resolve a tag in — and a
+	// tag is admitted with a warning saying so, or refused when
+	// executor.ImageProvenanceRequired. A signature that is present and wrong
+	// refuses either way. The hub's driver sets it (pkg/executor/reconcile).
+	VerifyOwnImages bool
 
 	// GitCABundle is a CA bundle in the workload namespace that every Pod's
 	// git verifies particular https URLs against — the hub's git proxy, on a
@@ -468,6 +479,10 @@ type Executor struct {
 	// A nil one fails closed, so a struct-literal Executor in a test refuses a
 	// signed-image policy rather than quietly satisfying it.
 	verifier imagepolicy.Verifier
+	// provenance verifies cloop's own images when opts.VerifyOwnImages; the
+	// process's shared verifier for an executor built by New. Nil verifies
+	// nothing, so the image is unverifiable.
+	provenance imagepolicy.ProvenanceVerifier
 
 	mu      sync.Mutex
 	handles map[string]*record
@@ -698,6 +713,7 @@ func New(opts Options) (*Executor, error) {
 		// survives across Pod creations; a fresh one per Pod would re-spawn
 		// cosign for every task in a project that runs one image.
 		verifier:    imagepolicy.NewCosignVerifier(),
+		provenance:  imagepolicy.SharedProvenanceVerifier(),
 		handles:     make(map[string]*record),
 		store:       norm.HandleStore,
 		leases:      executor.NewLeaseIndex(),
@@ -1210,6 +1226,11 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	// is the same stream that reaches the live-log room and the run artifact.
 	// A credential projected into the Pod above must not come back out of it.
 	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{Redact: spec.Redactor()})
+	// One of cloop's own images that runs unverified says so at the top of
+	// the run's log (Task 20453).
+	if p := req.ImageProvenance; p != nil && p.Warning != "" {
+		rec.bus.Emit("[cloop] warning: " + p.Warning + "\n")
+	}
 
 	e.mu.Lock()
 	if e.closed {
@@ -1295,6 +1316,8 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		// when the spec pinned it; ImageWarnings() is what nudges an author
 		// toward doing so.
 		Image: podImage(created, desired),
+		// What the check of one of cloop's own images found (Task 20453).
+		ImageProvenance: req.ImageProvenance,
 	}, nil
 }
 
@@ -1339,6 +1362,46 @@ func (e *Executor) authorizeImage(ctx context.Context, ref string) (string, erro
 		fmt.Fprintf(os.Stderr, "[kubernetes] sandbox image: %s\n", w)
 	}
 	return res.Ref, nil
+}
+
+// VerifyOwnImage checks this executor's configured image the way a Pod
+// would be checked, when it is one of cloop's own, and records the verdict
+// (Task 20453). It creates nothing; `cloop hub doctor` calls it. A nil
+// Provenance means the image is not cloop's.
+func (e *Executor) VerifyOwnImage(ctx context.Context) (*imagepolicy.Provenance, error) {
+	if !imagepolicy.IsOwnImage(e.opts.Image) {
+		return nil, nil
+	}
+	p, err := e.checkOwnImage(ctx, e.opts.Image, "executors.kubernetes.image")
+	return &p, err
+}
+
+// checkOwnImage verifies one of cloop's own images for a Pod (Task 20453).
+//
+// With no resolver: a cluster's image store is its nodes', so a tag here is a
+// pointer the hub cannot follow, and only a digest is verified. A tag is
+// unverifiable — admitted with a warning that says so, refused when
+// executor.ImageProvenanceRequired. Task 20457 resolves tags at the registry.
+func (e *Executor) checkOwnImage(ctx context.Context, image, field string) (imagepolicy.Provenance, error) {
+	p, err := imagepolicy.OwnImageCheck{
+		Image:    image,
+		Verifier: e.provenance,
+		Required: executor.ImageProvenanceRequired(),
+		Subject:  "Kubernetes executor " + e.id,
+		Field:    field,
+	}.Run(ctx)
+	if err != nil {
+		var denied *imagepolicy.DenyError
+		if errors.As(err, &denied) {
+			imagepolicy.RecordProvenance(e.id, p)
+		}
+		return p, classifyImageDenial(err)
+	}
+	imagepolicy.RecordProvenance(e.id, p)
+	if p.Warning != "" {
+		fmt.Fprintf(os.Stderr, "[kubernetes] %s\n", p.Warning)
+	}
+	return p, nil
 }
 
 // classifyImageDenial folds a policy refusal into this package's error
@@ -1411,7 +1474,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 	// where the policy could obtain one, and that is what lands in the Pod:
 	// past this line the project's tag does not exist, so no later edit can
 	// reintroduce the window between deciding and pulling.
-	image := e.opts.Image
+	image, field := e.opts.Image, "executors.kubernetes.image"
 	if override := strings.TrimSpace(spec.Image); override != "" {
 		authorized, err := e.authorizeImage(ctx, override)
 		if err != nil {
@@ -1420,7 +1483,25 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		if err := ValidateImageRef(authorized); err != nil {
 			return podRequest{}, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
 		}
+		image, field = authorized, "image: in the project's .cloop/sandbox.yaml"
+	} else if e.opts.ImagePolicy.GovernsOperatorImage(image) {
+		// The operator's own image, under the project rules because the
+		// operator asked for it (govern_operator_images, Task 20453).
+		authorized, err := e.authorizeImage(ctx, image)
+		if err != nil {
+			return podRequest{}, err
+		}
 		image = authorized
+	}
+	// One of cloop's own, however chosen: its digest verified against the
+	// workflow that publishes it before a kubelet is handed it (Task 20453).
+	var prov *imagepolicy.Provenance
+	if e.opts.VerifyOwnImages && imagepolicy.IsOwnImage(image) {
+		p, err := e.checkOwnImage(ctx, image, field)
+		if err != nil {
+			return podRequest{}, err
+		}
+		prov, image = &p, p.Ref
 	}
 
 	req := podRequest{
@@ -1458,6 +1539,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		GitCABundle:           e.opts.GitCABundle,
 		GitCA:                 podGitCA(spec.GitCA, e.opts.GitCABundle),
 		ProjectSeed:           len(spec.ProjectSeed) > 0,
+		ImageProvenance:       prov,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
 		TerminationGracePeriodSeconds: int64(e.opts.TerminationGracePeriod / time.Second),

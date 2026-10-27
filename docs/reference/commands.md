@@ -1388,6 +1388,24 @@ connecting until it is re-pinned. See [TLS](configuration.md#tls) for the servin
 and [Remote executors](configuration.md#remote-executors-edge-devices) for how the pin reaches
 a device.
 
+### `cloop hub verify-image <image>`
+
+Checks one of cloop's own images — `ghcr.io/blechschmidt/cloop`, `cloop-harness`
+or `cloop-harness-copilot` — as a hub checks it before a sandbox runs it (Task
+20453): a tag is resolved to the digest its registry serves now, and cosign
+verifies the digest against the identity of `.github/workflows/publish-images.yml`
+on `main` or a release tag.
+
+```bash
+cloop hub verify-image ghcr.io/blechschmidt/cloop-harness:latest
+cloop hub verify-image --json ghcr.io/blechschmidt/cloop-harness@sha256:…
+```
+
+The verdict is `verified`, `unsigned` (no signature at all — an image published
+before signing began), `unverifiable` (no cosign, or the registry or Sigstore out
+of reach) or `mismatch` (signed by someone else, which a hub refuses to run). The
+exit status is 0 only for `verified`. See [Image provenance](configuration.md#image-provenance).
+
 ### `cloop hub key`
 
 Sealing-key inspection and online rotation. Stored credentials are sealed under

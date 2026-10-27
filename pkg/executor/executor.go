@@ -35,6 +35,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // Well-known executor kinds. Kind identifies the *driver implementation*;
@@ -925,6 +927,11 @@ type Handle struct {
 	// and the handle records `python@sha256:…`, which is the only one of the
 	// two that will still mean the same thing next month.
 	Image string `json:"image,omitempty"`
+	// ImageProvenance is what the hub found when it checked one of cloop's
+	// own images against the workflow that publishes them (Task 20453): the
+	// digest that ran, and whether cosign verified it. Nil when the image is
+	// not one of cloop's own, or the driver ran none.
+	ImageProvenance *imagepolicy.Provenance `json:"image_provenance,omitempty"`
 }
 
 // State is the lifecycle phase of a handle.

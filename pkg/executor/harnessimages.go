@@ -2,6 +2,14 @@ package executor
 
 import "strings"
 
+// DefaultHarnessImage is the sandbox image an executor runs when nothing names
+// one: the container driver's and the Kubernetes driver's default, and a
+// device's or a virtual executor's whose sandbox image is unset. Here, beside
+// the published images, so the hub can say which image a device will run
+// without importing the device's driver — the remote executor verifies it
+// before dispatch (Task 20453).
+const DefaultHarnessImage = "ghcr.io/blechschmidt/cloop-harness:latest"
+
 // HarnessImage is a sandbox image this repository publishes, and what it
 // carries.
 type HarnessImage struct {
@@ -22,7 +30,7 @@ type HarnessImage struct {
 // its Ref to an image the workflow publishes, so a suggestion here cannot send
 // an operator to pull something that does not fix their problem.
 var HarnessImages = []HarnessImage{
-	{Ref: "ghcr.io/blechschmidt/cloop-harness:latest", Carries: []string{"claude", "cloop", "git"}},
+	{Ref: DefaultHarnessImage, Carries: []string{"claude", "cloop", "git"}},
 	{Ref: "ghcr.io/blechschmidt/cloop-harness-copilot:latest", Carries: []string{"claude", "copilot", "cloop", "git"}},
 }
 

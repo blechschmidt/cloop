@@ -24,6 +24,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // releaseWorkflow reads .github/workflows/release.yml from the repository root.
@@ -256,6 +258,179 @@ func TestEdgeManifestNamesTheBuildsPlaceOnMain(t *testing.T) {
 	} {
 		if !strings.Contains(wf, want) {
 			t.Errorf("release.yml no longer contains %q; a release's sequence would go unchecked", want)
+		}
+	}
+}
+
+// imagesWorkflow reads .github/workflows/publish-images.yml (Task 20453).
+func imagesWorkflow(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", filepath.FromSlash(ImagesWorkflowPath))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v — ImagesWorkflowPath names a workflow that does not exist, so every image "+
+			"would be signed under an identity the pin does not name", path, err)
+	}
+	return string(b)
+}
+
+// TestImagesWorkflowPinsTheSameIdentity is the images pin's drift gate: the
+// identity publish-images.yml verifies its own signatures against, before any
+// hub is asked to run the image, is the one every hub verifies them against.
+func TestImagesWorkflowPinsTheSameIdentity(t *testing.T) {
+	wf := imagesWorkflow(t)
+	m := regexp.MustCompile(`identity="([^"]+)"`).FindStringSubmatch(wf)
+	if m == nil {
+		t.Fatal("publish-images.yml no longer assigns identity=\"…\"; the self-verification step was renamed or removed")
+	}
+	if got := strings.ReplaceAll(m[1], "${GITHUB_REPOSITORY}", "blechschmidt/cloop"); got != ImagesIdentityRegexp {
+		t.Errorf("publish-images.yml and pkg/provenance pin different identities.\n"+
+			"  publish-images.yml:   %s\n"+
+			"  ImagesIdentityRegexp: %s\n"+
+			"Every image would be refused as wrongly signed by every hub.", got, ImagesIdentityRegexp)
+	}
+	m = regexp.MustCompile(`issuer="([^"]+)"`).FindStringSubmatch(wf)
+	if m == nil || m[1] != DefaultIssuer {
+		t.Errorf("publish-images.yml does not pin the issuer %s: %v", DefaultIssuer, m)
+	}
+	// The workflow names itself in the pin; a renamed file would sign under a
+	// SAN nothing accepts.
+	if !strings.Contains(ImagesIdentityRegexp, regexp.QuoteMeta(filepath.Base(ImagesWorkflowPath))) {
+		t.Errorf("ImagesIdentityRegexp does not name %s", ImagesWorkflowPath)
+	}
+}
+
+// TestImagesWorkflowPublishesOnlyFromThePinnedRefs holds the workflow's
+// triggers to the pin: it runs on pushes to main and to release tags, the two
+// ref shapes ImagesIdentityRegexp accepts, and on nothing else that could sign.
+// A trigger added without the pin following would publish images every hub
+// refuses as wrongly signed; a pin widened without the triggers would accept a
+// signature the workflow was never meant to make.
+func TestImagesWorkflowPublishesOnlyFromThePinnedRefs(t *testing.T) {
+	var doc struct {
+		On   map[string]yaml.Node `yaml:"on"`
+		Jobs map[string]struct {
+			If string `yaml:"if"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(imagesWorkflow(t)), &doc); err != nil {
+		t.Fatalf("publish-images.yml does not parse: %v", err)
+	}
+	if len(doc.On) == 0 {
+		t.Fatal("publish-images.yml has no triggers that parse; this gate would pass vacuously")
+	}
+	for trigger := range doc.On {
+		switch trigger {
+		case "push", "workflow_dispatch":
+		default:
+			t.Errorf("publish-images.yml runs on %q, which ImagesIdentityRegexp does not account for — "+
+				"a pull request, a schedule or a workflow_run would sign from refs the pin was not written for", trigger)
+		}
+	}
+	var push struct {
+		Tags     []string `yaml:"tags"`
+		Branches []string `yaml:"branches"`
+	}
+	node := doc.On["push"]
+	if err := node.Decode(&push); err != nil {
+		t.Fatalf("publish-images.yml's push trigger does not parse: %v", err)
+	}
+	if strings.Join(push.Tags, ",") != "v*" || strings.Join(push.Branches, ",") != "main" {
+		t.Errorf("publish-images.yml publishes on tags %v and branches %v; ImagesIdentityRegexp accepts "+
+			"refs/tags/v… and refs/heads/main — change both together", push.Tags, push.Branches)
+	}
+	// workflow_dispatch can start the workflow on any branch, so the job is
+	// limited to the refs the pin accepts.
+	const wantIf = "github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')"
+	if got := doc.Jobs["publish"].If; got != wantIf {
+		t.Errorf("the publish job's if is %q, want %q: a dispatch from another branch would push images "+
+			"signed under an identity every hub refuses", got, wantIf)
+	}
+
+	// And the pin itself, against the SANs Fulcio would issue.
+	pin := regexp.MustCompile(ImagesIdentityRegexp)
+	san := func(ref string) string {
+		return "https://github.com/blechschmidt/cloop/.github/workflows/publish-images.yml@" + ref
+	}
+	for _, ref := range []string{"refs/heads/main", "refs/tags/v0.0.8", "refs/tags/v1.2.3-rc.1"} {
+		if !pin.MatchString(san(ref)) {
+			t.Errorf("ImagesIdentityRegexp refuses %s, a ref the workflow publishes from", san(ref))
+		}
+	}
+	for _, s := range []string{
+		san("refs/heads/feature"),
+		san("refs/pull/7/merge"),
+		san("refs/tags/v1/../../heads/main"),
+		san("refs/tags/x1.0.0"),
+		san("refs/heads/main") + "x",
+		"https://github.com/blechschmidt/cloop/.github/workflows/edge.yml@refs/heads/main",
+		"https://github.com/blechschmidt/cloop/.github/workflows/release.yml@refs/tags/v0.0.8",
+		"https://github.com/blechschmidt/cloop/.github/workflows/publish-imagesxyml@refs/heads/main",
+		"https://github.com/attacker/cloop/.github/workflows/publish-images.yml@refs/heads/main",
+	} {
+		if pin.MatchString(s) {
+			t.Errorf("ImagesIdentityRegexp accepts %s", s)
+		}
+	}
+}
+
+// TestImagesWorkflowSignsEveryDigestItPushes guards the mechanical half: the
+// permission keyless signing needs, the signing of the index and of every
+// platform manifest, the self-check against the pin, and the negative — a
+// digest nobody signed, and the release and edge pins, refused — including
+// through the published hub's own `cloop hub verify-image` and its bundled
+// cosign.
+func TestImagesWorkflowSignsEveryDigestItPushes(t *testing.T) {
+	wf := imagesWorkflow(t)
+	for _, want := range []struct{ snippet, why string }{
+		{"id-token: write", "keyless signing needs an OIDC token; without this permission cosign cannot reach Fulcio"},
+		{"sigstore/cosign-installer@v4", "cosign has to be installed in the runner before it can sign"},
+		{`cosign sign --yes "$REF@$d"`, "nothing signs the digests"},
+		{`select(.platform.os != "unknown")`, "each platform manifest is signed, not only the index"},
+		{`digests="$INDEX `, "the index a tag names is signed"},
+		{"cosign verify --certificate-oidc-issuer", "the signatures are verified before any hub runs the image"},
+		{"no signatures found", "a digest nobody signed must be refused for having no signature"},
+		{`grep -q "no matching"`, "another identity's pin must refuse the signatures for their signer"},
+		{`/\.github/workflows/edge\.yml@refs/heads/main$`, "the edge pin is shown not to vouch for an image"},
+		{`/\.github/workflows/release\.yml@refs/tags/v[^/]+$`, "the release pin is shown not to vouch for an image"},
+		{"hub verify-image --json", "the published hub's own check is run against what was signed"},
+		{"--entrypoint /usr/local/bin/cosign", "the hub image's bundled cosign is shown to run"},
+		{ImagesIdentityEnv, "the hub's override is shown to turn a pass into a mismatch"},
+	} {
+		if !strings.Contains(wf, want.snippet) {
+			t.Errorf("publish-images.yml no longer contains %q: %s", want.snippet, want.why)
+		}
+	}
+}
+
+// TestImagesWorkflowInstallsTheCosignTheHubBundles: what signs in CI is what
+// verifies in the published hub image, and the Dockerfile pins that binary by
+// its checksum for both architectures it is built for.
+func TestImagesWorkflowInstallsTheCosignTheHubBundles(t *testing.T) {
+	m := regexp.MustCompile(`cosign-release:\s*'(v[0-9.]+)'`).FindStringSubmatch(imagesWorkflow(t))
+	if m == nil {
+		t.Fatal("publish-images.yml no longer pins cosign-release")
+	}
+	b, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(b)
+	d := regexp.MustCompile(`(?m)^ARG COSIGN_VERSION=(v[0-9.]+)$`).FindStringSubmatch(dockerfile)
+	if d == nil {
+		t.Fatal("the Dockerfile no longer pins ARG COSIGN_VERSION; the hub image would carry no cosign, or an unpinned one")
+	}
+	if m[1] != d[1] {
+		t.Errorf("publish-images.yml signs with cosign %s, the hub image bundles %s", m[1], d[1])
+	}
+	for _, arch := range []string{"AMD64", "ARM64"} {
+		if !regexp.MustCompile(`(?m)^ARG COSIGN_SHA256_` + arch + `=[0-9a-f]{64}$`).MatchString(dockerfile) {
+			t.Errorf("the Dockerfile does not pin the %s cosign binary by its SHA-256", strings.ToLower(arch))
+		}
+	}
+	for _, want := range []string{`sha256sum -c -`, "COPY --from=cosign /out/cosign /usr/local/bin/cosign"} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("the Dockerfile no longer contains %q: the bundled cosign is not checked, or not shipped", want)
 		}
 	}
 }

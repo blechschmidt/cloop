@@ -336,7 +336,8 @@ sandbox:
     # Refuse a reference pinned only to a tag.
     require_digest: true
 
-    # Refuse an image cosign cannot verify. Needs the cosign binary on the hub.
+    # Refuse an image cosign cannot verify. Needs the cosign binary on the hub,
+    # which the published hub image bundles.
     require_signature: false
     cosign_public_keys:
       - /etc/cloop/cosign/acme.pub
@@ -346,6 +347,9 @@ sandbox:
 
     # Qualify a reference that names no registry. Unset, "alpine:3" is refused.
     default_registry: ""
+
+    # Hold the operator's own images to these rules too (see below).
+    govern_operator_images: false
 ```
 
 The policy is **deny-by-default within each rule it configures**: with
@@ -355,10 +359,22 @@ laptop's `image: python:3.12` keeps working across an upgrade. Rules that are
 *present* are the ones that bite, so `require_digest` on its own is a valid
 policy meaning "anywhere, but immutably".
 
-The policy governs **project-supplied images only**. `executors.container.image`
-and `executors.kubernetes.image` are the operator's own choice, made in the same
-file as the policy; running them through an allowlist the same person wrote
-would be a lint rather than a control.
+The policy governs **project-supplied images**. `executors.container.image`,
+`executors.kubernetes.image` and a device's or a virtual executor's sandbox image
+are the operator's own choice, made beside the policy; running them through an
+allowlist the same person wrote would be a lint rather than a control, so they
+run as configured unless `govern_operator_images: true` holds them to the same
+registries, digest and signature rules (Task 20453).
+
+**cloop's own images are checked whoever chose them.** `ghcr.io/blechschmidt/cloop`,
+`cloop-harness` and `cloop-harness-copilot` — the default image among them — are
+signed by the workflow that publishes them, and the hub verifies one against that
+workflow's identity before a sandbox runs it and dispatches the digest it
+verified: the default, an executor configured with it, a device's image, a project
+naming it. A signature present and wrong refuses the run; an unsigned image, or
+one nothing could check, runs with a warning unless `executors.image_provenance`
+is `required`. `govern_operator_images` does not reach them — they have their own
+pin. See [Image provenance](configuration.md#image-provenance).
 
 ### Matching is on the parsed reference
 

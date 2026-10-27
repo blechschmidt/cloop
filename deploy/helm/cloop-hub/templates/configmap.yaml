@@ -28,7 +28,7 @@ The Go validator catches this too, but by then it is a failed executor card in
 the dashboard rather than a line in `helm install`'s output.
 */ -}}
 {{- if and .Values.sandbox.imagePolicy.requireSignature (not .Values.sandbox.imagePolicy.cosignPublicKeys) (not .Values.sandbox.imagePolicy.cosignIdentities) }}
-{{- fail "cloop-hub: sandbox.imagePolicy.requireSignature is true but neither cosignPublicKeys nor cosignIdentities is set, so there is nothing to verify signatures against and every project image would be refused.\n\nSet one of:\n  sandbox.imagePolicy.cosignPublicKeys   paths to public keys inside the hub Pod\n  sandbox.imagePolicy.cosignIdentities   keyless {issuer, subjectRegexp} pairs\n\nNote also that requireSignature needs the cosign binary in the hub image; the published image does not ship it." }}
+{{- fail "cloop-hub: sandbox.imagePolicy.requireSignature is true but neither cosignPublicKeys nor cosignIdentities is set, so there is nothing to verify signatures against and every project image would be refused.\n\nSet one of:\n  sandbox.imagePolicy.cosignPublicKeys   paths to public keys inside the hub Pod\n  sandbox.imagePolicy.cosignIdentities   keyless {issuer, subjectRegexp} pairs\n\nThe published hub image bundles cosign; a hub image of your own needs it too." }}
 {{- end }}
 {{- if .Values.config.fromConfigMap }}
 apiVersion: v1
@@ -54,6 +54,10 @@ data:
       # image being distroless there is nothing to fork anyway, but the policy
       # is what makes the API refuse rather than the filesystem.
       allow_host_process: {{ .Values.config.allowHostProcess }}
+      # cloop's own images are verified against the workflow that publishes
+      # them before a sandbox runs one; "required" refuses one whose signature
+      # could not be verified (Task 20453).
+      image_provenance: {{ .Values.config.imageProvenance | default "warn" | quote }}
     {{- if .Values.executor.kubernetes.enabled }}
       kubernetes:
         enabled: true
@@ -181,10 +185,12 @@ data:
     # so a fresh install already constrains projects to the one registry this
     # deployment has decided to trust rather than to the whole Internet.
     #
-    # It governs project-supplied images only. The executor's own image, above,
-    # is the operator's choice made in this same file — running it through an
-    # allowlist the same person wrote would be a lint, not a control, and with
-    # require_digest on it would refuse the hub's own tagged image at boot.
+    # It governs project-supplied images, and the executor's own image above
+    # only under govern_operator_images: that is the operator's choice made in
+    # this same file — running it through an allowlist the same person wrote
+    # would be a lint, not a control, and with require_digest on it would
+    # refuse the hub's own tagged image at boot. cloop's own images are checked
+    # against their publishing workflow instead (executors.image_provenance).
     sandbox:
       image_policy:
         allowed_registries: {{ toJson (default (list (include "cloop-hub.imageRegistry" .)) .Values.sandbox.imagePolicy.allowedRegistries) }}
@@ -205,6 +211,9 @@ data:
         {{- end }}
         {{- with .Values.sandbox.imagePolicy.defaultRegistry }}
         default_registry: {{ . | quote }}
+        {{- end }}
+        {{- if .Values.sandbox.imagePolicy.governOperatorImages }}
+        govern_operator_images: true
         {{- end }}
 
     ui:

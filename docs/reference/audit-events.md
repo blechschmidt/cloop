@@ -110,7 +110,7 @@ Payload keys:
 
 - `task.attachment_delete` — `id`, `attachment_id`, `name`, `size`, `sha256`
 - `task.delete` — `id`
-- `task.dispatch` — `task_id`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `requested_image`, `pinned_image`, `spec_sha256`, `setup_sha256`, `lease_ids`
+- `task.dispatch` — `task_id`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `requested_image`, `pinned_image`, `image_provenance`, `verified_digest`, `spec_sha256`, `setup_sha256`, `lease_ids`
 - `task.finish` — `task_id`, `outcome`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `reason`, `started_at`, `completed_at`, `duration_ms`, `abort_class`, `abort_cleared`, `fail_count`, `write_back_commit`
 - `task.quarantine` — `task_id`, `title`, `kind`, `nodes`, `reason`
 - `task.quarantine_release` — `task_id`, `kind`, `nodes`, `marked_at`, `via`

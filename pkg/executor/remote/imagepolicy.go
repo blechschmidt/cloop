@@ -27,9 +27,11 @@ package remote
 // remediation.
 //
 // An operator's own image — the device's configured sandbox image, a virtual
-// executor's — is not a project's and is not checked, as the container driver
-// does not check executors.container.image. Only Spec.Image is: the field
-// pkg/sandbox fills from the repository's file.
+// executor's — is not a project's and is not checked against the project
+// rules, as the container driver does not check executors.container.image,
+// unless the policy says govern_operator_images (Task 20453). One of cloop's
+// own images is checked whoever chose it, against the pin of the workflow that
+// publishes it: authorizeRunImage below.
 
 import (
 	"context"
@@ -68,6 +70,133 @@ func (o Options) imageResolver() imagepolicy.Resolver {
 		return o.ImageResolver
 	}
 	return imagepolicy.NewRegistryResolver()
+}
+
+// provenanceVerifier returns the verifier for cloop's own images.
+func (o Options) provenanceVerifier() imagepolicy.ProvenanceVerifier {
+	if o.ProvenanceVerifier != nil {
+		return o.ProvenanceVerifier
+	}
+	return imagepolicy.SharedProvenanceVerifier()
+}
+
+// authorizeRunImage checks the image a dispatch's sandbox will run that the
+// project's own check above did not reach (Task 20453), and returns what the
+// check of one of cloop's own images found, or nil for any other image.
+//
+// The image is spec.Image when the project named one — already through the
+// project rules — and otherwise the operator's: the virtual executor's sandbox
+// image, the device's, or the device driver's default when neither names one.
+//
+//   - One of cloop's own, however it was chosen, is resolved at its registry —
+//     the hub holds no store of the device's to read — and the digest is
+//     verified against the workflow that publishes cloop's images. Verified,
+//     spec.Image becomes that digest: the device's driver never pulls and
+//     inspects exactly what it is given, so it runs the verified bytes or
+//     refuses naming the pull. Wrongly signed, the dispatch is refused.
+//     Unsigned or unverifiable, it is refused under
+//     executor.ImageProvenanceRequired and otherwise runs with a warning, as
+//     the tag the device pins in its own store — a digest the hub could not
+//     verify buys nothing, and would only strand a device holding an older
+//     copy of the tag.
+//   - An operator's image that is not cloop's is held to the project rules
+//     when the policy governs operator images, and dispatched as the
+//     reference they admitted.
+func (e *Executor) authorizeRunImage(ctx context.Context, spec *executor.Spec,
+	sandbox executor.SandboxSettings, virtual *VirtualDispatch) (*imagepolicy.Provenance, error) {
+	if !sandbox.RunsProjectImages() {
+		return nil, nil
+	}
+	image, field := strings.TrimSpace(spec.Image), "image: in the project's .cloop/sandbox.yaml"
+	if image == "" {
+		image, field = strings.TrimSpace(sandbox.Image), "the sandbox image of "+e.subject()
+		if virtual != nil {
+			field = "the sandbox image of virtual executor " + virtual.ID
+		}
+		if image == "" {
+			image, field = executor.DefaultHarnessImage, field+" (unset, so the default)"
+		}
+		if !imagepolicy.IsOwnImage(image) {
+			return nil, e.governOperatorImage(ctx, spec, image)
+		}
+	}
+	if !e.opts.VerifyOwnImages || !imagepolicy.IsOwnImage(image) {
+		return nil, nil
+	}
+	subject := e.subject()
+	if virtual != nil {
+		subject = "virtual executor " + virtual.ID + " on " + subject
+	}
+	p, err := imagepolicy.OwnImageCheck{
+		Image:    image,
+		Resolver: e.opts.imageResolver(),
+		Verifier: e.opts.provenanceVerifier(),
+		Required: executor.ImageProvenanceRequired(),
+		Subject:  subject,
+		Field:    field,
+	}.Run(ctx)
+	recordAs := e.id
+	if virtual != nil {
+		recordAs = virtual.ID
+	}
+	if err != nil {
+		var denied *imagepolicy.DenyError
+		if errors.As(err, &denied) {
+			imagepolicy.RecordProvenance(recordAs, p)
+			if denied.Malformed() {
+				return nil, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
+			}
+			return nil, err
+		}
+		// Not a verdict: every failure to resolve at the registry is one
+		// (unverifiable), so this is a digest the registry answered that is
+		// not one.
+		return nil, fmt.Errorf("remote: check %s for %s against the workflow that publishes cloop's images: %w",
+			image, subject, err)
+	}
+	imagepolicy.RecordProvenance(recordAs, p)
+	if p.Verified() {
+		spec.Image = p.Ref
+	}
+	return &p, nil
+}
+
+// governOperatorImage holds an operator's image that is not cloop's to the
+// project rules when the policy says govern_operator_images, and points the
+// dispatch at the reference they admitted — the verified digest under
+// require_signature.
+func (e *Executor) governOperatorImage(ctx context.Context, spec *executor.Spec, image string) error {
+	if e.opts.ImagePolicy == nil {
+		return nil
+	}
+	policy, err := e.opts.ImagePolicy()
+	if err != nil {
+		return &imagepolicy.DenyError{
+			Ref:  image,
+			Rule: imagepolicy.RuleConfig,
+			Reason: fmt.Sprintf("the hub could not read its image trust policy (%v), so it cannot say whether "+
+				"its policy governs %s's own image", err, e.subject()),
+			Remediation: "Fix the hub's configuration — `cloop config validate` in the hub's directory names " +
+				"what is wrong — and start the run again.",
+		}
+	}
+	if !policy.GovernsOperatorImage(image) {
+		return nil
+	}
+	enforcer := imagepolicy.Enforcer{Policy: policy, Verifier: e.opts.imageVerifier()}
+	if policy.RequireSignature {
+		enforcer.Resolver = e.opts.imageResolver()
+	}
+	res, err := enforcer.Authorize(ctx, image)
+	if err != nil {
+		var denied *imagepolicy.DenyError
+		if errors.As(err, &denied) {
+			return err
+		}
+		return unresolvedImage(image, e.subject(), err)
+	}
+	spec.Image = res.Ref
+	return nil
 }
 
 // authorizeProjectImage applies the hub's image trust policy to the image spec

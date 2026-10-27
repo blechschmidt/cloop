@@ -66,6 +66,11 @@ type stepSet struct {
 	executors     func(ctx context.Context, dir string, cfg *config.Config, opts Options, add addFn)
 	networkPolicy func(ctx context.Context, dir string, cfg *config.Config, opts Options, add addFn)
 	smoke         func(ctx context.Context, dir string, cfg *config.Config, opts Options, rep *Report, add addFn)
+	// verifyImages verifies cloop's own images in use before the provenance
+	// check reports them (Task 20453): cosign, image inspects and registry
+	// requests, which the hub's own diagnosis must not make. Nil there: it
+	// reports what the hub's dispatches found.
+	verifyImages func(ctx context.Context, dir string, cfg *config.Config, opts Options)
 }
 
 // steps returns every check for cfg, in report order. cfg must not be nil:
@@ -114,6 +119,16 @@ func steps(dir string, cfg *config.Config, opts Options, wal walSample, rep *Rep
 		// probed. Reads the evidence rows only; it starts no probe.
 		{"executors.isolation", "Executor isolation evidence", func(_ context.Context, add addFn) {
 			checkIsolationEvidence(dir, add)
+		}},
+		// After the executor step too: `cloop hub doctor` verifies through the
+		// drivers it reconciled. cloop's own images against the workflow that
+		// publishes them, and whether cosign is here to check them (Task
+		// 20453).
+		{"images.provenance", "Image provenance", func(ctx context.Context, add addFn) {
+			if set.verifyImages != nil {
+				set.verifyImages(ctx, dir, cfg, opts)
+			}
+			checkImageProvenance(dir, cfg, opts, add)
 		}},
 		{"runs.build_lag", "Builds of the runs on this host", func(_ context.Context, add addFn) { checkRunBuilds(add) }},
 		// Beside it: the credentials an adopted run's hub process could not

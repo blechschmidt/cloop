@@ -3600,6 +3600,41 @@ protocol on its own. `CLOOP_PROVENANCE_EDGE_IDENTITY` repoints this pin for a
 fork, and is deliberately a different variable from `CLOOP_PROVENANCE_IDENTITY`.
 See the [edge channel guide](../guides/edge-channel.md) for the channel's limits.
 
+### cloop's container images: a third pin
+
+The images `.github/workflows/publish-images.yml` publishes —
+`ghcr.io/blechschmidt/cloop`, `cloop-harness` and `cloop-harness-copilot` — are
+signed by that workflow, keyless, every digest it pushes: the multi-arch index a
+tag names and each platform's manifest, which a podman store or a pull by
+platform records instead (Task 20453). They are trusted by a pin of their own:
+
+| Pinned | Value | Declared in |
+| --- | --- | --- |
+| Images signing identity | `^https://github\.com/blechschmidt/cloop/\.github/workflows/publish-images\.yml@refs/(heads/main\|tags/v[^/]+)$` | `provenance.ImagesIdentityRegexp` |
+
+The two refs are the two the workflow publishes from: a push to `main` moves
+`:edge`, a release tag moves the version tags and `:latest`, and the job refuses
+to run anywhere else, so a dispatch from another branch cannot push an image
+under an identity every hub refuses (`TestImagesWorkflowPublishesOnlyFromThePinnedRefs`).
+The same job verifies what it signed against this pin, and proves the negative
+before any hub is asked to run the image: a digest nobody signed is refused as
+unsigned, the release and edge pins refuse the signatures, and the published hub
+image's own `cloop hub verify-image`, with the cosign it bundles, reports them
+`verified`, `unsigned` and `mismatch` (`TestImagesWorkflowSignsEveryDigestItPushes`).
+
+A hub checks every dispatch of one of these images against the pin, however the
+image was chosen — the default, an executor configured with it, a device's or a
+virtual executor's sandbox image, a project naming it — and dispatches the
+digest it verified. What it does with an image that is not verified is
+`executors.image_provenance`: a signature present and wrong always refuses; an
+unsigned image, or one nothing could check, runs with a warning under `warn`,
+the default, and is refused under `required`
+([cloop's own images](#cloops-own-images--imageprovenance_testgo)). The pin is
+separate from the release and edge pins in both directions, and so are its
+overrides: `CLOOP_PROVENANCE_IMAGES_ISSUER` and `CLOOP_PROVENANCE_IMAGES_IDENTITY`
+repoint it for an enterprise that rebuilds the images and signs them itself
+(`TestImagesPinIsItsOwn`).
+
 ### Upgrades the hub asks for, and the privilege they need
 
 The agent runs unprivileged (`NoNewPrivileges`, `ProtectSystem=strict`), so it
@@ -4270,6 +4305,27 @@ an image the operator's policy admits, or does not start.
 | The shipped Helm chart default actually denies something | `TestChartDefaultPolicyIsRestrictive` |
 | An unconfigured hub allows any image — asserted, so the day it changes in either direction is visible | `TestNoPolicyIsNotSilentlyAPolicy` |
 | `Evaluate` is pure and deterministic, so the UI's preview and the executor's decision cannot disagree | `TestEvaluateIsPure` in `pkg/imagepolicy` |
+
+### cloop's own images — `imageprovenance_test.go`
+
+The image nearly every sandbox runs is cloop's own — the default,
+`ghcr.io/blechschmidt/cloop-harness:latest` — and the project policy above does
+not reach it: it governs what a repository names, and an operator's image is
+chosen beside it. So cloop's images are held to a pin of their own, whoever
+chose them: the identity of `.github/workflows/publish-images.yml` on `main` or a
+release tag, which signs every digest it pushes (Task 20453).
+
+| Guarantee | Test |
+| --- | --- |
+| Under `executors.image_provenance: required` no sandbox runs one of cloop's images by tag: the container executor, a device and a virtual executor run the digest cosign verified — from the local store, and from the registry for a device — and Kubernetes, which can verify only a digest, refuses a tag | `TestNoSandboxRunsACloopImageByTag`, `TestADeviceRunsTheDigestTheHubVerified`, `TestAVirtualExecutorsCloopImageIsVerified`, `TestADigestOfCloopsImageIsVerifiedBeforeAPodRunsIt` |
+| A signature present and not the publishing workflow's refuses the dispatch whatever the setting, with cosign's diagnosis | `TestAWronglySignedCloopImageNeverRuns`, `TestAWrongSignatureRefusesTheStartInEveryMode`, `TestAWrongSignatureNeverReachesAPod`, `TestADeviceIsNeverSentAWronglySignedImage` |
+| An unsigned image, one nothing could check, and a Kubernetes tag run with a warning on the run under `warn` and are refused under `required` | `TestOwnImageCheckWarnsOrRefusesWhatIsNotVerified`, `TestAnUnsignedImageWarnsOrIsRefused`, `TestAnUnsignedDigestWarnsOrIsRefused`, `TestAnUnsignedDeviceImageWarnsOrIsRefused`, `TestATagOfCloopsImageOnKubernetesIsSaidToBeUnverifiable` |
+| cosign's answers are read as cosign means them, and nothing but exit status 0 is a pass; a tag is never verified | `TestCosignProvenanceVerifierReadsCosignsAnswers`, `TestCosignProvenanceVerifierNeverVerifiesATag`, `TestCosignProvenanceVerifierWithoutCosign` |
+| A repository that merely begins with one of cloop's names, the same path on another registry, and an unqualified name are not cloop's | `TestIsOwnImage` |
+| An operator's image that is not cloop's is left alone unless `govern_operator_images` holds it to the project rules | `TestAnOperatorImageIsLeftAloneUnlessGoverned`, `TestAnOperatorPodImageIsLeftAloneUnlessGoverned`, `TestADevicesOwnImageIsGovernedOnlyWhenAsked` |
+| A device checks nothing itself: the hub verified what it dispatched there | `TestADevicesDriverChecksNothingItself`, `TestWithoutVerifyOwnImagesTheDeviceIsLeftToItsOwnPin` |
+| The publishing workflow signs every digest it pushes, verifies them against the pin, proves an unsigned digest and the release and edge pins refused, and runs from the triggers the pin accepts with the cosign the hub image bundles | `TestImagesWorkflowSignsEveryDigestItPushes`, `TestImagesWorkflowPinsTheSameIdentity`, `TestImagesWorkflowPublishesOnlyFromThePinnedRefs`, `TestImagesWorkflowInstallsTheCosignTheHubBundles` |
+| The images pin has its own overrides, and neither the release nor the edge variables move it | `TestImagesPinIsItsOwn` |
 
 ### Workspace provisioning — `workspace_test.go`
 
@@ -4980,22 +5036,46 @@ itself non-dumpable, because the kernel went on serving the token at
 workload runs as the agent's own user, bounded from the agent's memory by
 nothing but the kernel's ptrace policy.
 
-**Image signatures are verified only where a policy asks for them, and never
-on the operator's own images.** `sandbox.image_policy.require_signature` has
-the hub verify, with cosign, the digest a project's image runs from — on the
-container and Kubernetes executors, and since Task 20424 for a device or a
-virtual executor too, whose tag the hub resolves at its registry and dispatches
-by the digest it verified (`TestADeviceRunsOnlyASignatureVerifiedImage`). Three
-things it leaves. The policy is off unless configured: an unconfigured hub runs
-any image a project names (`TestNoPolicyIsNotSilentlyAPolicy`). An operator's
-own image — `executors.*.image`, a device's or a virtual executor's configured
-sandbox image — is chosen beside the policy and exempt from it
+**cloop's own images are verified against the workflow that publishes them,
+but under the default an unsigned one still runs, and an operator's other images
+are exempt from the policy unless it governs them.** Every digest
+`.github/workflows/publish-images.yml` pushes — the multi-arch index and each
+platform manifest of `ghcr.io/blechschmidt/cloop`, `cloop-harness` and
+`cloop-harness-copilot` — is signed keyless by that workflow on `main` or a
+release tag, and since Task 20453 the hub verifies one of those images wherever
+it dispatches it: the default, an executor configured with it, a device's or a
+virtual executor's sandbox image, a project naming it. The digest comes from the
+local store on the container executor and from the registry for a device, and
+the dispatch names the digest cosign verified
+(`TestNoSandboxRunsACloopImageByTag`); a signature present and not that
+workflow's refuses whatever the setting (`TestAWronglySignedCloopImageNeverRuns`).
+Five things it leaves. Under the default `executors.image_provenance: warn`, an
+image with no signature runs with a warning on the run and in `cloop hub
+doctor` — every image published before signing began, and one somebody with
+write access to the packages pushed unsigned; a signature can always be
+deleted, so only `required` refuses it (`TestAnUnsignedImageWarnsOrIsRefused`,
+`TestAnUnsignedDeviceImageWarnsOrIsRefused`). The pin vouches for "built by this
+repository's publishing workflow from `main` or a release tag", and anyone who
+can push to `main` can change what that builds
+(`TestImagesWorkflowPublishesOnlyFromThePinnedRefs`). Kubernetes verifies only a
+digest: the hub has no image store to resolve a tag in, so cloop's image named
+by tag reaches the kubelet unverified, with the warning, unless `required`
+refuses it (`TestATagOfCloopsImageOnKubernetesIsSaidToBeUnverifiable`) — and a
+project's own tag there is resolved whenever a node pulls it, unless
+`require_digest` or `require_signature` refuses it
+(`TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo`,
+`TestATagCannotBeSignatureVerifiedWithoutAResolver`). The project policy is off
+unless configured (`TestNoPolicyIsNotSilentlyAPolicy`), and an operator's image
+that is not cloop's — `executors.*.image`, a device's or a virtual executor's
+sandbox image — is chosen beside it and exempt from it unless
+`sandbox.image_policy.govern_operator_images` is set
 (`TestDeviceLeavesTheOperatorsImageAlone`,
-`TestOperatorImageIsNotGovernedByThePolicy`). And Kubernetes cannot pin a tag:
-the hub has no image store to resolve one in, so a tag reaches the kubelet as a
-tag, resolved whenever a node pulls it, unless `require_digest` or
-`require_signature` refuses it (`TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo`,
-`TestATagCannotBeSignatureVerifiedWithoutAResolver`).
+`TestOperatorImageIsNotGovernedByThePolicy`,
+`TestAnOperatorImageIsLeftAloneUnlessGoverned`). And a device is sent the digest
+the registry serves now: one holding an older copy of the tag refuses the start
+until it pulls that digest, and one whose image could not be verified runs its
+own copy of the tag, which the hub has not seen
+(`TestADeviceRunsTheDigestTheHubVerified`).
 
 **The container runtime socket is trusted implicitly.** Anyone who can reach the
 Docker/Podman socket the hub uses is root-equivalent on that host

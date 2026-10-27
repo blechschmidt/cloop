@@ -272,6 +272,19 @@ const (
 	// is on the hub.
 	EventIsolationEvidence EventType = "isolation_evidence"
 
+	// EventImageProvenance records that one of cloop's own images ran without
+	// a verified signature from the workflow that publishes them (Task
+	// 20453): the image carries none — it was published before signing
+	// began, or pushed unsigned — or nothing could check it, because the hub
+	// has no cosign, cannot reach the registry or Sigstore, or the executor
+	// cannot resolve a tag. executors.image_provenance: required refuses such
+	// a dispatch instead. Written once per hub process for each image digest
+	// and verdict.
+	//
+	// On the project's journal because the image ran the project's work;
+	// the setting that would have refused it is the hub's.
+	EventImageProvenance EventType = "image_provenance"
+
 	// EventLeaseTakeover records what became of a credential an adopted run's
 	// owner row names when the hub process adopting the run could not take it
 	// over at once (Task 20451): its secret lease, its workspace lease or its

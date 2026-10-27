@@ -661,7 +661,8 @@ sandbox:
     allowed_registries: [ghcr.io]     # also "*.example.com" or "*"
     allowed_repos: [ghcr.io/acme/*]   # optional; empty means any repo there
     require_digest: true              # refuse a reference pinned to a tag
-    require_signature: false          # cosign; needs the binary on the hub
+    require_signature: false          # cosign; the published hub image bundles it
+    govern_operator_images: false     # also check the operator's own images
 ```
 
 Matching is on the **parsed** reference, so `ghcr.io` here admits neither
@@ -675,6 +676,14 @@ cluster's image store, so an unpinned reference is resolved by a kubelet, on a
 node, when it schedules. The [Helm chart](../../deploy/helm/cloop-hub) sets it,
 and defaults `allowed_registries` to the registry the hub's own image comes
 from.
+
+The policy governs the images a *project* names. An operator's own image —
+`executors.container.image`, `executors.kubernetes.image`, a device's or a
+virtual executor's sandbox image — is chosen beside it and runs as configured,
+unless `govern_operator_images: true` holds it to the same registries, digest
+and signature rules (Task 20453). cloop's own images are the exception both
+ways: whoever chose them, they are checked against the workflow that publishes
+them instead — see [Image provenance](#image-provenance).
 
 Rules, denial codes, the cosign contract and the audit record:
 **[Image trust policy](sandbox.md#image-trust-policy)**.
@@ -1282,6 +1291,56 @@ Before turning on `required`, check the Executors panel or `cloop hub doctor`
 (`executors.isolation`): a device whose agent predates protocol v26 cannot be
 probed, so every project requiring isolation on it would be refused until it is
 upgraded. See [The name is checked](../architecture/executors.md#the-name-is-checked-isolation-evidence).
+
+### Image provenance
+
+What a dispatch does with one of cloop's own images whose signature it could
+not verify:
+
+```yaml
+executors:
+  image_provenance: required   # or warn, the default
+```
+
+cloop's published images — `ghcr.io/blechschmidt/cloop`, `cloop-harness` and
+`cloop-harness-copilot` — are signed by `.github/workflows/publish-images.yml`,
+keyless, every digest it pushes. Since Task 20453 the hub checks one of them
+before a sandbox runs it, however it was chosen: the default image, an executor
+configured with it, a device's or a virtual executor's sandbox image, a project
+naming it. The tag is resolved to a digest — from the local image store after
+the pull on the container executor, at the registry for a device — cosign
+verifies the digest against that workflow's identity on `main` or a release tag,
+and the dispatch names the digest.
+
+| cosign finds | `warn` (default) | `required` |
+| --- | --- | --- |
+| the workflow's signature | runs the verified digest | runs the verified digest |
+| a signature from anyone else, or bytes that do not match | **refused** | **refused** |
+| no signature — an image published before signing began, or pushed unsigned | runs, with a warning on the run and in `cloop hub doctor` | refused |
+| nothing could check: no cosign on the hub, the registry or Sigstore out of reach, an image built locally, a tag on Kubernetes | runs, with the warning | refused |
+
+On Kubernetes only an image configured by digest can be checked — the hub has no
+image store to resolve a tag in — so `executors.kubernetes.image` by tag gets the
+warning saying so, and `required` refuses it until it is pinned by digest. On a
+device the verified digest is what the start frame names, and the device's
+engine never pulls: a device holding an older copy of the tag refuses the start
+naming `docker pull <digest>`. An image that could not be verified is left to the
+device's own copy of the tag, with the warning.
+
+The published hub image bundles cosign (v3.1.4, pinned by checksum); elsewhere
+install it on the hub's `PATH`. `cloop hub verify-image <image>` makes the check
+by hand, and `cloop hub doctor` reports it as `images.provenance`: whether cosign
+is present and its version, the setting, and what each image in use resolved to.
+Before turning on `required`, check that the images in use are signed — every
+image published before Task 20453 is not: pull `:edge`, or a release after
+v0.0.7. An enterprise that rebuilds the images and signs them itself repoints the
+pin with `CLOOP_PROVENANCE_IMAGES_ISSUER` and `CLOOP_PROVENANCE_IMAGES_IDENTITY`,
+which move neither the release nor the edge pin.
+
+Like `isolation_evidence` it is a **ratchet**: once a hub requires verified
+images, a tenant's `config.yaml` saying `warn` does not relax it, and `cloop
+config set` refuses any other value. It is a hub-scope key, so the per-instance
+overlay `config.ui-<port>.yaml` may set it for one hub alone.
 
 ### Feature bundles
 
@@ -2878,7 +2937,7 @@ ui:
 | Key | What the hub does with it |
 | --- | --- |
 | `executors.allow_host_process` | Whether a harness may run on this host at all. `false` in the overlay puts this hub in strict mode; `true` there relaxes a shared `config.yaml` that says `false`, for this hub alone. |
-| `executors.min_agent_build`, `executors.limits`, `executors.isolation_evidence` | The oldest agent build the hub will place work on, the fleet resource ceiling, and whether an executor whose isolation claim was never verified is refused. As with `allow_host_process`, a value the overlay states replaces `config.yaml`'s. Once installed, nothing the process reads later can loosen any of them. |
+| `executors.min_agent_build`, `executors.limits`, `executors.isolation_evidence`, `executors.image_provenance` | The oldest agent build the hub will place work on, the fleet resource ceiling, whether an executor whose isolation claim was never verified is refused, and whether one of cloop's own images whose signature was not verified is. As with `allow_host_process`, a value the overlay states replaces `config.yaml`'s. Once installed, nothing the process reads later can loosen any of them. |
 | `executors.container`, `executors.kubernetes`, `executors.orphan_sweep_interval_minutes` | Which isolating drivers the hub registers at startup, and how often it sweeps their orphans. |
 | `executors.git_proxy`, `executors.kube_guard` | The git interception proxy and the Kubernetes access monitor, started at startup. |
 | `executors.egress` | The egress proxy, bound at startup. In a cluster each member binds its own, so `listen_addr` belongs here when two members share a host. |

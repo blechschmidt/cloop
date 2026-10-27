@@ -72,6 +72,41 @@ schema and the hub's HTTP API may change in any release.
   destroy it. `tests/arch` and the `tests/security` call graph now hold every
   lease and every in-hub path to the pin. Single-user hubs are unchanged
   (Task 20449).
+- **cloop's published images are signed, and a hub verifies cloop's own image
+  by digest before a sandbox runs it.** `publish-images.yml` pushed
+  `ghcr.io/blechschmidt/cloop`, `cloop-harness` and `cloop-harness-copilot`
+  unsigned, and the image every sandbox runs by default — the mutable tag
+  `cloop-harness:latest` — was exempt from `sandbox.image_policy` along with
+  every image an operator chose, so anyone who could push to those packages (a
+  leaked publishing token, a compromised workflow) decided what ran beside every
+  lease's credentials on every hub using the default. Now the workflow signs
+  every digest it pushes, keyless — the multi-arch index and each platform
+  manifest — verifies them against its own identity, and proves the negative: a
+  digest nobody signed, and the release and edge pins, are refused, including
+  by the published hub's own `cloop hub verify-image` with the cosign it now
+  bundles. `pkg/provenance` gains a third pin, `ImagesIdentityRegexp`, for that
+  workflow on `main` and release tags only, overridable on its own with
+  `CLOOP_PROVENANCE_IMAGES_ISSUER` / `CLOOP_PROVENANCE_IMAGES_IDENTITY`, and a
+  drift test holds the workflow's triggers, pin and cosign version to it.
+  Wherever the hub dispatches one of cloop's own images — the default, one
+  configured explicitly, a device's or a virtual executor's sandbox image, one a
+  project names — it resolves the digest (from the local store on the container
+  executor, at the registry for a device), verifies it with cosign and
+  dispatches the digest; Kubernetes can check only an image configured by
+  digest and warns on a tag. The verdict and the verified digest are recorded on
+  the handle, every task artifact (`sandbox_image_provenance`,
+  `sandbox_image_verified_digest`) and the `task.dispatch` audit row
+  (`image_provenance`, `verified_digest`). A signature present and wrong always
+  refuses the dispatch. An unsigned image — every one published before this —
+  or a hub without cosign is a warning on the run and in `cloop hub doctor` and
+  Settings → Hub health (`images.provenance`, which also reports cosign's
+  version), so an upgrade never stops a working hub; the new
+  `executors.image_provenance: required` refuses them. The hub image bundles
+  cosign v3.1.4, pinned by checksum. The new
+  `sandbox.image_policy.govern_operator_images: true` applies the project rules
+  to operator-chosen images that are not cloop's own. A device holding an
+  older copy of a cloop image refuses a dispatch of the verified digest until it
+  pulls it (`docker pull` of the digest the refusal names) (Task 20453).
 
 ### Added
 

@@ -300,8 +300,11 @@ For Kubernetes there is a chart at `deploy/helm/cloop-hub`. Its default
 `image.repository` is `ghcr.io/blechschmidt/cloop` and `image.tag` defaults to
 the chart's `appVersion`. Both images are published to GHCR by
 `.github/workflows/publish-images.yml` on every release tag, with `:edge`
-tracking `main`. For production, pin by digest rather than by tag — a floating
-tag means the thing that runs your agents can change without a deploy.
+tracking `main`, and every digest it pushes is signed by that workflow, keyless
+(Task 20453): `cloop hub verify-image ghcr.io/blechschmidt/cloop:<tag>` checks
+one, and a hub checks cloop's images itself before a sandbox runs one. For
+production, pin by digest rather than by tag — a floating tag means the thing
+that runs your agents can change without a deploy.
 
 ---
 

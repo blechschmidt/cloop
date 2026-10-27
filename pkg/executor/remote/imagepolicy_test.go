@@ -282,8 +282,11 @@ func TestDeviceRefusesWithoutCosign(t *testing.T) {
 
 // TestDeviceLeavesTheOperatorsImageAlone: the device's configured sandbox
 // image is the operator's choice, made beside the policy, and is exempt as
-// executors.container.image is on the hub's container driver. Only the image
-// a project names is checked.
+// executors.container.image is on the hub's container driver — unless the
+// policy says govern_operator_images, and unless it is one of cloop's own,
+// which is checked against its publishing workflow (Task 20453;
+// TestADevicesOwnImageIsGovernedOnlyWhenAsked). Only the image a project names
+// is checked against the project rules.
 func TestDeviceLeavesTheOperatorsImageAlone(t *testing.T) {
 	cosign, _ := stubCosign(t)
 	verifier := &countingVerifier{inner: &imagepolicy.CosignVerifier{Binary: cosign}}

@@ -66,6 +66,15 @@ type ImagePolicyConfig struct {
 	// registry it resolves to is the executor host's configuration rather
 	// than anything this policy can see.
 	DefaultRegistry string `yaml:"default_registry,omitempty"`
+	// GovernOperatorImages applies the rules above — registries, digest,
+	// signature — to the images an operator chose too (Task 20453):
+	// executors.container.image, executors.kubernetes.image, and a device's
+	// or virtual executor's sandbox image, when they are not one of cloop's
+	// own. Those are checked against the pin of the workflow that publishes
+	// them whatever this says. Off by default: the operator's image is chosen
+	// beside the policy, and a chart default of "digests only" would
+	// otherwise refuse a tagged executor image at boot.
+	GovernOperatorImages bool `yaml:"govern_operator_images,omitempty"`
 }
 
 // Policy converts the config section into the enforcement type.
@@ -85,6 +94,8 @@ func (c ImagePolicyConfig) Policy() imagepolicy.Policy {
 		RequireSignature:  c.RequireSignature,
 		CosignPublicKeys:  c.CosignPublicKeys,
 		DefaultRegistry:   c.DefaultRegistry,
+
+		GovernOperatorImages: c.GovernOperatorImages,
 	}
 	if len(ids) > 0 {
 		p.CosignIdentities = ids

@@ -140,6 +140,23 @@ type Policy struct {
 	// registries on two executors in the same fleet. An operator who wants the
 	// Docker convention writes it down here.
 	DefaultRegistry string `json:"default_registry,omitempty" yaml:"default_registry,omitempty"`
+
+	// GovernOperatorImages applies the rules above to the images an operator
+	// chose — an executor's configured image, a device's or a virtual
+	// executor's sandbox image — and not only to the ones a project names
+	// (Task 20453). cloop's own images are held to their publishing
+	// workflow's pin (provenance.go) whatever this says, so it reaches the
+	// operator images that are not cloop's. It decides which images a
+	// policy is applied to, not what the policy says about one, so it is not
+	// part of Configured or Fingerprint.
+	GovernOperatorImages bool `json:"govern_operator_images,omitempty" yaml:"govern_operator_images,omitempty"`
+}
+
+// GovernsOperatorImage reports whether an operator-chosen image is checked
+// against this policy: govern_operator_images is on, and the image is not one
+// of cloop's own, which have a pin of their own.
+func (p Policy) GovernsOperatorImage(ref string) bool {
+	return p.GovernOperatorImages && !IsOwnImage(ref)
 }
 
 // Configured reports whether this policy constrains anything.

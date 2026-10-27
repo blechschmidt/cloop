@@ -128,6 +128,11 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			// image a project names, before dispatch (Task 20424): nothing on
 			// a device does. See deviceImagePolicy.
 			ImagePolicy: s.deviceImagePolicy,
+			// And cloop's own images, whoever chose them, checked against
+			// the workflow that publishes them before a dispatch, a tag
+			// resolved at its registry and the verified digest dispatched
+			// (Task 20453).
+			VerifyOwnImages: true,
 			// Agents send no Origin, so these only ever affect browsers.
 			//
 			// The hub gets AllowedOrigins but NOT AllowedWSOrigins: an entry

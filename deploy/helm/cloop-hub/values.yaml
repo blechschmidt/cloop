@@ -138,6 +138,20 @@ config:
   # or set the escape hatch below.
   allowHostProcess: false
 
+  # What a dispatch does with one of cloop's own images — ghcr.io/blechschmidt/
+  # cloop, cloop-harness, cloop-harness-copilot, which executor.kubernetes.image
+  # defaults to — whose signature the hub could not verify against the
+  # workflow that publishes them (executors.image_provenance, Task 20453).
+  #
+  # "warn" runs it with a warning on the run and in Settings → Hub health;
+  # "required" refuses it. A signature that is present and wrong refuses the
+  # run either way. The hub image bundles cosign, so verification works out of
+  # the box — but on Kubernetes only an image named by digest can be checked:
+  # with "required", pin executor.kubernetes.image (or image.tag's image) by
+  # digest, or every run is refused. Images published before signing began
+  # carry no signature; check yours with `cloop hub verify-image <image>`.
+  imageProvenance: warn
+
   # Skip that check. For adopting a hub whose fleet is enrolled remote agents:
   # it starts not-ready — correctly, it has nothing to dispatch to — and
   # becomes ready when the first agent connects. Raise
@@ -194,10 +208,12 @@ sandbox:
 
     # Refuse an image whose signature cosign cannot verify.
     #
-    # Off by default because it needs the cosign binary in the hub image and
-    # keys or identities below. When it is on and cosign is missing, the hub
-    # refuses every project image rather than admitting them unchecked — that
-    # is the intended behaviour, and it is why this is opt-in.
+    # Off by default because it needs keys or identities below to verify
+    # against. The published hub image bundles cosign (Task 20453); on a hub
+    # image without it, this refuses every project image rather than admitting
+    # them unchecked — the intended behaviour. cloop's own images are verified
+    # against the workflow that publishes them whatever this says
+    # (config.imageProvenance).
     requireSignature: false
 
     # Paths (inside the hub Pod) to cosign public keys. Any one may carry the
@@ -218,6 +234,14 @@ sandbox:
     # unqualified-search-registries), so the same reference can legitimately
     # pull from different places on two nodes in one fleet.
     defaultRegistry: ""
+
+    # Hold the operator's own images — executor.kubernetes.image, and a
+    # device's or a virtual executor's sandbox image — to the rules above too,
+    # not only the images a project names (Task 20453). cloop's own images are
+    # not affected: they have the pin of their own publishing workflow. Off by
+    # default because, with requireDigest on, a tagged executor image would be
+    # refused at the first run.
+    governOperatorImages: false
 
 oidc:
   enabled: false

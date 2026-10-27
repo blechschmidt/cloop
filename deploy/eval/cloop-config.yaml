@@ -105,10 +105,12 @@ sandbox:
     # on some node, where nothing but this can close the gap.
     require_digest: true
 
-    # Verify signatures with cosign. Off here because the published hub image
-    # does not ship the cosign binary, and with it on a hub that cannot verify
-    # refuses every project image rather than admitting them unchecked. Turn it
-    # on with an image that has cosign, plus keys or identities:
+    # Verify project images' signatures with cosign. Off here because it needs
+    # keys or identities to verify against, and with it on, an image nothing
+    # can verify is refused rather than admitted unchecked. The published hub
+    # image bundles cosign (Task 20453), which already verifies cloop's own
+    # images against the workflow that publishes them. Turn it on with keys
+    # or identities:
     #
     # require_signature: true
     # cosign_identities:

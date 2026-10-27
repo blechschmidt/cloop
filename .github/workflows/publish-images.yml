@@ -12,6 +12,16 @@
 # Nothing here needs a secret: GITHUB_TOKEN can push to ghcr.io under the
 # repository owner's namespace given `packages: write`, and the package it
 # creates is linked back to this repository automatically.
+#
+# Every digest it pushes is signed, keyless (Task 20453): the multi-arch index
+# and each platform manifest, by this workflow's own identity, which Fulcio
+# names as .../.github/workflows/publish-images.yml@<ref>. A hub verifies
+# cloop's own images against exactly that identity — pkg/provenance's
+# ImagesIdentityRegexp, which accepts main and release tags and nothing else —
+# before a sandbox runs one, so whoever can push to these packages without
+# being this workflow can no longer decide what runs beside a lease's
+# credentials. pkg/provenance's workflow_drift_test.go holds this file's
+# triggers, its pin and its cosign version to the Go side.
 
 name: Publish images
 
@@ -38,11 +48,13 @@ on:
         type: boolean
         default: false
 
-# Least privilege: read the tree, write packages. Notably NOT contents: write —
-# publishing an image must not be able to move a tag or edit a release.
+# Least privilege: read the tree, write packages, and request the OIDC token
+# keyless signing proves this workflow's identity with. Notably NOT contents:
+# write — publishing an image must not be able to move a tag or edit a release.
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 concurrency:
   # Serialise per ref so two pushes cannot race to move the same tag, but let
@@ -53,6 +65,10 @@ concurrency:
 jobs:
   publish:
     name: ${{ matrix.image }} (${{ matrix.target }})
+    # Only the refs the signing pin accepts: main and release tags. A
+    # workflow_dispatch from any other branch would push images signed under
+    # an identity every hub refuses as wrongly signed, so it never starts.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     # The harness builds arm64 under emulation because the claude CLI's native
     # helpers have to be selected for the target architecture, not the builder's
@@ -178,6 +194,124 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+      - name: Install cosign
+        # The version the hub image bundles (the Dockerfile's COSIGN_VERSION;
+        # workflow_drift_test.go holds the two equal), so what signs here is
+        # what verifies on a hub built from the same tree.
+        uses: sigstore/cosign-installer@v4
+        with:
+          cosign-release: 'v3.1.4'
+
+      - name: Sign the index and every platform manifest
+        # Keyless: the OIDC token proves this workflow's identity to Fulcio,
+        # which certifies it, and the signature is recorded in Rekor and stored
+        # beside the image. Every digest a hub could resolve the tags to is
+        # signed — the index a tag names, and each platform's manifest, which a
+        # podman store or a pull by platform records instead. The attestation
+        # manifests buildx adds (platform unknown/unknown) are not runnable and
+        # are left unsigned; the next step uses one as the digest nobody
+        # signed.
+        #
+        # Signed right after the push: the tags name the new index from the
+        # push on, so for the minute this takes a hub resolving them finds it
+        # unsigned — a warning, or a refusal under image_provenance: required.
+        id: sign
+        env:
+          REF: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          INDEX: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "$REF@$INDEX" > /tmp/index.json
+          platforms=$(jq -r '.manifests[] | select(.platform.os != "unknown") | .digest' /tmp/index.json)
+          unsigned=$(jq -r '.manifests[] | select(.platform.os == "unknown") | .digest' /tmp/index.json | head -n1)
+          [ -n "$platforms" ] || { echo "::error::$REF@$INDEX lists no platform manifests"; exit 1; }
+          [ -n "$unsigned" ] || { echo "::error::$REF@$INDEX carries no attestation manifest to prove an unsigned digest is refused with"; exit 1; }
+          digests="$INDEX $(echo "$platforms" | tr '\n' ' ')"
+          for d in $digests; do
+            echo "==> signing $REF@$d"
+            cosign sign --yes "$REF@$d"
+          done
+          echo "digests=$digests" >> "$GITHUB_OUTPUT"
+          echo "unsigned=$unsigned" >> "$GITHUB_OUTPUT"
+
+      - name: The signatures verify against the pinned images identity
+        # The exact check a hub makes before a sandbox runs one of these, against
+        # the same literal pin as pkg/provenance.ImagesIdentityRegexp
+        # (TestImagesWorkflowPinsTheSameIdentity holds the two together). A
+        # mismatch fails here, before any hub is asked to run the image.
+        env:
+          REF: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          DIGESTS: ${{ steps.sign.outputs.digests }}
+        run: |
+          set -euo pipefail
+          issuer="https://token.actions.githubusercontent.com"
+          identity="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/publish-images\.yml@refs/(heads/main|tags/v[^/]+)$"
+          for d in $DIGESTS; do
+            cosign verify --certificate-oidc-issuer "$issuer" --certificate-identity-regexp "$identity" \
+              "$REF@$d" > /dev/null
+            echo "ok: $REF@$d"
+          done
+
+      - name: An unsigned digest and another identity are refused
+        # The negative, as edge.yml's tamper check proves it for archives: a
+        # digest nobody signed is reported unsigned, and the digests just
+        # signed are refused by the release and edge pins, which must never
+        # vouch for an image.
+        env:
+          REF: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          INDEX: ${{ steps.build.outputs.digest }}
+          UNSIGNED: ${{ steps.sign.outputs.unsigned }}
+        run: |
+          set -euo pipefail
+          issuer="https://token.actions.githubusercontent.com"
+          images="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/publish-images\.yml@refs/(heads/main|tags/v[^/]+)$"
+          if cosign verify --certificate-oidc-issuer "$issuer" --certificate-identity-regexp "$images" \
+               "$REF@$UNSIGNED" > /tmp/unsigned.txt 2>&1; then
+            echo "::error::cosign accepted $REF@$UNSIGNED, which nothing signed"; exit 1
+          fi
+          grep -q "no signatures found" /tmp/unsigned.txt || {
+            echo "::error::an unsigned digest was refused for another reason than having no signature:"; cat /tmp/unsigned.txt; exit 1; }
+          echo "ok: $REF@$UNSIGNED carries no signature and is refused"
+          for other in \
+            "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/edge\.yml@refs/heads/main$" \
+            "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/tags/v[^/]+$"; do
+            if cosign verify --certificate-oidc-issuer "$issuer" --certificate-identity-regexp "$other" \
+                 "$REF@$INDEX" > /tmp/other.txt 2>&1; then
+              echo "::error::$REF@$INDEX verified against $other, a pin that must not vouch for an image"; exit 1
+            fi
+            grep -q "no matching" /tmp/other.txt || {
+              echo "::error::$REF@$INDEX was refused under $other for another reason than its signer:"; cat /tmp/other.txt; exit 1; }
+            echo "ok: $other does not accept it"
+          done
+
+      - name: The published hub verifies with its own cosign
+        # The hub image bundles cosign (Task 20453), and this runs the published
+        # hub's `cloop hub verify-image` — the check a dispatch makes, through
+        # pkg/imagepolicy — with that cosign, from inside the distroless image:
+        # its own digest verified, a digest nobody signed unsigned, and the same
+        # digest under another identity a mismatch.
+        if: matrix.target == 'runtime'
+        env:
+          REF: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          INDEX: ${{ steps.build.outputs.digest }}
+          UNSIGNED: ${{ steps.sign.outputs.unsigned }}
+        run: |
+          set -euo pipefail
+          hub="$REF@$INDEX"
+          docker pull -q "$hub"
+          docker run --rm --entrypoint /usr/local/bin/cosign "$hub" version
+          verdict() { docker run --rm "$@" | jq -r .status; }
+          got=$(verdict "$hub" hub verify-image --json "$hub" || true)
+          [ "$got" = "verified" ] || { echo "::error::the hub reports its own image $got, not verified"; exit 1; }
+          echo "ok: verified"
+          got=$(verdict "$hub" hub verify-image --json "$REF@$UNSIGNED" || true)
+          [ "$got" = "unsigned" ] || { echo "::error::the hub reports a digest nobody signed $got, not unsigned"; exit 1; }
+          echo "ok: unsigned"
+          edge="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/edge\.yml@refs/heads/main$"
+          got=$(verdict -e CLOOP_PROVENANCE_IMAGES_IDENTITY="$edge" "$hub" hub verify-image --json "$hub" || true)
+          [ "$got" = "mismatch" ] || { echo "::error::the hub reports another identity's pin $got, not mismatch"; exit 1; }
+          echo "ok: mismatch"
 
       - name: The published image satisfies its contract
         # Pulling by digest is what makes this a check of the *published*

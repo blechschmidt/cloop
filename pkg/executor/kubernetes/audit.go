@@ -46,6 +46,28 @@ func AuditPodJSON(ctx context.Context, opts Options, spec executor.Spec, workspa
 	return json.Marshal(p)
 }
 
+// AuditPodProvenance returns the image the Pod for spec would carry and what
+// the check of one of cloop's own images found (Task 20453), with v standing
+// in for cosign — the same buildPodFor Start calls, so the conformance suite's
+// "no sandbox runs a cloop image by tag" is asked of production code.
+func AuditPodProvenance(ctx context.Context, opts Options, spec executor.Spec,
+	v imagepolicy.ProvenanceVerifier) (string, *imagepolicy.Provenance, error) {
+	if opts.Namespace == "" {
+		opts.Namespace = DefaultNamespace
+	}
+	norm, err := opts.Normalize()
+	if err != nil {
+		return "", nil, err
+	}
+	ex := &Executor{id: norm.ID, opts: norm, verifier: imagepolicy.NewCosignVerifier(), provenance: v,
+		handles: make(map[string]*record)}
+	req, err := ex.podRequestFor(ctx, spec, "audit", norm.Namespace, "")
+	if err != nil {
+		return "", nil, err
+	}
+	return req.Image, req.ImageProvenance, nil
+}
+
 // auditPod is the shared construction behind both seams.
 func auditPod(ctx context.Context, opts Options, spec executor.Spec, workspaceSecret string) (*pod, error) {
 	if opts.Namespace == "" {
@@ -63,8 +85,9 @@ func auditPod(ctx context.Context, opts Options, spec executor.Spec, workspaceSe
 		// The production verifier, so a signature requirement here behaves as
 		// it would on a hub: it looks for cosign, and refuses when there is
 		// none rather than passing.
-		verifier: imagepolicy.NewCosignVerifier(),
-		handles:  make(map[string]*record),
+		verifier:   imagepolicy.NewCosignVerifier(),
+		provenance: imagepolicy.SharedProvenanceVerifier(),
+		handles:    make(map[string]*record),
 	}
 	return ex.buildPodFor(ctx, spec, "audit", norm.Namespace, workspaceSecret)
 }

@@ -524,6 +524,13 @@ type TaskDispatchInput struct {
 	RequestedImage string
 	PinnedImage    string
 
+	// ImageProvenance is the verdict on the image when it is one of cloop's
+	// own (Task 20453) — "verified", "unsigned" or "unverifiable" — and
+	// VerifiedDigest the digest cosign verified against the workflow that
+	// publishes cloop's images, empty unless verified.
+	ImageProvenance string
+	VerifiedDigest  string
+
 	// SpecHash is the .cloop/sandbox.yaml content hash, empty when the project
 	// has no spec and ran on the executor's defaults. SetupHash identifies
 	// commands baked into a derived image.
@@ -548,16 +555,18 @@ func AuditTaskDispatch(d *DB, in TaskDispatchInput) {
 	}
 	payload := map[string]any{"task_id": in.TaskID}
 	for k, v := range map[string]string{
-		"title":           in.TaskTitle,
-		"project":         in.ProjectPath,
-		"run_id":          in.RunID,
-		"executor_id":     in.ExecutorID,
-		"executor_kind":   in.ExecutorKind,
-		"isolation":       in.Isolation,
-		"requested_image": in.RequestedImage,
-		"pinned_image":    in.PinnedImage,
-		"spec_sha256":     in.SpecHash,
-		"setup_sha256":    in.SetupHash,
+		"title":            in.TaskTitle,
+		"project":          in.ProjectPath,
+		"run_id":           in.RunID,
+		"executor_id":      in.ExecutorID,
+		"executor_kind":    in.ExecutorKind,
+		"isolation":        in.Isolation,
+		"requested_image":  in.RequestedImage,
+		"pinned_image":     in.PinnedImage,
+		"image_provenance": in.ImageProvenance,
+		"verified_digest":  in.VerifiedDigest,
+		"spec_sha256":      in.SpecHash,
+		"setup_sha256":     in.SetupHash,
 	} {
 		if v != "" {
 			payload[k] = v

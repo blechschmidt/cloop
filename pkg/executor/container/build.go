@@ -78,6 +78,11 @@ type ImageIdentity struct {
 	// org.cloop.harnesses (imagepolicy.HarnessesLabel): what the image says it
 	// carries, checked against the harness a workload needs (Task 20450).
 	Labels map[string]string
+	// Provenance is what the check of one of cloop's own images found (Task
+	// 20453): the digest that runs, and whether cosign verified it. Nil for
+	// any other image. A derived image built over a verified base carries the
+	// base's: setup: adds layers, it cannot change what they were built on.
+	Provenance *imagepolicy.Provenance
 }
 
 // Pinned returns the strongest reference that still resolves to this exact
@@ -114,7 +119,12 @@ func InspectImage(ctx context.Context, rt Runtime, ref string) (ImageIdentity, e
 	// renders .Config as a map and its templates fail on a missing key, and an
 	// image with no labels at all — alpine:3.20 among them — has no Labels key,
 	// so the narrower template made every such image read as absent.
-	const format = "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}\x1f{{.Id}}\x1f{{json .Config}}"
+	//
+	// Every repo digest, not the first (Task 20453): an image held under two
+	// repositories, or podman's index and platform digests for one pull, list
+	// several, and the one that names ref's own repository is the one a
+	// signature on that repository is over.
+	const format = "{{json .RepoDigests}}\x1f{{.Id}}\x1f{{json .Config}}"
 	res, err := runCLITimeout(ctx, rt, imageInspectTimeout, "image", "inspect", "--format", format, "--", ref)
 	if err != nil {
 		return ImageIdentity{}, fmt.Errorf("container: inspect image %s: %w", ref, err)
@@ -125,7 +135,7 @@ func InspectImage(ctx context.Context, rt Runtime, ref string) (ImageIdentity, e
 			ref, rt.Name, ref, firstLine(res.Stderr))
 	}
 	parts := strings.SplitN(strings.TrimSpace(res.Stdout), "\x1f", 3)
-	id := ImageIdentity{Ref: ref, RepoDigest: strings.TrimSpace(parts[0])}
+	id := ImageIdentity{Ref: ref, RepoDigest: pickRepoDigest(ref, strings.TrimSpace(parts[0]))}
 	if len(parts) >= 2 {
 		id.ID = normalizeImageID(strings.TrimSpace(parts[1]))
 	}
@@ -141,6 +151,38 @@ func InspectImage(ctx context.Context, rt Runtime, ref string) (ImageIdentity, e
 		}
 	}
 	return id, nil
+}
+
+// pickRepoDigest chooses, from the repo digests an inspect printed, the one
+// for ref's own repository, else the first. raw is the JSON list the template
+// renders — or, from a runtime stand-in that prints one digest, that digest.
+func pickRepoDigest(ref, raw string) string {
+	var digests []string
+	switch {
+	case raw == "" || raw == "null" || raw == "[]":
+		return ""
+	case strings.HasPrefix(raw, "["):
+		if json.Unmarshal([]byte(raw), &digests) != nil {
+			return ""
+		}
+	default:
+		digests = []string{raw}
+	}
+	want := ""
+	if parsed, err := imagepolicy.ParseReference(ref); err == nil {
+		want = parsed.Name()
+	}
+	for _, d := range digests {
+		if name, _, ok := strings.Cut(strings.TrimSpace(d), "@"); ok && want != "" && name == want {
+			return strings.TrimSpace(d)
+		}
+	}
+	for _, d := range digests {
+		if d = strings.TrimSpace(d); d != "" {
+			return d
+		}
+	}
+	return ""
 }
 
 // normalizeImageID puts a content ID in the algorithm-prefixed form.
@@ -238,8 +280,21 @@ func (e *Executor) authorizeImage(ctx context.Context, ref string) (string, erro
 // override, after the build, after the digest resolution.
 func (e *Executor) sandboxImage(ctx context.Context, spec executor.Spec) (ImageIdentity, error) {
 	base := strings.TrimSpace(spec.Image)
+	field := "image: in the project's " + FileNameHint
 	if base == "" {
 		base = e.opts.Image
+		field = "executors.container.image"
+		// The operator's own image, exempt from the project policy unless the
+		// operator asked for it to be governed too (Task 20453) — and never by
+		// it when it is one of cloop's own, which is held to its publishing
+		// workflow's pin below instead.
+		if e.opts.ImagePolicy.GovernsOperatorImage(base) {
+			authorized, err := e.authorizeImage(ctx, base)
+			if err != nil {
+				return ImageIdentity{}, err
+			}
+			base = authorized
+		}
 	} else {
 		// A project-supplied override. This is the untrusted one — it came out
 		// of a repo — so it goes through the trust policy before it is
@@ -251,10 +306,22 @@ func (e *Executor) sandboxImage(ctx context.Context, spec executor.Spec) (ImageI
 		}
 		base = authorized
 	}
+	// One of cloop's own images, however it was chosen: resolved to the
+	// digest the local store holds, verified against the workflow that
+	// publishes it, and run by that digest (Task 20453).
+	var prov *imagepolicy.Provenance
+	if e.opts.VerifyOwnImages && imagepolicy.IsOwnImage(base) {
+		p, err := e.checkOwnImage(ctx, base, field)
+		if err != nil {
+			return ImageIdentity{}, err
+		}
+		prov, base = &p, p.Ref
+	}
 	baseID, err := InspectImage(ctx, e.rt, base)
 	if err != nil {
 		return ImageIdentity{}, err
 	}
+	baseID.Provenance = prov
 	// The harness the project's provider drives, against what the image says
 	// it carries (Task 20450): refused here, before anything runs, rather than
 	// by `exec: "copilot": executable file not found` from inside the sandbox
@@ -272,7 +339,55 @@ func (e *Executor) sandboxImage(ctx context.Context, spec executor.Spec) (ImageI
 	if len(spec.SetupCommands) == 0 {
 		return baseID, nil
 	}
-	return e.ensureDerivedImage(ctx, baseID, spec)
+	derived, err := e.ensureDerivedImage(ctx, baseID, spec)
+	if err != nil {
+		return ImageIdentity{}, err
+	}
+	derived.Provenance = prov
+	return derived, nil
+}
+
+// VerifyOwnImage checks this executor's configured image the way a start
+// would, when it is one of cloop's own, and records the verdict (Task 20453).
+// It starts nothing. `cloop hub doctor` calls it, so the report says what the
+// next run would find; a nil Provenance means the image is not cloop's.
+func (e *Executor) VerifyOwnImage(ctx context.Context) (*imagepolicy.Provenance, error) {
+	if !imagepolicy.IsOwnImage(e.opts.Image) {
+		return nil, nil
+	}
+	p, err := e.checkOwnImage(ctx, e.opts.Image, "executors.container.image")
+	return &p, err
+}
+
+// checkOwnImage verifies one of cloop's own images before it runs (Task
+// 20453): the digest comes from the local store, where the operator's pull put
+// it — ResolveDigest — and cosign checks it against provenance.ImagesIdentity.
+// The verdict is recorded for the hub's doctor, and a warning is printed where
+// the driver prints its others.
+func (e *Executor) checkOwnImage(ctx context.Context, image, field string) (imagepolicy.Provenance, error) {
+	p, err := imagepolicy.OwnImageCheck{
+		Image:    image,
+		Resolver: e,
+		Verifier: e.provenance,
+		Required: executor.ImageProvenanceRequired(),
+		Subject:  "container executor " + e.id,
+		Field:    field,
+	}.Run(ctx)
+	if err != nil {
+		var denied *imagepolicy.DenyError
+		if errors.As(err, &denied) && denied.Malformed() {
+			return p, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
+		}
+		if errors.As(err, &denied) {
+			imagepolicy.RecordProvenance(e.id, p)
+		}
+		return p, err
+	}
+	imagepolicy.RecordProvenance(e.id, p)
+	if p.Warning != "" {
+		fmt.Fprintf(os.Stderr, "[container] %s\n", p.Warning)
+	}
+	return p, nil
 }
 
 // ensureDerivedImage returns a derived image built from base plus the spec's

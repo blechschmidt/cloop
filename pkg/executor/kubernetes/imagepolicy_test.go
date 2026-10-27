@@ -188,7 +188,9 @@ func TestNoPolicyLeavesTheOverrideAlone(t *testing.T) {
 // TestOperatorImageIsNotGovernedByThePolicy.
 //
 // The hub's own image is chosen by the same person who writes the policy, in
-// the same file. Running it through the allowlist would be a lint rather than a
+// the same file, and is governed by it only under govern_operator_images (Task
+// 20453; TestAnOperatorPodImageIsLeftAloneUnlessGoverned) — cloop's own images
+// are checked against their publishing workflow instead. Running it through the allowlist would be a lint rather than a
 // control — and with the shipped chart default of require_digest it would
 // refuse the hub's own tagged image at boot, which is how a safe default
 // becomes one nobody can adopt.

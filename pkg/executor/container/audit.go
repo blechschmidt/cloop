@@ -17,9 +17,11 @@ package container
 // argv logic would pass forever while production drifted.
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // AuditRuntime describes the runtime to build argv for, without probing the
@@ -139,4 +141,35 @@ func AuditBuildNetwork(opts Options, spec executor.Spec) (string, error) {
 	}
 	e := &Executor{id: norm.ID, opts: norm, handles: map[string]*record{}}
 	return e.buildNetwork(spec), nil
+}
+
+// AuditSandboxImage returns the image reference the container executor would
+// run for spec — the one Start puts on the runtime's command line — and what
+// the check of one of cloop's own images found (Task 20453), with the
+// runtime CLI at runtimePath answering the image store's questions and v
+// standing in for cosign.
+//
+// It is the same sandboxImage Start calls, so the conformance suite's
+// "no sandbox runs a cloop image by tag" is asked of production code: a
+// verification that stopped pinning, or stopped being applied to the default,
+// would stop here too.
+func AuditSandboxImage(ctx context.Context, opts Options, runtimePath string, spec executor.Spec,
+	v imagepolicy.ProvenanceVerifier) (string, *imagepolicy.Provenance, error) {
+	norm, err := opts.Normalize()
+	if err != nil {
+		return "", nil, err
+	}
+	ex := &Executor{
+		id:         norm.ID,
+		opts:       norm,
+		rt:         Runtime{Name: RuntimeDocker, Path: runtimePath},
+		verifier:   imagepolicy.NewCosignVerifier(),
+		provenance: v,
+		handles:    make(map[string]*record),
+	}
+	id, err := ex.sandboxImage(ctx, spec)
+	if err != nil {
+		return "", nil, err
+	}
+	return id.Pinned(), id.Provenance, nil
 }

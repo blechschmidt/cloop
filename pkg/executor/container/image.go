@@ -43,7 +43,7 @@ import (
 // the correct failure: Preflight reports "image not present" with the pull
 // command rather than silently falling back to something unaudited. Operators
 // running an image of their own set executors.container.image.
-const DefaultImage = "ghcr.io/blechschmidt/cloop-harness:latest"
+const DefaultImage = executor.DefaultHarnessImage
 
 // ContainerCloopPath is where the cloop binary is expected inside the
 // sandbox, and where the smoke test bind-mounts the control plane's own

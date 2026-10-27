@@ -193,6 +193,17 @@ func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex exec
 		RunID:       runID,
 		LeaseIDs:    leaseIDs,
 	}
+	// The verdict on one of cloop's own images, and the digest verified (Task
+	// 20453): onto every task artifact and task.dispatch row of the run.
+	if p := h.ImageProvenance; p != nil {
+		rec.ImageProvenance = string(p.Status)
+		rec.VerifiedDigest = p.VerifiedDigest()
+		if rec.PinnedImage == "" && p.Digest != "" {
+			// A device pins an unverified tag in its own store, so its handle
+			// names no image; the record says what the hub resolved instead.
+			rec.PinnedImage = p.Ref
+		}
+	}
 	if rec.StartedAt.IsZero() {
 		rec.StartedAt = time.Now()
 	}
@@ -289,6 +300,55 @@ func (c egressGrantChecker) HasEgressGrant(projectPath, grantID string) bool {
 // (executors_api.go), which is the single place every workload-dispatch error
 // is rendered. Adding a second renderer here would be how the run panel and the
 // project panel start disagreeing about what a refusal means.
+
+// provenanceWarned remembers which unverified images of cloop's own this hub
+// process has journaled for each project, so a project of a hundred tasks
+// carries one warning per image digest and verdict rather than a hundred.
+var provenanceWarned = struct {
+	sync.Mutex
+	seen map[string]bool
+}{seen: map[string]bool{}}
+
+// journalImageProvenance writes the run's warning when one of cloop's own
+// images ran without a signature verified against the workflow that publishes
+// them (Task 20453): unsigned, or nothing could check it. A verified image and
+// one that is not cloop's say nothing; a wrongly signed one never started.
+func journalImageProvenance(workDir string, ex executor.Executor, h executor.Handle) {
+	p := h.ImageProvenance
+	if p == nil || p.Verified() || p.Warning == "" || workDir == "" {
+		return
+	}
+	key := workDir + "\x00" + p.Image + "\x00" + p.Digest + "\x00" + string(p.Status)
+	provenanceWarned.Lock()
+	if provenanceWarned.seen[key] {
+		provenanceWarned.Unlock()
+		return
+	}
+	if len(provenanceWarned.seen) >= 4096 {
+		provenanceWarned.seen = map[string]bool{}
+	}
+	provenanceWarned.seen[key] = true
+	provenanceWarned.Unlock()
+
+	details := map[string]any{
+		"image":    p.Image,
+		"ref":      p.Ref,
+		"status":   string(p.Status),
+		"identity": p.Identity,
+		"issuer":   p.Issuer,
+	}
+	if p.Digest != "" {
+		details["digest"] = p.Digest
+	}
+	if ex != nil {
+		details["executor_id"] = ex.ID()
+	}
+	state.LogEventDetails(workDir, state.EventRow{
+		Type:    state.EventImageProvenance,
+		Step:    state.NoStep,
+		Message: p.Warning,
+	}, details)
+}
 
 // isolationWarned remembers which unverified placements this hub process has
 // already journaled, so a project of a hundred tasks carries one warning per

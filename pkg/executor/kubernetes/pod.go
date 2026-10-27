@@ -51,6 +51,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // Label keys applied to every Pod this driver creates. The GC sweep selects
@@ -607,6 +608,10 @@ type podRequest struct {
 	HandleID   string
 	Namespace  string
 	Image      string
+	// ImageProvenance is what the check of one of cloop's own images found
+	// (Task 20453), carried to the handle. buildPod does not read it: the Pod
+	// carries Image, and Image is the reference the check decided on.
+	ImageProvenance *imagepolicy.Provenance
 	// ImagePullPolicy is "" (cluster default), "Always", "IfNotPresent" or
 	// "Never".
 	ImagePullPolicy    string

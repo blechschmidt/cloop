@@ -133,10 +133,14 @@ type dispatchFacts struct {
 	Isolation      string
 	RequestedImage string
 	PinnedImage    string
-	SpecHash       string
-	SetupHash      string
-	LeaseIDs       []string
-	Identity       string
+	// ImageProvenance and VerifiedDigest are the verdict on one of cloop's
+	// own images and the digest verified (Task 20453).
+	ImageProvenance string
+	VerifiedDigest  string
+	SpecHash        string
+	SetupHash       string
+	LeaseIDs        []string
+	Identity        string
 }
 
 // resolveDispatchFacts reads the placement record for the dispatch row.
@@ -156,6 +160,8 @@ func resolveDispatchFacts(workDir string) dispatchFacts {
 	}
 	f.RequestedImage = rec.RequestedImage
 	f.PinnedImage = rec.PinnedImage
+	f.ImageProvenance = rec.ImageProvenance
+	f.VerifiedDigest = rec.VerifiedDigest
 	f.SpecHash = rec.SpecHash
 	f.SetupHash = rec.SetupHash
 	f.LeaseIDs = rec.LeaseIDs
@@ -182,19 +188,21 @@ func (o *Orchestrator) beginTaskExecution(task *pm.Task) dispatchFacts {
 	task.RunID = f.RunID
 
 	statedb.AuditTaskDispatch(o.statedb, statedb.TaskDispatchInput{
-		TaskID:         task.ID,
-		TaskTitle:      task.Title,
-		ProjectPath:    o.config.WorkDir,
-		RunID:          f.RunID,
-		ExecutorID:     f.ExecutorID,
-		ExecutorKind:   f.ExecutorKind,
-		Isolation:      f.Isolation,
-		RequestedImage: f.RequestedImage,
-		PinnedImage:    f.PinnedImage,
-		SpecHash:       f.SpecHash,
-		SetupHash:      f.SetupHash,
-		LeaseIDs:       f.LeaseIDs,
-		Actor:          f.Identity,
+		TaskID:          task.ID,
+		TaskTitle:       task.Title,
+		ProjectPath:     o.config.WorkDir,
+		RunID:           f.RunID,
+		ExecutorID:      f.ExecutorID,
+		ExecutorKind:    f.ExecutorKind,
+		Isolation:       f.Isolation,
+		RequestedImage:  f.RequestedImage,
+		PinnedImage:     f.PinnedImage,
+		ImageProvenance: f.ImageProvenance,
+		VerifiedDigest:  f.VerifiedDigest,
+		SpecHash:        f.SpecHash,
+		SetupHash:       f.SetupHash,
+		LeaseIDs:        f.LeaseIDs,
+		Actor:           f.Identity,
 	})
 	return f
 }
