@@ -993,11 +993,27 @@ function reportForbidden(err, details) {
 // authenticates them (handleUnauthorized), 403 explains the denial or quietly
 // renews and retries, and everything else resolves to the decoded body.
 function parseAPIResponse(r, retry) {
-  if (r.status === 401) { handleUnauthorized(r); return Promise.reject(new Error('401')); }
+  if (r.status === 401) {
+    // A privileged action on a session signed in too long ago (Task 20448):
+    // the person confirms it is them and the request replays, rather than the
+    // tab signing in from scratch.
+    if (r.headers.get('X-Cloop-Reauth')) return r.json().catch(() => null).then(b => reauthAsk(b && b.error, retry));
+    handleUnauthorized(r); return Promise.reject(new Error('401'));
+  }
   if (r.status === 403) {
     return r.json().catch(() => null).then(body => handleForbidden(r, body, retry));
   }
   return r.json().then(normalizeAPIError);
+}
+
+// reauthAsk opens the deferred "Confirm it's you" dialog for a refusal, and
+// settles with the replayed request — or, when the dialog cannot load, says
+// what the hub said.
+function reauthAsk(err, retry) {
+  return deferredPanel('reauth').then(p => p.ask(err, retry), () => {
+    toast(errText(err) || 'Sign in again to continue', 'error');
+    throw new Error('REAUTH_REQUIRED');
+  });
 }
 
 // normalizeAPIError flattens apierror's {"error":{code,message}} into the

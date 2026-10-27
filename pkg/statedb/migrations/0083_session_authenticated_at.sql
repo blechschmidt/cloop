@@ -1,0 +1,31 @@
+-- 0083_session_authenticated_at: when the person behind a session last
+-- authenticated interactively (Task 20448).
+--
+-- A session cookie used to carry its owner's full authority for its whole
+-- absolute lifetime, and silent renewal (prompt=none) keeps one alive without
+-- the person ever typing a password again. Privileged actions now ask for a
+-- recent interactive sign-in — sudo mode, ui.oidc.sudo_max_age_minutes — and
+-- this column is what they are measured against:
+--
+--   authenticated_at  the id_token's auth_time when the provider reported
+--                     one; otherwise the time of the sign-in callback the hub
+--                     itself started with prompt=login; for a terminal
+--                     session, the sign-in behind its `cloop login`
+--                     approval. ''
+--                     when none of those is known — a sign-in the provider
+--                     may have answered silently from a session of its own,
+--                     and every row written before this column — which reads
+--                     as "not recently", so the first privileged action asks.
+--
+-- On the durable row rather than in a process's memory, so every hub member
+-- agrees whether a session is fresh: the sign-in that freshened it may have
+-- completed on another one. Neither silent renewal nor the server-side
+-- refresh writes it.
+--
+-- Guarded (ADD COLUMN IF NOT EXISTS, pkg/statedb/addcolumn.go) and additive
+-- in schema_compat.go's sense: a column with a default on a table no build
+-- replaces rows of. An older binary sharing the database inserts sessions
+-- without it — they read as not recent — and updates rows without touching
+-- it. Times are RFC 3339 UTC, as every other column of the table.
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS authenticated_at TEXT NOT NULL DEFAULT '';

@@ -2308,6 +2308,7 @@ ui:
     idle_timeout_hours: 8          # ends an unused session sooner
     refresh_interval_minutes: 15   # how often the IdP is re-asked
     max_claim_age_minutes: 5       # claim freshness required for privileged actions
+    sudo_max_age_minutes: 120      # privileged actions need a sign-in this recent; -1 off
     clock_skew_seconds: 300        # leeway on an ID token's exp/iat
     require_idp: false             # refuse to start if the issuer will not resolve
     require_rbac: false            # refuse to start with SSO on and no role policy
@@ -2319,6 +2320,7 @@ ui:
 | `idle_timeout_hours` | `8` | `1`–`720`, and never above `session_ttl_hours` | How long a session may go unused. This is the clock that bounds an unattended browser, and usually the one to tighten first — shortening it costs a re-login after a long meeting, while shortening the ceiling interrupts people mid-task. |
 | `refresh_interval_minutes` | `15` | `1`–`1440`, or `-1` to disable | Worst-case lag between the identity provider disabling a user and their cloop session ending. Requires `CLOOP_SECRET_KEY`. |
 | `max_claim_age_minutes` | `5` | `1`–`60`, or `-1` to disable | How stale a session's group and role claims may be when it performs an action **above operator**. Past it the provider is re-asked synchronously and the action is refused if it cannot answer. With `CLOOP_SECRET_KEY` the hub re-asks with the session's refresh token; without one the dashboard re-asserts the claims from the user's browser instead (see below). |
+| `sudo_max_age_minutes` | `120` | `1`–`1440`, or `-1` to turn off | **Sudo mode** (Task 20448): how recently the person behind a session must have signed in interactively for a privileged action — creating or deleting a secret or a grant, minting or approving an API token, minting an enrollment token, editing this block, retiring the static token, rotating the hub CA, upgrading or deregistering an executor, attaching to a sandbox, granting membership at maintainer, ending someone else's session, offboarding, minting a SCIM credential or a glasses link, setting a provider's API key or base URL, the dictation key or the CI relay's settings. Measured from the `id_token`'s `auth_time`, or — where the provider reports none, as Entra ID does unless that optional claim is configured — from a sign-in the hub itself started with `prompt=login`; silent renewal never counts. Older, the action is refused with `401 REAUTH_REQUIRED` and the dashboard asks the person to confirm it's them at the provider (`prompt=login&max_age=0`). A terminal session counts from the sign-in behind its `cloop login` approval — the approval itself when it asked you to sign in, which it does whenever the approving browser's sign-in is not recent — and is told to run `cloop login` again. **API tokens and the static token are not sessions and are never asked.** `-1` turns it off, and `cloop hub doctor` and Hub health warn (`oidc.sudo`). Editable in Settings → Single sign-on, honoured in a per-hub overlay like the rest of this block. See [Recent sign-in for privileged actions](../security/model.md#recent-sign-in-for-privileged-actions). |
 | `clock_skew_seconds` | `300` | `0`–`600`, or `-1` for none | Leeway applied to an ID token's `exp` and `iat`, for hosts whose clocks disagree with the provider's. |
 | `require_idp` | `false` | — | Makes an unresolvable issuer fatal at startup instead of a warning. Also available as `cloop ui --require-idp`. |
 | `require_rbac` | `false` | — | Makes single sign-on without a role policy — no `role_mappings` and no `default_role` — fatal at startup instead of a warning. The Settings panel refuses to save a block it would refuse, and `cloop hub doctor` says the start will fail. |
@@ -2482,13 +2484,20 @@ ui:
 | `cli_idle_timeout_hours` | `idle_timeout_hours` | `1`–`idle_timeout_hours`, and never above `cli_session_ttl_hours` | How long a terminal session may go unused. The janitor sweeps each kind of session on its own idle clock. |
 | `device_approval_max_age_minutes` | `120` | `1`–`1440`, or `-1` never to ask | How long ago the person approving may have signed in. The approval's round trip asks the provider for `max_age` of this; a browser session older than it is sent with `prompt=login&max_age=0` instead. Where the `id_token` carries `auth_time` the hub holds it to that — a sign-in older than this behind a fresh dashboard session (a silent re-login) goes round again with `prompt=login`, and one that ignored the prompt is refused — so a provider that ignored either is caught rather than believed. A provider that reports no `auth_time` (Entra ID unless that optional claim is configured) is trusted to have honoured them. |
 
-Everything else is the browser session's: `refresh_interval_minutes` and
-`max_claim_age_minutes` apply unchanged, because the approval is itself an
-authorization-code sign-in whose `id_token` and refresh grant become the CLI
+Everything else is the browser session's: `refresh_interval_minutes`,
+`max_claim_age_minutes` and `sudo_max_age_minutes` apply unchanged, because the
+approval is itself an authorization-code sign-in whose `id_token` and refresh grant become the CLI
 session's own — never a copy of the browser's. Without `CLOOP_SECRET_KEY` no
 refresh grant is kept, so a terminal session's claims stay as of its approval
 and actions above operator need a fresh `cloop login` once they are older than
-`max_claim_age_minutes`; the terminal is told so when it signs in.
+`max_claim_age_minutes`; the terminal is told so when it signs in. Sudo mode
+counts a terminal session from the sign-in behind its approval: approving from
+a browser whose own sign-in is older than `sudo_max_age_minutes` makes the
+approval a `prompt=login` sign-in, which the terminal then counts from, and a
+silent approval leaves the terminal no fresher than the browser. A privileged
+action — minting a token, approving a request, opening a sandbox terminal — from
+a terminal past the window is refused, and the terminal names `cloop login` as
+the way back.
 
 Two endpoints answer before authentication — a terminal asking for a code holds
 no credential yet. They take JSON only, like every state-changing request, and

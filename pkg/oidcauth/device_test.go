@@ -24,6 +24,10 @@ func deviceAuth(t *testing.T, idp *fakeIdP, clk *clock, rec *auditRecorder, muta
 	t.Helper()
 	return newLifecycleAuth(t, idp, NewMemorySessionStore(0), clk, func(c *Config) {
 		c.DeviceLogin = true
+		// These tests are about the device window. Sudo mode (Task 20448)
+		// adds its own reason to ask — a browser whose sign-in is not recent
+		// — which sudo_test.go covers with it on.
+		c.SudoMaxAge = -1
 		if rec != nil {
 			c.Audit = rec.sink
 		}
@@ -672,7 +676,7 @@ func TestTheSweepEndsTheSessionOfAnInterruptedApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The hub stopped between writing the session and recording the approval.
-	if _, err := a.createCLISession(Identity{Sub: "user-123", Email: "alice@example.com"}, d, &tokenResponse{}, clk.now()); err != nil {
+	if _, err := a.createCLISession(Identity{Sub: "user-123", Email: "alice@example.com"}, d, &tokenResponse{}, clk.now(), clk.now()); err != nil {
 		t.Fatal(err)
 	}
 	clk.advance(DeviceCodeLifetime + deviceSweepGrace + time.Second)

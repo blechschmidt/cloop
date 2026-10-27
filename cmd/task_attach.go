@@ -270,6 +270,10 @@ func attachDialError(err error, resp *http.Response, fromLogin bool) error {
 	}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
+		if resp.Header.Get("X-Cloop-Reauth") != "" {
+			// Live, but approved too long ago to open a terminal (Task 20448).
+			return fmt.Errorf("opening a sandbox terminal needs a recent sign-in (%s): run `cloop login` again, then retry", msg)
+		}
 		if fromLogin {
 			return fmt.Errorf("the hub refused this terminal's session (%s): run `cloop login` again", msg)
 		}
@@ -290,14 +294,24 @@ func attachDialError(err error, resp *http.Response, fromLogin bool) error {
 // decodeAttachError pulls the message out of the hub's JSON error envelope.
 func decodeAttachError(body []byte) string {
 	var env struct {
-		Error   string `json:"error"`
-		Message string `json:"message"`
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
 	}
 	if json.Unmarshal(body, &env) != nil {
 		return ""
 	}
-	if env.Error != "" {
-		return env.Error
+	// Two dialects: the dashboard's {"error":"text"}, and the API's
+	// {"error":{"code":…,"message":…}}, which a refusal from the route gate
+	// — a recent sign-in, a permission — is written in.
+	var text string
+	if json.Unmarshal(env.Error, &text) == nil && text != "" {
+		return text
+	}
+	var nested struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(env.Error, &nested) == nil && nested.Message != "" {
+		return nested.Message
 	}
 	return env.Message
 }

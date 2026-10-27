@@ -187,6 +187,12 @@ func (s *Server) handleProjectMemberAdd(w http.ResponseWriter, r *http.Request) 
 	if !s.requireMemberCeiling(w, r, entry, role, "") {
 		return
 	}
+	// Granting maintainer hands over who may reach the project and its
+	// credentials, so it asks for a recent sign-in (Task 20448); a lesser role
+	// does not.
+	if grantsProjectAdministration(role) && !s.requireSudo(w, r) {
+		return
+	}
 	if existing, found := store.Lookup(entry.Path, key); found {
 		apierror.WriteError(w, apierror.New(apierror.CodeConflict,
 			key+" is already a member of this project, as "+string(existing.Role)+" — change their role instead").
@@ -228,6 +234,13 @@ func (s *Server) handleProjectMemberAdd(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleProjectMemberChange serves PATCH /api/projects/{idx}/members?identity=….
+// grantsProjectAdministration reports whether a membership at role decides who
+// else may reach the project and what credentials it is given: maintainer and
+// up. Granting one is a sudo-mode action (Task 20448).
+func grantsProjectAdministration(role authz.Role) bool {
+	return role.AtLeast(authz.RoleMaintainer)
+}
+
 func (s *Server) handleProjectMemberChange(w http.ResponseWriter, r *http.Request) {
 	entry, store, ok := s.memberMutationTarget(w, r)
 	if !ok {
@@ -252,6 +265,14 @@ func (s *Server) handleProjectMemberChange(w http.ResponseWriter, r *http.Reques
 		role = parsed
 	}
 	if !s.requireMemberCeiling(w, r, entry, role, existing.Role) {
+		return
+	}
+	// A change that leaves a member at maintainer or above asks for a recent
+	// sign-in, as adding one there does (Task 20448). Whatever the role was:
+	// existing is read through a short cache, so a member demoted on another
+	// hub member a moment ago could otherwise be put back by a stale cookie
+	// "changing nothing". Leaving one below maintainer does not ask.
+	if grantsProjectAdministration(role) && !s.requireSudo(w, r) {
 		return
 	}
 	reason := existing.Reason

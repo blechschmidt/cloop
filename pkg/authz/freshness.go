@@ -81,3 +81,35 @@ func FreshClaimPermissions() []Permission {
 	}
 	return out
 }
+
+// RequiresRecentSignIn reports whether exercising p through a session is the
+// kind of action that asks for a recent interactive sign-in — sudo mode, Task
+// 20448 — rather than any live cookie.
+//
+// Derived from the ladder for the reason RequiresFreshClaims is: every
+// permission an operator does not hold, so a permission added above that tier
+// later is covered unless somebody decides otherwise. Two deliberate changes to
+// that set, each for its reason:
+//
+//   - project.write and config.write are out. They are a maintainer's daily
+//     work on a project — its goal, its run options, its budget — bounded by
+//     the project, and putting the identity provider in front of every toggle
+//     would teach people to click through it. audit.read is out because it is
+//     only ever read.
+//   - secret.own is in, though operators hold it: it mints and destroys
+//     credentials, which is the first thing a stolen cookie is used for.
+//
+// It decides which routes must *declare* their answer, not the answer: the
+// route table (pkg/ui/routes.go) marks each such route as asking or names why
+// it does not, and a route outside this set may still ask — rotating the hub's
+// CA is config.write and asks. Reads never ask, except the one read that is an
+// action: opening a sandbox terminal.
+func RequiresRecentSignIn(p Permission) bool {
+	switch p {
+	case PermProjectWrite, PermConfigWrite, PermAuditRead:
+		return false
+	case PermSecretOwn:
+		return true
+	}
+	return RequiresFreshClaims(p)
+}

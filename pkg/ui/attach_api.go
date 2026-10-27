@@ -51,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/logger"
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -149,6 +150,17 @@ func (s *Server) handleAttachInfo(w http.ResponseWriter, r *http.Request) {
 		// Write authority is reported separately so the terminal can open
 		// read-only rather than refusing, and say which it got.
 		"can_write": s.grantFor(r).decide(s.projectScope(r)).Allows(authz.PermSandboxAttachWrite),
+	}
+	// Whether opening the terminal will first ask for a recent sign-in (Task
+	// 20448). The socket asks, and a refused WebSocket handshake is invisible
+	// to the page, so the Attach button asks before it opens one — with the
+	// window, in the shape a REAUTH_REQUIRED refusal carries it.
+	if _, st, asked, _ := s.sudoStanding(r); asked && !st.Recent {
+		resp["reauth_required"] = true
+		resp["reauth"] = map[string]any{"details": map[string]any{
+			"max_age_seconds": int64(st.MaxAge / time.Second),
+			"reauth_url":      oidcauth.ReauthURL("", true),
+		}}
 	}
 
 	target, aerr := s.resolveAttachTarget(workDir, taskID)

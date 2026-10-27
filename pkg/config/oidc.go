@@ -49,6 +49,9 @@ func (o OIDCConfig) AuthConfig() oidcauth.Config {
 		CLISessionTTL:        time.Duration(o.EffectiveCLISessionTTLHours()) * time.Hour,
 		CLIIdleTimeout:       time.Duration(o.EffectiveCLIIdleTimeoutHours()) * time.Hour,
 		DeviceApprovalMaxAge: time.Duration(o.EffectiveDeviceApprovalMaxAgeMinutes()) * time.Minute,
+		// Sudo mode (Task 20448): how recent a privileged action's sign-in
+		// must be.
+		SudoMaxAge: time.Duration(o.EffectiveSudoMaxAgeMinutes()) * time.Minute,
 	}
 }
 

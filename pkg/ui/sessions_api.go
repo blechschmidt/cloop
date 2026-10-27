@@ -207,6 +207,27 @@ func (s *Server) SessionAuditSink() func(oidcauth.SessionAudit) {
 				payload["session_id"] = ev.SessionID
 			}
 		}
+		// A session.reauth event (Task 20448): what the recent-sign-in rule
+		// did, and to which request or with which sign-in.
+		if d := ev.Reauth; d != nil {
+			payload["outcome"] = string(d.Outcome)
+			if d.MaxAge > 0 {
+				payload["max_age_seconds"] = int64(d.MaxAge / time.Second)
+			}
+			if !d.AuthenticatedAt.IsZero() {
+				payload["authenticated_at"] = d.AuthenticatedAt.UTC().Format(time.RFC3339)
+			}
+			if d.Method != "" {
+				payload["method"] = d.Method
+				payload["path"] = d.Path
+			}
+			if d.Replaces != "" {
+				payload["replaces"] = d.Replaces
+			}
+			if d.Suppressed > 0 {
+				payload["suppressed"] = d.Suppressed
+			}
+		}
 		actor := ev.Actor
 		if actor == "" {
 			actor = "system"
@@ -432,6 +453,16 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, "a session id is required"))
 		return
 	}
+	// Ending somebody else's session asks for a recent sign-in (Task 20448):
+	// a stolen cookie must not be able to sign its owner's colleagues out.
+	// Ending one of one's own is containment and never asks — and only a
+	// session read back as live and the caller's own is one, so a store that
+	// could not answer asks rather than letting the revocation through.
+	if target, st := s.OIDC.CheckSession(id); st != oidcauth.SessionLive || !s.isCallersSubject(r, target.Identity.Sub) {
+		if !s.requireSudo(w, r) {
+			return
+		}
+	}
 	actor := s.grantFor(r).subjectLabel()
 	ok, err := s.OIDC.RevokeSession(id, actor, oidcauth.ReasonAdminRevoked)
 	if err != nil {
@@ -443,6 +474,14 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{"ok": true, "id": id})
+}
+
+// isCallersSubject reports whether sub is the subject of the session r
+// authenticates with. False for a caller with no session — a token — whose
+// requireSudo is a no-op anyway.
+func (s *Server) isCallersSubject(r *http.Request, sub string) bool {
+	rec, ok := s.OIDC.SessionFromRequest(r)
+	return ok && sub != "" && rec.Identity.Sub == sub
 }
 
 // handleLogoutAll serves POST /api/session/logout-all.

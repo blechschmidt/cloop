@@ -198,6 +198,13 @@ func (s *Server) handleGlassesLinkCreate(w http.ResponseWriter, r *http.Request)
 	if !s.glassesSelfService(w, r) {
 		return
 	}
+	// A link is a token that outlives the session that mints it — thirty
+	// days, through a sign-out everywhere — so minting one asks for a recent
+	// sign-in, like minting an API token does (Task 20448). Revoking one's own
+	// never asks.
+	if !s.requireSudo(w, r) {
+		return
+	}
 	mgr, ok := s.tokenManagerOr(w)
 	if !ok {
 		return

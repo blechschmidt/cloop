@@ -60,6 +60,23 @@ it where it gives one (`auth_time`), so signing out of the dashboard and back in
 without typing a password does not reset it; a provider that gives none is
 asked to re-authenticate when your dashboard session is that old.
 
+The same two hours then apply to the terminal's own privileged actions — the
+hub's sudo mode (`ui.oidc.sudo_max_age_minutes`): approving a grant request,
+minting a token, opening a sandbox terminal with `cloop task attach` and the
+other actions the dashboard asks you to confirm. They count from the sign-in
+behind the approval — the approval itself when the provider asked you to sign
+in, which it always does when your dashboard sign-in is older than that window
+— so once a terminal session is past it the hub refuses them and the terminal
+says so:
+
+```console
+$ cloop remote approvals approve gr_3f…
+Error: this action needs a recent sign-in, and this terminal's session was approved more than 2 hours ago: run `cloop login https://cloop.example.com` again, then retry
+```
+
+`cloop login` again is the whole remedy. `cloop whoami` shows how long the
+session may still take them (`Privileged actions:`).
+
 | Flag | Does |
 | --- | --- |
 | `--ca-file <pem>` | Trust this PEM bundle for the hub's certificate — a hub behind an internal CA. Kept with the session, so later commands use it too |
@@ -378,6 +395,7 @@ ui:
     cli_session_ttl_hours: 24             # default and ceiling: session_ttl_hours
     cli_idle_timeout_hours: 8             # default and ceiling: idle_timeout_hours
     device_approval_max_age_minutes: 120  # a sign-in older than this re-authenticates to approve; -1 never
+    sudo_max_age_minutes: 120             # privileged actions need an approval this recent; -1 never
 ```
 
 Each step is in the audit trail: [`device.code_issued`](../reference/audit-events.md#device),

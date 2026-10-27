@@ -57,6 +57,15 @@ const (
 	// to perform the requested action. Maps to HTTP 403.
 	CodeForbidden Code = "FORBIDDEN"
 
+	// CodeReauthRequired indicates a privileged action asked of a session
+	// whose last interactive sign-in is older than the hub allows (sudo mode,
+	// Task 20448). The caller is who they say and may do this; they must
+	// confirm it is them at the identity provider first. Details carry
+	// max_age_seconds and the reauth URL. Maps to HTTP 401 — the credential
+	// is what falls short, not the authority — but, unlike a plain 401, the
+	// session is live and stays so.
+	CodeReauthRequired Code = "REAUTH_REQUIRED"
+
 	// CodeNotFound indicates the requested resource (project, task,
 	// artifact, …) does not exist. Maps to HTTP 404.
 	CodeNotFound Code = "NOT_FOUND"
@@ -136,7 +145,7 @@ func defaultStatus(c Code) int {
 	switch c {
 	case CodeInvalidInput:
 		return http.StatusBadRequest
-	case CodeUnauthorized:
+	case CodeUnauthorized, CodeReauthRequired:
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeCrossOrigin:
 		return http.StatusForbidden

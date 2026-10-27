@@ -65,6 +65,7 @@ hostile by assumption** — it runs code the hub did not write, chosen by an LLM
 | WebSocket hijacking | `wsOriginAllowed`: absent `Origin` (CLI/agent), or an `Origin` exactly — scheme, host, port — one of the hub's own: the one the request was addressed to, `ui.external_url`, `ui.allowed_origins`, `ui.allowed_ws_origins`. No loopback or other-port allowance | `pkg/ui/originguard.go`, `pkg/executor/remote/origin.go` |
 | Forwarded headers | `X-Forwarded-Proto`/`-Host`/`-For` believed from loopback, `ui.trusted_proxies` and signed cluster forwards only; `X-Forwarded-For` walked from the right | `pkg/sameorigin/proxies.go` |
 | Authorization | every route declares its `Perm` in `routeTable()`; `gate()` wraps each one; `require()` is the single enforcement point | `pkg/ui/routes.go:143,210`, `pkg/ui/authz.go:214` |
+| Sudo mode | a privileged route also declares `Sudo`: the session behind it must have signed in interactively within `ui.oidc.sudo_max_age_minutes` (2 h), or the gate answers `401 REAUTH_REQUIRED` and the dashboard asks the person to confirm it's them at the provider. API tokens and the static token are not asked — see [Recent sign-in for privileged actions](#recent-sign-in-for-privileged-actions) | `pkg/ui/sudo.go`, `pkg/oidcauth/sudo.go` |
 | Injected markup | Every value escaped where it is rendered; markup carries no code — controls name actions in `data-action` attributes that one delegated dispatcher looks up in a registry, never `window`, and hover and drag events only in a table of their own; `script-src 'self'` with no `'unsafe-inline'` or `'unsafe-eval'`, `base-uri 'none'`, `form-action 'self'`, `object-src 'none'` on every response; violations reported to `POST /api/csp-report` | `pkg/ui/assets/js/00-core.js`, `pkg/ui/csp.go`, `pkg/oidcauth/script.go` |
 | Files a run made | A task's attachments are written by model-authored code and served from the hub's origin, so none is ever rendered as a document: a download is `application/octet-stream` with `Content-Disposition: attachment`; `?inline=1` is honoured only for a PNG, JPEG, GIF or WebP image or for text, judged on the stored bytes at that moment, text as `text/plain`; SVG, HTML and PDF only download; every response carries `Content-Security-Policy: default-src 'none'; sandbox` and `nosniff`. Every read, write and removal the hub makes in the store goes through an `os.Root` opened on the store directory, so a store swapped for a link redirects none; a link, a FIFO, a file swapped while it was opened or one whose size is not the recorded one is refused (TestTaskAttachmentsAPI, TestOpenServesOnlyTheStoredFile, TestTheStoreIsReachedOnlyThroughItsDirectory) | `pkg/ui/attachments_api.go`, `pkg/attachments` |
 | Abuse | per-IP token-bucket rate limiting; bounded WebSocket connections per IP and in total | `pkg/ui` |
@@ -2363,6 +2364,115 @@ recognise a session by. Neither is an input to any decision: both are
 attacker-supplied, and pinning a session to either breaks users behind mobile
 networks far more often than it stops a thief.
 
+### Recent sign-in for privileged actions
+
+Claim freshness bounds how *old the authority* behind a request may be. It does
+not bound how long ago the *person* behind it proved who they are, and on a hub
+with single sign-on that can be a day: the session cookie carries its owner's
+authority for its whole absolute lifetime (`session_ttl_hours`, 24 h), and
+silent renewal keeps it alive without anybody typing a password again. So a
+cookie lifted from a laptop could, for up to a day, mint API tokens, grant
+secrets to an executor of the thief's choosing, rewrite role mappings and open a
+shell in a running sandbox.
+
+**Sudo mode** (Task 20448) asks more of those actions, the way a forge does:
+the person behind the session must have authenticated interactively within
+`ui.oidc.sudo_max_age_minutes` (default 120, clamped to 1–1440, `-1` turns it
+off). The actions are:
+
+- creating or deleting a secret or a grant, renewing a Kubernetes share,
+  granting a project's repositories or its Claude credential;
+- approving a grant request or an API token, minting or revoking an API token;
+- editing `ui.oidc` — role mappings and `require_rbac` included — and enforcing
+  deny-by-default, retiring the static token;
+- rotating the hub CA;
+- minting an executor or forwarder enrollment token, upgrading, deregistering
+  or un-cordoning an executor, changing its sandbox, limits, access list,
+  labels, virtual executors or firewall, binding a project to it, the fleet's
+  auto-update policy, exposing or binding a forwarded device;
+- attaching a shell to a running sandbox;
+- granting project membership at maintainer;
+- ending somebody else's session, offboarding a user, quotas and legal holds;
+- creating, rotating or revoking a SCIM credential; telemetry, notification
+  and disk-floor settings;
+- minting a display-glasses link (a thirty-day token); setting a provider's API
+  key or base URL, or the dictation key; the CI relay's settings, whose
+  upstream URL is where the hub's Anthropic key is sent.
+
+Changing the sealing root or the KMS has no dashboard route: it is `cloop hub
+key` on the hub's host, which acts with the operating system's authority.
+
+**Declared in the route table, enforced by the gate.** Each route carries its
+rule beside its permission (`routeSpec.Sudo`), and the request gate enforces it
+after authorization — somebody who may not act at all is told that, not sent to
+sign in for nothing — and before the handler, so a handler cannot forget it.
+Two cases are decided by their handler once it knows which case it is: a
+membership granted at maintainer (a lesser role does not ask) and a session
+that is not the caller's own. `TestPrivilegedRoutesAskForARecentSignIn` fails
+the build for any route whose permission `authz.RequiresRecentSignIn` covers —
+every permission an operator does not hold except `project.write`,
+`config.write` and `audit.read`, plus `secret.own` — that neither declares the
+rule nor sits on its exempt list with a reason; the exemptions are reads (a
+Settings panel must open without a trip to the provider), containment (cordon,
+drain, revoking a lease, withdrawing a membership: each is undone by an action
+that asks) and writes that store nothing.
+
+**What "recent" is measured from** is `SessionRecord.AuthenticatedAt`, on the
+durable session row, so every hub member reads the same answer:
+
+| The sign-in | Counts from |
+| --- | --- |
+| The provider reports `auth_time` | `auth_time` — when it last asked the person, not when the dashboard's sign-in happened, which may have been answered silently from a provider session days old |
+| No `auth_time`, but the hub started the sign-in with `prompt=login` | the callback (Entra ID without the `auth_time` optional claim) |
+| No `auth_time` and no `prompt=login` | nothing: not recent, so the first privileged action asks |
+| A terminal session (`cloop login`) | the sign-in behind its approval: the approval itself when it asked the person to sign in — which it does, with `prompt=login&max_age=0`, whenever the approving browser's own sign-in is not recent — and otherwise the approving browser's. A silent approval never makes a terminal fresher than the browser that approved it |
+
+Neither silent renewal (`prompt=none`) nor the server-side refresh moves it:
+neither is the person doing anything. An `auth_time` a little ahead of the
+hub's clock is read as now, one further ahead than `clock_skew_seconds` is not
+believed.
+
+**The refusal is typed.** A stale session's privileged request is answered
+`401 REAUTH_REQUIRED` with `max_age_seconds` and where to confirm, and the
+header `X-Cloop-Reauth` — not `X-Cloop-Sign-In`, which would send the tab
+through the provider on its own and lose the page. The session stays live and
+its reads keep working. A terminal is told to run `cloop login` again.
+
+**Confirm it's you.** The dashboard turns the refusal into a dialog. Its button
+opens `/auth/login?reauth=window` in a window of its own: a sign-in with
+`prompt=login&max_age=0` and the person's `login_hint`, whose callback refuses
+another account and a token whose `auth_time` predates the request (the
+provider answered from its own session after all). When it counts, the window
+tells the dashboard tab — on a `BroadcastChannel`, and to its opener — with the
+nonce the dialog put on the window's URL, and the tab replays the refused
+request from memory only on a verdict naming its own nonce (a result some other
+sign-in produced in this browser replays nothing), so a secret typed into a form is
+never stored to survive a navigation. A browser that will not open the window
+makes the trip in the tab itself, comes back to the same view and asks for the
+button once more. The dialog is a deferred script under the hub's script
+policy (no inline handlers), and is laid out for 360 px screens.
+
+The confirmation **creates a new session**, with a new cookie, rather than
+freshening the one that asked. The fresh credential therefore lands in the
+browser that authenticated: somebody holding a stolen cookie who phishes its
+owner into completing a confirmation they started gains nothing, because the
+fresh session is set in the owner's browser and the stolen one stays as stale
+as it was. The session that asked is left to its own clocks.
+
+**Who is not asked.** API tokens and the static token are not sessions — nobody
+signs in behind them, and each has its own lifecycle and its own row in the
+threat model — and a hub without single sign-on has no sessions at all.
+
+**Off is a decision, not a default.** `sudo_max_age_minutes: -1` restores the
+old behaviour, and `cloop hub doctor` and Settings → Hub health warn
+`oidc.sudo` while it is in force on a hub with single sign-on.
+
+**Recorded.** Every refusal is counted in `cloop_session_reauth_total{outcome}`
+(`stale-refused`, `granted`, `refused`) and audited as `session.reauth` — at most
+thirty refusal rows a minute, the next one carrying how many were not written.
+Refusals that no `granted` follows are a session used by somebody who cannot
+sign in behind it.
+
 ### Silent renewal from the browser
 
 The hub's own refresh is the first layer and stays the first layer: holding a
@@ -4022,6 +4132,13 @@ a reconstruction, so this row set spans three packages.
 | A stream's re-check is not use, so an unattended tab's session still goes idle | `pkg/oidcauth: TestCheckSessionLeavesTheIdleClockAlone`, `TestCheckSessionNamesEachEnding` |
 | A session's change is announced only once it can be read back, so a listener re-checking on the notice finds it ended | `pkg/oidcauth: TestSessionChangeIsAnnouncedAfterTheRowIsGone` |
 | A revocation made on one hub member or from a shell closes the streams another member holds within a bus poll | `pkg/ui: TestClusterCredentialEndingsCloseStreamsOnEveryMember`; `cmd: TestSessionRevokeAnnouncesWhatItEnded`, `TestTokenRevokeAnnouncesTheToken`, `TestOffboardAnnouncesTheSessionsAndTokensItEnded` |
+| Every route whose permission asks for a recent sign-in declares it or is exempted by name with a reason; the actions Task 20448 named all ask; a handler that decides it calls the check | `pkg/ui: TestPrivilegedRoutesAskForARecentSignIn`, `TestSudoCoversTheNamedActions`, `TestSudoHandlerRoutesAskInTheirHandler` |
+| A stale session is refused secret create, enrollment-token mint and sandbox attach with `401 REAUTH_REQUIRED`, keeps its reads, and is let through after a confirm-it's-you sign-in; with no `auth_time` only a prompted sign-in counts; a provider that did not ask is refused; `-1` turns it off | `tests/security: TestStaleSessionMustConfirmItsYouForPrivilegedActions`, `TestConfirmItsYouWithoutAuthTime`, `TestConfirmItsYouRefusesAProviderThatDidNotAsk`, `TestSudoModeOffTakesAnyLiveSession` |
+| A sign-in counts from `auth_time`, or from a prompted callback; renewal never moves it; clock skew neither lengthens the window nor fails a real confirmation; another account is refused | `pkg/oidcauth: TestAuthTimeIsTheSignInARecentActionIsMeasuredFrom`, `TestNoAuthTimeMeansNoRecentSignIn`, `TestSilentRenewalDoesNotRefreshTheSignIn`, `TestAuthTimeAcrossClockSkew`, `TestReauthRefusesAnotherAccount` |
+| A second hub member honours a sign-in confirmed through the first | `pkg/ui: TestClusterMemberHonoursAFreshSignInMadeOnAnother` |
+| The dialog opens on the refusal, replays the request after the window's sign-in, and falls back to the tab at 360 px | `pkg/ui: TestConfirmItsYouDialogInBrowser` |
+| A terminal session counts from the sign-in behind its approval — a stale browser's approval is itself a `prompt=login` sign-in — and a stale one is told to run `cloop login` | `pkg/oidcauth: TestTerminalSessionsCountFromTheSignInBehindTheirApproval`; `cmd: TestRemoteStaleTerminalIsToldToRunCloopLogin` |
+| A glasses link, a provider key or base URL, the dictation key and the CI relay's settings ask too; a model choice does not; ending an unknown session asks | `pkg/ui: TestSudoCoversCredentialsOutsideTheSecretStore` |
 
 ### The static admin token — the package suites
 

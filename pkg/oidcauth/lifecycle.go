@@ -35,9 +35,18 @@ import (
 // cookie value. The returned string is the only place the raw session id ever
 // exists outside the browser: the store receives its digest.
 func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken string, tok *tokenResponse) (string, error) {
+	sid, _, err := a.openSession(id, r, refreshToken, tok, false)
+	return sid, err
+}
+
+// openSession is createSession, also returning the record, for a sign-in that
+// may have asked the provider for prompt=login (prompted): the session then
+// counts as recently authenticated even where the provider reports no
+// auth_time (Task 20448, sudo.go).
+func (a *Authenticator) openSession(id Identity, r *http.Request, refreshToken string, tok *tokenResponse, prompted bool) (string, SessionRecord, error) {
 	sid, err := randToken()
 	if err != nil {
-		return "", err
+		return "", SessionRecord{}, err
 	}
 	now := a.now()
 
@@ -69,9 +78,13 @@ func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken
 		// genuinely has not established for the refresh token it was handed.
 		ClaimsAsOf:     now,
 		ClaimsExpireAt: accessTokenExpiry(tok, now),
+
+		// When the person last proved who they are: the provider's word, or
+		// this sign-in when the hub asked for one (sudo.go).
+		AuthenticatedAt: a.interactiveAt(id.AuthTime, prompted, now),
 	}
 	if err := a.store.Put(rec); err != nil {
-		return "", fmt.Errorf("oidcauth: persist session: %w", err)
+		return "", SessionRecord{}, fmt.Errorf("oidcauth: persist session: %w", err)
 	}
 	a.mu.Lock()
 	a.cache[rec.ID] = &cachedSession{rec: withoutRefreshToken(rec), fetchedAt: now, lastPersisted: now}
@@ -89,7 +102,7 @@ func (a *Authenticator) createSession(id Identity, r *http.Request, refreshToken
 		Reason:    refreshReadyReason(refreshToken),
 		Kind:      SessionKindBrowser,
 	})
-	return sid, nil
+	return sid, rec, nil
 }
 
 // enforceSessionLimit evicts the identity's oldest sessions until one more

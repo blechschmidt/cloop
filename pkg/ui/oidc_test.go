@@ -84,6 +84,42 @@ type uiFakeIdP struct {
 	// frame at all: the browser shows its own error page instead, and nothing
 	// ever posts back to the dashboard.
 	silentFramingDenied bool
+
+	// The provider's own sign-in, which its tokens report as auth_time (Task
+	// 20448). signedInAt is when the person last typed a password here — zero
+	// means "just now", for every token, which is what a provider whose users
+	// sign in interactively looks like. prompt=login or max_age=0 makes the
+	// provider ask, moving it to now, unless ignorePrompt says it answers from
+	// its session anyway; omitAuthTime is Entra ID without the auth_time
+	// optional claim.
+	signedInAt   time.Time
+	ignorePrompt bool
+	omitAuthTime bool
+	// loginPrompts counts authorization requests that asked for prompt=login.
+	loginPrompts int
+}
+
+// setSignedInAt sets when the provider last asked the person to sign in.
+func (idp *uiFakeIdP) setSignedInAt(t time.Time) {
+	idp.mu.Lock()
+	idp.signedInAt = t
+	idp.mu.Unlock()
+}
+
+// setAuthTimeBehaviour sets whether tokens omit auth_time, and whether
+// prompt=login is ignored.
+func (idp *uiFakeIdP) setAuthTimeBehaviour(omit, ignorePrompt bool) {
+	idp.mu.Lock()
+	idp.omitAuthTime, idp.ignorePrompt = omit, ignorePrompt
+	idp.mu.Unlock()
+}
+
+// loginPromptCount reports how many authorization requests asked for
+// prompt=login.
+func (idp *uiFakeIdP) loginPromptCount() int {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	return idp.loginPrompts
 }
 
 // setSilentFramingDenied sets whether prompt=none answers with an unframable page.
@@ -170,6 +206,12 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 			idp.promptNoneRequests++
 			silentErr, denyFraming = idp.silentError, idp.silentFramingDenied
 		}
+		if q.Get("prompt") == "login" || q.Get("max_age") == "0" {
+			idp.loginPrompts++
+			if !idp.ignorePrompt && !idp.signedInAt.IsZero() {
+				idp.signedInAt = time.Now()
+			}
+		}
 		idp.mu.Unlock()
 		if denyFraming {
 			w.Header().Set("X-Frame-Options", "DENY")
@@ -198,7 +240,11 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 		header, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "k1"})
 		idp.mu.Lock()
 		nonce := idp.lastNonce
+		authAt, omitAuth := idp.signedInAt, idp.omitAuthTime
 		idp.mu.Unlock()
+		if authAt.IsZero() {
+			authAt = time.Now()
+		}
 		claims := map[string]any{
 			"iss":   idp.server.URL,
 			"sub":   idp.sub,
@@ -208,6 +254,9 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 			"nonce": nonce,
 			"email": idp.email,
 			"name":  idp.name,
+		}
+		if !omitAuth {
+			claims["auth_time"] = authAt.Unix()
 		}
 		if refresh {
 			// No authorization request to bind to, so no nonce — matching what

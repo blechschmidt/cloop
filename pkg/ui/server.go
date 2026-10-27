@@ -631,6 +631,11 @@ type Server struct {
 	// 20394); the zero value is ready.
 	refusals refusalLog
 
+	// sudoRefusals rate-limits the session.reauth rows a privileged request
+	// refused for want of a recent sign-in writes (Task 20448, sudo.go); the
+	// metric counts every one.
+	sudoRefusals refusalLog
+
 	// ci holds the CI/CD federation service — the OIDC verifier, the session
 	// registry and the Anthropic relay (Task 20278). It is per-Server rather
 	// than a package global, unlike the git and Kubernetes monitors, because
@@ -4101,6 +4106,13 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// A provider's API key, and the base URL it is sent to, are credentials:
+	// setting one asks for a recent sign-in, as creating a secret does (Task
+	// 20448) — a stale cookie must not be able to point the hub's key at a
+	// host of its choosing. The model and the effort do not ask.
+	if configKeyCarriesCredential(req.Key) && !s.requireSudo(w, r) {
+		return
+	}
 	workDir := s.resolveWorkDir(r)
 	cfg, err := config.Load(workDir)
 	if err != nil {
@@ -4116,6 +4128,13 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]bool{"ok": true})
+}
+
+// configKeyCarriesCredential reports whether key, one applyUIConfigKey takes,
+// is a credential or where one is sent: an API key or a base URL.
+func configKeyCarriesCredential(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	return strings.HasSuffix(k, ".api_key") || strings.HasSuffix(k, ".base_url")
 }
 
 // applyUIConfigKey applies a key/value pair to a Config struct.

@@ -837,9 +837,12 @@ function _atLoadInfo(id) {
 // Deliberately does not close the task details modal behind it: the terminal is
 // a side view of the task being read, and closing it has to return the reader
 // to where they were.
-act('taskDetailsAttach', function() {
+act('taskDetailsAttach', function attach() {
   const id = _tdCurrentId;
   if (!id) return;
+  // A refused handshake is invisible to the page, so a terminal the hub would
+  // refuse for want of a recent sign-in asks first (Task 20448).
+  if (_atInfo && _atInfo.reauth_required) return reauthAsk(_atInfo.reauth, () => (_atInfo.reauth_required = 0, attach()));
   const overlay = document.getElementById('at-overlay');
   if (!overlay) return;
 

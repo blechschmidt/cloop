@@ -215,7 +215,7 @@ function handleUnauthorized(r) {
 // so the provider's own cookie is first-party: usually two redirects and no
 // prompt. Automatic calls are guarded against looping; the banner's button
 // (force) is a person choosing to try anyway.
-function signInAgain(force) {
+function signInAgain(force, reauth) {
   let last = 0;
   try { last = Number(sessionStorage.getItem('cloop_signin_at')) || 0; } catch (_) {}
   if (!force && (renewState.redirected || Date.now() - last < RENEW.LOOP)) { showRenewBanner('lapsed'); return; }
@@ -224,11 +224,14 @@ function signInAgain(force) {
     sessionStorage.setItem('cloop_signin_at', String(Date.now()));
     // Before boot finishes there is no view yet, only the defaults.
     if (renewState.booted) {
-      sessionStorage.setItem('cloop_resume', JSON.stringify({path: selectedProjectPath, tab: activeTab, at: Date.now()}));
+      sessionStorage.setItem('cloop_resume', JSON.stringify({path: selectedProjectPath, tab: activeTab, at: Date.now(), reauth}));
     }
   } catch (_) {}
   const here = window.location.pathname + window.location.search + window.location.hash;
-  window.location.assign('/auth/login?return=' + encodeURIComponent(here));
+  // reauth (Task 20448): the confirm-it's-you sign-in, made in this tab where
+  // no window would open — prompt=login, and back here asking for the button
+  // once more.
+  window.location.assign('/auth/login?' + (reauth ? 'reauth=1&' : '') + 'return=' + encodeURIComponent(here));
 }
 act('signInAgain', function() { signInAgain(true); });
 
@@ -246,6 +249,7 @@ function resumeView(projects) {
   const i = projects ? projects.findIndex(p => p.path === saved.path) : -1;
   if (saved.path && i >= 0) openProject(i, projects[i].name);
   if (saved.tab && saved.tab !== activeTab && document.getElementById('tab-' + saved.tab)) switchTab(saved.tab);
+  if (saved.reauth) toast('Signed in again: press that button once more to finish', 'ok');
 }
 
 function showRenewBanner(reason) {

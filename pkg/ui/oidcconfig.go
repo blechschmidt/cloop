@@ -94,6 +94,12 @@ func validateOIDCConfig(o config.OIDCConfig, caller *authz.Subject, runtime auth
 	if err := oidcStartupParity(o); err != nil {
 		return err
 	}
+	// Clamped where it is read, like the other windows, but refused here: a
+	// value the panel would silently turn into another is not what the admin
+	// typed, and this one decides how often they are asked to sign in again.
+	if err := config.ValidSudoMaxAgeMinutes(o.SudoMaxAgeMinutes); err != nil {
+		return oidcConfigProblem{Field: "sudo_max_age_minutes", Message: err.Error()}
+	}
 	// Two resolvers over the same prospective config, differing only in whether
 	// the runtime layer is visible, because the two questions want different
 	// answers about it.

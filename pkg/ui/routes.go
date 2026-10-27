@@ -118,6 +118,16 @@ type routeSpec struct {
 
 	// Scope selects how the request's authz scope is derived.
 	Scope scopeKind
+
+	// Sudo is what the route asks of the session's last interactive sign-in
+	// (Task 20448, sudo.go): nothing, or one within
+	// ui.oidc.sudo_max_age_minutes — on the route's writes (sudoWrites), on
+	// every method (sudoAll), or where its handler finds the request is the
+	// privileged case (sudoHandler). gate() enforces the first two after the
+	// permission, so a handler cannot forget them;
+	// TestPrivilegedRoutesAskForARecentSignIn fails a route whose permission
+	// asks for one and which neither declares it nor is exempted by name.
+	Sudo sudoRule
 }
 
 // methods returns the verbs this route serves. For a method-prefixed pattern
@@ -177,6 +187,9 @@ func (rs routeSpec) validate() error {
 		// The project-list scope admits a caller by the projects they can
 		// read, which only says something about project.read.
 		return fmt.Errorf("route %q uses a project-list scope with a permission other than project.read", rs.Pattern)
+	}
+	if err := rs.validateSudo(); err != nil {
+		return err
 	}
 	if method, _, ok := splitPattern(rs.Pattern); ok {
 		if len(rs.Methods) > 0 {
@@ -348,6 +361,13 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 		// deployment-wide policy is off (Task 20175) — and neither must it
 		// swallow a runtime deny binding (Task 20248).
 		if !s.authzGateFor(r) {
+			// Nothing to authorize, but a session is still asked how recently
+			// its owner signed in: on a hub with single sign-on and no role
+			// policy every identity holds every privileged permission, which
+			// is where a stolen cookie is worth most.
+			if !s.sudoGate(w, r, rs) {
+				return
+			}
 			rs.Handler(w, r)
 			return
 		}
@@ -394,6 +414,13 @@ func (s *Server) gate(rs routeSpec) http.HandlerFunc {
 		}
 		g, ok := s.authorize(w, r, perm, scope)
 		if !ok {
+			return
+		}
+		// Authorized, so the caller may do this; now whether the session
+		// behind it was signed in to recently enough (Task 20448). After the
+		// permission, so somebody who may not do it at all is told that
+		// rather than sent to sign in for nothing.
+		if !s.sudoGate(w, pinned, rs) {
 			return
 		}
 		// The handler decides on the claims the gate did: when they were
@@ -641,8 +668,14 @@ func (s *Server) routeTable() []routeSpec {
 		// therefore not expressible in this table, which carries one
 		// permission per route. The handler checks it and downgrades the
 		// session to read-only when it is absent; see attach_api.go.
+		//
+		// Opening the terminal asks for a recent sign-in (Task 20448): sudoAll,
+		// because the socket is a GET. The info route does not — the task
+		// details modal reads it whenever it opens, and asking there would
+		// send people to their identity provider for looking at a task — and
+		// instead says whether the socket would ask, so the Attach button can.
 		{Pattern: "GET /api/tasks/{id}/attach/info", Handler: s.handleAttachInfo, Perm: attach, Scope: scopeProject},
-		{Pattern: "/api/tasks/{id}/attach", Handler: s.handleAttachWS, Methods: []string{"GET"}, Perm: attach, Scope: scopeProject},
+		{Pattern: "/api/tasks/{id}/attach", Handler: s.handleAttachWS, Methods: []string{"GET"}, Perm: attach, Scope: scopeProject, Sudo: sudoAll},
 		{Pattern: "/api/events", Handler: s.handleEvents, Methods: []string{"GET"}, Perm: read, Scope: scopeStream},
 		{Pattern: "/api/event-history", Handler: s.handleEventHistory, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
 		{Pattern: "/api/livelog", Handler: s.handleLiveLog, Methods: []string{"GET"}, Perm: read, Scope: scopeProject},
@@ -792,15 +825,21 @@ func (s *Server) routeTable() []routeSpec {
 			Pattern: "/api/config", Handler: s.handleConfig, Methods: []string{"GET"}, Perm: cfgWrite, Scope: scopeProject,
 			MethodPerms: map[string]authz.Permission{http.MethodGet: read},
 		},
-		{Pattern: "/api/config/set", Handler: s.handleConfigSet, Methods: []string{"POST"}, Perm: cfgWrite, Scope: scopeProject},
+		// A provider's API key or base URL asks for a recent sign-in; the model
+		// and the effort do not (Task 20448, handleConfigSet).
+		{Pattern: "/api/config/set", Handler: s.handleConfigSet, Methods: []string{"POST"}, Perm: cfgWrite, Scope: scopeProject, Sudo: sudoHandler},
 
+		// The two writes ask for a recent sign-in though config.write does not
+		// (Task 20448): the key is a credential, and whose account dictations
+		// go to is not a project setting.
+		//
 		// The dictation credential is hub-wide, not per project: /api/dictate
 		// and /api/transcribe are called with no project index, so they resolve
 		// against s.WorkDir alone. scopeGlobal puts the write where the read
 		// already looks — see dictate_api.go (Task 20250).
 		{Pattern: "GET /api/config/stt", Handler: s.handleSTTSettings, Perm: read, Scope: scopeGlobal},
-		{Pattern: "PUT /api/config/stt", Handler: s.handleSTTSettingsSave, Perm: cfgWrite, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/config/stt", Handler: s.handleSTTSettingsClear, Perm: cfgWrite, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/stt", Handler: s.handleSTTSettingsSave, Perm: cfgWrite, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/config/stt", Handler: s.handleSTTSettingsClear, Perm: cfgWrite, Scope: scopeGlobal, Sudo: sudoWrites},
 
 		// Single sign-on (Task 20308). userMgmt, not cfgWrite, on all three
 		// including the read: this block decides who may sign in and what
@@ -811,11 +850,11 @@ func (s *Server) routeTable() []routeSpec {
 		// together are most of what an attacker needs to stand up a
 		// convincing fake login for this hub.
 		{Pattern: "GET /api/config/oidc", Handler: s.handleOIDCSettings, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "PUT /api/config/oidc", Handler: s.handleOIDCSettingsSave, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/oidc", Handler: s.handleOIDCSettingsSave, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "POST /api/config/oidc/test", Handler: s.handleOIDCTest, Perm: userMgmt, Scope: scopeGlobal},
 		// Deny-by-default in one step for an SSO hub without a role policy
 		// (Task 20395): default_role none plus an admin mapping for the caller.
-		{Pattern: "POST /api/config/oidc/enforce", Handler: s.handleOIDCEnforce, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/config/oidc/enforce", Handler: s.handleOIDCEnforce, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 
 		{Pattern: "POST /api/options/toggle", Handler: s.handleOptionsToggle, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/max-parallel", Handler: s.handleMaxParallelSet, Perm: cfgWrite, Scope: scopeProject},
@@ -881,8 +920,8 @@ func (s *Server) routeTable() []routeSpec {
 		// so it sits at view.prefs, the weakest permission a member holds.
 		// See members_api.go.
 		{Pattern: "GET /api/projects/{idx}/members", Handler: s.handleProjectMembers, Perm: read, Scope: scopeProjectIdx},
-		{Pattern: "POST /api/projects/{idx}/members", Handler: s.handleProjectMemberAdd, Perm: share, Scope: scopeProjectIdx},
-		{Pattern: "PATCH /api/projects/{idx}/members", Handler: s.handleProjectMemberChange, Perm: share, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/members", Handler: s.handleProjectMemberAdd, Perm: share, Scope: scopeProjectIdx, Sudo: sudoHandler},
+		{Pattern: "PATCH /api/projects/{idx}/members", Handler: s.handleProjectMemberChange, Perm: share, Scope: scopeProjectIdx, Sudo: sudoHandler},
 		{Pattern: "DELETE /api/projects/{idx}/members", Handler: s.handleProjectMemberRemove, Perm: share, Scope: scopeProjectIdx},
 		{Pattern: "DELETE /api/projects/{idx}/members/self", Handler: s.handleProjectMemberLeave, Perm: viewPrefs, Scope: scopeProjectIdx},
 		// Parallel features (Task 20341): git worktrees of the project, each
@@ -897,7 +936,7 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/projects/{idx}/features/{slug}/pr/refresh", Handler: s.handleProjectFeaturePRRefresh, Perm: write, Scope: scopeProjectIdx},
 		// Choosing where a project's code runs is a fleet decision, not a
 		// project one.
-		{Pattern: "POST /api/projects/{idx}/executor", Handler: s.handleProjectExecutorBind, Perm: execMgmt, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/executor", Handler: s.handleProjectExecutorBind, Perm: execMgmt, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		// Which repositories a project may work on (Task 20306). Reading the
 		// list needs only project.read — it names repositories, not
 		// credentials — while granting and withdrawing carry the same
@@ -905,8 +944,8 @@ func (s *Server) routeTable() []routeSpec {
 		// against *this* project's scope, so holding secret.grant on one
 		// project does not let its maintainer widen another's access.
 		{Pattern: "GET /api/projects/{idx}/repositories", Handler: s.handleProjectRepositories, Perm: read, Scope: scopeProjectIdx},
-		{Pattern: "POST /api/projects/{idx}/repositories", Handler: s.handleProjectRepositoriesAssign, Perm: secGrant, Scope: scopeProjectIdx},
-		{Pattern: "DELETE /api/projects/{idx}/repositories", Handler: s.handleProjectRepositoriesRevoke, Perm: secRevoke, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/repositories", Handler: s.handleProjectRepositoriesAssign, Perm: secGrant, Scope: scopeProjectIdx, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/projects/{idx}/repositories", Handler: s.handleProjectRepositoriesRevoke, Perm: secRevoke, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		// The installation's own inventory, for the picker. Project-scoped
 		// rather than global despite describing a hub-wide App: it is read by
 		// whoever is about to grant from it, and a project-pinned binding never
@@ -921,7 +960,7 @@ func (s *Server) routeTable() []routeSpec {
 		// secret.grant on this project, a personal one may be granted by its
 		// owner alone. See harness_credential_api.go.
 		{Pattern: "GET /api/projects/{idx}/harness-credential", Handler: s.handleProjectHarnessCredential, Perm: read, Scope: scopeProjectIdx},
-		{Pattern: "POST /api/projects/{idx}/harness-credential", Handler: s.handleProjectHarnessCredentialGrant, Perm: secOwn, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/harness-credential", Handler: s.handleProjectHarnessCredentialGrant, Perm: secOwn, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		// The models the project's relayed runs may use (Task 20435): a
 		// narrowing of the hub's allowlist, which is the project's to choose
 		// and so project.write, as its other settings are.
@@ -932,7 +971,7 @@ func (s *Server) routeTable() []routeSpec {
 		// check stays reachable: with `GET /api/executors`, any other verb
 		// falls through to "/" and answers a JSON client with an HTML page.
 		{Pattern: "/api/executors", Handler: s.handleExecutorsList, Methods: []string{"GET"}, Perm: execRead, Scope: scopeGlobal},
-		{Pattern: "POST /api/executors/enroll", Handler: s.handleExecutorEnroll, Perm: execMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/executors/enroll", Handler: s.handleExecutorEnroll, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 		// Which hub processes serve this control plane, which one leads, and
 		// what each holds (Task 20354). Admin-only: member addresses are the
 		// deployment's internal network topology.
@@ -954,9 +993,9 @@ func (s *Server) routeTable() []routeSpec {
 		// fleet would put the audit out of reach of whoever is meant to
 		// perform it.
 		{Pattern: "GET /api/executors/{id}", Handler: s.handleExecutorDetail, Perm: execRead, Scope: scopeExecutor},
-		{Pattern: "DELETE /api/executors/{id}", Handler: s.handleExecutorDelete, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "DELETE /api/executors/{id}", Handler: s.handleExecutorDelete, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
 		{Pattern: "POST /api/executors/{id}/cordon", Handler: s.handleExecutorCordon, Perm: execMgmt, Scope: scopeExecutor},
-		{Pattern: "POST /api/executors/{id}/uncordon", Handler: s.handleExecutorUncordon, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "POST /api/executors/{id}/uncordon", Handler: s.handleExecutorUncordon, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
 		{Pattern: "POST /api/executors/{id}/drain", Handler: s.handleExecutorDrain, Perm: execMgmt, Scope: scopeExecutor},
 		// Where this executor's payloads run: on the device's host, or in a
 		// container on it, and under which engine, runtime and image (Task
@@ -970,7 +1009,7 @@ func (s *Server) routeTable() []routeSpec {
 		// given device — an agent too old to honour it, an engine missing from
 		// its PATH. That is reconnaissance rather than status, so reading it is
 		// an administrative act.
-		{Pattern: "/api/executors/{id}/sandbox", Handler: s.handleExecutorSandbox, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "/api/executors/{id}/sandbox", Handler: s.handleExecutorSandbox, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
 		// Run the isolation probe under the executor's runtime now (Task 20439).
 		{Pattern: "POST /api/executors/{id}/isolation-probe", Handler: s.handleExecutorIsolationProbe, Perm: execMgmt, Scope: scopeExecutor},
 
@@ -980,11 +1019,11 @@ func (s *Server) routeTable() []routeSpec {
 		// will not hold a workload to, and an access list names the people and
 		// groups who may reach it. Both are reconnaissance in the hands of
 		// someone deciding where to put a payload.
-		{Pattern: "/api/executors/{id}/limits", Handler: s.handleExecutorLimits, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
-		{Pattern: "/api/executors/{id}/audience", Handler: s.handleExecutorAudience, Methods: []string{"GET", "POST", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "/api/executors/{id}/limits", Handler: s.handleExecutorLimits, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
+		{Pattern: "/api/executors/{id}/audience", Handler: s.handleExecutorAudience, Methods: []string{"GET", "POST", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
 		// A device's labels: what a label grant reaching it is matched against
 		// (Task 20432). The permission enrolling one takes.
-		{Pattern: "/api/executors/{id}/labels", Handler: s.handleExecutorLabels, Methods: []string{"GET", "PUT"}, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "/api/executors/{id}/labels", Handler: s.handleExecutorLabels, Methods: []string{"GET", "PUT"}, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
 
 		// Virtual executors (Task 20345): sub-executors of an enrolled device
 		// with their own engine, runtime, firewall and host devices. {id} is
@@ -993,13 +1032,13 @@ func (s *Server) routeTable() []routeSpec {
 		// execMgmt on the reads for the sandbox route's reason: a device's
 		// hardware inventory and why its firewall would not hold are
 		// reconnaissance.
-		{Pattern: "/api/executors/{id}/virtuals", Handler: s.handleVirtualExecutors, Methods: []string{"GET", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
-		{Pattern: "/api/executors/{id}/virtual", Handler: s.handleVirtualExecutor, Methods: []string{"GET", "PUT", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "/api/executors/{id}/virtuals", Handler: s.handleVirtualExecutors, Methods: []string{"GET", "POST"}, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
+		{Pattern: "/api/executors/{id}/virtual", Handler: s.handleVirtualExecutor, Methods: []string{"GET", "PUT", "DELETE"}, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
 		// A device's firewall rule set (Task 20363): the superset every sandbox
 		// on it must fit inside, its virtual executors' included. execMgmt on
 		// the read for the sandbox route's reason — it says what the fleet's
 		// sandboxes can reach and why a rule set would not hold on a device.
-		{Pattern: "/api/executors/{id}/firewall", Handler: s.handleExecutorFirewall, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor},
+		{Pattern: "/api/executors/{id}/firewall", Handler: s.handleExecutorFirewall, Methods: []string{"GET", "PUT", "POST"}, Perm: execMgmt, Scope: scopeExecutor, Sudo: sudoWrites},
 		// A project's own rule set, which may only narrow its executor's.
 		// config.write — a project's maintainers — evaluated against this
 		// project, so a maintainer of one project cannot reach another's. The
@@ -1038,7 +1077,7 @@ func (s *Server) routeTable() []routeSpec {
 		// to maintainer would produce a role able to start collecting and
 		// unable to look. See telemetry_config_api.go.
 		{Pattern: "GET /api/config/telemetry", Handler: s.handleTelemetrySettings, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "PUT /api/config/telemetry", Handler: s.handleTelemetrySettingsSave, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/telemetry", Handler: s.handleTelemetrySettingsSave, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 		// Approval notifications (Task 20427): the webhooks the hub tells
 		// approvers through. Admin-only, for the reason telemetry is: a
 		// webhook decides where a stream of who-asked-for-what and
@@ -1046,12 +1085,12 @@ func (s *Server) routeTable() []routeSpec {
 		// that brokers credentials would let it route its own oversight. The
 		// test sends one fixed message to a configured webhook, nowhere else.
 		{Pattern: "GET /api/config/notifications", Handler: s.handleNotificationsSettings, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "PUT /api/config/notifications", Handler: s.handleNotificationsSettingsSave, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/notifications", Handler: s.handleNotificationsSettingsSave, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "POST /api/config/notifications/test", Handler: s.handleNotificationsTest, Perm: userMgmt, Scope: scopeGlobal},
 		// The hub's free-space floor (Task 20381): admin only, like every
 		// other hub-scope setting the panel writes.
 		{Pattern: "GET /api/config/disk", Handler: s.handleDiskFloorSettings, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "PUT /api/config/disk", Handler: s.handleDiskFloorSave, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/config/disk", Handler: s.handleDiskFloorSave, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 
 		// ── Secrets, grants, and leases ──────────────────────────────
 		// Global, and never below maintainer. Reads are gated on
@@ -1073,13 +1112,13 @@ func (s *Server) routeTable() []routeSpec {
 		// lower than the real rule is only safe while every handler above it
 		// remembers to apply the rule.
 		{Pattern: "GET /api/secrets", Handler: s.handleSecretsList, Perm: secOwn, Scope: scopeGlobal},
-		{Pattern: "POST /api/secrets", Handler: s.handleSecretCreate, Perm: secOwn, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/secrets/{id}", Handler: s.handleSecretDelete, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/secrets", Handler: s.handleSecretCreate, Perm: secOwn, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/secrets/{id}", Handler: s.handleSecretDelete, Perm: secOwn, Scope: scopeGlobal, Sudo: sudoWrites},
 		// A Kubernetes share's next token (Task 20416): renewed by the hub
 		// now, or taken from its owner's terminal. Narrowed in the handler
 		// exactly as the DELETE above is — a personal share by its owner, a
 		// shared one by secret.grant — see kubeshare.go.
-		{Pattern: "POST /api/secrets/{id}/renew", Handler: s.handleSecretRenew, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/secrets/{id}/renew", Handler: s.handleSecretRenew, Perm: secOwn, Scope: scopeGlobal, Sudo: sudoWrites},
 		// Whether the caller may delete a secret, or renew a share, asked by
 		// `cloop remote kube revoke` and `renew` before they touch the
 		// cluster with the caller's own credentials (Task 20420). Narrowed in
@@ -1089,8 +1128,8 @@ func (s *Server) routeTable() []routeSpec {
 		// Which executors a subject reaches now, for the grant dialog (Task
 		// 20432). Names executors only to a caller who may list them.
 		{Pattern: "GET /api/grants/matches", Handler: s.handleGrantSubjectMatches, Perm: secOwn, Scope: scopeGlobal},
-		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secOwn, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/grants", Handler: s.handleGrantCreate, Perm: secOwn, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/grants/{id}", Handler: s.handleGrantDelete, Perm: secOwn, Scope: scopeGlobal, Sudo: sudoWrites},
 		// Which running workloads hold a grant, for the revoke confirmation
 		// (Task 20403): narrowed in the handler to grants the caller may
 		// revoke, as the DELETE above is.
@@ -1101,8 +1140,8 @@ func (s *Server) routeTable() []routeSpec {
 		// administers access itself — because it decides that a grant's
 		// holders get more than the grant says: without the monitor its
 		// namespaces and verbs are not enforced. See unguarded_api.go.
-		{Pattern: "POST /api/grants/{id}/unguarded", Handler: s.handleGrantUnguardedAck, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/grants/{id}/unguarded", Handler: s.handleGrantUnguardedWithdraw, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/grants/{id}/unguarded", Handler: s.handleGrantUnguardedAck, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/grants/{id}/unguarded", Handler: s.handleGrantUnguardedWithdraw, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "GET /api/leases", Handler: s.handleLeasesList, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "POST /api/leases/{id}/revoke", Handler: s.handleLeaseRevoke, Perm: secRevoke, Scope: scopeGlobal},
 		// Connecting a GitHub App (Task 20306). Discovery takes a private key
@@ -1132,7 +1171,7 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/grant-requests", Handler: s.handleGrantRequestsList, Perm: secRequest, Scope: scopeGlobal},
 		{Pattern: "POST /api/grant-requests", Handler: s.handleGrantRequestCreate, Perm: secRequest, Scope: scopeGlobal},
 		{Pattern: "POST /api/grant-requests/{id}/withdraw", Handler: s.handleGrantRequestWithdraw, Perm: secRequest, Scope: scopeGlobal},
-		{Pattern: "POST /api/grant-requests/{id}/approve", Handler: s.handleGrantRequestApprove, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "POST /api/grant-requests/{id}/approve", Handler: s.handleGrantRequestApprove, Perm: secGrant, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "POST /api/grant-requests/{id}/deny", Handler: s.handleGrantRequestDeny, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "GET /api/grant-requests/{id}/uses", Handler: s.handleGrantRequestUses, Perm: secGrant, Scope: scopeGlobal},
 		// The approvals inbox (Task 20427): the grant requests and API tokens
@@ -1176,13 +1215,16 @@ func (s *Server) routeTable() []routeSpec {
 		// minted for its run, and holds no hub session by design — and
 		// answering 404 on any other configuration.
 		{Pattern: modelRelayMount + "/", Handler: s.handleModelRelay, Methods: []string{"GET", "POST"}, Perm: public, Scope: scopeGlobal},
+		// The relay's settings ask for a recent sign-in (Task 20448): its
+		// upstream URL is where the hub's Anthropic key is sent, and its issuer
+		// decides whose tokens the rules are matched against.
 		{Pattern: "GET /api/ci/config", Handler: s.handleCISettings, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "PUT /api/ci/config", Handler: s.handleCISettingsSave, Perm: cfgWrite, Scope: scopeGlobal},
+		{Pattern: "PUT /api/ci/config", Handler: s.handleCISettingsSave, Perm: cfgWrite, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "GET /api/ci/rules", Handler: s.handleCIRulesList, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "POST /api/ci/rules", Handler: s.handleCIRuleCreate, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "POST /api/ci/rules", Handler: s.handleCIRuleCreate, Perm: secGrant, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "POST /api/ci/rules/test", Handler: s.handleCIRuleTest, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "PUT /api/ci/rules/{id}", Handler: s.handleCIRuleUpdate, Perm: secGrant, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/ci/rules/{id}", Handler: s.handleCIRuleDelete, Perm: secGrant, Scope: scopeGlobal},
+		{Pattern: "PUT /api/ci/rules/{id}", Handler: s.handleCIRuleUpdate, Perm: secGrant, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/ci/rules/{id}", Handler: s.handleCIRuleDelete, Perm: secGrant, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "GET /api/ci/sessions", Handler: s.handleCISessionsList, Perm: secGrant, Scope: scopeGlobal},
 		{Pattern: "DELETE /api/ci/sessions/{id}", Handler: s.handleCISessionRevoke, Perm: secRevoke, Scope: scopeGlobal},
 		{Pattern: "GET /api/ci/exchanges", Handler: s.handleCIExchanges, Perm: secGrant, Scope: scopeGlobal},
@@ -1220,12 +1262,12 @@ func (s *Server) routeTable() []routeSpec {
 		// access administration, and so is deciding whose stored
 		// credentials an offboarding must keep.
 		{Pattern: "GET /api/scim", Handler: s.handleSCIMStatus, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "POST /api/scim/credentials", Handler: s.handleSCIMCredentialCreate, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "POST /api/scim/credentials/{id}/rotate", Handler: s.handleSCIMCredentialRotate, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "POST /api/scim/credentials/{id}/revoke", Handler: s.handleSCIMCredentialRevoke, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/scim/credentials", Handler: s.handleSCIMCredentialCreate, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/scim/credentials/{id}/rotate", Handler: s.handleSCIMCredentialRotate, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/scim/credentials/{id}/revoke", Handler: s.handleSCIMCredentialRevoke, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "GET /api/users/holds", Handler: s.handleLegalHolds, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "POST /api/users/holds", Handler: s.handleLegalHoldPlace, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "POST /api/users/holds/release", Handler: s.handleLegalHoldRelease, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/users/holds", Handler: s.handleLegalHoldPlace, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/users/holds/release", Handler: s.handleLegalHoldRelease, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 
 		// ── API tokens ───────────────────────────────────────────────
 		// Global and admin-only. Minting a token provisions an identity
@@ -1240,16 +1282,16 @@ func (s *Server) routeTable() []routeSpec {
 		// necessary but not sufficient to create a token — the handler also
 		// refuses to issue roles the caller does not hold (Task 20175).
 		{Pattern: "GET /api/tokens", Handler: s.handleTokensList, Perm: tokenAdmin, Scope: scopeGlobal},
-		{Pattern: "POST /api/tokens", Handler: s.handleTokenCreate, Perm: tokenAdmin, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/tokens/{id}", Handler: s.handleTokenRevoke, Perm: tokenAdmin, Scope: scopeGlobal},
-		{Pattern: "POST /api/tokens/{id}/approve", Handler: s.handleTokenApprove, Perm: tokenAdmin, Scope: scopeGlobal},
+		{Pattern: "POST /api/tokens", Handler: s.handleTokenCreate, Perm: tokenAdmin, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/tokens/{id}", Handler: s.handleTokenRevoke, Perm: tokenAdmin, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/tokens/{id}/approve", Handler: s.handleTokenApprove, Perm: tokenAdmin, Scope: scopeGlobal, Sudo: sudoWrites},
 		// The static admin token (Task 20406): whether one is configured,
 		// its fingerprint and last use, and retiring it on every member
 		// without a restart. token.admin like the rows above — it is the
 		// credential they replace — and held by the static token itself,
 		// which may retire itself.
 		{Pattern: "GET /api/static-token", Handler: s.handleStaticToken, Perm: tokenAdmin, Scope: scopeGlobal},
-		{Pattern: "POST /api/static-token/retire", Handler: s.handleStaticTokenRetire, Perm: tokenAdmin, Scope: scopeGlobal},
+		{Pattern: "POST /api/static-token/retire", Handler: s.handleStaticTokenRetire, Perm: tokenAdmin, Scope: scopeGlobal, Sudo: sudoWrites},
 
 		// ── Active sessions ──────────────────────────────────────────
 		// Global, and gated on session.admin rather than user.manage:
@@ -1259,7 +1301,7 @@ func (s *Server) routeTable() []routeSpec {
 		// gated at the same level as revoking because the list itself —
 		// who is signed in, from where, on what — is reconnaissance.
 		{Pattern: "GET /api/sessions", Handler: s.handleSessionsList, Perm: sessAdmin, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/sessions/{id}", Handler: s.handleSessionRevoke, Perm: sessAdmin, Scope: scopeGlobal},
+		{Pattern: "DELETE /api/sessions/{id}", Handler: s.handleSessionRevoke, Perm: sessAdmin, Scope: scopeGlobal, Sudo: sudoHandler},
 
 		// ── Display glasses (Task 20194) ─────────────────────────────
 		// The wearable's own surface. Ordinary project reads: the link
@@ -1299,7 +1341,8 @@ func (s *Server) routeTable() []routeSpec {
 		// never bound still needs to be able to revoke their own
 		// credential, and gating that would put an operator in the path.
 		{Pattern: "GET /api/glasses/link", Handler: s.handleGlassesLinkGet, Perm: public},
-		{Pattern: "POST /api/glasses/link", Handler: s.handleGlassesLinkCreate, Perm: public},
+		// Minting a link asks for a recent sign-in, in the handler (Task 20448).
+		{Pattern: "POST /api/glasses/link", Handler: s.handleGlassesLinkCreate, Perm: public, Sudo: sudoHandler},
 		{Pattern: "DELETE /api/glasses/link", Handler: s.handleGlassesLinkRevoke, Perm: public},
 
 		// The wearable's diagnostic trail (Task 20251). Duplicated onto this
@@ -1329,8 +1372,8 @@ func (s *Server) routeTable() []routeSpec {
 		// and what each one is spending, which is both a roster and a map
 		// of who is worth compromising.
 		{Pattern: "GET /api/quotas", Handler: s.handleQuotasList, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "PUT /api/quotas/{identity}", Handler: s.handleQuotaSet, Perm: userMgmt, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/quotas/{identity}", Handler: s.handleQuotaClear, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/quotas/{identity}", Handler: s.handleQuotaSet, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/quotas/{identity}", Handler: s.handleQuotaClear, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 
 		// Offboarding (Task 20261). PermUserManage because it is the most
 		// consequential access change the hub offers: it ends every session
@@ -1340,7 +1383,7 @@ func (s *Server) routeTable() []routeSpec {
 		// Enumerating somebody's entire credential footprint is exactly the
 		// read a stolen operator cookie would want, and putting it behind a
 		// cheaper permission is how the two drift apart.
-		{Pattern: "POST /api/users/offboard", Handler: s.handleUserOffboard, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/users/offboard", Handler: s.handleUserOffboard, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 
 		// The caller's own quota. Ungated for the same reason as
 		// /api/session/logout-all: it is scoped to the caller by

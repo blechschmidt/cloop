@@ -64,6 +64,8 @@ func TestApplyConfigKey_OIDCScalars(t *testing.T) {
 		{"ui.oidc.scim.rate_limit_per_minute", "1200", func(o config.OIDCConfig) bool {
 			return o.SCIM.RateLimitPerMinute == 1200
 		}},
+		// Task 20448: sudo mode's window.
+		{"ui.oidc.sudo_max_age_minutes", "30", func(o config.OIDCConfig) bool { return o.SudoMaxAgeMinutes == 30 }},
 	}
 
 	for _, tc := range cases {
@@ -88,6 +90,7 @@ func TestApplyConfigKey_OIDCAcceptsDisableSentinel(t *testing.T) {
 		"ui.oidc.refresh_interval_minutes",
 		"ui.oidc.max_claim_age_minutes",
 		"ui.oidc.clock_skew_seconds",
+		"ui.oidc.sudo_max_age_minutes",
 	} {
 		t.Run(key, func(t *testing.T) {
 			cfg := config.Default()
@@ -116,6 +119,9 @@ func TestApplyConfigKey_OIDCRejectsOutOfRange(t *testing.T) {
 		{"ui.oidc.scim.match_claim", "upn"},
 		{"ui.oidc.scim.offboard_after_days", "-1"},
 		{"ui.oidc.scim.rate_limit_per_minute", "5"},
+		{"ui.oidc.sudo_max_age_minutes", "-5"},
+		{"ui.oidc.sudo_max_age_minutes", "1441"},
+		{"ui.oidc.sudo_max_age_minutes", "two hours"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {

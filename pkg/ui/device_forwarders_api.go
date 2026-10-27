@@ -29,12 +29,12 @@ import (
 func (s *Server) forwarderRoutes() []routeSpec {
 	return []routeSpec{
 		{Pattern: "GET /api/forwarders", Handler: s.handleForwardersList, Perm: authz.PermExecutorRead, Scope: scopeGlobal},
-		{Pattern: "POST /api/forwarders/enroll", Handler: s.handleForwarderEnroll, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
-		{Pattern: "DELETE /api/forwarders/{id}", Handler: s.handleForwarderDelete, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
-		{Pattern: "POST /api/forwarders/{id}/expose", Handler: s.handleForwarderExpose, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
+		{Pattern: "POST /api/forwarders/enroll", Handler: s.handleForwarderEnroll, Perm: authz.PermExecutorManage, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/forwarders/{id}", Handler: s.handleForwarderDelete, Perm: authz.PermExecutorManage, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/forwarders/{id}/expose", Handler: s.handleForwarderExpose, Perm: authz.PermExecutorManage, Scope: scopeGlobal, Sudo: sudoWrites},
 		// Bindings (Task 20430): which projects' runs get a forwarder's device.
 		{Pattern: "GET /api/forwarders/bindings", Handler: s.handleForwarderBindingsList, Perm: authz.PermExecutorRead, Scope: scopeGlobal},
-		{Pattern: "POST /api/forwarders/{id}/bindings", Handler: s.handleForwarderBind, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
+		{Pattern: "POST /api/forwarders/{id}/bindings", Handler: s.handleForwarderBind, Perm: authz.PermExecutorManage, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "DELETE /api/forwarders/bindings/{bid}", Handler: s.handleForwarderUnbind, Perm: authz.PermExecutorManage, Scope: scopeGlobal},
 		{Pattern: "GET /api/forwarders/requests", Handler: s.handleForwarderRequestsList, Perm: authz.PermSecretRequest, Scope: scopeGlobal},
 		{Pattern: "GET /api/projects/{idx}/forwarders", Handler: s.handleProjectForwarders, Perm: authz.PermExecutorRead, Scope: scopeProjectIdx},

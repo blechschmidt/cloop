@@ -683,6 +683,15 @@ func (a *Authenticator) deviceForBrowser(r *http.Request, userCode string) (Devi
 // deviceReauth reports whether a browser session is too old to approve a
 // terminal without signing in again.
 func (a *Authenticator) deviceReauth(browser SessionRecord, now time.Time) bool {
+	// Sudo mode (Task 20448): the terminal session an approval creates is held
+	// to the sudo window from the sign-in behind it, so an approval from a
+	// browser whose own interactive sign-in is not recent has to be one —
+	// whatever the device window says — or a stolen browser cookie, too stale
+	// for any privileged action of its own, could mint a terminal session
+	// fresh enough for all of them.
+	if a.SudoMaxAge() > 0 && !a.RecentSignIn(browser).Recent {
+		return true
+	}
 	limit := a.cfg.DeviceApprovalMaxAge
 	if limit <= 0 {
 		return false
@@ -878,7 +887,8 @@ func (a *Authenticator) completeDeviceApproval(w http.ResponseWriter, r *http.Re
 	// callback cannot read its cookie — the provider's redirect is a
 	// cross-site navigation — so it asks about the session the approval
 	// captured, without counting the question as activity.
-	if _, state := a.CheckSession(p.sessionHash); state != SessionLive {
+	browser, state := a.CheckSession(p.sessionHash)
+	if state != SessionLive {
 		a.devicePage(w, http.StatusForbidden, p, "Your dashboard session ended while you were approving. Sign in and approve the code again.", nil)
 		return
 	}
@@ -908,10 +918,20 @@ func (a *Authenticator) completeDeviceApproval(w http.ResponseWriter, r *http.Re
 		a.devicePage(w, http.StatusConflict, p, undecidableMessage(err), nil)
 		return
 	}
+	// When the person behind the terminal session last authenticated (Task
+	// 20448): this round trip, when it asked them to (prompt=login) or the
+	// provider says when it last did; otherwise the sign-in the approving
+	// browser session rode on, which deviceReauth required to be recent. Never
+	// the approval's own time unless the approval was a sign-in: a silent round
+	// trip proves nothing newer than what the browser already had.
+	authAt := a.interactiveAt(id.AuthTime, p.reauth, now)
+	if browser.AuthenticatedAt.After(authAt) {
+		authAt = browser.AuthenticatedAt
+	}
 	// The session first, the approval after it: a poll that finds the code
 	// approved finds the session there to collect, never an approval with
 	// nothing behind it yet.
-	sess, err := a.createCLISession(*id, pending, tok, now)
+	sess, err := a.createCLISession(*id, pending, tok, now, authAt)
 	if err != nil {
 		a.refuseDevice(p.device, *id, p.sessionHash, "session_error", r)
 		a.devicePage(w, http.StatusInternalServerError, p, "The terminal's session could not be created. Nothing was approved.", err)
@@ -1013,7 +1033,7 @@ func undecidableMessage(err error) string {
 // createCLISession writes the terminal's session under the id its commitment
 // names, from what the identity provider just asserted. It does not announce
 // it: the approval does, once it is recorded.
-func (a *Authenticator) createCLISession(id Identity, dev DeviceRecord, tok *tokenResponse, now time.Time) (SessionRecord, error) {
+func (a *Authenticator) createCLISession(id Identity, dev DeviceRecord, tok *tokenResponse, now, authenticatedAt time.Time) (SessionRecord, error) {
 	// The quota counts a terminal session like any other: it is one.
 	a.enforceSessionLimit(id, now)
 	id.AuthTime = time.Time{}
@@ -1035,6 +1055,9 @@ func (a *Authenticator) createCLISession(id Identity, dev DeviceRecord, tok *tok
 		// see createSession for why the claim clock starts now.
 		ClaimsAsOf:     now,
 		ClaimsExpireAt: accessTokenExpiry(tok, now),
+		// Held to the sudo window from the sign-in behind the approval (Task
+		// 20448) — see completeDeviceApproval.
+		AuthenticatedAt: authenticatedAt,
 	}
 	if err := a.store.Put(rec); err != nil {
 		return SessionRecord{}, fmt.Errorf("oidcauth: persist terminal session: %w", err)

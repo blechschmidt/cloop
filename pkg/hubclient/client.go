@@ -208,6 +208,18 @@ func IsUnauthorized(err error) bool {
 	return errors.As(err, &ae) && ae.Status == http.StatusUnauthorized
 }
 
+// ReauthRequiredCode is the code a hub refuses a privileged action with when
+// the session asking was signed in, or approved, longer ago than it allows
+// (sudo mode, Task 20448). The session itself is still live.
+const ReauthRequiredCode = "REAUTH_REQUIRED"
+
+// IsReauthRequired reports whether err is a hub asking for a more recent
+// sign-in: for a terminal, a fresh `cloop login`.
+func IsReauthRequired(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusUnauthorized && ae.Code == ReauthRequiredCode
+}
+
 // AsAPIError returns err's *APIError, if it is one.
 func AsAPIError(err error) (*APIError, bool) {
 	var ae *APIError

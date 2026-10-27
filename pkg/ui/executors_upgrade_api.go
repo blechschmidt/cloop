@@ -57,6 +57,8 @@ func (s *Server) executorUpgradeRoutes() []routeSpec {
 			Handler: s.handleExecutorUpgrade,
 			Perm:    authz.PermExecutorManage,
 			Scope:   scopeExecutor,
+			// Replaces the code a device runs as root (Task 20448).
+			Sudo: sudoWrites,
 		},
 		// Deliberately not under /api/executors/. A fleet-wide policy is not an
 		// executor, and parking it at /api/executors/autoupdate would put a
@@ -74,6 +76,8 @@ func (s *Server) executorUpgradeRoutes() []routeSpec {
 			Handler: s.handleFleetAutoUpdateSave,
 			Perm:    authz.PermExecutorManage,
 			Scope:   scopeGlobal,
+			// Decides what every device upgrades to, unattended (Task 20448).
+			Sudo: sudoWrites,
 		},
 	}
 }

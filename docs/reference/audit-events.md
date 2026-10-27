@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 219 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 220 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 196 |
+| `control-plane` | the hub's own state.db | 197 |
 | `project` | the project's .cloop/state.db | 19 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-219 actions in 48 families. Every action is listed: this section is the whole
+220 actions in 48 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (9) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -629,13 +629,26 @@ Payload keys, on every action above: `fingerprint`, `reason`, `via`, `forced`, `
 | `session.created` | `session` | control-plane | stable | A sign-in completes and a durable session is written. |
 | `session.expired` | `session` | control-plane | stable | The session janitor removes a session past its absolute or idle deadline. |
 | `session.idp_revoked` | `session` | control-plane | stable | The identity provider reports the authorisation behind a session is gone. |
+| `session.reauth` | `session` | control-plane | beta | A privileged request reaches the hub on a session whose last interactive sign-in is older than `ui.oidc.sudo_max_age_minutes` (sudo mode), or the confirm-it's-you sign-in that answers one completes. |
 | `session.renewal_mismatch` | `session` | control-plane | stable | A silent renewal from the user's browser is answered by the identity provider for a different subject than the session belongs to. |
 | `session.revoked` | `session` | control-plane | stable | A user logs out, or an operator terminates a session from the UI or the CLI. |
 | `session.role_narrowed` | `session` | control-plane | stable | A re-assertion finds the session's claims now map to a lower role than it held. |
 
-Payload keys, on every action above: `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+Payload keys:
+
+- `session.claims_rejected` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+- `session.claims_stale` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+- `session.claims_unverified` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+- `session.created` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+- `session.expired` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+- `session.idp_revoked` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+- `session.reauth` — `session_id`, `subject`, `email`, `ip`, `user_agent`, `kind`, `client`, `outcome`, `reason`, `max_age_seconds`, `authenticated_at`, `method`, `path`, `replaces`, `suppressed`
+- `session.renewal_mismatch` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+- `session.revoked` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
+- `session.role_narrowed` — `event`, `session_id`, `subject`, `email`, `actor`, `reason`, `ip`, `user_agent`, `prior_role`, `role`, `dropped_claims`, `issued_at`, `selector`, `selected`, `via`, `os_user`, `kind`, `client`
 
 - `session.claims_stale` — A block, not a revocation: the session stays, and ordinary reads keep working.
+- `session.reauth` — `outcome` is `stale-refused` for the refused request — `method` and `path` name it, `authenticated_at` is the session's last interactive sign-in (absent: none on record) and `max_age_seconds` the window it missed; at most thirty such rows a minute are written, the next one carrying `suppressed`, while `cloop_session_reauth_total` counts every one. `granted` is a sign-in the hub started with `prompt=login&max_age=0` that the provider answered for the same person: `session_id` is the fresh session it created and `replaces` the one that asked. `refused` is one that did not count — `reason` `subject_mismatch` (another account signed in), `not_reauthenticated` (the provider's `auth_time` is older than the request, so it did not ask), or `idp_error: <code>`; nothing is created then. API tokens and the static token are not sessions and never produce this row.
 - `session.renewal_mismatch` — The session is left exactly as it was: nothing of the other identity is applied or recorded. The benign reading is a user who switched accounts at the provider in another tab; the other is a browser signed into somebody else's account at the provider in the hope that the renewal adopts it. `ip` and `user_agent` are the browser that performed the renewal.
 - `session.role_narrowed` — `prior_role` and `role` bracket the demotion; `dropped_claims` names what the IdP stopped asserting. `via` is `browser_renewal` when the narrowed claims arrived through a silent renewal from the user's browser, and absent when the hub's own refresh found them.
 

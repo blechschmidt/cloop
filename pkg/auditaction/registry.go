@@ -1596,6 +1596,24 @@ var registry = []Entry{
 			"browser signed into somebody else's account at the provider in the hope that the renewal adopts it. " +
 			"`ip` and `user_agent` are the browser that performed the renewal.",
 	},
+	{
+		Action:    ActionSessionReauth,
+		Home:      HomeControlPlane,
+		Entity:    "session",
+		Trigger:   "A privileged request reaches the hub on a session whose last interactive sign-in is older than `ui.oidc.sudo_max_age_minutes` (sudo mode), or the confirm-it's-you sign-in that answers one completes.",
+		Payload:   reauthPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`outcome` is `stale-refused` for the refused request — `method` and `path` name it, `authenticated_at` is " +
+			"the session's last interactive sign-in (absent: none on record) and `max_age_seconds` the window it missed; " +
+			"at most thirty such rows a minute are written, the next one carrying `suppressed`, while " +
+			"`cloop_session_reauth_total` counts every one. `granted` is a sign-in the hub started with " +
+			"`prompt=login&max_age=0` that the provider answered for the same person: `session_id` is the fresh " +
+			"session it created and `replaces` the one that asked. `refused` is one that did not count — `reason` " +
+			"`subject_mismatch` (another account signed in), `not_reauthenticated` (the provider's `auth_time` is older " +
+			"than the request, so it did not ask), or `idp_error: <code>`; nothing is created then. API tokens and the " +
+			"static token are not sessions and never produce this row.",
+	},
 
 	// ── device ─────────────────────────────────────────────────────────────
 	// A terminal signing in to a hub with single sign-on (Task 20412). The
@@ -2632,6 +2650,15 @@ var (
 		"event", "session_id", "subject", "email", "actor", "reason", "ip",
 		"user_agent", "prior_role", "role", "dropped_claims",
 		"issued_at", "selector", "selected", "via", "os_user", "kind", "client",
+	}
+
+	// reauthPayload is what a session.reauth row says (Task 20448): the
+	// session, the outcome, and either the request a stale sign-in was refused
+	// for or the sign-in that answered it.
+	reauthPayload = []string{
+		"session_id", "subject", "email", "ip", "user_agent", "kind", "client",
+		"outcome", "reason", "max_age_seconds", "authenticated_at", "method", "path",
+		"replaces", "suppressed",
 	}
 
 	// devicePayload is what a device.* row says about a terminal's sign-in:

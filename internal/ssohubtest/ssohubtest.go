@@ -75,6 +75,12 @@ type Options struct {
 	SelfExe string
 	// Goal is the hub's own project's goal.
 	Goal string
+	// SudoMaxAge is ui.oidc.sudo_max_age_minutes as a duration (Task 20448):
+	// zero for the default window, negative to turn it off.
+	SudoMaxAge time.Duration
+	// Clock is the hub's session clock (oidcauth.Config.Clock); nil is the
+	// real one. The identity provider's tokens always carry real time.
+	Clock func() time.Time
 }
 
 // Hub is a running hub with single sign-on.
@@ -103,6 +109,9 @@ func Start(t testing.TB, opts Options) *Hub {
 	t.Setenv(secretbroker.EnvPassphraseKey, "ssohubtest-passphrase")
 
 	idp := NewIdP(t)
+	idp.mu.Lock()
+	idp.now = opts.Clock
+	idp.mu.Unlock()
 	dir := t.TempDir()
 	statedbtest.SeedDir(t, dir)
 	goal := opts.Goal
@@ -134,6 +143,8 @@ func Start(t testing.TB, opts Options) *Hub {
 		DeviceLogin: true,
 		Store:       store,
 		Audit:       srv.SessionAuditSink(),
+		SudoMaxAge:  opts.SudoMaxAge,
+		Clock:       opts.Clock,
 	}
 	srv.InstallOIDCHooks(&cfg)
 	auth, err := oidcauth.New(cfg)
@@ -377,11 +388,28 @@ type IdP struct {
 	n       int
 	codes   map[string]identity
 	refresh map[string]identity
+
+	// The provider's own sign-in, which its ID tokens report as auth_time
+	// (Task 20448). signedInAt zero means every token says "just now"; set,
+	// it is when the person last typed a password here, and an authorization
+	// request with prompt=login or max_age=0 moves it to now — the provider
+	// asked — unless ignorePrompt. omitAuthTime is a provider that reports no
+	// auth_time at all (Entra ID without the optional claim).
+	signedInAt   time.Time
+	ignorePrompt bool
+	omitAuthTime bool
+	loginPrompts int
+	// now is the clock auth_time is read from: the hub's when a test moves
+	// it (Options.Clock), so "just now" at the provider is just now to the
+	// hub too. iat and exp stay on the real clock, which the hub checks them
+	// against.
+	now func() time.Time
 }
 
 type identity struct {
 	email, sub, nonce string
 	groups            []string
+	authTime          time.Time
 }
 
 var (
@@ -428,7 +456,25 @@ func NewIdP(t testing.TB) *IdP {
 		idp.mu.Lock()
 		idp.n++
 		code := fmt.Sprintf("code-%d", idp.n)
-		idp.codes[code] = identity{email: idp.email, sub: idp.sub, groups: append([]string(nil), idp.groups...), nonce: q.Get("nonce")}
+		now := time.Now
+		if idp.now != nil {
+			now = idp.now
+		}
+		if q.Get("prompt") == "login" || q.Get("max_age") == "0" {
+			idp.loginPrompts++
+			if !idp.ignorePrompt && !idp.signedInAt.IsZero() {
+				idp.signedInAt = now()
+			}
+		}
+		authTime := idp.signedInAt
+		if authTime.IsZero() {
+			authTime = now()
+		}
+		if idp.omitAuthTime {
+			authTime = time.Time{}
+		}
+		idp.codes[code] = identity{email: idp.email, sub: idp.sub, groups: append([]string(nil), idp.groups...),
+			nonce: q.Get("nonce"), authTime: authTime}
 		idp.mu.Unlock()
 		cb, err := url.Parse(q.Get("redirect_uri"))
 		if err != nil {
@@ -454,7 +500,7 @@ func NewIdP(t testing.TB) *IdP {
 			delete(idp.codes, code)
 			refresh = "rt-" + code
 			if ok {
-				idp.refresh[refresh] = identity{email: id.email, sub: id.sub, groups: id.groups}
+				idp.refresh[refresh] = identity{email: id.email, sub: id.sub, groups: id.groups, authTime: id.authTime}
 			}
 		case "refresh_token":
 			id, ok = idp.refresh[refresh]
@@ -470,7 +516,10 @@ func NewIdP(t testing.TB) *IdP {
 		claims := map[string]any{
 			"iss": idp.server.URL, "sub": id.sub, "aud": ClientID,
 			"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
-			"auth_time": time.Now().Unix(), "email": id.email, "name": strings.Split(id.email, "@")[0],
+			"email": id.email, "name": strings.Split(id.email, "@")[0],
+		}
+		if !id.authTime.IsZero() {
+			claims["auth_time"] = id.authTime.Unix()
 		}
 		if id.nonce != "" {
 			claims["nonce"] = id.nonce
@@ -497,6 +546,30 @@ func (idp *IdP) SetIdentity(email string, groups ...string) {
 	defer idp.mu.Unlock()
 	idp.email, idp.groups = email, groups
 	idp.sub = "sub-" + strings.NewReplacer("@", "-at-", ".", "-").Replace(email)
+}
+
+// SetSignedInAt sets when the provider last asked the person to sign in: the
+// auth_time its tokens report until an authorization request asks for
+// prompt=login (Task 20448). The zero time restores "just now" on every token.
+func (idp *IdP) SetSignedInAt(t time.Time) {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	idp.signedInAt = t
+}
+
+// SetAuthTimeBehaviour sets whether tokens omit auth_time, and whether the
+// provider ignores prompt=login and answers from its own session anyway.
+func (idp *IdP) SetAuthTimeBehaviour(omit, ignorePrompt bool) {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	idp.omitAuthTime, idp.ignorePrompt = omit, ignorePrompt
+}
+
+// LoginPrompts counts authorization requests that asked for prompt=login.
+func (idp *IdP) LoginPrompts() int {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	return idp.loginPrompts
 }
 
 func (idp *IdP) sign(claims map[string]any) string {

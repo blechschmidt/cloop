@@ -182,6 +182,7 @@ func (s *Store) Put(rec oidcauth.SessionRecord) error {
 		Client:            rec.Client,
 		Username:          rec.Identity.Username,
 		OID:               rec.Identity.OID,
+		AuthenticatedAt:   rec.AuthenticatedAt,
 	})
 }
 
@@ -369,6 +370,7 @@ func (s *Store) toRecord(row statedb.SessionRow) oidcauth.SessionRecord {
 		ClaimsExpireAt:   row.ClaimsExpireAt,
 		Kind:             sessionKind(row.Kind),
 		Client:           row.Client,
+		AuthenticatedAt:  row.AuthenticatedAt,
 	}
 }
 

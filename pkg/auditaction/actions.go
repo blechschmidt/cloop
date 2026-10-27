@@ -459,6 +459,9 @@ const (
 	// ActionSessionRenewalMismatch records a silent renewal answered for a
 	// different subject than the session's, which leaves the session as it was.
 	ActionSessionRenewalMismatch Action = "session.renewal_mismatch"
+	// ActionSessionReauth records a privileged request refused for want of a
+	// recent sign-in, and the confirm-it's-you sign-in that answers it.
+	ActionSessionReauth Action = "session.reauth"
 
 	// ── device ─────────────────────────────────────────────────────────────
 

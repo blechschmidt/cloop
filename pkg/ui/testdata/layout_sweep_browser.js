@@ -849,6 +849,16 @@ const OPENERS = {
     open: async () => { await onTask('splitTask', F.pendingTaskID); },
     ready: visible('#dc-overlay button'),
   },
+  // "Confirm it's you" (Task 20448) opens on a privileged request refused for
+  // want of a recent sign-in, which a hub without sign-on never answers; it is
+  // raised as the bundle's 401 handler raises it, its refusal left unhandled
+  // for the sweep's Escape to settle.
+  'ra-overlay': {
+    open: async () => {
+      await cdp.eval(`(window.panelAct('reauth', 'ask', {details: {max_age_seconds: 5400}}, null).catch(() => {}), true)`);
+    },
+    ready: visible('#ra-go'),
+  },
   'newfeat-overlay': {
     open: async () => {
       await openTab('overview');

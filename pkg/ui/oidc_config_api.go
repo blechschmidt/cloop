@@ -90,6 +90,7 @@ type oidcSettingsView struct {
 	RefreshIntervalMinutes int    `json:"refresh_interval_minutes"`
 	MaxClaimAgeMinutes     int    `json:"max_claim_age_minutes"`
 	ClockSkewSeconds       int    `json:"clock_skew_seconds"`
+	SudoMaxAgeMinutes      int    `json:"sudo_max_age_minutes"`
 	RequireIdP             bool   `json:"require_idp"`
 	RequireRBAC            bool   `json:"require_rbac"`
 	CookieSecure           string `json:"cookie_secure"`
@@ -218,6 +219,7 @@ type oidcLimitsView struct {
 	RefreshIntervalMinutes oidcBound `json:"refresh_interval_minutes"`
 	MaxClaimAgeMinutes     oidcBound `json:"max_claim_age_minutes"`
 	ClockSkewSeconds       oidcBound `json:"clock_skew_seconds"`
+	SudoMaxAgeMinutes      oidcBound `json:"sudo_max_age_minutes"`
 }
 
 func oidcLimits() oidcLimitsView {
@@ -248,6 +250,12 @@ func oidcLimits() oidcLimitsView {
 			Default: config.OIDCClockSkewSecondsDefault,
 			Lower:   0,
 			Upper:   config.OIDCClockSkewSecondsUpper,
+			Disable: config.OIDCDisabledSentinel,
+		},
+		SudoMaxAgeMinutes: oidcBound{
+			Default: config.OIDCSudoMaxAgeMinutesDefault,
+			Lower:   config.OIDCSudoMaxAgeMinutesLower,
+			Upper:   config.OIDCSudoMaxAgeMinutesUpper,
 			Disable: config.OIDCDisabledSentinel,
 		},
 	}
@@ -291,6 +299,7 @@ func (s *Server) oidcViewOf(o config.OIDCConfig) oidcSettingsView {
 		RefreshIntervalMinutes: o.RefreshIntervalMinutes,
 		MaxClaimAgeMinutes:     o.MaxClaimAgeMinutes,
 		ClockSkewSeconds:       o.ClockSkewSeconds,
+		SudoMaxAgeMinutes:      o.SudoMaxAgeMinutes,
 		RequireIdP:             o.RequireIdP,
 		RequireRBAC:            o.RequireRBAC,
 		CookieSecure:           o.CookieSecure,
@@ -397,7 +406,19 @@ func (s *Server) oidcRestartRequired(o config.OIDCConfig) bool {
 	if time.Duration(o.EffectiveIdleTimeoutHours())*time.Hour != s.OIDC.IdleTimeout() {
 		return true
 	}
+	if !sameSudoWindow(o.EffectiveSudoMaxAgeMinutes(), s.OIDC.SudoMaxAge()) {
+		return true
+	}
 	return time.Duration(o.EffectiveMaxClaimAgeMinutes())*time.Minute != s.OIDC.MaxClaimAge()
+}
+
+// sameSudoWindow compares a saved sudo_max_age_minutes with the running
+// window, both off (negative) counting as the same.
+func sameSudoWindow(minutes int, running time.Duration) bool {
+	if minutes < 0 || running <= 0 {
+		return minutes < 0 && running <= 0
+	}
+	return time.Duration(minutes)*time.Minute == running
 }
 
 func oidcRoleNames() []string {
@@ -439,6 +460,7 @@ type oidcSettingsRequest struct {
 	RefreshIntervalMinutes *int    `json:"refresh_interval_minutes"`
 	MaxClaimAgeMinutes     *int    `json:"max_claim_age_minutes"`
 	ClockSkewSeconds       *int    `json:"clock_skew_seconds"`
+	SudoMaxAgeMinutes      *int    `json:"sudo_max_age_minutes"`
 	RequireIdP             *bool   `json:"require_idp"`
 	RequireRBAC            *bool   `json:"require_rbac"`
 	CookieSecure           *string `json:"cookie_secure"`
@@ -677,6 +699,9 @@ func applyOIDCRequest(o *config.OIDCConfig, req oidcSettingsRequest) {
 	}
 	if req.ClockSkewSeconds != nil {
 		o.ClockSkewSeconds = *req.ClockSkewSeconds
+	}
+	if req.SudoMaxAgeMinutes != nil {
+		o.SudoMaxAgeMinutes = *req.SudoMaxAgeMinutes
 	}
 	if req.RequireIdP != nil {
 		o.RequireIdP = *req.RequireIdP
@@ -999,6 +1024,7 @@ func oidcChangedFields(was, now config.OIDCConfig) []string {
 	add("refresh_interval_minutes", was.RefreshIntervalMinutes != now.RefreshIntervalMinutes)
 	add("max_claim_age_minutes", was.MaxClaimAgeMinutes != now.MaxClaimAgeMinutes)
 	add("clock_skew_seconds", was.ClockSkewSeconds != now.ClockSkewSeconds)
+	add("sudo_max_age_minutes", was.SudoMaxAgeMinutes != now.SudoMaxAgeMinutes)
 	add("require_idp", was.RequireIdP != now.RequireIdP)
 	add("require_rbac", was.RequireRBAC != now.RequireRBAC)
 	add("cookie_secure", was.CookieSecure != now.CookieSecure)

@@ -324,6 +324,11 @@ func remoteErr(c *hubclient.Client, err error) error {
 	if err == nil {
 		return nil
 	}
+	if ae, ok := hubclient.AsAPIError(err); ok && hubclient.IsReauthRequired(err) {
+		// The session is live; the action asks for one approved more recently
+		// than this (sudo mode, Task 20448). A fresh `cloop login` is one.
+		return &reauthError{hub: c.Base, ae: ae}
+	}
 	if hubclient.IsUnauthorized(err) {
 		return fmt.Errorf("%w — the session has ended: run `cloop login %s` again", err, c.Base)
 	}
@@ -331,6 +336,41 @@ func remoteErr(c *hubclient.Client, err error) error {
 		return &remoteError{hub: c.Base, ae: ae}
 	}
 	return err
+}
+
+// reauthError is a privileged action refused because this terminal's session
+// was approved longer ago than the hub's sudo window (Task 20448). It says so
+// in the terminal's words — the window, and the one command that fixes it —
+// and unwraps to the hub's refusal.
+type reauthError struct {
+	hub string
+	ae  *hubclient.APIError
+}
+
+func (e *reauthError) Error() string {
+	window := "the hub allows"
+	if secs, ok := e.ae.Details["max_age_seconds"].(float64); ok && secs >= 60 {
+		window = plainWindow(int64(secs) / 60)
+	}
+	return fmt.Sprintf("this action needs a recent sign-in, and this terminal's session was approved more than %s ago: "+
+		"run `cloop login %s` again, then retry", window, e.hub)
+}
+
+func (e *reauthError) Unwrap() error { return e.ae }
+
+// plainWindow says a number of minutes the way a person would: "2 hours",
+// "90 minutes", "1 minute".
+func plainWindow(minutes int64) string {
+	plural := func(n int64, unit string) string {
+		if n == 1 {
+			return "1 " + unit
+		}
+		return fmt.Sprintf("%d %ss", n, unit)
+	}
+	if minutes%60 == 0 {
+		return plural(minutes/60, "hour")
+	}
+	return plural(minutes, "minute")
 }
 
 func remoteContext(cmd *cobra.Command) context.Context {

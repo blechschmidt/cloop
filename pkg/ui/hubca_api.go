@@ -38,7 +38,10 @@ import (
 func (s *Server) hubCARoutes() []routeSpec {
 	return []routeSpec{
 		{Pattern: "GET /api/hub/ca", Handler: s.handleHubCAStatus, Perm: authz.PermConfigWrite, Scope: scopeGlobal},
-		{Pattern: "POST /api/hub/ca/rotate", Handler: s.handleHubCARotate, Perm: authz.PermConfigWrite, Scope: scopeGlobal},
+		// Rotating the CA every sandbox trusts asks for a recent sign-in
+		// though config.write does not (Task 20448): it is the hub's own trust
+		// root, not a project's setting.
+		{Pattern: "POST /api/hub/ca/rotate", Handler: s.handleHubCARotate, Perm: authz.PermConfigWrite, Scope: scopeGlobal, Sudo: sudoWrites},
 	}
 }
 

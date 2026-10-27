@@ -440,6 +440,15 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	addSessionSchedule(body, s.OIDC, rec)
+	// Sudo mode (Task 20448): whether this session may take the actions that
+	// ask for a recent sign-in, and for how long — absent when the hub asks
+	// for none.
+	if st := s.OIDC.RecentSignIn(rec); st.Required {
+		body["recent_sign_in"] = map[string]any{
+			"max_age_seconds":   int64(st.MaxAge / time.Second),
+			"remaining_seconds": int64(st.Remaining / time.Second),
+		}
+	}
 	jsonOK(w, body)
 }
 

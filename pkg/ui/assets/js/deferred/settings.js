@@ -283,6 +283,7 @@
       num('oidcRefreshInterval', d.refresh_interval_minutes, lim.refresh_interval_minutes);
       num('oidcMaxClaimAge', d.max_claim_age_minutes, lim.max_claim_age_minutes);
       num('oidcClockSkew', d.clock_skew_seconds, lim.clock_skew_seconds);
+      num('oidcSudoMaxAge', d.sudo_max_age_minutes, lim.sudo_max_age_minutes);
 
       renderOIDCRoleOptions(d.roles || [], d.default_role || '');
       renderOIDCSecretState(d);
@@ -505,6 +506,7 @@
         refresh_interval_minutes: oidcNum('oidcRefreshInterval'),
         max_claim_age_minutes: oidcNum('oidcMaxClaimAge'),
         clock_skew_seconds: oidcNum('oidcClockSkew'),
+        sudo_max_age_minutes: oidcNum('oidcSudoMaxAge'),
         require_idp: !!document.getElementById('oidcRequireIdp').checked,
         require_rbac: !!document.getElementById('oidcRequireRbac').checked,
         cookie_secure: document.getElementById('oidcCookieSecure').value,
@@ -603,6 +605,7 @@
         require_rbac: 'oidcRequireRbac',
         max_claim_age_minutes: 'oidcMaxClaimAge',
         clock_skew_seconds: 'oidcClockSkew',
+        sudo_max_age_minutes: 'oidcSudoMaxAge',
       };
       return map[field] || '';
     }
@@ -2149,6 +2152,15 @@
                 <input type="checkbox" id="oidcRequireRbac">
                 Refuse to start without a role policy
               </label>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="oidcSudoMaxAge">Privileged actions need a sign-in from the last (minutes, -1 to turn off)</label>
+              <input class="form-input" id="oidcSudoMaxAge" type="number" autocomplete="off">
+              <div class="form-hint">Creating secrets and grants, minting tokens, editing this block, attaching to a
+                sandbox and the other admin actions first ask a session signed in longer ago than this to confirm it
+                is its owner at the identity provider. API tokens and the static token are not asked.</div>
             </div>
           </div>
 

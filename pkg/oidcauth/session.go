@@ -78,6 +78,17 @@ type SessionRecord struct {
 	// IP and UserAgent.
 	Kind   SessionKind
 	Client string
+
+	// AuthenticatedAt is when the person behind the session last
+	// authenticated interactively (Task 20448, sudo.go): the id_token's
+	// auth_time when the provider reported one, else the time of a sign-in
+	// callback the hub itself started with prompt=login, and for a terminal
+	// session the sign-in behind its approval. Zero when none of those is
+	// known — a sign-in the provider may have answered from a session of its
+	// own — which reads as not recent. Written once, when the session is
+	// created: neither silent renewal nor the server-side refresh moves it,
+	// since neither is the person proving anything.
+	AuthenticatedAt time.Time
 }
 
 // ExpiryCutoffs are the absolute times a store compares sessions against to
@@ -314,6 +325,13 @@ const (
 	// (Task 20359). The session is left exactly as it was. See
 	// noteRenewalMismatch for why this is worth a row.
 	AuditSessionRenewalMismatch = auditaction.ActionSessionRenewalMismatch
+
+	// AuditSessionReauth records the life of a recent-sign-in requirement
+	// (Task 20448, sudo.go): a privileged request refused because the
+	// session's last interactive sign-in is too old (stale-refused), and the
+	// confirm-it's-you sign-in that followed — granted, or refused. The
+	// outcome is in Reauth.
+	AuditSessionReauth = auditaction.ActionSessionReauth
 )
 
 // The Reason a session.expired or session.revoked event carries for each way a
@@ -379,6 +397,9 @@ type SessionAudit struct {
 	// doing: "browser_renewal" for claims a silent renewal re-asserted from
 	// the user's browser (Task 20359). Empty for the server-side refresh.
 	Via string
+
+	// Reauth is set on AuditSessionReauth events and says what happened.
+	Reauth *ReauthAuditDetail
 }
 
 // ── in-memory store ─────────────────────────────────────────────────────────

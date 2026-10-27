@@ -602,6 +602,15 @@ func applyConfigKey(cfg *config.Config, key, value string) error {
 				config.OIDCDeviceApprovalMaxAgeMinutesDefault, config.OIDCDisabledSentinel, n)
 		}
 		cfg.UI.OIDC.DeviceApprovalMaxAgeMinutes = n
+	case "ui.oidc.sudo_max_age_minutes":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("ui.oidc.sudo_max_age_minutes: expected integer, got %q", value)
+		}
+		if err := config.ValidSudoMaxAgeMinutes(n); err != nil {
+			return err
+		}
+		cfg.UI.OIDC.SudoMaxAgeMinutes = n
 	case "ui.oidc.clock_skew_seconds":
 		n, err := strconv.Atoi(value)
 		if err != nil {

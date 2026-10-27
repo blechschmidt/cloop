@@ -2652,6 +2652,17 @@ type OIDCConfig struct {
 	// "sudo mode" does.
 	DeviceApprovalMaxAgeMinutes int `yaml:"device_approval_max_age_minutes,omitempty"`
 
+	// SudoMaxAgeMinutes is how recent a session's last interactive sign-in
+	// must be for a privileged action — creating a secret or a grant, minting
+	// an API token or an enrollment token, editing this block, attaching to a
+	// sandbox and the rest the route table marks (Task 20448, sudo mode). An
+	// older one gets a "confirm it's you" sign-in at the identity provider
+	// first. Zero uses the default (120); values are clamped to 1..1440; -1
+	// never asks. Terminal sessions are held to it from the sign-in behind
+	// their approval; API tokens and the static token are not sessions and
+	// never are.
+	SudoMaxAgeMinutes int `yaml:"sudo_max_age_minutes,omitempty"`
+
 	// SCIM is SCIM 2.0 provisioning (Task 20415): the identity provider
 	// creating, deactivating and deleting this hub's users and groups at
 	// /scim/v2, authenticated by a credential minted with `cloop hub scim
@@ -2903,6 +2914,50 @@ const (
 	OIDCDeviceApprovalMaxAgeMinutesLower   = 1
 	OIDCDeviceApprovalMaxAgeMinutesUpper   = 1440
 )
+
+// OIDC sudo-mode bounds (Task 20448): the window a privileged action's
+// sign-in must fall in. The ceiling is a day, the default session lifetime;
+// device approval's bounds, for the rule this generalises.
+const (
+	OIDCSudoMaxAgeMinutesDefault = 120
+	OIDCSudoMaxAgeMinutesLower   = 1
+	OIDCSudoMaxAgeMinutesUpper   = 1440
+)
+
+// EffectiveSudoMaxAgeMinutes returns how recent a session's last interactive
+// sign-in must be for a privileged action. A negative configured value is
+// passed through as -1, the explicit "never ask"; every other out-of-band
+// value is clamped.
+func (o OIDCConfig) EffectiveSudoMaxAgeMinutes() int {
+	switch {
+	case o.SudoMaxAgeMinutes < 0:
+		return -1
+	case o.SudoMaxAgeMinutes == 0:
+		return OIDCSudoMaxAgeMinutesDefault
+	case o.SudoMaxAgeMinutes < OIDCSudoMaxAgeMinutesLower:
+		return OIDCSudoMaxAgeMinutesLower
+	case o.SudoMaxAgeMinutes > OIDCSudoMaxAgeMinutesUpper:
+		return OIDCSudoMaxAgeMinutesUpper
+	}
+	return o.SudoMaxAgeMinutes
+}
+
+// ValidSudoMaxAgeMinutes refuses a sudo_max_age_minutes the hub would not run
+// as written: anything but 0 (the default), -1 (off) or 1..1440.
+func ValidSudoMaxAgeMinutes(n int) error {
+	if n == 0 || n == OIDCDisabledSentinel || (n >= OIDCSudoMaxAgeMinutesLower && n <= OIDCSudoMaxAgeMinutesUpper) {
+		return nil
+	}
+	return fmt.Errorf("ui.oidc.sudo_max_age_minutes must be between %d and %d (0 for the default %d, %d never to ask privileged actions for a recent sign-in) (got %d)",
+		OIDCSudoMaxAgeMinutesLower, OIDCSudoMaxAgeMinutesUpper, OIDCSudoMaxAgeMinutesDefault, OIDCDisabledSentinel, n)
+}
+
+// SudoOff reports whether this block turns sudo mode off: single sign-on on,
+// and privileged actions taken on any live session however long ago its owner
+// signed in. Hub doctor and Hub health warn about it.
+func (o OIDCConfig) SudoOff() bool {
+	return o.Enabled && o.EffectiveSudoMaxAgeMinutes() < 0
+}
 
 // DeviceLoginEnabled reports whether terminals may sign in with `cloop login`:
 // on unless device_login is set to false.
@@ -3971,6 +4026,9 @@ func (c *Config) ValidateNumeric() error {
 	}
 	if _, err := parseHubHealthInterval(c.UI.HubHealthInterval); err != nil {
 		return fmt.Errorf("ui.hub_health_interval: %w", err)
+	}
+	if err := ValidSudoMaxAgeMinutes(c.UI.OIDC.SudoMaxAgeMinutes); err != nil {
+		return err
 	}
 	if c.UI.MaxWebSocketConns != 0 && (c.UI.MaxWebSocketConns < WebSocketConnsLower || c.UI.MaxWebSocketConns > WebSocketConnsUpper) {
 		return fmt.Errorf("ui.max_websocket_conns must be between %d and %d (or 0 for the default %d) (got %d)",

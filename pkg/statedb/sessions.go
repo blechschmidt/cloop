@@ -60,6 +60,12 @@ type SessionRow struct {
 	// a SCIM directory matching on either is compared against.
 	Username string
 	OID      string
+
+	// AuthenticatedAt is when the person behind the session last
+	// authenticated interactively (Task 20448,
+	// migrations/0083_session_authenticated_at.sql): what a privileged action
+	// measures the session against. Zero when unknown.
+	AuthenticatedAt time.Time
 }
 
 // The session kinds the kind column holds. pkg/oidcauth owns what they mean;
@@ -100,7 +106,7 @@ const sessionColumns = `id, subject, issuer, email, display_name, owner_key,
 	groups_json, roles_json, ip, user_agent,
 	issued_at, last_seen, expires_at, refresh_sealed, refresh_checked_at,
 	refresh_key_id, refresh_wrapped_dek, claims_as_of, claims_expire_at,
-	kind, client, username, oid`
+	kind, client, username, oid, authenticated_at`
 
 // PutSession inserts a session row.
 //
@@ -129,7 +135,7 @@ func (d *DB) PutSession(row SessionRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err = d.conn.Exec(
-		`INSERT INTO sessions(`+sessionColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO sessions(`+sessionColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.Subject, row.Issuer, row.Email, row.DisplayName, row.OwnerKey,
 		groups, roles, row.IP, row.UserAgent,
 		row.IssuedAt.UTC().Format(time.RFC3339Nano),
@@ -145,6 +151,7 @@ func (d *DB) PutSession(row SessionRow) error {
 		row.Client,
 		row.Username,
 		row.OID,
+		formatOptionalTime(row.AuthenticatedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: insert session: %w", classifyDriverErr(err))
@@ -458,6 +465,7 @@ func scanSessionRow(sc rowScanner) (SessionRow, error) {
 		groups, roles                   string
 		issued, lastSeen, expires, chkd string
 		claimsAsOf, claimsExpire        string
+		authenticated                   string
 		sealed                          []byte
 	)
 	if err := sc.Scan(
@@ -465,7 +473,7 @@ func scanSessionRow(sc rowScanner) (SessionRow, error) {
 		&groups, &roles, &out.IP, &out.UserAgent,
 		&issued, &lastSeen, &expires, &sealed, &chkd,
 		&out.RefreshKeyID, &out.RefreshWrappedDEK, &claimsAsOf, &claimsExpire,
-		&out.Kind, &out.Client, &out.Username, &out.OID,
+		&out.Kind, &out.Client, &out.Username, &out.OID, &authenticated,
 	); err != nil {
 		return SessionRow{}, err
 	}
@@ -477,6 +485,7 @@ func scanSessionRow(sc rowScanner) (SessionRow, error) {
 	out.RefreshCheckedAt = parseOptionalTime(chkd)
 	out.ClaimsAsOf = parseOptionalTime(claimsAsOf)
 	out.ClaimsExpireAt = parseOptionalTime(claimsExpire)
+	out.AuthenticatedAt = parseOptionalTime(authenticated)
 	out.RefreshSealed = sealed
 	return out, nil
 }

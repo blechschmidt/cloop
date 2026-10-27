@@ -1483,3 +1483,28 @@ func TestForwardedProtoIsRequiredOnlyWhereTheCookieFollowsTheRequest(t *testing.
 		}
 	}
 }
+
+// TestOIDCSudoModeOffIsAWarning (Task 20448): with sudo_max_age_minutes -1 a
+// session cookie takes every privileged action for its whole life, so the
+// doctor — and Hub health, which runs the same step — says so; on by default,
+// it passes and names the window.
+func TestOIDCSudoModeOffIsAWarning(t *testing.T) {
+	cfg := hubCfg()
+	f := only(t, findingsFor(t, t.TempDir(), cfg, Options{Offline: true}), "oidc.sudo")
+	wantSeverity(t, f, SeverityPass)
+	if !strings.Contains(f.Message, "120 minutes") {
+		t.Errorf("the default window is not named: %q", f.Message)
+	}
+
+	cfg.UI.OIDC.SudoMaxAgeMinutes = -1
+	f = only(t, findingsFor(t, t.TempDir(), cfg, Options{Offline: true}), "oidc.sudo")
+	wantSeverity(t, f, SeverityWarn)
+	if !strings.Contains(f.Remediation, "sudo_max_age_minutes") {
+		t.Errorf("the remedy does not name the setting: %q", f.Remediation)
+	}
+
+	cfg.UI.OIDC.Enabled = false
+	if got := findingsFor(t, t.TempDir(), cfg, Options{Offline: true})["oidc.sudo"]; len(got) != 0 {
+		t.Errorf("a hub without single sign-on has no sessions to ask: %+v", got)
+	}
+}

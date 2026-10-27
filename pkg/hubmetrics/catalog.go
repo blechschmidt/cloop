@@ -371,6 +371,21 @@ var (
 		Labels: []string{"document", "client", "outcome"},
 	})
 
+	// Sudo mode (Task 20448): privileged requests refused because the
+	// session's last interactive sign-in is older than
+	// ui.oidc.sudo_max_age_minutes (stale-refused), and the confirm-it's-you
+	// sign-ins that answer them (granted, refused). The outcomes are
+	// oidcauth.Reauth*, a closed set. stale-refused counts every refusal,
+	// including the ones the session.reauth audit rows' rate limit does not
+	// write. A burst of stale-refused with no granted after it, from one
+	// session, is somebody holding a cookie they cannot sign in behind.
+	SessionReauth = Default.MustRegister(Definition{
+		Name:   "cloop_session_reauth_total",
+		Help:   "Recent-sign-in (sudo mode) events, by outcome: stale-refused, a privileged request refused because the session's last interactive sign-in is too old; granted, a confirm-it's-you sign-in that counted; refused, one that did not (another account, a provider that did not ask, a provider error). Stale-refused with no granted after it is a cookie used by somebody who cannot sign in behind it.",
+		Type:   TypeCounter,
+		Labels: []string{"outcome"},
+	})
+
 	OIDCRenewals = Default.MustRegister(Definition{
 		Name:   "cloop_oidc_renewal_total",
 		Help:   "Silent claim renewals that reached a verdict, by outcome (ok, interaction_required, no_session, not_enabled, idp_error, discovery_failed, state_error, invalid_state, exchange_failed, token_invalid, subject_mismatch, store_error). A rising interaction_required rate means users are being sent back to the provider mid-session.",

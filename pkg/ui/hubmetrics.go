@@ -674,6 +674,13 @@ func countSessionEvent(ev oidcauth.SessionAudit) {
 		hubmetrics.SessionsCreated.Inc()
 	case oidcauth.AuditSessionExpired, oidcauth.AuditSessionRevoked, oidcauth.AuditSessionIdPRevoked:
 		hubmetrics.SessionsTerminated.Inc(sessionEndReason(ev))
+	case oidcauth.AuditSessionReauth:
+		// The confirm-it's-you sign-ins, which oidcauth reports once each.
+		// A stale-refused request is counted where it is refused (sudo.go),
+		// because its audit rows are rate-limited and the counter is not.
+		if d := ev.Reauth; d != nil && d.Outcome != oidcauth.ReauthStaleRefused {
+			hubmetrics.SessionReauth.Inc(string(d.Outcome))
+		}
 	}
 }
 

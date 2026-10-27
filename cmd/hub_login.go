@@ -303,6 +303,15 @@ for it, the hubs this terminal is signed in to are listed.`,
 		if secs, ok := me["idle_timeout_seconds"].(float64); ok && secs > 0 {
 			fmt.Fprintf(w, "Ends when unused for:\t%s\n", time.Duration(secs)*time.Second)
 		}
+		// Sudo mode (Task 20448): how much longer this session may take the
+		// actions that ask for a recent sign-in.
+		if rs, ok := me["recent_sign_in"].(map[string]any); ok {
+			if left, _ := rs["remaining_seconds"].(float64); left > 0 {
+				fmt.Fprintf(w, "Privileged actions:\tfor %s more\n", (time.Duration(left) * time.Second).Round(time.Minute))
+			} else {
+				fmt.Fprintf(w, "Privileged actions:\tneed a fresh sign-in — run `cloop login %s`\n", u)
+			}
+		}
 		if perms, ok := me["global_permissions"].([]any); ok && len(perms) > 0 {
 			names := make([]string, 0, len(perms))
 			for _, p := range perms {

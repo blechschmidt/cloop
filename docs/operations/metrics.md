@@ -429,6 +429,7 @@ to the KMS key, which is what revoking it looks like from the hub's side.
 | `cloop_sessions_created_total` | counter | — |
 | `cloop_sessions_terminated_total` | counter | `reason` |
 | `cloop_sessions_live` | gauge | — |
+| `cloop_session_reauth_total` | counter | `outcome` |
 | `cloop_apitoken_auth_total` | counter | `result` |
 | `cloop_apitoken_auth_failures_total` | counter | `reason` |
 
@@ -541,6 +542,27 @@ rate(cloop_oidc_renewal_total{outcome="interaction_required"}[15m])
 A renewal that fails *inside the browser* — a provider that refuses to be
 framed, a frame that never answers — never reaches the hub and is not counted
 here; the dashboard shows the user a sign-in banner instead.
+
+`cloop_session_reauth_total` counts sudo mode (Task 20448;
+[Recent sign-in for privileged actions](../security/model.md#recent-sign-in-for-privileged-actions)):
+a privileged action — creating a secret or a grant, minting a token, attaching
+to a sandbox — asks a session for an interactive sign-in no older than
+`ui.oidc.sudo_max_age_minutes`. `outcome` is `stale-refused`, a privileged
+request refused because the session's last sign-in is older than that (every
+one is counted, though the audit trail writes at most thirty `session.reauth`
+rows a minute); `granted`, a "Confirm it's you" sign-in that counted; or
+`refused`, one that did not — another account, a provider that did not ask, or
+a provider error. A person meets the dialog and signs in, so `stale-refused`
+is normally followed by `granted`. Refusals that nothing follows are a session
+being used by somebody who cannot sign in behind it — a stolen cookie:
+
+```promql
+increase(cloop_session_reauth_total{outcome="stale-refused"}[30m]) > 5
+  and increase(cloop_session_reauth_total{outcome="granted"}[30m]) == 0
+```
+
+`session.reauth` rows in the audit trail say which session, from where, and
+which request.
 
 **Credential stuffing** — a `bad_secret` spike is a token ID that exists being
 tried with wrong secrets:

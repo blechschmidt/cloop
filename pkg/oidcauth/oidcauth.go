@@ -328,6 +328,13 @@ type Config struct {
 	// never asks.
 	DeviceApprovalMaxAge time.Duration
 
+	// SudoMaxAge is how recent a session's last interactive sign-in must be
+	// for a privileged action (Task 20448, sudo.go). Zero uses
+	// DefaultSudoMaxAge; negative never asks; anything above MaxSudoMaxAge is
+	// held to it. API tokens and the static token are not sessions and are
+	// never asked.
+	SudoMaxAge time.Duration
+
 	// Devices persists device authorizations. Nil uses Store when it is also
 	// a DeviceStore (pkg/sessionstore is), and process memory otherwise.
 	Devices DeviceStore
@@ -474,6 +481,18 @@ type pendingLogin struct {
 	// fresh sign-in, which the callback then holds the provider to.
 	device string
 	reauth bool
+
+	// On a sign-in (device empty), reauth marks a confirm-it's-you sign-in
+	// (Task 20448, sudo.go): it asked for prompt=login, so the callback holds
+	// the provider's auth_time to it, refuses another account than subject,
+	// and records the session it creates as recently authenticated.
+	// sessionHash and subject then name the session that asked, when the
+	// request carried one. window has the callback answer with the result
+	// document instead of a landing page; windowNonce is the dashboard
+	// dialog's own nonce, echoed in it, so the dialog acts only on the result
+	// of the sign-in it opened.
+	window      bool
+	windowNonce string
 }
 
 // cachedSession is one entry of the read-through session cache.
@@ -688,6 +707,7 @@ func New(cfg Config) (*Authenticator, error) {
 			"compensating for drift", cfg.ClockSkew, MaxClockSkew))
 	}
 	normalizeDeviceConfig(&cfg)
+	normalizeSudoConfig(&cfg)
 	store := cfg.Store
 	if store == nil {
 		store = NewMemorySessionStore(maxSessions)
@@ -981,12 +1001,20 @@ const (
 	// it shares the callback route for the reason a renewal does, and its
 	// outcome is in the device.* audit events.
 	LoginDevice LoginOutcome = "device_approval"
+
+	// LoginReauthRefused means a confirm-it's-you sign-in (Task 20448) was
+	// answered for another account, or by a provider that did not ask the
+	// person to sign in: nothing was created. Not a sign-in verdict — the
+	// person is still signed in as they were — and counted instead in
+	// cloop_session_reauth_total{outcome="refused"} through the audit event.
+	LoginReauthRefused LoginOutcome = "reauth_refused"
 )
 
 // Recorded reports whether o is a verdict worth counting. Neither a pending
-// login, a silent renewal nor a terminal's approval is a sign-in verdict.
+// login, a silent renewal, a terminal's approval nor a refused confirm-it's-you
+// sign-in is a sign-in verdict.
 func (o LoginOutcome) Recorded() bool {
-	return o != LoginPending && o != LoginRenewal && o != LoginDevice
+	return o != LoginPending && o != LoginRenewal && o != LoginDevice && o != LoginReauthRefused
 }
 
 // BeginLogin starts the authorization-code flow: it records a one-shot
@@ -1007,13 +1035,31 @@ func (a *Authenticator) BeginLogin(w http.ResponseWriter, r *http.Request) Login
 		a.errorPage(w, http.StatusServiceUnavailable, "The identity provider is unreachable or misconfigured.", err)
 		return LoginDiscoveryFailed
 	}
-	p, state, err := a.newPendingLogin(pendingLogin{returnTo: safeReturnPath(r.URL.Query().Get("return"))})
+	tmpl := pendingLogin{returnTo: safeReturnPath(r.URL.Query().Get("return"))}
+	var extra url.Values
+	if mode := r.URL.Query().Get(ReauthParam); mode != "" {
+		// A confirm-it's-you sign-in (Task 20448): the provider is told to
+		// ask, and to say when it did, which the callback holds it to.
+		tmpl.reauth, tmpl.window = true, mode == ReauthWindow
+		if tmpl.window {
+			tmpl.windowNonce = reauthNonce(r.URL.Query().Get(ReauthNonceParam))
+		}
+		extra = url.Values{"prompt": {"login"}, "max_age": {"0"}}
+		if rec, ok := a.browserSession(r); ok {
+			// The person signed in here, so the provider should ask for them
+			// rather than offer an account picker; the callback refuses
+			// anybody else.
+			tmpl.sessionHash, tmpl.subject = rec.ID, rec.Identity.Sub
+			extra.Set("login_hint", renewLoginHint(rec.Identity))
+		}
+	}
+	p, state, err := a.newPendingLogin(tmpl)
 	if err != nil {
 		a.errorPage(w, http.StatusInternalServerError, "Could not generate login state.", err)
 		return LoginStateError
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, a.authorizeURL(disc, state, p, nil), http.StatusFound)
+	http.Redirect(w, r, a.authorizeURL(disc, state, p, extra), http.StatusFound)
 	return LoginPending
 }
 
@@ -1146,6 +1192,15 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) L
 	}
 	if e := q.Get("error"); e != "" {
 		desc := strings.TrimSpace(e + " " + q.Get("error_description"))
+		if p != nil && p.reauth {
+			// The person cancelled, or the provider refused them: the session
+			// that asked is as it was. Not a sign-in verdict — they are still
+			// signed in — so counted as a refused confirmation instead.
+			a.auditReauth(p, r, Identity{Sub: p.subject}, ReauthRefused, "idp_error: "+truncate(e, 64), "")
+			a.reauthFailure(w, p, http.StatusForbidden,
+				"The identity provider did not complete the sign-in ("+desc+"). Nothing changed.", nil)
+			return LoginReauthRefused
+		}
 		a.errorPage(w, http.StatusForbidden, "The identity provider rejected the sign-in: "+desc, nil)
 		return LoginIdPError
 	}
@@ -1160,32 +1215,58 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) L
 
 	ctx, cancel := context.WithTimeout(r.Context(), httpTimeout)
 	defer cancel()
+	// fail answers a sign-in that cannot complete: an error page, or for a
+	// confirm-it's-you sign-in its own verdict too — in a window, the result
+	// document, so the dashboard tab that is waiting hears of it.
+	fail := func(status int, msg string, err error, outcome LoginOutcome) LoginOutcome {
+		if p.reauth {
+			a.auditReauth(p, r, Identity{Sub: p.subject}, ReauthRefused, string(outcome), "")
+			a.reauthFailure(w, p, status, msg+" Nothing changed.", err)
+			return outcome
+		}
+		a.errorPage(w, status, msg, err)
+		return outcome
+	}
 	tok, err := a.exchangeCode(ctx, code, p.verifier)
 	if err != nil {
-		a.errorPage(w, http.StatusBadGateway, "Exchanging the authorization code with the identity provider failed.", err)
 		// A code exchange that could not even reach discovery is a
 		// misconfigured issuer, not a rejected code, and must be reported
 		// as the former or the operator debugs the wrong end.
+		outcome := LoginExchangeFailed
 		if isPreflightFailure(err) {
-			return LoginDiscoveryFailed
+			outcome = LoginDiscoveryFailed
 		}
-		return LoginExchangeFailed
+		return fail(http.StatusBadGateway, "Exchanging the authorization code with the identity provider failed.", err, outcome)
 	}
 	id, err := a.verifyIDToken(ctx, tok.IDToken, p.nonce)
 	if err != nil {
-		a.errorPage(w, http.StatusForbidden, "The identity token failed validation.", err)
+		outcome := LoginTokenInvalid
 		if isPreflightFailure(err) {
-			return LoginDiscoveryFailed
+			outcome = LoginDiscoveryFailed
 		}
-		return LoginTokenInvalid
+		return fail(http.StatusForbidden, "The identity token failed validation.", err, outcome)
 	}
 
-	sid, err := a.createSession(*id, r, tok.RefreshToken, tok)
+	if p.reauth {
+		if reason := a.reauthRefusal(p, id); reason != "" {
+			a.auditReauth(p, r, *id, ReauthRefused, reason, "")
+			a.reauthFailure(w, p, http.StatusForbidden, reauthReasonMessage(reason), nil)
+			return LoginReauthRefused
+		}
+	}
+
+	sid, rec, err := a.openSession(*id, r, tok.RefreshToken, tok, p.reauth)
 	if err != nil {
-		a.errorPage(w, http.StatusInternalServerError, "Could not create a session.", err)
-		return LoginSessionError
+		return fail(http.StatusInternalServerError, "Could not create a session.", err, LoginSessionError)
 	}
 	http.SetCookie(w, a.sessionCookie(r, sid, int(a.cfg.SessionTTL.Seconds())))
+	if p.reauth {
+		a.auditReauth(p, r, *id, ReauthGranted, "", rec.ID)
+		if p.window {
+			reauthResult(w, http.StatusOK, ReauthGranted, "Confirmed: you are signed in again.", p.windowNonce)
+			return LoginSuccess
+		}
+	}
 	a.completeLogin(w, r, p.returnTo)
 	return LoginSuccess
 }

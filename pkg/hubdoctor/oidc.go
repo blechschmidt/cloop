@@ -69,6 +69,7 @@ func checkOIDC(ctx context.Context, cfg *config.Config, opts Options, add addFn)
 	checkOIDCStartup(oc, add)
 	checkOIDCClientSecret(oc, add)
 	checkRedirectURI(cfg, add)
+	checkSudoMode(oc, add)
 
 	// A hub diagnosing itself reads the issuer from what its own sign-in
 	// client holds, when that client is for the configured issuer; anything
@@ -76,6 +77,31 @@ func checkOIDC(ctx context.Context, cfg *config.Config, opts Options, add addFn)
 	if st := opts.signInState(oc); st != nil {
 		checkIdPState(*st, add)
 	}
+}
+
+// checkSudoMode reports whether privileged actions ask for a recent
+// interactive sign-in (Task 20448). Off — sudo_max_age_minutes: -1 — a
+// session cookie carries its owner's whole authority for its whole lifetime:
+// silent renewal keeps it alive without the person ever signing in again, so a
+// cookie lifted from a laptop mints tokens and grants secrets for up to a day.
+// A warning rather than a failure, because a hub can choose that; it should
+// not be one nobody notices.
+func checkSudoMode(oc config.OIDCConfig, add addFn) {
+	if oc.SudoOff() {
+		add(Finding{
+			Check: "oidc.sudo", Title: "Recent sign-in for privileged actions", Severity: SeverityWarn,
+			Message: "ui.oidc.sudo_max_age_minutes is -1: creating secrets and grants, minting API tokens and " +
+				"enrollment tokens, editing single sign-on and attaching to sandboxes take any live session, however " +
+				"long ago its owner signed in — a stolen session cookie can do all of them until it expires",
+			Remediation: "Remove ui.oidc.sudo_max_age_minutes (default 120) or set it to 1–1440 minutes, in " +
+				"Settings → Single sign-on or with `cloop config set ui.oidc.sudo_max_age_minutes 120`, and restart the hub",
+		})
+		return
+	}
+	add(Finding{
+		Check: "oidc.sudo", Title: "Recent sign-in for privileged actions", Severity: SeverityPass,
+		Message: fmt.Sprintf("privileged actions ask for a sign-in from the last %d minutes", oc.EffectiveSudoMaxAgeMinutes()),
+	})
 }
 
 // checkOIDCIssuer resolves the configured issuer over the network, as a sign-in

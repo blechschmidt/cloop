@@ -10,6 +10,43 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+### Security
+
+- **Sudo mode: on a hub with single sign-on, privileged actions need a recent
+  interactive sign-in, not just a live session cookie.** A session carried its
+  owner's full authority for its whole absolute lifetime (24 h by default), and
+  silent renewal kept it alive without the person ever authenticating again,
+  so a cookie lifted from a laptop could mint API tokens, grant secrets and
+  rewrite role mappings for up to a day. Now creating or deleting a secret or a
+  grant, approving a grant request or an API token, minting an API token or an
+  executor enrollment token, editing `ui.oidc` (role mappings, `require_rbac`),
+  retiring the static token, rotating the hub CA, upgrading or deregistering an
+  executor, attaching to a sandbox, granting project membership at maintainer,
+  ending someone else's session, offboarding, minting a SCIM credential or a
+  glasses link, and setting a provider's API key or base URL, the dictation key
+  or the CI relay's settings ask for a sign-in within
+  `ui.oidc.sudo_max_age_minutes` (default 120, 1–1440, `-1` off). It is measured from the ID token's `auth_time`, or — where the
+  provider reports none, as Entra ID does unless that optional claim is
+  configured — from a sign-in the hub started with `prompt=login`; silent
+  renewal never counts, and the time is stored on the session row (migration
+  0083, additive) so every hub member agrees. A stale session gets
+  `401 REAUTH_REQUIRED`, which the dashboard turns into a "Confirm it's you"
+  dialog that signs in again at the provider (`prompt=login&max_age=0`) in a
+  window of its own and then replays the action. A terminal session counts from
+  the sign-in behind its `cloop login` approval — approving from a browser whose
+  sign-in is not recent is itself a `prompt=login` sign-in — and a stale one is
+  told to run `cloop login` again. API
+  tokens and the static token are not sessions and are not asked. The route
+  table declares the rule beside each permission and a test fails a privileged
+  route that neither asks nor is exempted with a reason. Refusals and
+  confirmations are audited as `session.reauth` and counted in
+  `cloop_session_reauth_total{outcome}`; `cloop hub doctor` and Hub health warn
+  (`oidc.sudo`) when it is off. **On :8888 (Entra ID, no `auth_time`) admin
+  actions will ask for a fresh sign-in after the next deploy** — the first one
+  in each two hours. To turn that off, set `sudo_max_age_minutes: -1` under
+  `ui.oidc` in that hub's `.cloop/config.ui-8081.yaml` (or in Settings →
+  Single sign-on) and restart it (Task 20448).
+
 ### Changed
 
 - **Hub health no longer costs a doctor run and two identity-provider fetches
