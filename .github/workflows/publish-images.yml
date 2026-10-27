@@ -198,8 +198,10 @@ jobs:
       - name: Install cosign
         # The version the hub image bundles (the Dockerfile's COSIGN_VERSION;
         # workflow_drift_test.go holds the two equal), so what signs here is
-        # what verifies on a hub built from the same tree.
-        uses: sigstore/cosign-installer@v4
+        # what verifies on a hub built from the same tree. The installer is
+        # pinned by commit — it is what puts the signing tool on this runner —
+        # and has no floating v4 tag to follow anyway.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: 'v3.1.4'
 

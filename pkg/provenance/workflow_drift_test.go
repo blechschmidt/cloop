@@ -384,7 +384,8 @@ func TestImagesWorkflowSignsEveryDigestItPushes(t *testing.T) {
 	wf := imagesWorkflow(t)
 	for _, want := range []struct{ snippet, why string }{
 		{"id-token: write", "keyless signing needs an OIDC token; without this permission cosign cannot reach Fulcio"},
-		{"sigstore/cosign-installer@v4", "cosign has to be installed in the runner before it can sign"},
+		{"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2",
+			"cosign has to be installed in the runner before it can sign, by an installer pinned by commit"},
 		{`cosign sign --yes "$REF@$d"`, "nothing signs the digests"},
 		{`select(.platform.os != "unknown")`, "each platform manifest is signed, not only the index"},
 		{`digests="$INDEX `, "the index a tag names is signed"},
