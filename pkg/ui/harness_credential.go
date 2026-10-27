@@ -37,6 +37,21 @@ package ui
 // granting your own token to a shared project would quietly bill your
 // subscription for every member's runs, and a project holding two people's
 // tokens would run on whichever the lease happened to render last.
+//
+// And one executor that shares the hub's host is checked as a sandbox is: the
+// Copilot CLI's, on a hub with single sign-on (Task 20449). Claude Code there
+// signs in with its person's own login home (claudeEnvFor); the Copilot CLI
+// signed in with whatever the hub's environment held — the operator's `copilot
+// login`, a GH_TOKEN the service keeps for something else — for everyone. So a
+// copilot dispatch to the hub's host acting for a person must find a grant
+// that counts for them, exactly as a sandbox must: their own personal one, or
+// one an administrator shared with the project; a run the hub carries on by
+// itself that cannot find one waits paused starter_unavailable. And every
+// harness dispatch to the hub's host on such a hub, whatever its provider — a
+// claudecode run may start the Copilot CLI as its review gate's reviewer —
+// inherits the hub's environment with the Copilot CLI's own variables blanked
+// before the lease and is pinned to its person's Copilot home after it
+// (copilotEnv, pkg/copilotauth), as every one is pinned to their Claude home.
 
 import (
 	"encoding/json"
@@ -54,6 +69,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/copilotauth"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/provider/anthropic"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
@@ -189,7 +205,9 @@ func harnessPasteHint(provider string) string {
 
 // isHarnessKey reports whether k is one of the variables any provider's
 // harness authenticates with. These are the keys a personal credential is
-// withheld for.
+// withheld for — for the Copilot CLI, every variable its person-pinned mode
+// passes on (copilotauth.CredentialVars): a personal grant carrying only a
+// provider's headers, which may hold its key, is a credential too.
 func isHarnessKey(k string) bool {
 	switch k {
 	case envClaudeOAuthToken, envAnthropicAPIKey, envAnthropicAuth, envAnthropicBaseURL,
@@ -197,7 +215,7 @@ func isHarnessKey(k string) bool {
 		envCopilotGitHubToken, envCopilotProviderURL, envCopilotProviderKey, envCopilotProviderAuth:
 		return true
 	}
-	return false
+	return slices.Contains(copilotauth.CredentialVars, k)
 }
 
 // describeKeySets renders alternatives for a sentence:
@@ -498,13 +516,28 @@ type harnessReport struct {
 	ExecutorID   string
 	ExecutorKind string
 	Isolates     bool
+	// PerPerson says the dispatch runs the Copilot CLI on an executor that
+	// shares the hub's host, on a hub with single sign-on (Task 20449): it is
+	// checked as a sandbox is, since what it would otherwise sign in with is
+	// the hub's own.
+	PerPerson bool
+	// PinCopilot says the dispatch runs a harness on an executor that shares
+	// the hub's host, on a hub with single sign-on, whatever its provider: a
+	// Copilot CLI it starts — the project's harness, or a review gate's
+	// reviewer — is pinned to its person's Copilot home, with the hub's own
+	// Copilot variables blanked (copilotEnv). PerPerson implies it.
+	PinCopilot bool
+	// Nobody says the dispatch acts for no one — the static token, a service
+	// token minted on nobody's behalf — so no personal credential counts.
+	Nobody bool
 	// Exempt says the hub's configuration lists the executor as supplying its
 	// own credential (executors.harness_credential_exempt).
 	Exempt bool
 	// Applies is true when anything was checked: the executor isolates, the
 	// provider needs a credential, the dispatch runs a harness, and the
-	// executor is not exempt. When false the dispatch is not refused — though
-	// other people's personal credentials are still withheld from it.
+	// executor is not exempt — or the dispatch is PerPerson. When false the
+	// dispatch is not refused — though other people's personal credentials are
+	// still withheld from it.
 	Applies bool
 	Needed  [][]string
 	// State is "not_needed", "ok", "expiring" or "missing".
@@ -573,11 +606,21 @@ func harnessPreflight(workDir string, ex executor.Executor, who harnessWho, prov
 			rep.Provider = resolveProviderName(workDir)
 		}
 	}
+	// As the provider factory reads it, which pays case no attention: a
+	// project that recorded "Copilot" runs the Copilot CLI all the same.
+	rep.Provider = strings.ToLower(strings.TrimSpace(rep.Provider))
 	rep.Needed = harnessKeySets(rep.Provider)
 	rep.Exempt = rep.Isolates && len(rep.Needed) > 0 && harnessExempt(ex.ID())
 	// A host-sharing executor runs the harness on the hub, under the hub's or
-	// the user's own login (claudeEnvFor), and is never refused here.
-	rep.Applies = check && rep.Isolates && len(rep.Needed) > 0 && !rep.Exempt
+	// the user's own login (claudeEnvFor), and is never refused here — but for
+	// the Copilot CLI on a hub with single sign-on, which has no login of the
+	// person's own there and must never use the hub's (Task 20449). No
+	// executor exemption applies to it: the credential an exempt executor
+	// brings is, on the hub's own host, the hub's.
+	rep.PinCopilot = check && !rep.Isolates && who.personal
+	rep.PerPerson = rep.PinCopilot && rep.Provider == copilot.ProviderName
+	rep.Nobody = who.personal && who.identity == ""
+	rep.Applies = check && len(rep.Needed) > 0 && ((rep.Isolates && !rep.Exempt) || rep.PerPerson)
 	if !rep.Applies && !who.personal {
 		return rep // nothing to check, and nobody's credential to withhold
 	}
@@ -871,14 +914,27 @@ type harnessCredentialError struct {
 	Provider     string
 	Needed       [][]string
 	ExpiresAt    time.Time
-	message      string
-	remedy       string
+	// PerPerson says the run would have gone to the hub's own host, where a
+	// Copilot run acts for its person (harnessReport.PerPerson).
+	PerPerson bool
+	message   string
+	remedy    string
 }
 
 func (e *harnessCredentialError) Error() string { return e.message }
 
 // Remediation is the "what to do about it" half, rendered apart from the cause.
 func (e *harnessCredentialError) Remediation() string { return e.remedy }
+
+// Summary is the refusal in a few words, for a toast over the dialog that
+// says the rest.
+func (e *harnessCredentialError) Summary() string {
+	noun := harnessCredentialNoun(e.Provider)
+	if e.PerPerson {
+		return "Refused: you have no usable " + noun + " for this project"
+	}
+	return "Refused: this sandbox has no usable " + noun
+}
 
 // refusal returns the error the dispatch must stop on, or nil.
 func (rep harnessReport) refusal() error {
@@ -892,6 +948,7 @@ func (rep harnessReport) refusal() error {
 		Project:      filepath.Base(rep.WorkDir),
 		Provider:     rep.Provider,
 		Needed:       rep.Needed,
+		PerPerson:    rep.PerPerson,
 	}
 	if rep.State == "expiring" {
 		e.Code, e.ExpiresAt = codeHarnessCredentialExpiring, rep.ExpiresAt
@@ -903,6 +960,9 @@ func (rep harnessReport) refusal() error {
 // explain renders the report as a cause and a remedy, for the 409 and for the
 // dialog. Other people's credentials are never named.
 func (rep harnessReport) explain() (cause, remedy string) {
+	if rep.PerPerson {
+		return rep.explainPerPerson()
+	}
 	project := filepath.Base(rep.WorkDir)
 	where := fmt.Sprintf("executor %s (%s)", rep.ExecutorID, rep.ExecutorKind)
 	needs := describeKeySets(rep.Needed)
@@ -968,6 +1028,70 @@ func (rep harnessReport) explain() (cause, remedy string) {
 	return cause, remedy
 }
 
+// explainPerPerson is explain for a Copilot run on the hub's own host on a hub
+// with single sign-on (Task 20449), whose credential is the person's to grant —
+// there is no sandbox to speak of.
+func (rep harnessReport) explainPerPerson() (cause, remedy string) {
+	project := filepath.Base(rep.WorkDir)
+	where := fmt.Sprintf("the hub's own host (executor %s)", rep.ExecutorID)
+	rule := "On this hub with single sign-on a Copilot run on " + where + " signs in as the person it acts for, " +
+		"with a Copilot credential granted to its project — never with the hub's own Copilot sign-in, GH_TOKEN or " +
+		"GITHUB_TOKEN"
+	grantStep := "Open the project's Overview and use Copilot credential to paste " +
+		harnessPasteHint(copilot.ProviderName) + " — stored as your personal secret, it is spent only on runs you " +
+		"start — or to grant one you have. From a shell on the hub: cloop secret grant <secret> --to project:" +
+		policyProjectPath(rep.WorkDir) + " --env-keys " + envCopilotGitHubToken + "."
+	if rep.Nobody {
+		grantStep = "Start it signed in as yourself, or have an administrator grant the project a Copilot " +
+			"credential shared with it: cloop secret grant <secret> --to project:" + policyProjectPath(rep.WorkDir) +
+			" --env-keys " + envCopilotGitHubToken + "."
+	}
+	switch {
+	case rep.State == "expiring" && rep.EndedBy != nil:
+		ended := "a grant of another user's personal secret"
+		if !rep.EndedBy.Foreign {
+			ended = rep.EndedBy.SecretName
+		}
+		cause = fmt.Sprintf("%s's runs on %s would lose their Copilot credential at %s, in under %d minutes: a "+
+			"lease ends with the first of the project's grants to expire, and that is %s (grant %s).",
+			project, where, rep.ExpiresAt.UTC().Format(time.RFC3339), int(harnessExpiryMargin/time.Minute),
+			ended, rep.EndedBy.GrantID)
+		return cause, "Grant " + rep.EndedBy.GrantID + " again for longer, or revoke it, before starting the run."
+	case rep.State == "expiring":
+		sat := rep.Satisfied[0]
+		cause = fmt.Sprintf("The only Copilot credential granted to %s that counts for this run (%s, grant %s) "+
+			"expires at %s — in under %d minutes, before a run could finish its first task.", project,
+			sat.SecretName, sat.GrantID, rep.ExpiresAt.UTC().Format(time.RFC3339), int(harnessExpiryMargin/time.Minute))
+		return cause, "Grant it again for longer, or grant another credential, before starting the run. " + grantStep
+	case rep.BrokerProblem != "":
+		cause = rule + " — and " + rep.BrokerProblem + "."
+		remedy = "Fix the secret broker, then grant the project your Copilot credential."
+		if rep.BrokerUnset {
+			remedy = "Configure the broker by setting CLOOP_SECRET_KEY in the hub's environment, then grant the " +
+				"project your Copilot credential."
+		}
+		return cause, remedy
+	}
+	var b strings.Builder
+	if rep.Nobody {
+		fmt.Fprintf(&b, "%s. This request acts for no one — the hub's static token, or an API token minted on "+
+			"nobody's behalf — so only a Copilot credential an administrator shared with %s could sign it in "+
+			"(%s), and none is granted.", rule, project, describeKeySets(rep.Needed))
+	} else {
+		fmt.Fprintf(&b, "%s. No active grant gives %s a Copilot credential that counts for this run (%s): one of "+
+			"your own, or one an administrator shared with the project.", rule, project, describeKeySets(rep.Needed))
+	}
+	for _, l := range rep.Lapsed {
+		fmt.Fprintf(&b, " The grant of %s (%s) expired at %s.", l.SecretName, l.GrantID,
+			l.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	if len(rep.Unreadable) > 0 {
+		fmt.Fprintf(&b, " %s would not open with this hub's key, so a lease would deny it too.",
+			strings.Join(rep.Unreadable, ", "))
+	}
+	return b.String(), grantStep
+}
+
 // harnessClearance carries a dispatch's preflight from the handler that knows
 // who asked to the primitive that resolves the executor, and from there to the
 // lease. Every dispatch carries one — tests/arch refuses a nil — built by the
@@ -994,6 +1118,10 @@ type harnessClearance struct {
 
 	mu     sync.Mutex
 	report *harnessReport
+	// copilotHome is the Copilot home a PerPerson dispatch settled with report
+	// is pinned to (Task 20449), and copilotErr why it has none.
+	copilotHome string
+	copilotErr  error
 }
 
 // newHarnessClearance prepares the preflight for a harness dispatched to
@@ -1040,9 +1168,105 @@ func (c *harnessClearance) settle(ex executor.Executor, workDir string) (map[str
 	defer c.mu.Unlock()
 	if c.report == nil || c.report.ExecutorID != ex.ID() {
 		rep := harnessPreflight(c.workDir, ex, c.who, c.provider, c.check)
-		c.report = &rep
+		c.report, c.copilotHome, c.copilotErr = &rep, "", nil
+		if rep.PinCopilot && rep.refusal() == nil {
+			c.copilotHome, c.copilotErr = c.resolveCopilotHome()
+		}
 	}
-	return c.report.Withhold, c.report.refusal()
+	if err := c.report.refusal(); err != nil {
+		// A run the hub carries on by itself, for a person with no Copilot
+		// credential it may use: held for them, as for a Claude home that is
+		// gone, rather than tried again every sweep (Task 20449).
+		if c.account != nil && c.report.PerPerson {
+			return nil, c.account.noCopilot(*c.report, err)
+		}
+		return c.report.Withhold, err
+	}
+	if c.copilotErr != nil {
+		return nil, c.copilotErr
+	}
+	return c.report.Withhold, nil
+}
+
+// resolveCopilotHome finds the Copilot home a PinCopilot dispatch is pinned to
+// (Task 20449): for a dispatch a person asked for, theirs, made if need be; for
+// one the hub makes by itself acting for them, theirs only where their identity
+// home is still there — never recreating the home of someone offboarded; and
+// for a dispatch acting for no one, the unattributed home. A copilot run with
+// none is refused; any other harness dispatch is pinned to a home that never
+// exists instead, so a Copilot CLI it might start — a review gate's reviewer —
+// is refused there rather than the dispatch. Called with c.mu held.
+func (c *harnessClearance) resolveCopilotHome() (string, error) {
+	var home string
+	var err error
+	switch {
+	case c.who.identity == "":
+		home, err = copilotauth.UnattributedHome()
+	case c.account == nil:
+		home, err = copilotauth.HomeFor(c.who.identity)
+	default:
+		home, err = copilotauth.HomeIfKnown(c.who.identity)
+	}
+	switch {
+	case err == nil:
+		return home, nil
+	case !c.report.PerPerson:
+		return noCopilotHomePath, nil
+	case c.account != nil:
+		return "", c.account.noCopilot(*c.report, err)
+	}
+	return "", err
+}
+
+// noCopilotHomePath is where a dispatch whose Copilot home could not be
+// resolved is pinned: under a file, so it never exists, and the provider
+// refuses to start the CLI there.
+const noCopilotHomePath = "/dev/null/cloop-no-copilot-home"
+
+// copilotEnv is the Copilot half of pinning a dispatch to ex to whom it acts
+// for (Task 20449). For a PinCopilot dispatch settled against ex it returns the
+// hub's own Copilot variables blanked — for the environment before the lease,
+// whose grants then supply the person's credential — and the pin naming their
+// Copilot home, for after everything else (pinCopilotHome). Nil for any other
+// dispatch, which inherits what it always did.
+func (c *harnessClearance) copilotEnv(ex executor.Executor) (blanks, pin []string) {
+	if c == nil || ex == nil {
+		return nil, nil
+	}
+	c.mu.Lock()
+	rep, home := c.report, c.copilotHome
+	c.mu.Unlock()
+	switch {
+	case rep != nil && rep.ExecutorID == ex.ID():
+		if !rep.PinCopilot {
+			return nil, nil
+		}
+	case c.check && c.who.personal && !executor.IsolatesFromHost(ex):
+		// Not settled against this executor, which no primitive does: a
+		// dispatch that would be pinned is pinned to nobody's home rather
+		// than left to the hub's sign-in.
+		home = ""
+	default:
+		return nil, nil
+	}
+	if home == "" {
+		home = noCopilotHomePath
+	}
+	return copilotauth.HubBlanks(os.Environ()), []string{copilotauth.Pin(home)}
+}
+
+// pinCopilotHome makes pin, from copilotEnv, the last word of spec's
+// environment: after the lease's grants and everything else a dispatch adds,
+// so that no grant can point a person's run at another person's home.
+func pinCopilotHome(spec executor.Spec, pin []string) executor.Spec {
+	if len(pin) == 0 {
+		return spec
+	}
+	if spec.Env == nil {
+		spec.Env = os.Environ()
+	}
+	spec.Env = append(spec.Env, pin...)
+	return spec
 }
 
 // started records, once run runID is under way, whom it was started for —
@@ -1093,6 +1317,10 @@ func writeHarnessRefusal(w http.ResponseWriter, e *harnessCredentialError) {
 		"executor_kind": e.ExecutorKind,
 		"provider":      e.Provider,
 		"needed":        e.Needed,
+		"summary":       e.Summary(),
+	}
+	if e.PerPerson {
+		body["per_person"] = true
 	}
 	if !e.ExpiresAt.IsZero() {
 		body["expires_at"] = e.ExpiresAt.UTC().Format(time.RFC3339)

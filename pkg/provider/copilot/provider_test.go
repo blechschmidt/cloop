@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/blechschmidt/cloop/pkg/copilotauth"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
@@ -496,5 +497,145 @@ func TestAMissingCLIIsNamed(t *testing.T) {
 	_, err := New().Complete(context.Background(), "x", provider.Options{})
 	if err == nil || !strings.Contains(err.Error(), Binary) {
 		t.Fatalf("err = %v; a missing CLI must be reported by name", err)
+	}
+}
+
+// pinnedRun is the environment a `cloop run` the hub dispatched for a person
+// on its own host inherits (Task 20449): the hub's own, its Copilot and GitHub
+// credentials blanked, the lease's grants — the person's token and a
+// repository grant's GitHub token — and the pin naming their home.
+func pinnedRun(t *testing.T, token string) (home string) {
+	t.Helper()
+	home = t.TempDir()
+	for k, v := range map[string]string{
+		"GH_HOST":                     "ghe.example.com",
+		"GH_ENTERPRISE_TOKEN":         "host-ghe-token",
+		"COPILOT_API_URL":             "https://collector.example.com",
+		"COPILOT_HOME":                "/root/.copilot",
+		"GH_CONFIG_DIR":               "/root/.config/gh",
+		"GITHUB_COPILOT_GITHUB_TOKEN": "host-agent-token",
+		"COPILOT_MODEL":               "host-model",
+		EnvGitHubToken:                token,
+		"GH_TOKEN":                    "repo-grant-token",
+		"GITHUB_TOKEN":                "repo-grant-token",
+		copilotauth.EnvHome:           home,
+	} {
+		t.Setenv(k, v)
+	}
+	return home
+}
+
+// recordEnv is a stub CLI body that writes its environment beside its args.
+const recordEnv = `env > "$(dirname "$0")/env"; printf 'Done.\nTASK_DONE\n'`
+
+func readEnv(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "env"))
+	if err != nil {
+		t.Fatalf("the stub CLI recorded no environment: %v", err)
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// The core of the per-person mode: the CLI signs in with the person's own
+// token, keeps its sessions and logs in their home, has a GitHub CLI
+// configuration of its own, and sees none of the hub's tokens, settings or
+// hosts — nor a repository grant's GitHub token, which the CLI would sign in
+// with were its own missing.
+func TestAPinnedRunSignsInAsItsPersonOnly(t *testing.T) {
+	home := pinnedRun(t, "alice-token")
+	dir := fakeCLI(t, recordEnv)
+	if _, err := New().Complete(context.Background(), "x", provider.Options{Env: []string{"CLOOP_HOLD=1"}}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	env := readEnv(t, dir)
+	want := map[string]string{
+		EnvGitHubToken:        "alice-token",
+		"COPILOT_HOME":        home,
+		"GH_CONFIG_DIR":       filepath.Join(home, "gh"),
+		"COPILOT_AUTO_UPDATE": "false",
+		"CLOOP_HOLD":          "1",
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("the CLI got %s=%q, want %q", k, env[k], v)
+		}
+	}
+	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_ENTERPRISE_TOKEN", "COPILOT_API_URL",
+		"GITHUB_COPILOT_GITHUB_TOKEN", "COPILOT_MODEL", copilotauth.EnvHome} {
+		if v, ok := env[k]; ok {
+			t.Errorf("the CLI inherited %s=%q", k, v)
+		}
+	}
+}
+
+// A run acting for a person whose lease brought no credential is refused
+// before the CLI starts: every place the CLI would look next is the hub's.
+func TestAPinnedRunWithNoCredentialNeverStartsTheCLI(t *testing.T) {
+	pinnedRun(t, "")
+	dir := fakeCLI(t, recordEnv)
+	_, err := New().Complete(context.Background(), "x", provider.Options{})
+	if !errors.Is(err, ErrAuthFailure) || !strings.Contains(err.Error(), "grant your Copilot credential") {
+		t.Fatalf("err = %v, want ErrAuthFailure naming the grant", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "args")); !os.IsNotExist(serr) {
+		t.Error("the CLI ran for a person with no credential")
+	}
+}
+
+// A run pinned to a home that is gone — its person offboarded while it
+// waited — is refused rather than given a fresh, empty one.
+func TestAPinnedRunWhoseHomeIsGoneIsRefused(t *testing.T) {
+	home := pinnedRun(t, "alice-token")
+	if err := os.Remove(home); err != nil {
+		t.Fatal(err)
+	}
+	dir := fakeCLI(t, recordEnv)
+	if _, err := New().Complete(context.Background(), "x", provider.Options{}); !errors.Is(err, ErrAuthFailure) {
+		t.Fatalf("err = %v, want ErrAuthFailure", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "args")); !os.IsNotExist(serr) {
+		t.Error("the CLI ran in a home that is gone")
+	}
+	if _, serr := os.Stat(home); !os.IsNotExist(serr) {
+		t.Error("the provider recreated the home of a person who is gone")
+	}
+}
+
+// The call the hub makes in its own process: the hub's environment is the
+// process's, and the person's arrives as the call's own.
+func TestAPinnedInlineCallTakesItsCredentialFromTheCall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(EnvGitHubToken, "host-copilot-token")
+	t.Setenv("GH_TOKEN", "host-gh-token")
+	dir := fakeCLI(t, recordEnv)
+	explicit := append(copilotauth.HubBlanks(os.Environ()), EnvGitHubToken+"=bob-token", copilotauth.Pin(home))
+	if _, err := New().Complete(context.Background(), "x", provider.Options{Env: explicit}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	env := readEnv(t, dir)
+	if env[EnvGitHubToken] != "bob-token" || env["COPILOT_HOME"] != home {
+		t.Errorf("the inline call signed in with %q in %q, want bob's own", env[EnvGitHubToken], env["COPILOT_HOME"])
+	}
+	if v, ok := env["GH_TOKEN"]; ok {
+		t.Errorf("the hub's GH_TOKEN reached the call: %q", v)
+	}
+}
+
+// A person's credential the service refuses is theirs to replace, from the
+// dashboard — not a `copilot login` on the hub's host.
+func TestARefusedCredentialOfAPinnedRunNamesTheGrant(t *testing.T) {
+	pinnedRun(t, "alice-token")
+	fakeCLI(t, `echo "Error: Authentication failed (HTTP 401)" >&2; exit 1`)
+	_, err := New().Complete(context.Background(), "x", provider.Options{})
+	if !errors.Is(err, ErrAuthFailure) || !strings.Contains(err.Error(), "project's Overview") ||
+		strings.Contains(err.Error(), "copilot login") {
+		t.Fatalf("err = %v, want an auth failure pointing at the grant", err)
 	}
 }

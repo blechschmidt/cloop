@@ -63,7 +63,13 @@ var redirectedVars = []string{"HOME", "USERPROFILE"}
 // pkg/ratelimit and pkg/provider/claudecode read that login instead of their
 // fixtures and failed on every commit, for a reason that was never the change
 // under test (Task 20349). A test that wants either sets it with t.Setenv.
-var clearedVars = []string{EnvRoot, "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"}
+//
+// CLOOP_COPILOT_HOME is the Copilot CLI's counterpart (Task 20449): a hub with
+// single sign-on pins a copilot run to its person's home with it, so an agent
+// running this suite under copilot would put pkg/provider/copilot's tests in
+// the per-person mode, on its own home.
+var clearedVars = []string{EnvRoot, "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN",
+	"CLOOP_COPILOT_HOME"}
 
 // rootKeyVars are every source of the hub's root key (pkg/rootkey), unset for
 // the same reason: an agent running this suite inherits its hub's. With the

@@ -8,7 +8,10 @@
 // in with, and a dialog that grants a credential in one step — an env secret
 // the user already has, or a token pasted from `claude setup-token`. A copilot
 // project's harness signs in to GitHub Copilot instead (Task 20447), and the
-// card and dialog say so: words() is the one place the two differ.
+// card and dialog say so: words() is the one place the two differ. On a hub
+// with single sign-on a copilot project on the hub's own host is checked too
+// (Task 20449, per_person): each person's runs there sign in with a credential
+// of their own, never the hub's, so the card and dialog are the viewer's.
 //
 // Fetched on demand rather than bundled (static.go, deferredScripts): first
 // paint has no room for it. It runs outside the dashboard's IIFE, so
@@ -120,9 +123,10 @@
         rl.style.display = r ? '' : 'none';
         rl.textContent = !r ? '' : r.relayed ? 'through the hub relay' : 'not relayed';
       }
+      const who = d.per_person ? 'Runs you start' : 'This project’s sandbox';
       c.title = (d.state === 'ok'
-        ? 'This project’s sandbox signs in to ' + w.service + ' with ' + grantedBy(d) + '. Click to grant another.'
-        : (d.reason || 'This project’s sandbox has no ' + w.login + '.') + ' Click to grant one.') +
+        ? who + ' sign' + (d.per_person ? '' : 's') + ' in to ' + w.service + ' with ' + grantedBy(d) + '. Click to grant another.'
+        : (d.reason || who + ' ha' + (d.per_person ? 've' : 's') + ' no ' + w.login + '.') + ' Click to grant one.') +
         (r && r.relayed ? ' Its model calls go through the hub relay: the credential stays on the hub.' : '');
     }
 
@@ -209,10 +213,14 @@
       const w = words(d);
       el('hcTitle').textContent = w.noun;
       const ex = d.executor || {};
-      el('hcIntro').textContent = (ex.id ? 'This project runs on ' + ex.id + ' (' + ex.kind + '), a sandbox' : 'This project’s sandbox') +
-        ' that gets no ' + w.login + ' of its own — only what is granted to ' +
-        (d.grant_target && d.grant_target !== d.project ? 'its project, ' + d.grant_target : 'the project') + '.' +
-        (d.personal ? ' A personal credential is used only for runs you start.' : '');
+      const target = d.grant_target && d.grant_target !== d.project ? 'its project, ' + d.grant_target : 'the project';
+      el('hcIntro').textContent = d.per_person
+        ? 'This project runs on the hub’s own host' + (ex.id ? ' (' + ex.id + ')' : '') + '. On this hub with single ' +
+          'sign-on, each person’s runs there sign in to ' + w.service + ' with a credential granted to ' + target +
+          ' that counts for them — never with the hub’s own. A personal credential is used only for runs you start.'
+        : (ex.id ? 'This project runs on ' + ex.id + ' (' + ex.kind + '), a sandbox' : 'This project’s sandbox') +
+          ' that gets no ' + w.login + ' of its own — only what is granted to ' + target + '.' +
+          (d.personal ? ' A personal credential is used only for runs you start.' : '');
 
       // The cause alone: the refusal's remediation points at this dialog.
       const why = refusal ? refusal.error : (d.state !== 'ok' ? d.reason : '');

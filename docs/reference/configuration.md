@@ -1422,6 +1422,11 @@ executors:
   harness_credential_exempt: [sgx, build-box-2]   # executor IDs
 ```
 
+It waives nothing on the hub's own host: a `copilot` project there on a hub with
+single sign-on needs a credential that counts for the person each run acts for,
+since the only credential the host could bring is the hub's own ([per-person
+Copilot credentials](../security/copilot-identity.md)).
+
 The waiver is the check and nothing else: the grants such a run holds are
 delivered exactly as before, and another user's personal Claude credential is
 still withheld from it. Only the hub's own configuration can grant it — a

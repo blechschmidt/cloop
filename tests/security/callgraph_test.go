@@ -46,12 +46,13 @@ var gatedHostExecution = map[string]string{
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleReplayRunCreate": "replays a task inline, and context collection shells out to git in the " +
 		"project directory; migrating this to a dispatched workload is tracked work. Its target provider runs in " +
 		"the hub's process too — claudecode's `claude` on the host — so it is also refused for a project bound " +
-		"to an isolating executor, and pinned to the caller's Claude account (Task 20442)",
+		"to an isolating executor, and pinned to the caller's Claude account (Task 20442) and, for copilot, their " +
+		"own Copilot credential and home (inlineHarnessEnv, Task 20449)",
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleProviderCallReplay": "re-runs a recorded provider call in the " +
 		"hub's process to compare the answers side by side; with claudecode that is `claude` on the host. Gated by " +
 		"denyInlineModelCall — refused under strict mode and for a project bound to an isolating executor — and " +
-		"pinned to the caller's Claude account (Task 20442). Seen since the reference graph follows " +
-		"provider.Provider",
+		"pinned to the caller's Claude account (Task 20442) and, for a copilot call, their own Copilot credential " +
+		"and home (inlineHarnessEnv, Task 20449). Seen since the reference graph follows provider.Provider",
 	"(*github.com/blechschmidt/cloop/pkg/ui.Server).handleTaskProvenance": "reconstructs a task's prompt, and pm.ExecuteTaskPrompt's context " +
 		"collection shells out to `git diff` in the project directory — the same " +
 		"path handleReplayRunCreate is listed for. Read-only, and no harness runs here",

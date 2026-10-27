@@ -1123,7 +1123,10 @@ of these, delivered by a grant:
 | `copilot` | `COPILOT_GITHUB_TOKEN` (a fine-grained GitHub token with the Copilot Requests permission, or an OAuth token), or `COPILOT_PROVIDER_BASE_URL` (a model provider of the project's own, with its key beside it). `GH_TOKEN` and `GITHUB_TOKEN` do not count: a repository grant puts tokens there that need not carry Copilot access, and the CLI reads `COPILOT_GITHUB_TOKEN` before them |
 
 Other providers are not checked, and neither is a host executor, which runs the
-harness under the hub's or the requesting user's own login. The provider is the
+harness under the hub's or the requesting user's own login — except for a
+`copilot` project on a hub with single sign-on, whose runs there sign in only
+with a credential granted to the project that counts for their person, never
+the hub's own: see [per-person Copilot credentials](../security/copilot-identity.md). The provider is the
 one the sandbox will run. A container on the hub's tree reads the project's
 `config.yaml`, then its state, and none of the hub's environment. A device or a
 Pod reads the `config.yaml` its repository commits, if it commits one, and
@@ -1168,7 +1171,10 @@ auto-evolving project included.
 
 **Granting one takes one step.** On the project's Overview a *Claude credential*
 card — *Copilot credential* for a `copilot` project — sits beside the Executor
-card whenever the executor isolates: green with
+card whenever the executor isolates, and for a `copilot` project on a hub with
+single sign-on on the hub's own host too, where it is the viewer's own: each
+person's runs there need a credential that counts for them ([per-person Copilot
+credentials](../security/copilot-identity.md)). It is green with
 the credential's expiry, amber within three days of it, red when there is none.
 It opens a dialog — and so does a Run refused for this reason — that offers the
 env secrets you could grant (your own, and shared ones if you hold

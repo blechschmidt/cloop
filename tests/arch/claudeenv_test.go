@@ -18,6 +18,9 @@ package arch_test
 //   - a dispatch that acts for a run's recorded starter — its clearance built
 //     by newResumeClearance(acct) — passes that same account's acct.envFor, so
 //     the account the clearance checked is the one the run is pinned to.
+//
+// The Copilot CLI's account is pinned by the clearance itself, and
+// copilotenv_test.go holds every lease to it (Task 20449).
 
 import (
 	"fmt"

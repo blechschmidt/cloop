@@ -745,3 +745,74 @@ func (g *Graph) Reaches(from, to string) ([]string, bool) {
 	}
 	return nil, false
 }
+
+// ReachesWithin is Reaches with FindSpawnReachable's boundary: the search does
+// not enter the executor drivers, whose job is to start what a dispatch asks
+// for, so `to` is reached only by running it in the caller's own process —
+// the question for code that must never run a harness on the hub's account
+// (Task 20449).
+func (g *Graph) ReachesWithin(from, to string) ([]string, bool) {
+	return g.reachesWithin(from, to, false)
+}
+
+// BackgroundReachesWithin is ReachesWithin from a background root, which also
+// stops at an HTTP handler: the route table is referenced from Run, and what a
+// handler reaches is the handler check's, as FindBackgroundSpawns has it.
+func (g *Graph) BackgroundReachesWithin(from, to string) ([]string, bool) {
+	return g.reachesWithin(from, to, true)
+}
+
+func (g *Graph) reachesWithin(from, to string, stopAtHandlers bool) ([]string, bool) {
+	if _, ok := g.nodes[from]; !ok || to == "" {
+		return nil, false
+	}
+	parent := map[string]string{from: ""}
+	queue := []string{from}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == to {
+			return reconstruct(parent, cur), true
+		}
+		n := g.nodes[cur]
+		if n == nil {
+			continue
+		}
+		callees := make([]string, 0, len(n.callees))
+		for c := range n.callees {
+			callees = append(callees, c)
+		}
+		sort.Strings(callees)
+		for _, c := range callees {
+			if _, seen := parent[c]; seen {
+				continue
+			}
+			next := g.nodes[c]
+			if next == nil || (inExecutorBoundary(next.pkgPath) && !next.abstract) {
+				continue
+			}
+			if _, isHandler := g.handlers[c]; isHandler && stopAtHandlers {
+				continue
+			}
+			parent[c] = cur
+			queue = append(queue, c)
+		}
+	}
+	return nil, false
+}
+
+// HandlerKeys returns the audited HTTP handlers, sorted.
+func (g *Graph) HandlerKeys() []string {
+	out := make([]string, 0, len(g.handlers))
+	for k := range g.handlers {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// References reports whether from's own body references to.
+func (g *Graph) References(from, to string) bool {
+	n := g.nodes[from]
+	return n != nil && n.callees[to]
+}

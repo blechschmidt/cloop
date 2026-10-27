@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
+	"github.com/blechschmidt/cloop/pkg/copilotauth"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretbroker/secretbrokertest"
@@ -662,5 +663,42 @@ func TestALegalHoldStillTellsTheSharedProject(t *testing.T) {
 	}
 	if req.State != secretbroker.RequestWithdrawn || strings.Contains(req.DecisionNote, "HR-882") {
 		t.Fatalf("request %s note %q, want withdrawn without the reason", req.State, req.DecisionNote)
+	}
+}
+
+// A person's Copilot home — the CLI's sessions and logs, which hold their
+// conversations (Task 20449) — lives inside their identity home, so severing
+// the one destroys the other on every member, and a legal hold that keeps the
+// one keeps the other.
+func TestSeveringTheIdentityHomeTakesTheCopilotHomeWithIt(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	c := LocalClaude{Logout: func(context.Context, string) error { return nil }}
+	for _, keep := range []bool{true, false} {
+		who := "carol@example.com"
+		if keep {
+			who = "held@example.com"
+		}
+		copilotHome, err := copilotauth.HomeFor(who)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(copilotHome, "session-store.db"), []byte("conversations"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		homes, _, err := c.Inspect([]string{who})
+		if err != nil || len(homes) != 1 || !homes[0].Exists {
+			t.Fatalf("Inspect(%s) = %+v, %v; a person with only a Copilot home has a home to destroy", who, homes, err)
+		}
+		res, _, err := c.Sever([]string{who}, keep, "admin", "left")
+		if err != nil || len(res) != 1 {
+			t.Fatalf("Sever(%s, keep=%v) = %+v, %v", who, keep, res, err)
+		}
+		_, statErr := os.Stat(copilotHome)
+		switch {
+		case keep && (statErr != nil || !res[0].Kept):
+			t.Errorf("a legal hold did not keep the Copilot home: %+v, %v", res[0], statErr)
+		case !keep && (!os.IsNotExist(statErr) || !res[0].Removed):
+			t.Errorf("the Copilot home survived the offboarding: %+v, %v", res[0], statErr)
+		}
 	}
 }

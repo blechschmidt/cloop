@@ -46,6 +46,32 @@ schema and the hub's HTTP API may change in any release.
   in each two hours. To turn that off, set `sudo_max_age_minutes: -1` under
   `ui.oidc` in that hub's `.cloop/config.ui-8081.yaml` (or in Settings →
   Single sign-on) and restart it (Task 20448).
+- **Copilot on a hub with single sign-on acts for the person: no run on the
+  hub's host, dashboard model call or resume spends the hub's own Copilot
+  sign-in any more.** The `copilot` provider passed the hub's environment to
+  the CLI, which signs in with `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
+  `GITHUB_TOKEN`, then the hub user's `copilot login` — so every person's run
+  on the hub's host, every Split, Revise, blocker analysis, plan-assistant
+  call and replay on a copilot project, and every auto-resume and failover ran
+  on one person's seat or on a token the service held for something else, a
+  person with no credential was served on it, and everybody's conversations
+  went into one `~/.copilot`. Now such a dispatch needs a Copilot credential
+  granted to the project that counts for its person — their own token, pasted
+  into the *Copilot credential* card and kept as their personal secret
+  (`github_pat_`, `gho_`, `ghu_`; never `ghp_`, `ghs_`, `ghr_`), or one shared
+  with the project — and is refused with the `409 harness_credential_missing`
+  that opens the dialog otherwise; a resume or failover acts for the recorded
+  starter and holds the run `starter_unavailable` without one. Every harness
+  dispatch to the hub's host — whatever its provider, as a review gate's
+  reviewer may be Copilot — has the hub's own Copilot variables blanked before
+  the lease and the person's own Copilot home (inside their identity home, so
+  offboarding and the denied identities' sweep remove it) pinned after it, and
+  the provider strips every `COPILOT_*`, `GH_TOKEN`, `GITHUB_TOKEN` and
+  `GH_HOST` the CLI would inherit but that credential. A deactivation at the identity provider suspends the
+  credential with the person's other personal ones; offboarding and a deletion
+  destroy it. `tests/arch` and the `tests/security` call graph now hold every
+  lease and every in-hub path to the pin. Single-user hubs are unchanged
+  (Task 20449).
 
 ### Changed
 

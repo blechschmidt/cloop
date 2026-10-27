@@ -13,7 +13,8 @@ well-known location derived from the process's `HOME`.
 With OIDC enabled, cloop gives each signed-in identity a private Claude CLI
 configuration directory and scopes every login, logout, status read, usage
 figure and dispatched run to the caller's own. There is no new configuration
-key: the switch is OIDC itself.
+key: the switch is OIDC itself. The `copilot` provider's counterpart is
+[per-person Copilot credentials](copilot-identity.md).
 
 - [What it closes](#what-it-closes)
 - [Turning it on](#turning-it-on)

@@ -6752,6 +6752,16 @@ func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 		judgeModel = jModel
 	}
 
+	// On the caller's Claude account, not the hub's (Task 20442), and on
+	// their own Copilot credential and home, the target's or the judge's
+	// (Task 20449).
+	judgeName, _, _ := splitProviderModelToken(req.Judge)
+	env, done, ok := s.inlineHarnessEnv(w, r, workDir, req.Provider, judgeName)
+	if !ok {
+		return
+	}
+	defer done()
+
 	// Generous timeout for the synchronous call; the underlying provider
 	// honours ctx, so request cancellation propagates naturally.
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
@@ -6765,8 +6775,7 @@ func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 		Timeout:     5 * time.Minute,
 		Judge:       judge,
 		JudgeModel:  judgeModel,
-		// On the caller's Claude account, not the hub's (Task 20442).
-		Env: s.inlineClaudeEnv(r),
+		Env:         env,
 	})
 	if err != nil {
 		jsonErr(w, "replay: "+err.Error(), http.StatusInternalServerError)

@@ -151,13 +151,14 @@ function loadHarnessCred(opts) {
     api, apiMethod, esc, toast, openOverlay, closeOverlay, idx: _overviewIdx,
   }).then(p => p.load(opts)).catch(() => opts && opts.refusal && toast(opts.refusal.error, 'err'));
 }
-// harnessRefused handles a dispatch's 409 for a sandbox with no Claude login:
-// a short toast, and the dialog that grants one opens with the full reason —
-// the whole sentence in a toast would sit over the dialog's own buttons on a
-// phone for as long as it shows.
+// harnessRefused handles a dispatch's 409 for a sandbox with no Claude login,
+// or a copilot run on the hub's host with no credential of the person's: a
+// short toast (the hub's summary), and the dialog that grants one opens with
+// the full reason — the whole sentence in a toast would sit over the dialog's
+// own buttons on a phone for as long as it shows.
 function harnessRefused(d, idx) {
   if (!d || !/^harness_cred/.test(d.code)) return false;
-  toast('Refused: this sandbox has no usable Claude credential', 'err');
+  toast(d.summary || 'Refused: this sandbox has no usable Claude credential', 'err');
   loadHarnessCred({open: true, refusal: d, idx});
   return true;
 }

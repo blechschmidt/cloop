@@ -14,7 +14,9 @@
 //   - their Claude Code login home (claudecodeauth.HomeFor): an OAuth refresh
 //     token in plaintext, plus the CLI's session transcripts and project
 //     history, under each hub member's config directory — and a login they had
-//     in flight, parked in that member's memory.
+//     in flight, parked in that member's memory. Their Copilot CLI home, its
+//     sessions and logs, lives inside it (copilotauth, Task 20449), and goes
+//     with it.
 //
 // claudecodeauth.ForgetHome even said it was "the deprovisioning path", and
 // nothing called it.

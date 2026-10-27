@@ -129,6 +129,9 @@ type starterUnavailableError struct {
 	// read just now — so the run is refused but not held: the next sweep
 	// asks again.
 	Transient bool
+	// Copilot says what is missing is a Copilot credential (Task 20449),
+	// which the person grants rather than signs in for.
+	Copilot bool
 }
 
 func (e *starterUnavailableError) Error() string {
@@ -151,6 +154,10 @@ func (e *starterUnavailableError) logDetail() string {
 
 // Remediation is what a person does about it.
 func (e *starterUnavailableError) Remediation() string {
+	if e.Copilot {
+		return "Carrying it on would spend the hub's own Copilot sign-in or another person's. Grant your Copilot " +
+			"credential to the project from its Overview if you have not, then press Run to start it as yourself."
+	}
 	return "Carrying it on would spend the hub's own Claude login or another person's. Press Run to start it " +
 		"as yourself, which acts on your own account."
 }
@@ -188,6 +195,13 @@ const (
 	// reasonNoUsage is for a pause an older build recorded, which clears by
 	// the starter's own usage windows: there is none to read.
 	reasonNoUsage = "has no Claude Code login on this hub whose usage could show the window reopened"
+	// reasonNoCopilot covers, for a copilot run on the hub's own host (Task
+	// 20449), a person with no Copilot credential granted to the project that
+	// counts for them, and one whose Copilot home is gone: Cause says which.
+	reasonNoCopilot = "has no Copilot credential on this hub that the hub may use for them"
+	// reasonNoCopilotNobody is for a run started acting for no one.
+	reasonNoCopilotNobody = "this run was started acting for no one, and no Copilot credential is shared with the " +
+		"project — the hub never signs a Copilot run in with its own"
 )
 
 // unavailableHomePath is where a dispatch that must not run on any Claude
@@ -521,6 +535,23 @@ func (a *resumeAccount) noUsage() *starterUnavailableError {
 		e.Reason = reasonNoUsage
 	}
 	return &e
+}
+
+// noCopilot is the refusal of a copilot dispatch to the hub's own host acting
+// for the account's person, who has no Copilot credential that counts for them
+// there or no Copilot home (Task 20449): cause is the preflight's refusal or
+// the home's error, for the hub's log, and rep says whether it may clear by
+// itself — a broker that could not be read just now.
+func (a *resumeAccount) noCopilot(rep harnessReport, cause error) *starterUnavailableError {
+	e := &starterUnavailableError{Identity: a.who.identity, Basis: a.basis, Reason: reasonNoCopilot, Copilot: true,
+		Transient: rep.BrokerProblem != "" && !rep.BrokerUnset && !rep.NoControlPlane}
+	if a.who.identity == "" {
+		e.Reason = reasonNoCopilotNobody
+	}
+	if cause != nil {
+		e.Cause = cause.Error()
+	}
+	return e
 }
 
 // newResumeClearance is the harness preflight for an automatic dispatch acting

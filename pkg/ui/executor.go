@@ -482,6 +482,18 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 			base.Env = append(os.Environ(), extra...)
 		}
 	}
+	// The Copilot CLI's account (Task 20449): on the hub's own host, on a hub
+	// with single sign-on, the hub's own Copilot variables are blanked here,
+	// before the lease, so that the Copilot credential left is what the lease
+	// delivers for whom the run acts for; the pin naming their Copilot home
+	// goes on last, below.
+	copilotBlanks, copilotPin := clear.copilotEnv(ex)
+	if len(copilotBlanks) > 0 {
+		if base.Env == nil {
+			base.Env = os.Environ()
+		}
+		base.Env = append(base.Env, copilotBlanks...)
+	}
 	// The hub's free-space floor, for a run of its own directory on this
 	// filesystem (Task 20381): Settings may have written it to the overlay,
 	// which `cloop run` does not read. Same inheritance as above, and only on
@@ -648,6 +660,9 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	spec, clamps := applyResourceCeiling(spec, workDir, ex)
 	logResourceClamps(workDir, clamps)
 	logUnenforceableCeiling(ex, workDir, clamps)
+	// The person's Copilot home, after every step that adds to the
+	// environment: no grant may point a run at another person's.
+	spec = pinCopilotHome(spec, copilotPin)
 
 	// Last gate before dispatch, and deliberately after every step that can add
 	// a binding to the spec: the lease, the repository grants and the workspace
@@ -973,6 +988,9 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	if envFor != nil {
 		extraEnv = envFor(ex)
 	}
+	// The Copilot CLI's account, as startWorkloadAs pins it (Task 20449): the
+	// four dashboard model calls on a copilot project come through here.
+	copilotBlanks, copilotPin := clear.copilotEnv(ex)
 	// Run is synchronous, so the lease's lifetime is exactly this call's. The
 	// run id still exists so the lease rows are attributable, even though no
 	// task.dispatch will reference it: these are helper subcommands
@@ -996,6 +1014,12 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 		} else {
 			base.Env = append(os.Environ(), extraEnv...)
 		}
+	}
+	if len(copilotBlanks) > 0 {
+		if base.Env == nil {
+			base.Env = os.Environ()
+		}
+		base.Env = append(base.Env, copilotBlanks...)
 	}
 	spec, err := applyLease(base, ex, lease)
 	if err != nil {
@@ -1067,6 +1091,7 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	spec, clamps := applyResourceCeiling(spec, workDir, ex)
 	logResourceClamps(workDir, clamps)
 	logUnenforceableCeiling(ex, workDir, clamps)
+	spec = pinCopilotHome(spec, copilotPin)
 
 	// On record for as long as it runs (Task 20419): a member that dies in
 	// the middle of a helper subcommand leaves its intent, and the member that

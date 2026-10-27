@@ -116,7 +116,11 @@ type harnessCredentialView struct {
 	CanPaste bool `json:"can_paste"`
 	// Personal says personal credentials follow the person who starts a run
 	// (single sign-on is on), so a pasted token is stored as the caller's own.
-	Personal          bool `json:"personal"`
+	Personal bool `json:"personal"`
+	// PerPerson says the project's Copilot runs go to the hub's own host on a
+	// hub with single sign-on, where each person's run signs in with a
+	// credential that counts for them (Task 20449): the view is the caller's.
+	PerPerson         bool `json:"per_person,omitempty"`
 	DefaultTTLMinutes int  `json:"default_ttl_minutes"`
 	MaxTTLMinutes     int  `json:"max_ttl_minutes"`
 	// BrokerUnavailable is why nothing can be granted on this hub at all.
@@ -159,11 +163,14 @@ func (s *Server) handleProjectHarnessCredential(w http.ResponseWriter, r *http.R
 func (s *Server) harnessCredentialView(r *http.Request, entry projectEntry) harnessCredentialView {
 	registerBuiltinExecutors()
 	ex, _ := executor.ResolveBinding(entry.Path)
-	// The card exists only where something is checked. Elsewhere the report is
-	// computed for nobody in particular, which skips the withholding pass and
-	// with it a broker opened on every Overview of a host project.
+	// The card exists only where something is checked: a sandbox, or a
+	// copilot project on the hub's own host on a hub with single sign-on,
+	// where each person's runs sign in with their own credential (Task 20449)
+	// and the card is the caller's. Elsewhere the report is computed for
+	// nobody in particular, which skips the withholding pass and with it a
+	// broker opened on every Overview of a host project.
 	who := harnessWho{}
-	if ex != nil && executor.IsolatesFromHost(ex) {
+	if ex != nil && (executor.IsolatesFromHost(ex) || s.copilotPerPerson(entry.Path)) {
 		who = s.harnessWhoFor(r)
 	}
 	rep := harnessPreflight(entry.Path, ex, who, "", true)
@@ -176,6 +183,7 @@ func (s *Server) harnessCredentialView(r *http.Request, entry projectEntry) harn
 		State:             rep.State,
 		Provider:          rep.Provider,
 		Needed:            rep.Needed,
+		PerPerson:         rep.PerPerson,
 		Candidates:        []harnessCandidateView{},
 		DefaultTTLMinutes: int(harnessGrantDefaultTTL / time.Minute),
 		MaxTTLMinutes:     secretGrantTTLMaxMinutes,
@@ -236,6 +244,13 @@ func (s *Server) harnessCredentialView(r *http.Request, entry projectEntry) harn
 	view.CanPaste = viewer.Identity != "" || canShared
 	view.Candidates = s.harnessCandidates(bs, ex, viewer, canShared, rep, target)
 	return view
+}
+
+// copilotPerPerson reports whether workDir is a copilot project on a hub with
+// single sign-on — whose runs on the hub's own host each sign in with a
+// credential of their person's (Task 20449).
+func (s *Server) copilotPerPerson(workDir string) bool {
+	return s.oidcEnabled() && strings.EqualFold(strings.TrimSpace(resolveProviderName(workDir)), copilot.ProviderName)
 }
 
 func grantRefView(ref harnessGrantRef) harnessGrantView {
@@ -378,6 +393,8 @@ func (s *Server) handleProjectHarnessCredentialGrant(w http.ResponseWriter, r *h
 	if ex, _ := executor.ResolveBinding(entry.Path); ex != nil && executor.IsolatesFromHost(ex) {
 		provider = sandboxProviderName(entry.Path, ex)
 	}
+	// As the preflight and the provider factory read it.
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	needed := harnessGrantableSets(provider)
 	if len(needed) == 0 {
 		apierror.WriteError(w, apierror.New(apierror.CodeConflict, fmt.Sprintf(

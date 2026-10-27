@@ -108,6 +108,12 @@ func (s *Server) watchAutoResume(ctx context.Context) {
 	}
 }
 
+// SweepAutoResume runs one pass of the sweep now: what Run's watcher does every
+// autoResumeCheckInterval, for a process that serves the hub's Handler without
+// Run — an embedding program, or internal/ssohubtest's hub in a test's process,
+// whose end-to-end tests drive an automatic resume through it (Task 20449).
+func (s *Server) SweepAutoResume(ctx context.Context) { s.runAutoResumeSweep(ctx) }
+
 // runAutoResumeSweep visits every known project once. A failure in one is
 // logged and skipped so it cannot stall the rest.
 func (s *Server) runAutoResumeSweep(ctx context.Context) {
@@ -241,7 +247,18 @@ func (s *Server) resumeRefusalFor(workDir string, acct *resumeAccount) error {
 	if err != nil || ex == nil {
 		return nil
 	}
-	return acct.check(ex)
+	if err := acct.check(ex); err != nil {
+		return err
+	}
+	// A copilot run on the hub's own host needs a Copilot credential of the
+	// starter's (Task 20449): settled as the dispatch will settle it, and only
+	// that refusal answered here — every other one the dispatch names itself.
+	if _, err := newResumeClearance(acct).settle(ex, workDir); err != nil {
+		if su, ok := errStarterUnavailable(err); ok && su.Copilot {
+			return su
+		}
+	}
+	return nil
 }
 
 // capPauseCleared reports whether st is paused for a subscription window that

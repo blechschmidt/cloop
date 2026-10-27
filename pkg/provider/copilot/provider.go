@@ -9,6 +9,12 @@
 // GH_TOKEN or GITHUB_TOKEN — in that order — or the GitHub CLI's, and with
 // COPILOT_PROVIDER_BASE_URL set, a model provider of the operator's own (BYOK).
 //
+// On a hub with single sign-on a run acts for a person (Task 20449): the hub
+// pins it to their Copilot home with copilotauth.EnvHome, and the CLI then
+// signs in with the credential the run's lease delivered — that person's own,
+// or one an administrator shared with the project — and with nothing of the
+// hub's: no token, no host, no stored login. See pkg/copilotauth.
+//
 // The flags were taken from Copilot CLI 1.0.103's own help and each behaviour
 // this package depends on was checked against that binary: see
 // copilot_cli_test.go, which runs the real CLI against a stub model server when
@@ -33,6 +39,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/blechschmidt/cloop/pkg/copilotauth"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provider/agentproc"
 )
@@ -198,9 +205,18 @@ func resumableSession(id string) string {
 }
 
 // childEnv is the CLI's environment: this process's, with two defaults it may
-// override, and then what the caller adds for this call.
-func childEnv(opts provider.Options) []string {
-	env := []string{
+// override, and then what the caller adds for this call — appended last, since
+// exec keeps the last occurrence of a key and these are meant to win: the
+// review gate's push hold (Task 20357), an outbox.
+//
+// When it names a person's Copilot home (copilotauth.EnvHome), the run acts for
+// that person on a hub with single sign-on, and copilotauth.ChildEnv takes
+// everything of the hub's away from the CLI (Task 20449). Such a run with no
+// credential of its own left, or whose home is gone, is refused here, before
+// anything runs: the CLI would otherwise go looking for one, and every place it
+// looks is somebody else's.
+func childEnv(opts provider.Options) (env []string, pinned bool, err error) {
+	defaults := []string{
 		// The CLI downloads newer versions of itself by default. A harness
 		// should run the version that was installed, not one that arrived
 		// mid-run, and a sandbox should not spend its egress on it.
@@ -208,10 +224,21 @@ func childEnv(opts provider.Options) []string {
 		// The output is parsed, never shown on a terminal.
 		"NO_COLOR=1",
 	}
-	env = append(env, os.Environ()...)
-	// Appended last: exec keeps the last occurrence of a key, and these are
-	// meant to win — the review gate's push hold (Task 20357), an outbox.
-	return append(env, opts.Env...)
+	env, pinned = copilotauth.ChildEnv(defaults, os.Environ(), opts.Env)
+	if !pinned {
+		return env, false, nil
+	}
+	home := copilotauth.HomeOf(append(os.Environ(), opts.Env...))
+	if fi, serr := os.Stat(home); serr != nil || !fi.IsDir() {
+		return nil, true, fmt.Errorf("%w: the Copilot home this run was pinned to (%s) is gone — its person may have "+
+			"been offboarded — and a run acting for a person never falls back to another one", ErrAuthFailure, home)
+	}
+	if !copilotauth.HasCredential(env) {
+		return nil, true, fmt.Errorf("%w: this run acts for a person on a hub with single sign-on, and its lease "+
+			"delivered no Copilot credential (%s or %s); it never signs in with the hub's own — grant your "+
+			"Copilot credential to the project from its Overview", ErrAuthFailure, EnvGitHubToken, EnvProviderBaseURL)
+	}
+	return env, true, nil
 }
 
 // Complete runs the CLI once.
@@ -269,7 +296,11 @@ func (p *Provider) run(ctx context.Context, prompt string, opts provider.Options
 	// should a grandchild keep a pipe open past the group kill.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = childEnv(opts)
+	env, pinned, err := childEnv(opts)
+	if err != nil {
+		return nil, "", err
+	}
+	cmd.Env = env
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
@@ -325,7 +356,7 @@ func (p *Provider) run(ctx context.Context, prompt string, opts provider.Options
 		if flag := rejectedFlag(diag); flag != "" {
 			return nil, flag, fmt.Errorf("copilot CLI does not know %s", flag)
 		}
-		return nil, "", cliFailure(exitErr.ExitCode(), diag, output)
+		return nil, "", cliFailure(exitErr.ExitCode(), diag, output, pinned)
 	}
 	if output == "" && diag != "" {
 		// Exit 0 and nothing said: the reason, if there is one, is on stderr,
@@ -391,19 +422,27 @@ var authMarkers = []string{
 }
 
 // cliFailure renders a failed run: the CLI's own diagnostics, with
-// ErrAuthFailure on the ones no retry fixes.
-func cliFailure(code int, diag, output string) error {
+// ErrAuthFailure on the ones no retry fixes. pinned says the run acts for a
+// person on a hub with single sign-on, whose remedy is a grant, not a sign-in
+// on the hub's host.
+func cliFailure(code int, diag, output string, pinned bool) error {
 	reason := diag
 	if reason == "" {
 		reason = output
 	}
 	lower := strings.ToLower(reason)
 	for _, m := range authMarkers {
-		if strings.Contains(lower, m) {
-			return fmt.Errorf("%w (exit %d): %s — sign the CLI in with `copilot login`, or set %s to a "+
-				"fine-grained GitHub token with the Copilot Requests permission", ErrAuthFailure, code,
-				truncateForError(reason), EnvGitHubToken)
+		if !strings.Contains(lower, m) {
+			continue
 		}
+		if pinned {
+			return fmt.Errorf("%w (exit %d): %s — the Copilot credential granted for the person this run acts "+
+				"for was refused; grant a working one (a fine-grained GitHub token with the Copilot Requests "+
+				"permission) from the project's Overview", ErrAuthFailure, code, truncateForError(reason))
+		}
+		return fmt.Errorf("%w (exit %d): %s — sign the CLI in with `copilot login`, or set %s to a "+
+			"fine-grained GitHub token with the Copilot Requests permission", ErrAuthFailure, code,
+			truncateForError(reason), EnvGitHubToken)
 	}
 	return fmt.Errorf("copilot CLI failed (exit %d): %s", code, truncateForError(reason))
 }

@@ -218,9 +218,11 @@ cloop looks for `copilot` on `PATH`, then at `~/.local/bin/copilot` (the
 install script, as a user), `~/.npm-global/bin/copilot`,
 `/usr/local/bin/copilot` and `/opt/homebrew/bin/copilot`.
 
-**Its sign-in is its own.** cloop keeps no Copilot credential of its own and
-adds none to a run on its host: the CLI uses, in this order, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`,
-the account `copilot login` stored, and the GitHub CLI's. A token must act for
+**Its sign-in is its own.** cloop keeps no Copilot credential of its own, and
+on a hub without single sign-on adds none to a run on its host: the CLI uses, in
+this order, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, the account
+`copilot login` stored, and the GitHub CLI's. On a hub with single sign-on each
+person's runs sign in with their own credential instead — see below. A token must act for
 a person with a Copilot seat — a fine-grained personal access token with the
 *Copilot Requests* permission, or an OAuth token; classic `ghp_` tokens are not
 accepted. Export `COPILOT_GITHUB_TOKEN` rather than `GH_TOKEN` when the
@@ -267,13 +269,27 @@ credential* card grants one in a step; see [the credential of a sandboxed
 run](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run). The CLI
 keeps its token out of the environment of the commands the agent runs.
 
+**On a hub with single sign-on, each person's own.** A `copilot` run on the
+hub's own host, the dashboard's model calls on a `copilot` project (Split,
+Revise, the blocker analysis, the plan assistant, the replays) and every resume
+or failover of a run act for a person, and sign the CLI in with a credential
+granted to the project that counts for that person: their own token, pasted
+into the project's *Copilot credential* card and kept as their personal secret,
+or one an administrator shared with the project. Never the host's `copilot
+login`, `GH_TOKEN` or `GITHUB_TOKEN`: the hub strips every `COPILOT_*`
+variable, `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` from what the CLI inherits,
+and gives each person a Copilot home of their own for its sessions and logs.
+Someone with no credential is refused with the dialog that grants one, and a
+run the hub would carry on for them waits paused instead. See [per-person
+Copilot credentials](../security/copilot-identity.md).
+
 **What does not apply.** The Claude Code usage caps and the model relay are
 Claude's: a `copilot` run is not paused by `claudecode.max_*_pct`, and its
-model calls go to GitHub (or your own provider) directly. On a hub with single
-sign-on, runs on the hub's own host use the host's Copilot sign-in for every
-user — there is no per-user Copilot login there yet — so bind `copilot`
-projects to an isolating executor and grant each person's token as their
-personal secret to keep their usage on their own seat.
+model calls go to GitHub (or your own provider) directly. The hub's own host is
+not a boundary between people: a run there executes as the user the hub runs as,
+and its agent can read what that user can — to keep people's agents apart, bind
+`copilot` projects to an isolating executor, where the same personal grant
+signs the sandbox in.
 
 ---
 

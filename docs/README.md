@@ -145,6 +145,13 @@ Seven pages in order, indexed at
   — why an exported `CLAUDE_CODE_OAUTH_TOKEN` turns the isolation into an
   illusion. Includes the isolating-executor boundary and deprovisioning.
   Automatic when OIDC is on; nothing to configure.
+- **[Per-person Copilot credentials](security/copilot-identity.md)** — the same
+  for the `copilot` provider: why each person's Copilot credential is a
+  personal secret granted to the project rather than a login on the hub, how
+  every run, model call, resume and failover on the hub's own host signs the
+  CLI in as its person and never with the hub's `copilot login`, `GH_TOKEN` or
+  `GITHUB_TOKEN`, the per-person Copilot home, deprovisioning, and the gates
+  that keep a new path from skipping it.
 - **[Git interception proxy](git-interception-proxy.md)** — how a sandbox is
   allowed to push to some branches and not others without ever holding a
   credential that could reach the others: the branch allowlist enforced on the

@@ -31,13 +31,17 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
 	"github.com/blechschmidt/cloop/pkg/clijson"
+	"github.com/blechschmidt/cloop/pkg/copilotauth"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/provider/copilot"
 )
 
 const (
@@ -226,6 +230,76 @@ func denyInlineModelCall(w http.ResponseWriter, workDir, what string) bool {
 		return true
 	}
 	return false
+}
+
+// inlineHarnessEnv is the environment of a model call the hub makes in its own
+// process — the provider-call and task replays — for r's caller: their Claude
+// account (inlineClaudeEnv) and, on a hub with single sign-on, their own
+// Copilot home with the hub's Copilot variables blanked, whatever the provider
+// named, so a Copilot CLI the call starts signs in as the caller or not at all
+// (Task 20449). When one of providers is copilot — in any spelling: the
+// factory reads names without regard to case — the call is settled as a
+// dispatch's is: its clearance against the project's executor, so a caller with
+// no credential that counts for them meets the 409 the dashboard opens the
+// credential dialog on; then a lease of the project's grants, of which the call
+// takes the Copilot credential alone and which done ends. It writes the refusal
+// and reports false when there is no call to make.
+func (s *Server) inlineHarnessEnv(w http.ResponseWriter, r *http.Request, workDir string, providers ...string) (env []string, done func(), ok bool) {
+	env, done = s.inlineClaudeEnv(r), func() {}
+	if !s.oidcEnabled() {
+		return env, done, true
+	}
+	copilotCall, named := false, ""
+	for _, p := range providers {
+		p = strings.ToLower(strings.TrimSpace(p))
+		switch {
+		case p == copilot.ProviderName:
+			copilotCall = true
+		case p != "" && named == "":
+			named = p
+		}
+	}
+	if copilotCall {
+		named = copilot.ProviderName
+	}
+	registerBuiltinExecutors()
+	ex, err := executor.Resolve(workDir)
+	if err != nil {
+		jsonWorkloadErr(w, fmt.Errorf("no executor available for %s: %w", workDir, err))
+		return nil, nil, false
+	}
+	// The caller checked, and this is the one that pins: an executor rebound
+	// in between is judged here, where the pin depends on it.
+	if executor.IsolatesFromHost(ex) {
+		writeSandboxDenied(w, "inline_call_isolated",
+			fmt.Sprintf("an inline model call runs the project's provider inside the hub, on its host, and %s "+
+				"runs on %s, which keeps its runs off that host", workDir, ex.ID()),
+			"Run the task again instead: a run goes to the project's executor.", nil)
+		return nil, nil, false
+	}
+	clear := newHarnessClearance(workDir, s.harnessWhoFor(r), named)
+	withhold, err := clear.settle(ex, workDir)
+	if err != nil {
+		jsonWorkloadErr(w, err)
+		return nil, nil, false
+	}
+	blanks, pin := clear.copilotEnv(ex)
+	env = append(env, blanks...)
+	if copilotCall {
+		lease := acquireSecretLease(controlPlaneDir(), workDir, ex, artifact.NewRunID(), withhold)
+		for _, kv := range lease.Env() {
+			if k, _, _ := strings.Cut(kv, "="); slices.Contains(copilotauth.CredentialVars, k) {
+				env = append(env, kv)
+			}
+		}
+		done = lease.Close
+	}
+	// Last, after the credential; and never nothing on a hub with single
+	// sign-on, where an unpinned CLI would sign in as the hub.
+	if len(pin) == 0 {
+		pin = []string{copilotauth.Pin(noCopilotHomePath)}
+	}
+	return append(env, pin...), done, true
 }
 
 // inlineClaudeEnv pins an inline model call to the caller's Claude account:

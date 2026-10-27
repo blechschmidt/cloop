@@ -256,6 +256,14 @@ func (s *Server) handleProviderCallReplay(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// On the caller's Claude account, not the hub's (Task 20442), and on
+	// their own Copilot credential and home (Task 20449).
+	env, done, ok := s.inlineHarnessEnv(w, r, workDir, original.Provider)
+	if !ok {
+		return
+	}
+	defer done()
+
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
@@ -265,8 +273,7 @@ func (s *Server) handleProviderCallReplay(w http.ResponseWriter, r *http.Request
 		Timeout:      30 * time.Second,
 		SystemPrompt: replaySystem,
 		WorkDir:      workDir,
-		// On the caller's Claude account, not the hub's (Task 20442).
-		Env: s.inlineClaudeEnv(r),
+		Env:          env,
 	}
 	// Tag the replay with the originating task so the new audit row is
 	// correlated. Replays without a task originate from the inspector itself.

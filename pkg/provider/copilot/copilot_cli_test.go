@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/blechschmidt/cloop/pkg/copilotauth"
 	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
@@ -76,6 +77,7 @@ type modelRequest struct {
 	Tools    []string
 	Messages int
 	ToolOut  string // the result of the command, once it has run
+	Auth     string // the Authorization header: the key the CLI signed in with
 }
 
 func (m *modelServer) start(t *testing.T) {
@@ -116,7 +118,8 @@ func (m *modelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	seen := modelRequest{Model: req.Model, Effort: req.ReasoningEffort, Messages: len(req.Messages)}
+	seen := modelRequest{Model: req.Model, Effort: req.ReasoningEffort, Messages: len(req.Messages),
+		Auth: r.Header.Get("Authorization")}
 	for _, tool := range req.Tools {
 		seen.Tools = append(seen.Tools, tool.Function.Name)
 	}
@@ -293,5 +296,75 @@ func TestRealCLIWithNoCredentialIsAnAuthFailure(t *testing.T) {
 	_, err := New().Complete(ctx, "x", provider.Options{WorkDir: t.TempDir()})
 	if !errors.Is(err, ErrAuthFailure) {
 		t.Fatalf("err = %v, want ErrAuthFailure", err)
+	}
+}
+
+// A run acting for a person on a hub with single sign-on (Task 20449), with the
+// real CLI: it signs in with the provider the person's lease delivered — the
+// stub's key — keeps its session and logs in their home rather than the one the
+// hub's environment names, and its shell sees none of the hub's GitHub tokens,
+// hosts or Copilot settings.
+func TestRealCLIPinnedToAPersonRunsAsThemOnly(t *testing.T) {
+	realCLI(t)
+	stub := &modelServer{command: "env | sort"}
+	stub.start(t)
+	hubHome := os.Getenv("COPILOT_HOME") // the hub user's own, as realCLI set it
+	person := t.TempDir()
+	for k, v := range map[string]string{
+		copilotauth.EnvHome: person,
+		"GH_TOKEN":          "host-gh-token",
+		"GITHUB_TOKEN":      "host-github-token",
+		"GH_HOST":           "ghe.example.com",
+		"COPILOT_API_URL":   "http://127.0.0.1:1/collector",
+		"COPILOT_MODEL":     "host-model",
+	} {
+		t.Setenv(k, v)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	res, err := New().Complete(ctx, "Run the step.", provider.Options{WorkDir: t.TempDir(), Model: "stub-model"})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !strings.HasSuffix(res.Output, "TASK_DONE") {
+		t.Errorf("Output = %q", res.Output)
+	}
+	reqs := stub.requests()
+	if len(reqs) < 2 {
+		t.Fatalf("the model was asked %d times, want a tool turn and an answer", len(reqs))
+	}
+	for _, r := range reqs {
+		if r.Auth != "Bearer stub-key" {
+			t.Errorf("the CLI signed in to the model with %q, want the person's own key", r.Auth)
+		}
+	}
+	// Lines, not the whole dump, in a failure: the shell's environment is
+	// this test process's, whatever that holds.
+	shell := strings.Split(reqs[len(reqs)-1].ToolOut, "\n")
+	if !slices.Contains(shell, "COPILOT_HOME="+person) {
+		t.Errorf("the agent's shell does not run in the person's home %s", person)
+	}
+	for _, leak := range []string{"host-gh-token", "host-github-token", "ghe.example.com", "127.0.0.1:1", "host-model",
+		hubHome} {
+		for _, line := range shell {
+			if strings.Contains(line, leak) {
+				t.Errorf("the agent's shell sees %q: %s", leak, line)
+			}
+		}
+	}
+	entries, err := os.ReadDir(person)
+	if err != nil || len(entries) == 0 {
+		t.Errorf("the CLI kept nothing in the person's home (%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".copilot")); !os.IsNotExist(err) {
+		t.Errorf("the CLI wrote into the hub user's ~/.copilot (%v)", err)
+	}
+	if hub, _ := os.ReadDir(hubHome); len(hub) != 0 {
+		var names []string
+		for _, e := range hub {
+			names = append(names, e.Name())
+		}
+		t.Errorf("the CLI wrote into the hub's own home: %v", names)
 	}
 }
