@@ -326,6 +326,60 @@ it deliberately prefers neither. `tests/arch/orphan_test.go` has an `exempt`
 map for packages that are unreferenced on purpose — it is empty, and an entry
 needs an argument a reader can check.
 
+## When CI is red
+
+A job's log can only be read with admin rights on the repository — without
+them, `GET /repos/blechschmidt/cloop/actions/jobs/{id}/logs` answers 403 "Must
+have admin rights to Repository" — but its annotations can be read by anyone,
+token or not. So CI writes why a job failed into its annotations.
+
+Every `run:` step in `.github/workflows/ci.yml` runs under
+[`scripts/ci-step.sh`](scripts/ci-step.sh), the workflow's default shell: it
+runs the step's script under `bash -e`, as GitHub does for a step that names no
+shell, and records its output and exit status without changing either. When a
+job fails, its last step, **Say why the job failed**, hands the record to
+[`scripts/ci-annotate`](scripts/ci-annotate/main.go), which reads go's output
+— plain, `-v` or `-json` — and annotates each cause it finds:
+
+| Cause | Annotation title | What it carries |
+| --- | --- | --- |
+| A failing test | `<package> <Test>` — the leaves of nested subtests | Its first ~30 lines of output; it points at the last `file:line` the test logged |
+| A panic or fatal error | `<package> <Test>: panic: …` | The panic and the top frames below the runtime's and the testing package's |
+| A data race | `<package> <Test>: data race in <function>` | Both accesses' first frames, and the test |
+| A timeout | `<package> <Test>: test timed out after …` | The tests still running, and where their goroutines were |
+| A build, vet or setup failure | `<package>: build failed` (or `vet failed`, `setup failed`) | The compiler's or vet's output, pointing at the first error |
+| A package that failed with no failing test | `<package>: failed outside any test` | What the package printed outside its tests |
+| A failed step with no go output | `A step exited N: <its first command>` | Its last forty lines |
+
+GitHub keeps ten error annotations a step and fifty a job, so the causes are
+ranked — the first failed step's first, and within a step a package that did
+not build, crashed, hung or raced before a test that failed — and what does not
+fit is folded into the last annotation, which lists it. The run's summary page
+has every finding in full. A step that annotates its own output, as the
+security suite does from its `-json` stream (`go run ./scripts/ci-annotate
+FILE`), is left alone by the job's last step. Give no step a `shell:` of its
+own, or its output goes unrecorded; `go test ./tests/ciscripts/` holds the
+workflow to that, and to every job ending with the step that says why.
+
+To read why a commit's CI failed, from a machine with no token:
+
+```bash
+scripts/ci-why.sh                    # HEAD's push runs
+scripts/ci-why.sh 34f170cd           # any commit; a SHA this clone lacks is looked up
+scripts/ci-why.sh --job Lint HEAD    # one job's annotations, whether it passed or not
+```
+
+It prints each run's verdict and, for each job that did not pass, the step it
+failed at, a link to its log and its annotations. That takes three or four of
+the sixty requests an hour GitHub allows an address without a token, and it
+says how many are left; `GITHUB_TOKEN`, when set, lifts the limit. The same
+annotations come from a log you have locally:
+
+```bash
+go test ./pkg/x/ 2>&1 | tee x.log
+go run ./scripts/ci-annotate -summary x.md x.log    # x.md: the full report
+```
+
 ## Asking the secret broker on an executor's behalf
 
 Build a `secretbroker.Requester` — what a lease, an egress session or a grant
