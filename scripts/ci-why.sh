@@ -138,7 +138,9 @@ def jobs(path, name):
                          j.get("conclusion") or "-", j.get("html_url") or "-", " / ".join(failed) or "-"]))
 
 def annotations(path):
-    items = load(path)
+    # GitHub lists a check run's annotations newest first; the job emitted
+    # its first cause first, so that is the order they are printed in.
+    items = list(reversed(load(path)))
     order = {"failure": 0, "warning": 1, "notice": 2}
     items.sort(key=lambda a: order.get(a.get("annotation_level"), 3))
     # GitHub adds this to every failed step; it says nothing the job's

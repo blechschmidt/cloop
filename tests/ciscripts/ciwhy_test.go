@@ -370,7 +370,9 @@ func (f *fakeGitHub) why(t *testing.T, dir string, args ...string) (string, stri
 }
 
 // asAPI turns workflow commands into the annotations GitHub's check-runs API
-// returns for them.
+// returns for them: newest first, as recorded for f6e1ab1f and read back from
+// the one-off proof on 106354ff, and with the line GitHub adds to a failed step
+// the newest of all.
 func asAPI(t *testing.T, as []annotation) string {
 	t.Helper()
 	type api struct {
@@ -382,7 +384,7 @@ func asAPI(t *testing.T, as []annotation) string {
 		RawDetails string `json:"raw_details"`
 	}
 	out := []api{{Path: ".github", StartLine: 2302, Level: "failure", Message: "Process completed with exit code 1."}}
-	for _, a := range as {
+	for _, a := range slices.Backward(as) {
 		path, line := a.Path, a.Line
 		if path == "" {
 			path, line = ".github", 1
@@ -449,6 +451,11 @@ func TestCIWhyReadsWhyAJobFailed(t *testing.T) {
 	}
 	if strings.Contains(out, "Process completed with exit code") {
 		t.Errorf("the boilerplate is printed beside the reasons:\n%s", out)
+	}
+	// In the order the job emitted them: the first cause first.
+	first := strings.Index(out, "red/missing: setup failed")
+	if later := strings.Index(out, "red/failing TestAssertion"); first < 0 || later < first {
+		t.Errorf("the annotations are not in the order they were emitted:\n%s", out)
 	}
 }
 
