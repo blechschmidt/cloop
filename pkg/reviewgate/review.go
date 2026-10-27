@@ -59,7 +59,7 @@ func (r *Reviewer) Review(ctx context.Context, workDir string, in Input) Round {
 	if r == nil || r.Provider == nil {
 		return Round{Err: errors.New("no reviewer is configured")}
 	}
-	in.CanReadFiles = r.ProviderName == "claudecode"
+	in.CanReadFiles = r.ProviderName == "claudecode" || r.ProviderName == "copilot"
 	prompt := BuildPrompt(in)
 	timeout := r.Timeout
 	if timeout <= 0 {

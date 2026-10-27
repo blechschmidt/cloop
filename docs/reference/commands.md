@@ -89,7 +89,7 @@ cloop init "Build a full REST API"
 | `--max-steps` | `0` (unlimited) | Max autonomous steps |
 | `--instructions` | | Additional constraints for the AI |
 | `--model` | | Model override |
-| `--effort` | | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode only) |
+| `--effort` | | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode and copilot) |
 | `--provider` | | Provider override |
 
 ### `cloop run`
@@ -114,7 +114,7 @@ cloop run --follow-builds     # adopt newly deployed builds at task boundaries (
 |------|---------|-------------|
 | `--provider` | from config | AI provider to use |
 | `--model` | from config | Model override |
-| `--effort` | from state/config | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode only) |
+| `--effort` | from state/config | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode and copilot) |
 | `--auto-evolve` | `false` | After goal completion, keep discovering new tasks |
 | `--innovate` | `false` | Innovation mode: push evolve toward novel capabilities |
 | `--step-timeout` | `0` (disabled) | Timeout per step (e.g. `10m`); falls back to `step_timeout` in config when unset |
@@ -270,7 +270,7 @@ cloop config set provider anthropic        # set default provider
 cloop config set anthropic.api_key sk-...  # set a value
 ```
 
-Supported keys: `provider`, `anthropic.api_key`, `anthropic.model`, `anthropic.base_url`, `openai.api_key`, `openai.model`, `openai.base_url`, `ollama.base_url`, `ollama.model`, `claudecode.model`, `webhook.url`, `github.token`, `github.repo`
+Supported keys: `provider`, `anthropic.api_key`, `anthropic.model`, `anthropic.base_url`, `openai.api_key`, `openai.model`, `openai.base_url`, `ollama.base_url`, `ollama.model`, `claudecode.model`, `copilot.model`, `copilot.effort`, `webhook.url`, `github.token`, `github.repo`
 
 ### `cloop task`
 
@@ -752,9 +752,9 @@ cloop review gate --disable
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--enable` / `--disable` | | Turn the gate on or off (settings are kept) |
-| `--provider` | the project's | `claudecode`, `anthropic`, `openai`, `ollama` |
+| `--provider` | the project's | `claudecode`, `copilot`, `anthropic`, `openai`, `ollama` |
 | `--model` | the project's model on its own provider | Reviewer model |
-| `--effort` | provider default | Reviewer reasoning effort (`claudecode` only) |
+| `--effort` | provider default | Reviewer reasoning effort (`claudecode` and `copilot`) |
 | `--mode` | `fix` | `fix` (send back, then block), `block`, `advisory` |
 | `--max-fix-rounds` | `0` (= 2) | How often `fix` sends a task back, at most 5 |
 | `--instructions` | | Extra review criteria sent with every review |
@@ -1200,7 +1200,7 @@ cloop remote init --goal "…" --repo acme/api-docs --grant staging-cluster,name
 | `--name` | the repository's name | The project's name and its directory under the hub's projects root (`ui.projects_root`) |
 | `--dir` | — | The project's directory on the hub, instead of `--name`; inside the hub's projects root unless you hold `executor.manage` |
 | `--provider`, `--model`, `--effort` | the hub's | As the New Project dialog's |
-| `--claude-secret` | your one complete Claude credential | The env secret the project's sandbox signs in to Claude with, on an executor that isolates |
+| `--claude-secret` | your one complete Claude credential | The env secret the project's sandbox signs in to Claude with — or, for a `copilot` project, to Copilot with (`COPILOT_GITHUB_TOKEN`) — on an executor that isolates |
 | `--justification` | the goal | The reason given for any credential requested from an approver |
 | `--run` | `false` | Start the project's first run once it is set up |
 | `--json` | `false` | Print what was created, granted and requested as one object |

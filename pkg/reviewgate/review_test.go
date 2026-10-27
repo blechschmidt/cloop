@@ -67,6 +67,22 @@ func TestReviewAsksForTheVerdictReadOnly(t *testing.T) {
 	}
 }
 
+// The copilot harness reads files the same way, under the same read-only call.
+func TestACopilotReviewerMayReadFiles(t *testing.T) {
+	p := &scriptedReviewer{name: "copilot", answers: []string{`{"verdict":"approve","summary":"good"}`}}
+	r := &Reviewer{Provider: p, ProviderName: "copilot", Model: "gpt-5.4"}
+	round := r.Review(context.Background(), "/p", Input{Changes: sampleChanges(), Round: 1})
+	if round.Err != nil || round.Verdict == nil {
+		t.Fatalf("round = %+v", round)
+	}
+	if !p.opts[0].ReadOnly {
+		t.Error("the copilot reviewer was not asked for a read-only call")
+	}
+	if !strings.Contains(p.prompts[0], "You may read files") {
+		t.Error("a copilot reviewer is not told it may read files")
+	}
+}
+
 func TestReviewRetriesOnceForTheFormatInTheSameConversation(t *testing.T) {
 	p := &scriptedReviewer{name: "claudecode", session: "5f0c4f3e-6f7a-4c1d-9a51-3a4b2c1d0e9f",
 		answers: []string{"It looks fine to me.", `{"verdict":"request_changes","findings":[{"severity":"major","title":"no test"}]}`}}

@@ -208,6 +208,30 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A `copilot` provider runs the GitHub Copilot CLI as the agent harness.**
+  `provider: copilot` (or `--provider copilot`, the dashboard's provider
+  pickers, `cloop init`, the review gate and `cloop router`) runs `copilot`
+  once per call in prompt mode, under the sign-in the CLI already has —
+  `copilot login`, `COPILOT_GITHUB_TOKEN`, or a model provider of its own via
+  `COPILOT_PROVIDER_BASE_URL` — with the prompt on stdin, every tool allowed as
+  `claudecode`'s `bypassPermissions` allows them, and no stopping to ask.
+  `copilot.model` (`auto` lets Copilot pick) and `copilot.effort` pass through
+  as `--model` and `--reasoning-effort`; each conversation gets an ID, so a
+  task whose agent ends its turn early is resumed in it; token counts come from
+  the CLI's usage report; the reviewer gets the reading tools only; and work
+  the agent leaves running is waited for under `copilot.background`, by the
+  same code as `claudecode`'s, now shared in `pkg/provider/agentproc`. A flag
+  an older CLI does not know is dropped rather than failing every task. On an
+  isolating executor the project needs `copilot` where it runs — devices
+  advertise it from this build's agent on; it is not installed on request —
+  and `COPILOT_GITHUB_TOKEN`
+  (or the provider URL) granted: the hub refuses the dispatch without one, the
+  Overview's *Copilot credential* card grants a pasted fine-grained token in a
+  step and refuses classic, installation and refresh tokens with the reason,
+  and a Copilot grant never supersedes the project's Claude one. Every command
+  now reads a provider's configured model through one `config.ModelFor`
+  (Task 20447).
+
 - **Decompose, beside Add Task, plans a task into several before any is
   added.** A task too big for one agent could only be added whole and split
   afterwards, or retyped as a request in AI Feature Suggestions, where the

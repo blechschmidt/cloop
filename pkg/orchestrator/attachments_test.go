@@ -264,8 +264,11 @@ func TestRunsToolsReadsAFallbackChain(t *testing.T) {
 	for name, want := range map[string]bool{
 		"claudecode":           true,
 		"claudecode→anthropic": true,
+		"copilot":              true,
+		"copilot→claudecode":   true,
 		"anthropic":            false,
 		"anthropic→claudecode": false,
+		"anthropic→copilot":    false,
 		"openai":               false,
 	} {
 		if got := runsTools(&textOnlyProvider{name: name}); got != want {

@@ -248,6 +248,9 @@ Press Ctrl+C to pause gracefully.`,
 		for _, note := range cfg.ClaudeCode.Background.Clamp() {
 			fmt.Fprintf(os.Stderr, "warning: %s\n", note)
 		}
+		for _, note := range cfg.Copilot.Background.ClampFor("copilot.background") {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", note)
+		}
 		provCfg := provider.ProviderConfig{
 			Name:              providerName,
 			AnthropicAPIKey:   cfg.Anthropic.APIKey,
@@ -261,6 +264,12 @@ Press Ctrl+C to pause gracefully.`,
 				GraceSeconds: cfg.ClaudeCode.Background.GraceSeconds,
 				WaitMinutes:  cfg.ClaudeCode.Background.WaitMinutes,
 				KeepOrphans:  cfg.ClaudeCode.Background.KeepOrphans,
+			},
+			CopilotBackground: provider.BackgroundPolicyConfig{
+				Disabled:     cfg.Copilot.Background.Disabled,
+				GraceSeconds: cfg.Copilot.Background.GraceSeconds,
+				WaitMinutes:  cfg.Copilot.Background.WaitMinutes,
+				KeepOrphans:  cfg.Copilot.Background.KeepOrphans,
 			},
 		}
 
@@ -279,10 +288,15 @@ Press Ctrl+C to pause gracefully.`,
 		if !provider.ValidEffort(effort) {
 			return fmt.Errorf("invalid --effort %q — valid: %s (or empty for provider default)", effort, strings.Join(provider.EffortLevels, ", "))
 		}
-		if effort == "" && providerName == "claudecode" {
-			effort = cfg.ClaudeCode.Effort
+		if effort == "" && (providerName == "claudecode" || providerName == "copilot") {
+			switch providerName {
+			case "claudecode":
+				effort = cfg.ClaudeCode.Effort
+			case "copilot":
+				effort = cfg.Copilot.Effort
+			}
 			if !provider.ValidEffort(effort) {
-				fmt.Fprintf(os.Stderr, "warning: ignoring invalid claudecode.effort %q in config — valid: %s\n", effort, strings.Join(provider.EffortLevels, ", "))
+				fmt.Fprintf(os.Stderr, "warning: ignoring invalid %s.effort %q in config — valid: %s\n", providerName, effort, strings.Join(provider.EffortLevels, ", "))
 				effort = ""
 			}
 		}
@@ -532,6 +546,7 @@ Press Ctrl+C to pause gracefully.`,
 				"openai":     cfg.OpenAI.Model,
 				"ollama":     cfg.Ollama.Model,
 				"claudecode": cfg.ClaudeCode.Model,
+				"copilot":    cfg.Copilot.Model,
 			},
 			Resumed:      resume.active,
 			Handoff:      resume.handoff,
@@ -771,7 +786,7 @@ func buildProviderWithFallback(primaryName string, primaryCfg provider.ProviderC
 
 func init() {
 	runCmd.Flags().StringVar(&runModel, "model", "", "Override model for this run")
-	runCmd.Flags().StringVar(&runEffort, "effort", "", "Model reasoning-effort level: low, medium, high, xhigh, max (claudecode only; empty = provider default)")
+	runCmd.Flags().StringVar(&runEffort, "effort", "", "Model reasoning-effort level: low, medium, high, xhigh, max (claudecode and copilot; empty = provider default)")
 	runCmd.Flags().StringVar(&stepTimeout, "step-timeout", "0", "Timeout per step (e.g. 10m, 30m); 0 = disabled (default)")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Total session timeout (e.g. 30m, 2h); 0 = no limit")
 	runCmd.Flags().IntVar(&runMaxTokens, "max-tokens", 0, "Max output tokens per step (overrides config provider.max_tokens)")
@@ -782,7 +797,7 @@ func init() {
 	runCmd.Flags().IntVar(&continueSteps, "add-steps", 0, "Add more steps to max before running")
 	runCmd.Flags().IntVar(&runStepsLimit, "steps", 0, "Run at most N steps this session (not persisted; 0 = no session limit)")
 	runCmd.Flags().BoolVar(&autoEvolve, "auto-evolve", false, "After goal completion, keep improving the project autonomously")
-	runCmd.Flags().StringVar(&runProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode")
+	runCmd.Flags().StringVar(&runProvider, "provider", "", "AI provider: anthropic, openai, ollama, claudecode, copilot")
 	runCmd.Flags().BoolVar(&planOnly, "plan-only", false, "Decompose goal into tasks but do not execute them")
 	runCmd.Flags().BoolVar(&retryFailed, "retry-failed", false, "Retry tasks that previously failed")
 	runCmd.Flags().BoolVar(&replan, "replan", false, "Discard the existing plan and re-decompose the goal")

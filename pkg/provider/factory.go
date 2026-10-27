@@ -28,10 +28,13 @@ type ProviderConfig struct {
 	// running after it exits (Task 20205). The zero value detects it, waits
 	// for it, and terminates whatever outlives the wait.
 	ClaudeCodeBackground BackgroundPolicyConfig
+
+	// CopilotBackground is the same for the copilot CLI.
+	CopilotBackground BackgroundPolicyConfig
 }
 
 // BackgroundPolicyConfig carries pkg/config's background settings to the
-// claudecode factory in units the factory can apply directly.
+// claudecode and copilot factories in units the factory can apply directly.
 //
 // A plain struct here rather than an import of pkg/config because the
 // dependency runs the other way round: the provider tree is imported by

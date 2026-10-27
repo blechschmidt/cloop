@@ -58,7 +58,7 @@ Example:
 		}
 
 		// Validate provider
-		validProviders := []string{"anthropic", "openai", "ollama", "claudecode"}
+		validProviders := []string{"anthropic", "openai", "ollama", "claudecode", "copilot"}
 		provValid := false
 		for _, p := range validProviders {
 			if p == provName {

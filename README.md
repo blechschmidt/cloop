@@ -83,6 +83,7 @@ Switch with `--provider`, or set a default with `cloop config set provider <name
 | Provider | What it is | Auth |
 | --- | --- | --- |
 | `claudecode` | the Claude Code CLI (default) | an existing `claude` login |
+| `copilot` | the GitHub Copilot CLI | an existing `copilot` login, or `COPILOT_GITHUB_TOKEN` |
 | `anthropic` | the Anthropic API directly | `ANTHROPIC_API_KEY` |
 | `openai` | Chat Completions, including OpenAI-compatible endpoints | `OPENAI_API_KEY` |
 | `ollama` | a local Ollama server — no key, no cost | none |

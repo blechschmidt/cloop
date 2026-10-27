@@ -284,7 +284,7 @@ var (
 
 // Config is the project configuration loaded from .cloop/config.yaml.
 type Config struct {
-	// Default provider: anthropic, openai, ollama, claudecode, mock
+	// Default provider: anthropic, openai, ollama, claudecode, copilot, mock
 	Provider string `yaml:"provider"`
 
 	// loadRepairs records what validateAndClamp changed; see LoadRepairs.
@@ -295,6 +295,7 @@ type Config struct {
 	OpenAI     OpenAIConfig     `yaml:"openai"`
 	Ollama     OllamaConfig     `yaml:"ollama"`
 	ClaudeCode ClaudeCodeConfig `yaml:"claudecode"`
+	Copilot    CopilotConfig    `yaml:"copilot,omitempty"`
 	Mock       MockConfig       `yaml:"mock,omitempty"`
 	Webhook    WebhookConfig    `yaml:"webhook,omitempty"`
 	GitHub     GitHubConfig     `yaml:"github,omitempty"`
@@ -3095,6 +3096,25 @@ type ClaudeCodeConfig struct {
 	Background BackgroundConfig `yaml:"background,omitempty"`
 }
 
+// CopilotConfig configures the copilot provider, which runs the GitHub Copilot
+// CLI. It holds no credential: the CLI signs in for itself (`copilot login`,
+// or COPILOT_GITHUB_TOKEN in its environment).
+type CopilotConfig struct {
+	// Model is passed to the CLI as --model; empty leaves the CLI's own
+	// choice. "auto" lets Copilot pick per request.
+	Model string `yaml:"model,omitempty"`
+
+	// Effort is the default reasoning-effort level, passed to the CLI as
+	// --reasoning-effort. Valid: low, medium, high, xhigh, max; empty = the
+	// CLI's default. The per-project effort persisted in project state takes
+	// precedence, as it does for claudecode.
+	Effort string `yaml:"effort,omitempty"`
+
+	// Background tunes what happens to work the CLI leaves running after it
+	// exits — the same knobs as claudecode.background.
+	Background BackgroundConfig `yaml:"background,omitempty"`
+}
+
 // BackgroundConfig tunes the handling of work an agent harness leaves running
 // after it reports a task complete.
 //
@@ -3130,23 +3150,28 @@ const (
 
 // Clamp bounds the background settings, returning a note for anything it had
 // to correct so a bad config is reported rather than silently reinterpreted.
-func (b *BackgroundConfig) Clamp() []string {
+// The notes name claudecode.background; ClampFor names another section.
+func (b *BackgroundConfig) Clamp() []string { return b.ClampFor("claudecode.background") }
+
+// ClampFor is Clamp for the settings at section — "copilot.background", say —
+// which is the key its notes name.
+func (b *BackgroundConfig) ClampFor(section string) []string {
 	var notes []string
 	if b.GraceSeconds < 0 {
 		notes = append(notes, fmt.Sprintf(
-			"claudecode.background.grace_seconds %d is negative; using the default", b.GraceSeconds))
+			"%s.grace_seconds %d is negative; using the default", section, b.GraceSeconds))
 		b.GraceSeconds = 0
 	}
 	if b.GraceSeconds > BackgroundGraceSecondsMax {
 		notes = append(notes, fmt.Sprintf(
-			"claudecode.background.grace_seconds %d exceeds %d; clamped",
-			b.GraceSeconds, BackgroundGraceSecondsMax))
+			"%s.grace_seconds %d exceeds %d; clamped",
+			section, b.GraceSeconds, BackgroundGraceSecondsMax))
 		b.GraceSeconds = BackgroundGraceSecondsMax
 	}
 	if b.WaitMinutes > BackgroundWaitMinutesMax {
 		notes = append(notes, fmt.Sprintf(
-			"claudecode.background.wait_minutes %d exceeds %d; clamped",
-			b.WaitMinutes, BackgroundWaitMinutesMax))
+			"%s.wait_minutes %d exceeds %d; clamped",
+			section, b.WaitMinutes, BackgroundWaitMinutesMax))
 		b.WaitMinutes = BackgroundWaitMinutesMax
 	}
 	return notes
@@ -3169,6 +3194,8 @@ func (c *Config) ModelFor(providerName string) string {
 		return c.Ollama.Model
 	case "claudecode":
 		return c.ClaudeCode.Model
+	case "copilot":
+		return c.Copilot.Model
 	}
 	return ""
 }

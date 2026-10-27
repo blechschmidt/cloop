@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/provider/copilot"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -52,6 +54,16 @@ optionally test connectivity with --test.`,
 				model:       cfg.ClaudeCode.Model,
 				provCfg: provider.ProviderConfig{
 					Name: "claudecode",
+				},
+			},
+			{
+				name:        "copilot",
+				displayName: "GitHub Copilot (copilot CLI)",
+				configured:  copilotInstalled(),
+				details:     "uses local copilot CLI binary and its sign-in",
+				model:       coalesce(cfg.Copilot.Model, "(CLI default)"),
+				provCfg: provider.ProviderConfig{
+					Name: "copilot",
 				},
 			},
 			{
@@ -138,6 +150,14 @@ optionally test connectivity with --test.`,
 
 		return nil
 	},
+}
+
+// copilotInstalled reports whether the copilot CLI can be found where the
+// provider looks for it. Its sign-in is the CLI's own business, which --test
+// exercises.
+func copilotInstalled() bool {
+	_, err := exec.LookPath(copilot.FindBinary())
+	return err == nil
 }
 
 func testProvider(cfg provider.ProviderConfig) string {

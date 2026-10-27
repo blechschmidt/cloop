@@ -18,6 +18,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/dbverify"
 	"github.com/blechschmidt/cloop/pkg/diskusage"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/provider/copilot"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -498,6 +499,24 @@ func checkEnvVars(cfg *config.Config, add addFn) {
 			})
 		}
 	}
+
+	// copilot: the GitHub Copilot CLI, found where the provider looks for it.
+	if cfg.Provider == copilot.ProviderName {
+		if path, err := exec.LookPath(copilot.FindBinary()); err != nil {
+			add(Result{
+				Name:    "copilot binary (copilot provider)",
+				Level:   Fail,
+				Message: "GitHub Copilot CLI (copilot) not found — the copilot provider will not work",
+				Fix:     "Install it (npm install -g @github/copilot, or curl -fsSL https://gh.io/copilot-install | bash) and sign in with `copilot login`",
+			})
+		} else {
+			add(Result{
+				Name:    "copilot binary (copilot provider)",
+				Level:   Pass,
+				Message: "GitHub Copilot CLI found at " + path,
+			})
+		}
+	}
 }
 
 // checkProviders tests connectivity for each configured provider.
@@ -513,6 +532,11 @@ func checkProviders(ctx context.Context, cfg *config.Config, add addFn) {
 			name:    "claudecode connectivity",
 			enabled: cfg.Provider == "claudecode" || cfg.Provider == "",
 			pcfg:    provider.ProviderConfig{Name: "claudecode"},
+		},
+		{
+			name:    "copilot connectivity",
+			enabled: cfg.Provider == copilot.ProviderName,
+			pcfg:    provider.ProviderConfig{Name: copilot.ProviderName},
 		},
 		{
 			name:    "anthropic connectivity",

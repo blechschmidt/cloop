@@ -11,6 +11,7 @@ func TestModelForReadsEachProvidersOwnKey(t *testing.T) {
 		OpenAI:     OpenAIConfig{Model: "o-model"},
 		Ollama:     OllamaConfig{Model: "l-model"},
 		ClaudeCode: ClaudeCodeConfig{Model: "c-model"},
+		Copilot:    CopilotConfig{Model: "g-model"},
 	}
 	for provider, want := range map[string]string{
 		"anthropic":    "a-model",
@@ -18,6 +19,7 @@ func TestModelForReadsEachProvidersOwnKey(t *testing.T) {
 		"ollama":       "l-model",
 		"claudecode":   "c-model",
 		" ClaudeCode ": "c-model",
+		"copilot":      "g-model",
 		"mock":         "",
 		"":             "",
 		"no-such-one":  "",

@@ -113,6 +113,7 @@ var registeredProviders = map[string]bool{
 	"openai":     true,
 	"ollama":     true,
 	"claudecode": true,
+	"copilot":    true,
 	"mock":       true,
 }
 

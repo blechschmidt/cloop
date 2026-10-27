@@ -201,6 +201,10 @@ func Apply(p Profile, cfg *config.Config) {
 		if p.Model != "" {
 			cfg.ClaudeCode.Model = p.Model
 		}
+	case "copilot":
+		if p.Model != "" {
+			cfg.Copilot.Model = p.Model
+		}
 	}
 }
 

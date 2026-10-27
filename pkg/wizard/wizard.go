@@ -58,9 +58,10 @@ func Run() (*Result, error) {
 
 	// ── Step 2: Provider ─────────────────────────────────────────────────────
 	printStep(2, 6, "AI Provider")
-	providers := []string{"claudecode", "anthropic", "openai", "ollama", "mock"}
+	providers := []string{"claudecode", "copilot", "anthropic", "openai", "ollama", "mock"}
 	providerDesc := []string{
 		"Claude Code CLI (local, no API key needed)",
+		"GitHub Copilot CLI (local, uses your Copilot sign-in)",
 		"Anthropic API (claude-sonnet-4-6 etc.)",
 		"OpenAI API (gpt-4o etc.)",
 		"Ollama (local models, no API key needed)",
@@ -114,6 +115,8 @@ func Run() (*Result, error) {
 		"openai":     {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1"},
 		"ollama":     {"llama3.2", "mistral", "qwen2.5", "deepseek-r1"},
 		"mock":       {"(provider default)"},
+		// Copilot's catalog depends on the plan; `copilot` → /model lists it.
+		"copilot": {"(provider default)", "auto", "claude-sonnet-4.5", "claude-opus-4.5", "claude-haiku-4.5", "gpt-5.4", "gpt-5-mini"},
 	}
 	models := defaultModels[res.Provider]
 	if len(models) == 0 {

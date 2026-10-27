@@ -23,6 +23,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
+	"github.com/blechschmidt/cloop/pkg/provider/copilot"
 	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -39,12 +40,17 @@ type taskOutbox struct {
 }
 
 // runsTools reports whether p's agent works in the project directory with
-// tools of its own, and so can put a file in an outbox. HTTP providers return
-// text and nothing else; telling their model about a directory would only
-// cost prompt. A fallback chain is named for its providers in order
-// ("claudecode→anthropic"), and runs its first unless that fails.
+// tools of its own, and so can put a file in an outbox: an agent harness,
+// claudecode's or copilot's. HTTP providers return text and nothing else;
+// telling their model about a directory would only cost prompt. A fallback
+// chain is named for its providers in order ("claudecode→anthropic"), and runs
+// its first unless that fails.
 func runsTools(p provider.Provider) bool {
-	return p != nil && strings.HasPrefix(p.Name(), claudecode.ProviderName)
+	if p == nil {
+		return false
+	}
+	name := p.Name()
+	return strings.HasPrefix(name, claudecode.ProviderName) || strings.HasPrefix(name, copilot.ProviderName)
 }
 
 // openOutbox prepares the outbox of an attempt at task by p's agent, or

@@ -53,7 +53,7 @@ const (
 // reviewProviders are the providers a reviewer may use: the ones the
 // dashboard's provider picker offers for the work itself.
 var reviewProviders = map[string]bool{
-	"claudecode": true, "anthropic": true, "openai": true, "ollama": true,
+	"claudecode": true, "copilot": true, "anthropic": true, "openai": true, "ollama": true,
 }
 
 // reviewModelRe bounds a reviewer model name. The value becomes an argument to

@@ -9,6 +9,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provider/anthropic"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
+	"github.com/blechschmidt/cloop/pkg/provider/copilot"
 	mockprovider "github.com/blechschmidt/cloop/pkg/provider/mock"
 	"github.com/blechschmidt/cloop/pkg/provider/ollama"
 	"github.com/blechschmidt/cloop/pkg/provider/openai"
@@ -36,6 +37,18 @@ func init() {
 		// detection, the wait, and the cleanup.
 		bg := cfg.ClaudeCodeBackground
 		return claudecode.NewWithBackground(claudecode.BackgroundPolicy{
+			Disabled:    bg.Disabled,
+			Grace:       time.Duration(bg.GraceSeconds) * time.Second,
+			Wait:        time.Duration(bg.WaitMinutes) * time.Minute,
+			KeepOrphans: bg.KeepOrphans,
+		}), nil
+	})
+
+	// The GitHub Copilot CLI (Task 20447): an agent harness like claudecode,
+	// and so the same handling of work it leaves running.
+	provider.Register(copilot.ProviderName, func(cfg provider.ProviderConfig) (provider.Provider, error) {
+		bg := cfg.CopilotBackground
+		return copilot.NewWithBackground(copilot.BackgroundPolicy{
 			Disabled:    bg.Disabled,
 			Grace:       time.Duration(bg.GraceSeconds) * time.Second,
 			Wait:        time.Duration(bg.WaitMinutes) * time.Minute,
