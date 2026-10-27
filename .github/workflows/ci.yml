@@ -51,21 +51,6 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: Prove the annotator on this runner (one-off, Task 20444)
-        # The fixtures in scripts/ci-annotate/testdata/red fail every way the
-        # annotator reads. Their output, from this runner's go, is recorded as
-        # a failed step's would be, and the job's last-step logic annotates it
-        # — as notices, so that this job stays green — for scripts/ci-why.sh
-        # --job 'Static analysis' to read back. Removed once it has been read.
-        timeout-minutes: 10
-        run: |
-          proof="$RUNNER_TEMP/ci-why-proof"
-          mkdir -p "$proof/001"
-          go test -race -timeout 10s ./scripts/ci-annotate/testdata/red/... > "$proof/001/log" 2>&1 || true
-          echo 'go test -race -timeout 10s ./scripts/ci-annotate/testdata/red/...' > "$proof/001/script"
-          echo 1 > "$proof/001/status"
-          CI_WHY_DIR="$proof" CI_WHY_LEVEL=notice bash scripts/ci-step.sh --why
-
       - name: gofmt
         # -l lists files whose formatting differs; the diff is printed because
         # a bare list of 137 paths tells you nothing about what to change.
