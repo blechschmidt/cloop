@@ -614,8 +614,10 @@ rather than run on a weaker sandbox than it asked for — see
 - the cloop binary at `/usr/local/bin/cloop`;
 - the agent harness the project's provider needs (for the default `claudecode`
   provider, the `claude` CLI on `PATH`; for `copilot`, the `copilot` CLI —
-  which the published `cloop-harness` image does not carry, so a `copilot`
-  project needs an image of its own);
+  which the default `cloop-harness` image does not carry, so a `copilot`
+  project runs in its published variant, `ghcr.io/blechschmidt/cloop-harness-copilot`,
+  or an image of its own; see [the published
+  images](sandbox.md#the-published-images-and-what-an-image-carries));
 - `git` and a CA bundle;
 - a non-root user, since the workload runs as the project directory's owner UID.
 
@@ -1529,9 +1531,10 @@ it. A project's own `config.yaml` cannot set any of them.
 ### Automatic harness installation
 
 A project driven by the `claudecode` provider needs the `claude` CLI on whatever
-runs it. A freshly enrolled edge device does not have one, so by default the hub
-asks the device to install it from **Anthropic's official installer** the first
-time a dispatch needs it:
+runs it, and a `copilot` project the `copilot` CLI. A freshly enrolled edge
+device has neither, so by default the hub asks the device to install the one a
+dispatch needs from **its vendor's official installer** the first time it is
+needed:
 
 ```yaml
 executors:
@@ -1554,11 +1557,12 @@ review. What it does **not** control is *what* can be installed; see below.
 
 **What the hub may ask for.** The install frame names a *harness*, never a URL,
 a script, an argv or an interpreter. The device holds the table mapping a name
-to an installer, compiled into the agent binary, and the only entry is:
+to an installer, compiled into the agent binary, and its entries are:
 
-| Harness  | Installer                                                       |
-| -------- | --------------------------------------------------------------- |
-| `claude` | `https://claude.ai/install.sh` (Anthropic's documented install), then `https://downloads.claude.ai/claude-code-releases/bootstrap.sh` |
+| Harness   | Installer                                                       |
+| --------- | --------------------------------------------------------------- |
+| `claude`  | `https://claude.ai/install.sh` (Anthropic's documented install), then `https://downloads.claude.ai/claude-code-releases/bootstrap.sh` |
+| `copilot` | `https://gh.io/copilot-install` (GitHub's documented install), accepted only from `raw.githubusercontent.com/github/copilot-cli/` |
 
 The second URL is where the first redirects to, fetched directly. It is tried
 only when the documented one does not serve the script: the claude.ai website
@@ -1568,6 +1572,17 @@ does not. A cloud VM enrolled as an executor is exactly such a machine. A
 source refused on a safety rule (a redirect off `claude.ai`, a downgrade to
 plaintext, an oversized body) is not retried elsewhere; the install stops and
 says why.
+
+GitHub's URL is a redirector too: `gh.io` answers 301 with the script in
+GitHub's own `github/copilot-cli` repository on `raw.githubusercontent.com`.
+That host serves every repository on GitHub, so a domain alone would admit any
+user's script there; the entry pins the repository's path as well, and a
+redirect anywhere else on the host is refused as a safety rule. It has no
+mirror: the cloud VM the claude mirror exists for reaches `gh.io`, the script
+and the release download it fetches. The script installs into `~/.local/bin`
+from the CLI's release on github.com, checking the release's checksums, and
+needs `bash`, `curl` or `wget`, `tar` and `gzip`; the CLI unpacks a runtime of
+about 250 MB under `~/.cache/copilot` the first time it starts.
 
 So a hub that has been taken over can ask a device to install Claude Code from
 Anthropic, and can ask for nothing else — there is nothing else to ask for. The
@@ -1580,8 +1595,8 @@ absent from the table: it already has
 Sigstore provenance against a pinned identity, and a shell script would be a
 downgrade.
 
-**Where it lands.** The official installer needs no root and writes no system
-path — the binary goes to `~/.local/bin/claude`. That directory is not on a
+**Where it lands.** The official installers need no root and write no system
+path — the binary goes to `~/.local/bin/claude` or `~/.local/bin/copilot`. That directory is not on a
 systemd unit's `PATH`, so the agent adds it to its own environment and to any
 payload environment that carries an explicit `PATH`. An operator debugging this
 can read the resolved path back from the Fleet panel; a device that installed
@@ -1591,11 +1606,9 @@ the harness but still cannot resolve it says so rather than reporting success.
 device's host — the harness comes out of the image, which is the configuration
 that *fixes* a device without one. An agent older than protocol v12 does not
 know the frame, and gets the plain refusal rather than a complaint about its
-version. A `copilot` project's `copilot` CLI is not in the table either: the
-device advertises it when it is on the agent's `PATH` (or in `~/.local/bin`,
-where GitHub's install script puts it for a user), and a device without it is
-refused with the remedy of installing it there or running the project in an
-image that carries it.
+version. An agent built before its table had `copilot` answers that it has no
+installer for it, and the refusal carries that answer: upgrade the agent, or
+install the CLI on the device by hand.
 
 The policy is a **ratchet**: it can only tighten at runtime. A control plane
 manages many projects, each with its own `config.yaml`, and applying them

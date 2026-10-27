@@ -23,6 +23,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitprovision"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // deviceSession is the agent's view of one live connection.
@@ -920,6 +921,13 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		if errors.As(err, &overLimit) {
 			b := overLimit.Breach
 			refusal.DiskLimit = &b
+		}
+		// An image that says it lacks the workload's harness goes back with
+		// what it says (Task 20450), for the hub to answer as that refusal.
+		var missing *imagepolicy.MissingHarnessError
+		if errors.As(err, &missing) {
+			refusal.HarnessRefusal = &remote.HarnessRefusal{Image: missing.Ref, Harness: missing.Harness,
+				Carries: missing.Carries}
 		}
 		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, refusal)
 		return

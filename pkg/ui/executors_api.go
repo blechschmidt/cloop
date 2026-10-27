@@ -1853,6 +1853,16 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 		writeSandboxDenied(w, "sandbox_image_denied", imageDenied.Error(), imageDenied.Remediation, nil)
 		return
 	}
+	// The image the run would start in says it does not carry the harness the
+	// project's provider drives (Task 20450) — a copilot project in an image
+	// labelled claude, cloop and git. A 409 like the policy refusal: nothing
+	// is broken, the project and the image disagree, and the remedy names an
+	// image that carries it.
+	var lacksHarness *imagepolicy.MissingHarnessError
+	if errors.As(err, &lacksHarness) {
+		writeSandboxDenied(w, "sandbox_image_lacks_harness", lacksHarness.Error(), lacksHarness.Remediation, nil)
+		return
+	}
 
 	// The executor cannot get at the project's source tree (Task 20179). Also
 	// a 409, and for the strongest version of the same reason: the request is
@@ -1969,6 +1979,11 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 var executorRefusals = []error{
 	executor.ErrUnsupported,
 	executor.ErrRevocationUnsupported,
+	// A device that runs payloads on its own host without the project's
+	// harness, which it could not or was not allowed to install (Task 20450:
+	// with executors.auto_install_harness off, a copilot project on a device
+	// with no copilot). The sentence names the device and every way out.
+	remote.ErrHarnessUnavailable,
 	remote.ErrWorkspaceUnsupported,
 	remote.ErrSecretFilesUnsupported,
 	remote.ErrProjectSeedUnsupported,

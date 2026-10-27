@@ -55,8 +55,9 @@ import (
 )
 
 // HarnessImageHint is the published sandbox image named when a device has no
-// harness of its own. It carries `claude`, `cloop` and `git`, which is exactly
-// the set a refused dispatch is missing.
+// harness of its own: the default one, which carries `claude`, `cloop` and
+// `git`. Its copilot variant is named for a project that needs `copilot`; see
+// imageHintFor and executor.HarnessImages, which list both.
 //
 // A constant rather than a literal in the message because docs/ and the Fleet
 // panel name the same image, and a hint that drifts from what the image
@@ -65,13 +66,15 @@ import (
 const HarnessImageHint = "ghcr.io/blechschmidt/cloop-harness:latest"
 
 // imageHintFor names an image that carries want, for a refusal's remedy: the
-// published one for the harness it has, and otherwise an image of the
-// operator's own. The published image carries no `copilot`, and a remedy that
-// named it would send an operator to pull something that does not fix their
-// problem.
+// first published one that carries it (executor.HarnessImages — the default
+// image for `claude`, its copilot variant for `copilot`, Task 20450), and
+// otherwise an image of the operator's own. A remedy naming an image without
+// the harness would send an operator to pull something that does not fix
+// their problem, so what each published image carries is held equal to its
+// org.cloop.harnesses label by tests/docs.
 func imageHintFor(want string) string {
-	if want == "claude" {
-		return "image " + HarnessImageHint
+	if ref := executor.HarnessImageFor(want); ref != "" {
+		return "image " + ref
 	}
 	return "an image with " + want + " installed"
 }

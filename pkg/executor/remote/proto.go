@@ -55,6 +55,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/isolationprobe"
 )
 
@@ -1613,6 +1614,54 @@ type StartedPayload struct {
 	// as the refusal it is — journalled, and a conflict rather than a fault —
 	// instead of as an opaque device error.
 	DiskLimit *executor.DiskLimitBreach `json:"disk_limit,omitempty"`
+	// HarnessRefusal is set beside Error when the device's container driver
+	// refused the image because its org.cloop.harnesses label lists what it
+	// carries without the workload's harness (Task 20450), so the hub answers
+	// it as that refusal — a conflict naming an image that carries the
+	// harness — rather than as an opaque device error. An older agent never
+	// sets it, and an older hub reads Error alone; neither needs a protocol
+	// version to agree on it.
+	HarnessRefusal *HarnessRefusal `json:"harness_refusal,omitempty"`
+}
+
+// HarnessRefusal is what a device's driver refused an image for: the image
+// as it was configured, the harness the workload needs, and what the image's
+// label lists.
+type HarnessRefusal struct {
+	Image   string   `json:"image"`
+	Harness string   `json:"harness"`
+	Carries []string `json:"carries,omitempty"`
+}
+
+// maxHarnessRefusal bounds the device's account of a harness refusal, which
+// the hub renders: an image reference is at most imagepolicy.MaxRefLen, and a
+// label listing more programs than this is not one a person wrote.
+const (
+	maxHarnessRefusalCarries = 32
+	maxHarnessName           = 64
+)
+
+// MissingHarnessError turns the device's account into the hub's refusal, or
+// nil when it is not one the hub can repeat: the device's word, bounded first
+// like every string a device sends that a page renders.
+func (r *HarnessRefusal) MissingHarnessError() *imagepolicy.MissingHarnessError {
+	if r == nil {
+		return nil
+	}
+	image, harness := strings.TrimSpace(r.Image), strings.TrimSpace(r.Harness)
+	if image == "" || len(image) > imagepolicy.MaxRefLen || harness == "" || len(harness) > maxHarnessName ||
+		len(r.Carries) > maxHarnessRefusalCarries {
+		return nil
+	}
+	carries := make([]string, 0, len(r.Carries))
+	for _, c := range r.Carries {
+		if c = strings.TrimSpace(c); c == "" || len(c) > maxHarnessName {
+			return nil
+		}
+		carries = append(carries, c)
+	}
+	return &imagepolicy.MissingHarnessError{Ref: image, Harness: harness, Carries: carries,
+		Remediation: executor.HarnessImageRemedy(harness)}
 }
 
 // SignalPayload asks the agent to signal a handle.

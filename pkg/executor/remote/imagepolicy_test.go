@@ -378,7 +378,7 @@ func TestVirtualExecutorVerifiesTheProjectImage(t *testing.T) {
 // and logs every `run`. It runs nothing: a container is "running" until it is
 // removed or killed, as with internal/drivertest's.
 type standInEngine struct {
-	dir, store, runs string
+	dir, store, runs, configs string
 }
 
 func newStandInEngine(t *testing.T) *standInEngine {
@@ -387,13 +387,18 @@ func newStandInEngine(t *testing.T) *standInEngine {
 		t.Skip("the stand-in engine is a POSIX shell script")
 	}
 	dir := t.TempDir()
-	e := &standInEngine{dir: dir, store: filepath.Join(dir, "store"), runs: filepath.Join(dir, "runs")}
+	e := &standInEngine{dir: dir, store: filepath.Join(dir, "store"), runs: filepath.Join(dir, "runs"),
+		configs: filepath.Join(dir, "configs")}
 	gone := filepath.Join(dir, "removed")
+	// An image held with a configuration answers it as `{{json .Config}}`
+	// renders one, the third field of the container driver's inspect.
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1" in
 image)
   ref=; for a in "$@"; do ref=$a; done
-  if grep -qxF -- "$ref" '%[1]s' 2>/dev/null; then printf '%%s\037%%s\n' "$ref" 'sha256:5f3b8f9c2b'; exit 0; fi
+  if grep -qxF -- "$ref" '%[1]s' 2>/dev/null; then
+    cfg=$(awk -F '\t' -v r="$ref" '$1 == r { print $2 }' '%[4]s' 2>/dev/null)
+    printf '%%s\037%%s\037%%s\n' "$ref" 'sha256:5f3b8f9c2b' "$cfg"; exit 0; fi
   echo "Error: No such image: $ref" >&2; exit 1 ;;
 run) echo "$*" >> '%[2]s'; echo "stand-in-container"; exit 0 ;;
 logs) i=0; while [ ! -e '%[3]s' ] && [ "$i" -lt 1200 ]; do sleep 0.1; i=$((i+1)); done; exit 0 ;;
@@ -404,7 +409,7 @@ rm|kill|stop) : > '%[3]s'; exit 0 ;;
 network) echo '{}'; exit 0 ;;
 *) exit 0 ;;
 esac
-`, e.store, e.runs, gone)
+`, e.store, e.runs, gone, e.configs)
 	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -422,6 +427,21 @@ func (e *standInEngine) hold(t *testing.T, ref string) {
 	}
 	defer f.Close()
 	if _, err := fmt.Fprintln(f, ref); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// holdConfigured puts ref in the engine's store with an image configuration,
+// as `{{json .Config}}` would render it.
+func (e *standInEngine) holdConfigured(t *testing.T, ref, config string) {
+	t.Helper()
+	e.hold(t, ref)
+	f, err := os.OpenFile(e.configs, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "%s\t%s\n", ref, config); err != nil {
 		t.Fatal(err)
 	}
 }

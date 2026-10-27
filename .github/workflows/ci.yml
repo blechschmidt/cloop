@@ -1539,6 +1539,74 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/ci-step.sh --why
 
+  copilot-harness:
+    name: Copilot in the harness image
+    runs-on: ubuntu-latest
+    # Task 20450: a copilot project in the flagship isolation path. This job
+    # builds both harness images from the commit — harness-copilot, which
+    # carries the GitHub Copilot CLI, and the default harness, which does not —
+    # and runs a copilot task in a container of the first, end to end: the real
+    # CLI from the image, driven by `cloop run` on a strict hub's container
+    # executor, against a model the test serves itself (the CLI's bring your
+    # own key mode with COPILOT_OFFLINE, so no Copilot seat), through TASK_DONE
+    # and the write-back of a feature's branch. Against the second image the hub
+    # refuses the same project before a container exists, because its
+    # org.cloop.harnesses label lists no copilot.
+    #
+    # publish-images.yml builds the same targets, but only on main and only to
+    # push them; this is where a change to them is proved before that.
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build both harness images
+        timeout-minutes: 15 # observed locally: ~1 min warm; cold, the Go build stage and two npm installs
+        # The second target shares every layer of the first but cloop's, so it
+        # costs a COPY. The sizes are printed because the copilot variant exists
+        # for its size: docs/reference/sandbox.md records them.
+        run: |
+          set -euo pipefail
+          docker build --target harness-copilot -t cloop-harness-copilot:ci .
+          docker build --target harness -t cloop-harness:ci .
+          for img in cloop-harness:ci cloop-harness-copilot:ci; do
+            echo "$img: $(docker image inspect "$img" --format '{{.Size}}') bytes," \
+                 "carries $(docker image inspect "$img" --format '{{index .Config.Labels "org.cloop.harnesses"}}')"
+          done
+
+      - name: A copilot task runs in the copilot image, and the default image refuses it
+        timeout-minutes: 10 # observed locally: 6s once both images are built
+        env:
+          CLOOP_COPILOT_HARNESS_IMAGE: cloop-harness-copilot:ci
+          CLOOP_HARNESS_IMAGE: cloop-harness:ci
+        # The same PASS-line assertion as the flagship job's, for the same
+        # reason: both tests skip without docker or without their image.
+        run: |
+          set -euo pipefail
+          # tests/e2e runs the hub from ./cloop.
+          CGO_ENABLED=0 go build -trimpath -o cloop .
+          go test ./tests/e2e/ -run '^TestE2ECopilot' -v -count=1 -timeout 8m 2>&1 | tee /tmp/copilot-harness.log
+          for t in TestE2ECopilotFeatureRunsInTheHarnessImage TestE2ECopilotProjectIsRefusedByTheDefaultImage; do
+            grep -qE "^--- PASS: $t \(" /tmp/copilot-harness.log || {
+              echo "::error::go test succeeded but $t did not pass — it was skipped (docker unavailable," \
+                   "or CLOOP_COPILOT_HARNESS_IMAGE / CLOOP_HARNESS_IMAGE lost); see the log."
+              exit 1
+            }
+          done
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   concurrency-soak:
     name: Multi-tenant soak (bleed, leak, growth)
     runs-on: ubuntu-latest

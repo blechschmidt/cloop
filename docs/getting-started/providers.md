@@ -258,14 +258,29 @@ model saved on the project that it does not list. A model your plan does not
 offer fails the call with the CLI's own error.
 
 **In a sandbox.** A `copilot` project bound to an executor that isolates from
-the hub needs the CLI where it runs — on an enrolled device's `PATH` (the
-device advertises it; unlike `claude`, it is not installed on request, and an
-agent built before the `copilot` provider does not look for it, so upgrade the
-agent first), or in the container image — and a credential granted to the
-project:
-`COPILOT_GITHUB_TOKEN`, or `COPILOT_PROVIDER_BASE_URL` for a provider of its
-own. The hub refuses the dispatch without one, and the Overview's *Copilot
-credential* card grants one in a step; see [the credential of a sandboxed
+the hub needs the CLI where it runs, and a credential granted to the project.
+
+- **In a container** — a container executor, a device in container mode, a
+  virtual executor: use `ghcr.io/blechschmidt/cloop-harness-copilot`, the
+  published harness image with the Copilot CLI added. It is a variant because
+  the CLI nearly doubles the image (+445 MB unpacked, +217 MB pulled; see [the
+  published images](../reference/sandbox.md#the-published-images-and-what-an-image-carries)).
+  The default `cloop-harness` image carries `claude` only and says so in its
+  `org.cloop.harnesses` label, so the hub refuses a `copilot` project in it
+  before the run starts (409 `sandbox_image_lacks_harness`), naming the variant.
+- **On a device's own host**, the device installs the CLI on request, as it
+  does `claude`: from GitHub's documented installer (`https://gh.io/copilot-install`)
+  into the agent user's `~/.local/bin`, the first time a dispatch needs it —
+  unless [`executors.auto_install_harness`](../reference/configuration.md#automatic-harness-installation)
+  is off, when the dispatch is refused naming the remedies. An agent built
+  before this release has no installer for `copilot` and says so; upgrade it,
+  or install the CLI on the device by hand. A device advertises `copilot` when
+  it is on the agent's `PATH`.
+
+The credential is `COPILOT_GITHUB_TOKEN`, or `COPILOT_PROVIDER_BASE_URL` for a
+provider of the project's own. The hub refuses the dispatch without one, and
+the Overview's *Copilot credential* card grants one in a step; see [the
+credential of a sandboxed
 run](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run). The CLI
 keeps its token out of the environment of the commands the agent runs.
 

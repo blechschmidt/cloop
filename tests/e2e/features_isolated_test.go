@@ -100,6 +100,14 @@ type featureScene struct {
 // appended to the hub's .cloop/config.yaml.
 func newFeatureScene(t *testing.T, bin, hubConfig string) *featureScene {
 	t.Helper()
+	return newFeatureSceneFor(t, bin, hubConfig, "claudecode", grantHarnessCredential)
+}
+
+// newFeatureSceneFor is newFeatureScene for a project on provider, whose
+// harness credential grant grants (Task 20450 runs a copilot project).
+func newFeatureSceneFor(t *testing.T, bin, hubConfig, provider string,
+	grant func(t *testing.T, run func(dir string, args ...string) string, hubDir, project string)) *featureScene {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -146,7 +154,7 @@ func newFeatureScene(t *testing.T, bin, hubConfig string) *featureScene {
 	writeTestFile(t, filepath.Join(s.proj, "README.md"), "the project\n")
 	s.git(s.proj, "add", "README.md")
 	s.git(s.proj, "commit", "-qm", "first")
-	s.cloop(s.proj, "init", "--provider", "claudecode", "--skip-clarify", "Parent goal")
+	s.cloop(s.proj, "init", "--provider", provider, "--skip-clarify", "Parent goal")
 	s.git(s.proj, "add", "-A")
 	s.git(s.proj, "commit", "-qm", "cloop init")
 	// An origin on "GitHub" that pushes to a local bare repository, so the
@@ -172,10 +180,11 @@ func newFeatureScene(t *testing.T, bin, hubConfig string) *featureScene {
 		t.Fatal(err)
 	}
 	s.cloop(s.hubDir, "init", "--provider", "mock", "--skip-clarify", "hub")
-	// The project runs claudecode in a sandbox, which the hub refuses to
-	// dispatch without a Claude credential granted to it (Task 20379). One on
-	// the parent is what its features run on; the stub claude ignores it.
-	grantHarnessCredential(t, s.cloop, s.hubDir, s.proj)
+	// The project runs its harness in a sandbox, which the hub refuses to
+	// dispatch without a credential for it granted to the project (Task
+	// 20379). One on the parent is what its features run on; the stub claude
+	// ignores it.
+	grant(t, s.cloop, s.hubDir, s.proj)
 	// The forge the pull request is opened on, and the hub's own token for
 	// it: a hub without sign-in hands that to a feature it publishes itself.
 	s.forge = &fakeForge{token: "e2e-forge-token", prs: map[int]map[string]any{}, next: 70}

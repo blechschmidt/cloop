@@ -279,6 +279,12 @@ already point at it:
 docker pull ghcr.io/blechschmidt/cloop-harness:latest
 ```
 
+It carries the `claude` CLI. For projects on the `copilot` provider there is a
+variant with the GitHub Copilot CLI added — `--target harness-copilot`,
+published as `ghcr.io/blechschmidt/cloop-harness-copilot` — kept separate
+because the CLI nearly doubles the image; see [the published
+images](../reference/sandbox.md#the-published-images-and-what-an-image-carries).
+
 What makes an image usable as a harness is a contract, not just a base OS: it
 carries `cloop` at `/usr/local/bin/cloop`, the `claude` CLI on `PATH` for the
 default provider, `git` and a CA bundle, **no `ENTRYPOINT`** (the driver

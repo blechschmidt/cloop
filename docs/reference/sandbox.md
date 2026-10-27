@@ -13,6 +13,7 @@ ceilings are — and the project describes the environment inside it.
 - [Schema](#schema)
 - [What a spec can and cannot do](#what-a-spec-can-and-cannot-do)
 - [`resources.disk` and the workspace](#resourcesdisk-and-the-workspace)
+- [The published images, and what an image carries](#the-published-images-and-what-an-image-carries)
 - [Image trust policy](#image-trust-policy)
 - [Executor support](#executor-support)
 - [Reproducibility](#reproducibility)
@@ -237,6 +238,76 @@ a repository, and nothing in it adds a workspace placement requirement — a
 repo-committed file that could arrange its own clone would be arranging it from
 a URL in the same pull request. The workspace *kind* is the hub's decision; a
 spec may only bound a fetch the hub already decided to perform.
+
+## The published images, and what an image carries
+
+An image has to carry the agent CLI the project's provider drives: `claude` for
+`claudecode`, `copilot` for `copilot`. This repository publishes two, built from
+the same Dockerfile and identical but for one program:
+
+| Image | Carries | Use it for |
+| --- | --- | --- |
+| `ghcr.io/blechschmidt/cloop-harness` | `claude`, `cloop`, `git` | the default (`executors.container.image`, a Kubernetes executor's image, a device's container sandbox when it names none) — `claudecode` projects |
+| `ghcr.io/blechschmidt/cloop-harness-copilot` | `claude`, `copilot`, `cloop`, `git` | `copilot` projects; it runs `claudecode` projects too |
+
+Both are published for `linux/amd64` and `linux/arm64`, run under any uid,
+and are tagged like the hub: `:latest` moves on a release, `:edge` with main,
+and each release has its own tag. The copilot variant's first `:latest` came
+from main, because it did not exist before the release that added it.
+
+**Why a variant.** The GitHub Copilot CLI is a 199 MB native binary that, the
+first time it starts, unpacks a 247 MB runtime of its own. Measured on amd64
+with CLI 1.0.104 (Task 20450):
+
+| | unpacked | compressed (pulled) |
+| --- | ---: | ---: |
+| `cloop-harness` | 685 MB | 268 MB |
+| the Copilot CLI added | +445 MB (+65%) | +217 MB (+81%) |
+| `cloop-harness-copilot` | 1,130 MB | 486 MB |
+
+Carried in the default image, that would nearly double the pull for every node
+and every `claudecode` project, which is most of them — so it is a variant you
+choose for `copilot` projects instead.
+
+**What the copilot variant does differently.** The CLI comes from npm
+(`@github/copilot`), pinned by version and by the sha512 integrity of every
+tarball the install unpacks, and installed offline from those checked tarballs
+only; `scripts/copilot-cli-pins.sh <version>` prints the pins for a newer one.
+Its runtime is unpacked at build time into `/usr/local/lib/copilot`
+(`COPILOT_PKG_CACHE_HOME`), read-only, so a start writes nothing to the
+sandbox's `/tmp` — a 512 MB tmpfs in RAM, which the 247 MB would otherwise fill
+half of on every task. `COPILOT_HOME` is `/tmp/.copilot`, writable by whatever
+uid the sandbox runs as, and `COPILOT_AUTO_UPDATE` is `false`, so a run uses
+the CLI the image was built with.
+
+**The label.** An image says what it carries in a label:
+
+```
+org.cloop.harnesses=claude,copilot,cloop,git
+```
+
+Wherever the hub already holds an image's configuration, it reads the label
+and refuses a project whose harness it does not list, before the run starts —
+`409 sandbox_image_lacks_harness`, naming the image and one that carries the
+harness:
+
+- a **container executor** — the hub's own, or a device's in container mode or
+  through a virtual executor — inspects every image before it runs it, so the
+  check is made there, before any container exists (a device's agent from
+  before this check does not make it);
+- under [`require_signature`](#signatures) the hub resolves a project's
+  `image:` at its registry to verify the digest, and reads the label of that
+  digest before anything is leased for the run.
+
+An image **without** the label is never refused for it: nearly every image has
+none, the published ones' earlier releases included, and a label nobody wrote
+says nothing either way. A Kubernetes executor has no image store the hub can
+read, so it does not check. To have your own image checked, label it with what
+is on its `PATH`:
+
+```dockerfile
+LABEL org.cloop.harnesses="claude,cloop,git"
+```
 
 ## Image trust policy
 
@@ -555,6 +626,7 @@ can see.
 | `capabilities.interfaces` together with `network: none` | 400 | `executor.ErrInvalidSpec` — the two statements contradict each other, and honouring either silently would discard the other |
 | a `host_device` grant on an executor that cannot expose devices | 409 | `executor.ErrInvalidSpec`, naming the grant and the binding |
 | `image:` is refused by the trust policy | 409 | `code: sandbox_image_denied`, naming the rule and its remediation |
+| the image's `org.cloop.harnesses` label lacks the project's harness | 409 | `code: sandbox_image_lacks_harness`, naming the image, what it carries and an image that carries the harness |
 | `image:` is not a usable reference | 400 | `imagepolicy: malformed image reference: …` — the author fixes the file |
 
 Each carries its own remediation, which the Web UI renders as a separate element

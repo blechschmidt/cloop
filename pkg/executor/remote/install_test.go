@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -429,4 +430,100 @@ func hasHarness(advertised []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// copilotSpec is a workload that will drive the GitHub Copilot CLI.
+func copilotSpec(workDir string) executor.Spec {
+	s := plainSpec(workDir)
+	s.Harness = "copilot"
+	return s
+}
+
+// TestMissingCopilotIsInstalledOnRequest (Task 20450): a host-mode device with
+// claude and no copilot, and a copilot project. The hub asks the device to
+// install copilot — the name only; the device's own table turns it into
+// GitHub's installer — and the dispatch carries on past the harness gate.
+func TestMissingCopilotIsInstalledOnRequest(t *testing.T) {
+	ex := installExecutor(t, true)
+	p, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"},
+		helloWithHarnesses(remote.MinHarnessInstallVersion, "claude", "cloop", "git"), nil)
+	defer sess.Close()
+
+	ip := &installerPeer{reply: remote.HarnessInstalledPayload{
+		Installed: true, Harness: "copilot",
+		Path: "/var/lib/cloop-executor/.local/bin/copilot", Version: "GitHub Copilot CLI 1.0.104.",
+	}}
+	ip.serve(t, p)
+
+	_, err := ex.Start(briefly(t), copilotSpec(t.TempDir()))
+	if errors.Is(err, remote.ErrHarnessUnavailable) {
+		t.Fatalf("dispatch was refused for a harness the device installed on request: %v", err)
+	}
+	if got := ip.askedFor(); len(got) != 1 || got[0] != "copilot" {
+		t.Fatalf("device was asked to install %v, want exactly [copilot]", got)
+	}
+	if !hasHarness(ex.AgentCapabilities().Harnesses, "copilot") {
+		t.Errorf("advertised harnesses = %v, want copilot recorded after the install", ex.AgentCapabilities().Harnesses)
+	}
+	// And in the inventory the Fleet panel renders, which reads the live
+	// session's advertisement: on sgx the card of a device that had just
+	// installed copilot said it had none until the agent reconnected.
+	inv, ok := ex.AgentInventory()
+	if !ok || !slices.Equal(inv.Harnesses, []string{"claude", "cloop", "git", "copilot"}) {
+		t.Errorf("inventory harnesses = %v (%v), want the advertised ones and copilot", inv.Harnesses, ok)
+	}
+}
+
+// TestAutoInstallOffRefusesCopilotWithoutAsking: executors.auto_install_harness
+// false turns the copilot install off exactly as it does claude's — no frame
+// at all — and the refusal names the image that carries copilot, the
+// published copilot variant, for a container sandbox.
+func TestAutoInstallOffRefusesCopilotWithoutAsking(t *testing.T) {
+	ex := installExecutor(t, false)
+	p, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"},
+		helloWithHarnesses(remote.MinHarnessInstallVersion, "claude", "cloop"), nil)
+	defer sess.Close()
+
+	ip := &installerPeer{reply: remote.HarnessInstalledPayload{Installed: true, Harness: "copilot"}}
+	ip.serve(t, p)
+
+	_, err := ex.Start(context.Background(), copilotSpec(t.TempDir()))
+	if !errors.Is(err, remote.ErrHarnessUnavailable) {
+		t.Fatalf("Start error = %v, want ErrHarnessUnavailable", err)
+	}
+	if got := ip.askedFor(); len(got) != 0 {
+		t.Errorf("device was asked to install %v with auto-install disabled", got)
+	}
+	variant := executor.HarnessImageFor("copilot")
+	if variant == "" || variant == remote.HarnessImageHint {
+		t.Fatalf("HarnessImageFor(copilot) = %q, want the copilot variant", variant)
+	}
+	for _, want := range []string{"edge-1", "copilot", "claude, cloop", variant} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should mention %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), remote.HarnessImageHint+",") || strings.Contains(err.Error(), remote.HarnessImageHint+")") {
+		t.Errorf("the refusal suggests the default image, which carries no copilot: %v", err)
+	}
+}
+
+// TestAnOldAgentsAnswerForCopilotIsCarriedIntoTheRefusal: an agent built
+// before its table had copilot answers that it has no official installer for
+// it, and says which it has. The hub refuses with that sentence, so the
+// operator learns to upgrade the agent rather than to debug an install.
+func TestAnOldAgentsAnswerForCopilotIsCarriedIntoTheRefusal(t *testing.T) {
+	ex := installExecutor(t, true)
+	p, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"},
+		helloWithHarnesses(remote.MinHarnessInstallVersion, "claude", "cloop"), nil)
+	defer sess.Close()
+
+	ip := &installerPeer{reply: remote.HarnessInstalledPayload{Harness: "copilot",
+		Reason: `"copilot" has no official installer known to this agent (it knows: claude), so there is nothing it can be asked to run; install it on the device by hand`}}
+	ip.serve(t, p)
+
+	_, err := ex.Start(context.Background(), copilotSpec(t.TempDir()))
+	if !errors.Is(err, remote.ErrHarnessUnavailable) || !strings.Contains(err.Error(), "it knows: claude") {
+		t.Fatalf("Start error = %v, want the refusal carrying the agent's answer", err)
+	}
 }

@@ -1086,6 +1086,13 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 			}
 			return executor.Handle{}, &executor.DiskLimitError{Executor: id, Breach: *b}
 		}
+		// An image whose label says it lacks the workload's harness, which the
+		// device's container driver read before it ran anything (Task 20450):
+		// the same refusal the hub's own container executor makes, so the same
+		// conflict and remedy.
+		if missing := started.HarnessRefusal.MissingHarnessError(); missing != nil {
+			return executor.Handle{}, missing
+		}
 		// The workspace is named in the refusal because the most common reason
 		// a device rejects a start is now that it could not materialise the
 		// tree, and "agent edge-1 refused the workload" alone sends the

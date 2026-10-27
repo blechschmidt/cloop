@@ -168,11 +168,38 @@ CMD ["executor", "agent"]
 # they fail at exec time — inside a sandbox, where the error is hardest to see.
 # A harness image is the wrong place to spend a boundary on image size.
 #
-# It is declared BEFORE the runtime stage so `runtime` remains the last one and
-# therefore the default target: a plain `docker build .` must keep producing the
-# hub, not this. Build it explicitly:
+# Two images are built here, and they differ by one program (Task 20450):
+#
+#   harness          claude, cloop and git — the default image, published as
+#                    ghcr.io/blechschmidt/cloop-harness;
+#   harness-copilot  the same plus the GitHub Copilot CLI, for the copilot
+#                    provider, published as
+#                    ghcr.io/blechschmidt/cloop-harness-copilot.
+#
+# A variant rather than one image because of what the Copilot CLI weighs: a
+# 199 MB native binary that, on its first start, unpacks a 247 MB runtime beside
+# it. Measured on amd64 (CLI 1.0.104), the harness image is 685 MB unpacked and
+# 268 MB compressed, and the copilot CLI adds 445 MB and 217 MB to it — +65%
+# and +81%, a pull that nearly doubles, paid by every node for every claude
+# project, which is most of them. The numbers are kept in
+# docs/reference/sandbox.md.
+#
+# Each image states what it carries in a label, org.cloop.harnesses, which a hub
+# reads wherever it inspects an image anyway, and a project whose harness the
+# list lacks is refused before it starts. An image without the label is not
+# refused: unknown is not no.
+#
+# They are declared BEFORE the runtime stage so `runtime` remains the last one
+# and therefore the default target: a plain `docker build .` must keep producing
+# the hub, not these. Build them explicitly:
 #   docker build --target harness -t cloop-harness:dev .
-FROM node:22-bookworm-slim AS harness
+#   docker build --target harness-copilot -t cloop-harness-copilot:dev .
+
+# What both images share. cloop comes last in each of them, because it changes
+# with every build and everything below it is then reused from build to build —
+# the copilot layer included, which is why that is a stage of its own on this
+# one rather than a layer added on top of the finished harness image.
+FROM node:22-bookworm-slim AS harness-base
 
 # git and a CA bundle because almost every task shells out to one or the other;
 # ca-certificates additionally backs the provider's own TLS calls. procps
@@ -189,14 +216,72 @@ RUN npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE
  && npm cache clean --force \
  && claude --version
 
-COPY --from=build /out/cloop /usr/local/bin/cloop
-
 # A non-root user for the documented default and for any runtime that resolves
 # the image's own USER. The driver overrides it with --user on every start, so
 # this is the floor rather than the decision: an image whose default user is
 # root is one --user flag away from a root workload, and ValidateNonRootUser
 # exists because most base images make that the easy mistake.
 RUN useradd --uid 65532 --create-home --shell /usr/sbin/nologin cloop
+
+# The GitHub Copilot CLI, for the copilot variant: the npm package
+# @github/copilot, a small loader that execs the native build published beside
+# it for each platform (@github/copilot-linux-x64, -linux-arm64), plus the
+# loader's one dependency.
+FROM harness-base AS harness-copilot-base
+
+# Pinned twice, unlike claude: by version, and by the sha512 integrity of every
+# tarball the install unpacks, as `npm view <name>@<version> dist.integrity`
+# prints them. Each tarball is fetched into npm's cache, copied back out and
+# hashed against its pin; the install then runs --offline, so it can unpack
+# nothing but what was checked — the other platforms' builds, which the loader
+# lists as optional, are simply absent. A rebuild of an old tag installs the
+# same bytes or fails here, whatever the registry serves by then. To move the
+# version, `scripts/copilot-cli-pins.sh <version>` prints the ARG lines below;
+# every one of them moves with it.
+ARG COPILOT_CLI_VERSION=1.0.104
+ARG COPILOT_CLI_INTEGRITY=sha512-C2fPHjSM8HanINktDaqaalPzNSsth9H3zj9V4+ier8ziOIqi+U6OiLXwH44e+QR1vIEaRLKnX40tXUS8SeJDVw==
+ARG COPILOT_CLI_LINUX_X64_INTEGRITY=sha512-HGxTAkwrlzIAoQRQ25uWoKToujHzmO1sKC0qGP/yQTv8UhWufHYGHKkHj4sjEbHhRqwXfZvcUzKL9t/vUtklFg==
+ARG COPILOT_CLI_LINUX_ARM64_INTEGRITY=sha512-rJ4f2Dgi+jbs4Jf/t/9ommYKhS1e78zxMx7NKuOYkLubnjwzqL/cWeG+UZV4sxl8uTaG1B6pnc1Hr5OuecQ8zA==
+ARG COPILOT_CLI_DETECT_LIBC_VERSION=2.1.2
+ARG COPILOT_CLI_DETECT_LIBC_INTEGRITY=sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==
+
+# Where the CLI unpacks its runtime, in the image and read-only, rather than
+# under $HOME. The native binary carries its runtime packed and unpacks it, 247
+# MB, the first time it starts — into the cache under $HOME unless this says
+# otherwise, and $HOME is the sandbox's /tmp: a tmpfs in RAM, capped at 512 MB
+# by the container driver and gone with the container. So every task would
+# unpack it again into memory, half the scratch space gone before the agent did
+# anything. Unpacked here once, at the `copilot --version` below, a start finds
+# it complete and reads it, which any uid can; nothing is written.
+ENV COPILOT_PKG_CACHE_HOME=/usr/local/lib/copilot
+
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) native=linux-x64;   native_integrity="$COPILOT_CLI_LINUX_X64_INTEGRITY" ;; \
+      arm64) native=linux-arm64; native_integrity="$COPILOT_CLI_LINUX_ARM64_INTEGRITY" ;; \
+      *) echo "the Copilot CLI publishes no build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    pinned() { \
+      npm cache add --no-update-notifier "$1"; \
+      tarball=$(npm pack --offline --silent --no-update-notifier --pack-destination /tmp "$1"); \
+      got=$(node -e 'const fs = require("fs"), crypto = require("crypto"); process.stdout.write("sha512-" + crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "/tmp/$tarball"); \
+      rm -f "/tmp/$tarball"; \
+      if [ "$got" != "$2" ]; then echo "$1 is $got, not the pinned $2" >&2; exit 1; fi; \
+      echo "$1 matches its pin"; \
+    }; \
+    pinned "@github/copilot@${COPILOT_CLI_VERSION}" "$COPILOT_CLI_INTEGRITY"; \
+    pinned "@github/copilot-${native}@${COPILOT_CLI_VERSION}" "$native_integrity"; \
+    pinned "detect-libc@${COPILOT_CLI_DETECT_LIBC_VERSION}" "$COPILOT_CLI_DETECT_LIBC_INTEGRITY"; \
+    npm install -g --offline --no-fund --no-audit --no-update-notifier "@github/copilot@${COPILOT_CLI_VERSION}"; \
+    npm cache clean --force; \
+    COPILOT_HOME=/tmp/copilot-build-home copilot --version; \
+    rm -rf /tmp/copilot-build-home /root/.cache /root/.npm; \
+    test -f "$COPILOT_PKG_CACHE_HOME/pkg/${native}/${COPILOT_CLI_VERSION}/cli-main.js"
+
+# The default image.
+FROM harness-base AS harness
+
+COPY --from=build /out/cloop /usr/local/bin/cloop
 
 # HOME on the tmpfs the driver mounts at /tmp, NOT on /home/cloop.
 #
@@ -212,18 +297,51 @@ ENV HOME=/tmp
 # are injected as environment at start (buildRunArgs' `--env NAME` passthrough),
 # which is what makes one image safe to share across tenants and safe to publish.
 
+# org.cloop.harnesses lists the programs the image carries, comma-separated.
+# pkg/imagepolicy reads it (HarnessesLabel), and tests/docs holds each image's
+# list equal to remote.PublishedHarnessImages, which the hub's refusals name
+# these images from.
 LABEL org.opencontainers.image.title="cloop harness" \
       org.opencontainers.image.description="cloop sandbox image: the default workload image for container and Kubernetes executors" \
       org.opencontainers.image.source="https://github.com/blechschmidt/cloop" \
       org.opencontainers.image.documentation="https://github.com/blechschmidt/cloop/blob/main/docs/architecture/executors.md" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="blechschmidt" \
-      org.opencontainers.image.base.name="node:22-bookworm-slim"
+      org.opencontainers.image.base.name="node:22-bookworm-slim" \
+      org.cloop.harnesses="claude,cloop,git"
 
 USER 65532:65532
 
 # Explicit and empty, so that the no-ENTRYPOINT contract is stated in the image
 # rather than merely inherited from whatever the base image happens to do.
+ENTRYPOINT []
+CMD ["/usr/local/bin/cloop", "--help"]
+
+# The copilot variant: the default image's tail, on the stage that carries the
+# Copilot CLI. Every line means what it means in the harness stage above.
+FROM harness-copilot-base AS harness-copilot
+
+COPY --from=build /out/cloop /usr/local/bin/cloop
+
+ENV HOME=/tmp
+
+# The CLI keeps its state — sessions, logs, its configuration — in
+# COPILOT_HOME, named outright on the tmpfs for the reason HOME is there: any
+# uid can create it. Its updater is off, so the CLI that runs is the one this
+# image was built with rather than whatever it would download at a start.
+ENV COPILOT_HOME=/tmp/.copilot \
+    COPILOT_AUTO_UPDATE=false
+
+LABEL org.opencontainers.image.title="cloop harness with GitHub Copilot" \
+      org.opencontainers.image.description="cloop sandbox image with the GitHub Copilot CLI, for the copilot provider" \
+      org.opencontainers.image.source="https://github.com/blechschmidt/cloop" \
+      org.opencontainers.image.documentation="https://github.com/blechschmidt/cloop/blob/main/docs/reference/sandbox.md" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="blechschmidt" \
+      org.opencontainers.image.base.name="node:22-bookworm-slim" \
+      org.cloop.harnesses="claude,copilot,cloop,git"
+
+USER 65532:65532
 ENTRYPOINT []
 CMD ["/usr/local/bin/cloop", "--help"]
 

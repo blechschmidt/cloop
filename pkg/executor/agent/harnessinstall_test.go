@@ -76,7 +76,7 @@ func installerSandbox(t *testing.T) string {
 func fakeInstaller(t *testing.T, script string) {
 	t.Helper()
 	prev := installScriptFetcher
-	installScriptFetcher = func(context.Context, string, string) (string, error) { return script, nil }
+	installScriptFetcher = func(context.Context, string, installOrigin) (string, error) { return script, nil }
 	t.Cleanup(func() { installScriptFetcher = prev })
 }
 
@@ -144,7 +144,7 @@ func TestAnAlreadyInstalledHarnessIsASuccess(t *testing.T) {
 
 	// Any attempt to fetch is a bug: the harness is already here.
 	prev := installScriptFetcher
-	installScriptFetcher = func(context.Context, string, string) (string, error) {
+	installScriptFetcher = func(context.Context, string, installOrigin) (string, error) {
 		t.Error("fetched an installer for a harness that was already present")
 		return "", errors.New("should not be called")
 	}
@@ -170,7 +170,7 @@ func TestAnUnknownHarnessIsRefusedByName(t *testing.T) {
 	installerSandbox(t)
 
 	prev := installScriptFetcher
-	installScriptFetcher = func(context.Context, string, string) (string, error) {
+	installScriptFetcher = func(context.Context, string, installOrigin) (string, error) {
 		t.Error("fetched an installer for a harness with no table entry")
 		return "", errors.New("should not be called")
 	}
@@ -190,40 +190,60 @@ func TestAnUnknownHarnessIsRefusedByName(t *testing.T) {
 	}
 }
 
-// TestOnlyClaudeIsInstallable pins the table's contents, because its
-// membership is an assertion someone has to make deliberately.
+// TestOnlyVettedHarnessesAreInstallable pins the table's contents — every
+// entry and every field of it — because its membership is an assertion
+// someone has to make deliberately: that a URL is a vendor's official
+// installer, and where that vendor's script may be served from.
 //
 // cloop is absent on purpose: it already has the upgrade frame, which verifies
 // Sigstore provenance against a pinned identity, and routing it through a shell
-// script would be a downgrade dressed up as a convenience.
-func TestOnlyClaudeIsInstallable(t *testing.T) {
-	if len(officialHarnessInstallers) != 1 {
-		t.Fatalf("installer table = %v; adding an entry means asserting that a URL is that "+
-			"vendor's official installer, which needs a human who checked",
-			knownInstallerNames())
+// script would be a downgrade dressed up as a convenience. codex and gemini are
+// absent because nobody has checked their installers yet.
+func TestOnlyVettedHarnessesAreInstallable(t *testing.T) {
+	vetted := map[string]harnessInstaller{
+		// The exact URL Anthropic documents at code.claude.com/docs/en/setup.
+		// It redirects to downloads.claude.ai, so the vendor's domain has to
+		// be declared or the real installer is refused on every device; the
+		// mirror is that redirect's target, fetched directly, for a device the
+		// claude.ai website turns away (Task 20337).
+		"claude": {
+			ScriptURL:    "https://claude.ai/install.sh",
+			OriginSuffix: ".claude.ai",
+			MirrorURLs:   []string{"https://downloads.claude.ai/claude-code-releases/bootstrap.sh"},
+			Binary:       "claude",
+			VersionArgs:  []string{"--version"},
+		},
+		// The URL GitHub documents at docs.github.com (Task 20450). It
+		// redirects onto raw.githubusercontent.com, which serves every
+		// repository on GitHub, so the redirect is pinned to GitHub's own
+		// copilot-cli repository as well as to that host. No mirror: sgx,
+		// the device the claude mirror exists for, reaches it.
+		"copilot": {
+			ScriptURL:    "https://gh.io/copilot-install",
+			OriginSuffix: ".raw.githubusercontent.com",
+			OriginPath:   "/github/copilot-cli/",
+			Binary:       "copilot",
+			VersionArgs:  []string{"--version"},
+		},
 	}
-	spec, ok := officialHarnessInstallers["claude"]
-	if !ok {
-		t.Fatal("the claude entry is missing")
+	got := knownInstallerNames()
+	want := make([]string, 0, len(vetted))
+	for name := range vetted {
+		want = append(want, name)
 	}
-	// The exact URL Anthropic documents at code.claude.com/docs/en/setup. A
-	// change here is a change to what every device in every fleet downloads
-	// and executes, so it should never pass unnoticed.
-	if spec.ScriptURL != "https://claude.ai/install.sh" {
-		t.Errorf("claude installer URL = %q, want the documented official installer",
-			spec.ScriptURL)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("installer table = %v, want exactly %v; adding an entry means asserting that a URL "+
+			"is that vendor's official installer, which needs a human who checked", got, want)
 	}
-	if spec.OriginSuffix != ".claude.ai" {
-		t.Errorf("claude OriginSuffix = %q; the published URL redirects to "+
-			"downloads.claude.ai, so the vendor's domain has to be declared or the real "+
-			"installer is refused on every device", spec.OriginSuffix)
-	}
-	// Pinned for the same reason as ScriptURL: it is fetched and executed on
-	// every device the entry point turns away. It is the URL ScriptURL was
-	// observed to redirect to, fetched directly.
-	wantMirrors := []string{"https://downloads.claude.ai/claude-code-releases/bootstrap.sh"}
-	if !slices.Equal(spec.MirrorURLs, wantMirrors) {
-		t.Errorf("claude MirrorURLs = %q, want %q", spec.MirrorURLs, wantMirrors)
+	// A change to any of these is a change to what every device in every
+	// fleet downloads and executes, so none of them may pass unnoticed.
+	for name, w := range vetted {
+		g := officialHarnessInstallers[name]
+		if g.ScriptURL != w.ScriptURL || g.OriginSuffix != w.OriginSuffix || g.OriginPath != w.OriginPath ||
+			g.Binary != w.Binary || !slices.Equal(g.MirrorURLs, w.MirrorURLs) || !slices.Equal(g.VersionArgs, w.VersionArgs) {
+			t.Errorf("%s installer = %+v, want the vetted %+v", name, g, w)
+		}
 	}
 }
 
@@ -262,8 +282,34 @@ func TestEveryInstallerIsHTTPS(t *testing.T) {
 				t.Errorf("%s mirror %q is outside the vendor's domain %q", name, mirror,
 					spec.OriginSuffix)
 			}
+			if !withinOriginPath(u, entry, spec.OriginPath) {
+				t.Errorf("%s mirror %q is outside the vendor's path %q", name, mirror, spec.OriginPath)
+			}
+		}
+		// A path pin is a repository's directory: anchored at the root and
+		// ending at a segment boundary, or "/github/copilot-cli" would admit
+		// "/github/copilot-cli-evil/".
+		if p := spec.OriginPath; p != "" && (!strings.HasPrefix(p, "/") || !strings.HasSuffix(p, "/") || p == "/") {
+			t.Errorf("%s OriginPath %q must start and end with a slash and name a directory", name, p)
+		}
+		// A host that serves many owners' files says nothing about who wrote
+		// a script on it. An entry whose domain covers one must pin the
+		// vendor's own path there (Task 20450: gh.io redirects onto
+		// raw.githubusercontent.com).
+		for _, shared := range sharedContentHosts {
+			if withinOrigin(shared, entry.Hostname(), spec.OriginSuffix) && spec.OriginPath == "" {
+				t.Errorf("%s admits %s, which serves every user's files, without an OriginPath "+
+					"pinning the vendor's repository on it", name, shared)
+			}
 		}
 	}
+}
+
+// sharedContentHosts serve files on behalf of anyone with an account, so a
+// script's host there names nobody in particular.
+var sharedContentHosts = []string{
+	"raw.githubusercontent.com", "objects.githubusercontent.com", "gist.githubusercontent.com",
+	"github.com", "gitlab.com", "bitbucket.org", "codeberg.org",
 }
 
 // scriptedFetcher makes installScriptFetcher answer from a table keyed by URL
@@ -274,7 +320,7 @@ func scriptedFetcher(t *testing.T, answers map[string]func() (string, error)) *[
 	t.Helper()
 	var asked []string
 	prev := installScriptFetcher
-	installScriptFetcher = func(_ context.Context, rawURL, _ string) (string, error) {
+	installScriptFetcher = func(_ context.Context, rawURL string, _ installOrigin) (string, error) {
 		asked = append(asked, rawURL)
 		answer, ok := answers[rawURL]
 		if !ok {
@@ -418,7 +464,7 @@ func TestFetchNamesABotChallenge(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fetchInstallScript(context.Background(), srv.URL, "")
+	_, err := fetchInstallScript(context.Background(), srv.URL, installOrigin{})
 	if err == nil {
 		t.Fatal("a challenge page was accepted as an install script")
 	}
@@ -470,7 +516,7 @@ func TestFetchSeparatesRefusalsFromUnavailability(t *testing.T) {
 		{"redirect off the vendor's origin", offOrigin.URL, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := fetchInstallScript(context.Background(), tc.url, "")
+			_, err := fetchInstallScript(context.Background(), tc.url, installOrigin{})
 			if err == nil {
 				t.Fatal("fetch succeeded")
 			}
@@ -580,7 +626,7 @@ func TestFetchRefusesARedirectOffTheVendorsOrigin(t *testing.T) {
 	}))
 	defer vendor.Close()
 
-	_, err := fetchInstallScript(context.Background(), vendor.URL, "")
+	_, err := fetchInstallScript(context.Background(), vendor.URL, installOrigin{})
 	if err == nil {
 		t.Fatal("a redirect to another origin was followed and the script accepted")
 	}
@@ -619,7 +665,7 @@ func TestFetchFollowsARedirectInsideTheVendorsDomain(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := fetchInstallScript(context.Background(), srv.URL+"/install.sh", "")
+	got, err := fetchInstallScript(context.Background(), srv.URL+"/install.sh", installOrigin{})
 	if err != nil {
 		t.Fatalf("a same-host redirect was refused: %v", err)
 	}
@@ -669,7 +715,7 @@ func TestFetchRefusesAnOversizedBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := fetchInstallScript(context.Background(), srv.URL, ""); err == nil {
+	if _, err := fetchInstallScript(context.Background(), srv.URL, installOrigin{}); err == nil {
 		t.Fatal("an oversized body was accepted as an install script")
 	}
 }
@@ -691,7 +737,7 @@ func TestFetchRefusesAnEmptyOrFailedResponse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(tc.h)
 			defer srv.Close()
-			if _, err := fetchInstallScript(context.Background(), srv.URL, ""); err == nil {
+			if _, err := fetchInstallScript(context.Background(), srv.URL, installOrigin{}); err == nil {
 				t.Fatalf("a %s response was accepted as an install script", tc.name)
 			}
 		})
@@ -705,5 +751,130 @@ func writeStubBinary(t *testing.T, path, version string) {
 	body := "#!/bin/sh\necho \"" + version + "\"\n"
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // a test stub that must be executable
 		t.Fatalf("write stub %s: %v", path, err)
+	}
+}
+
+// installsCopilotScript stands in for GitHub's installer: as a user it puts
+// the CLI in ~/.local/bin, which is not on a service manager's PATH.
+const installsCopilotScript = `#!/bin/bash
+set -e
+mkdir -p "$HOME/.local/bin"
+printf '%s\n' '#!/bin/sh' 'echo "GitHub Copilot CLI 1.0.104."' > "$HOME/.local/bin/copilot"
+chmod +x "$HOME/.local/bin/copilot"
+`
+
+// TestCopilotIsInstalledOnRequest is the device half of Task 20450: the hub
+// asks for "copilot", the agent fetches GitHub's installer from the table's
+// URL — and from nowhere else — runs it, and the binary is resolvable by name
+// for the payload that needs it.
+func TestCopilotIsInstalledOnRequest(t *testing.T) {
+	installerSandbox(t)
+	if p, err := exec.LookPath("copilot"); err == nil {
+		t.Fatalf("the sandbox PATH resolves copilot at %s", p)
+	}
+	asked := scriptedFetcher(t, map[string]func() (string, error){
+		"https://gh.io/copilot-install": func() (string, error) { return installsCopilotScript, nil },
+	})
+
+	a := &Agent{}
+	out := a.installHarness(context.Background(), remote.InstallHarnessPayload{Harness: "copilot"})
+	if !out.Installed || out.AlreadyPresent {
+		t.Fatalf("Installed = %v, AlreadyPresent = %v; Reason = %q", out.Installed, out.AlreadyPresent, out.Reason)
+	}
+	resolved, err := exec.LookPath("copilot")
+	if err != nil || out.Path != resolved {
+		t.Fatalf("copilot resolves to %q (%v), reported %q", resolved, err, out.Path)
+	}
+	if !strings.Contains(out.Version, "GitHub Copilot CLI") {
+		t.Errorf("Version = %q, want what the installed binary prints", out.Version)
+	}
+	if !slices.Equal(*asked, []string{"https://gh.io/copilot-install"}) {
+		t.Errorf("fetched %q, want only GitHub's documented installer", *asked)
+	}
+}
+
+// TestFetchFollowsTheRedirectIntoThePinnedRepository is gh.io's behaviour
+// against a local server: the documented URL answers 301 into the vendor's
+// repository on a shared host, and the script there is accepted.
+func TestFetchFollowsTheRedirectIntoThePinnedRepository(t *testing.T) {
+	const body = "#!/bin/bash\necho installed\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/copilot-install":
+			http.Redirect(w, r, "/github/copilot-cli/refs/heads/main/install.sh", http.StatusMovedPermanently)
+		case "/github/copilot-cli/refs/heads/main/install.sh":
+			_, _ = w.Write([]byte(body))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	got, err := fetchInstallScript(context.Background(), srv.URL+"/copilot-install",
+		installOrigin{Path: "/github/copilot-cli/"})
+	if err != nil || got != body {
+		t.Fatalf("fetch = %q, %v; want the script from the pinned repository", got, err)
+	}
+}
+
+// TestFetchRefusesARedirectIntoAnotherRepository is why the path is pinned:
+// on a host that serves every repository, a redirect that stays on the
+// vendor's domain can still land on anyone's script. It is a safety refusal,
+// which ends the install rather than moving on to a mirror.
+func TestFetchRefusesARedirectIntoAnotherRepository(t *testing.T) {
+	for _, target := range []string{
+		"/attacker/copilot-cli/main/install.sh",
+		"/github/copilot-cli-evil/main/install.sh",
+		"/github/copilot-cli/..%2f..%2fattacker/x/install.sh",
+		"/github/copilot-cli/%2e%2e/%2e%2e/attacker/x/install.sh",
+	} {
+		t.Run(target, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/copilot-install" {
+					w.Header().Set("Location", target)
+					w.WriteHeader(http.StatusMovedPermanently)
+					return
+				}
+				_, _ = w.Write([]byte("#!/bin/bash\necho pwned\n"))
+			}))
+			defer srv.Close()
+
+			_, err := fetchInstallScript(context.Background(), srv.URL+"/copilot-install",
+				installOrigin{Path: "/github/copilot-cli/"})
+			if !errors.Is(err, errInstallSourceRefused) {
+				t.Fatalf("a redirect to %s = %v, want a safety refusal", target, err)
+			}
+		})
+	}
+}
+
+// TestWithinOriginPath covers the path rule directly.
+func TestWithinOriginPath(t *testing.T) {
+	entry, _ := url.Parse("https://gh.io/copilot-install")
+	for _, tc := range []struct {
+		final, prefix string
+		want          bool
+	}{
+		{"https://raw.githubusercontent.com/github/copilot-cli/refs/heads/main/install.sh", "/github/copilot-cli/", true},
+		{"https://raw.githubusercontent.com/github/copilot-cli/main/install.sh", "/github/copilot-cli/", true},
+		// The table's own URL, served without a redirect, is the vetted one.
+		{"https://gh.io/copilot-install", "/github/copilot-cli/", true},
+		{"https://gh.io/other-thing", "/github/copilot-cli/", false},
+		{"https://raw.githubusercontent.com/attacker/repo/main/install.sh", "/github/copilot-cli/", false},
+		{"https://raw.githubusercontent.com/github/copilot-cli-evil/install.sh", "/github/copilot-cli/", false},
+		{"https://raw.githubusercontent.com/github/copilot-cli/../../attacker/x", "/github/copilot-cli/", false},
+		{"https://raw.githubusercontent.com/github/copilot-cli/..%2Fx/install.sh", "/github/copilot-cli/", false},
+		{"https://raw.githubusercontent.com/github/copilot-cli//install.sh", "/github/copilot-cli/", false},
+		{"https://raw.githubusercontent.com/GitHub/copilot-cli/main/install.sh", "/github/copilot-cli/", false},
+		// No pin: the domain rule alone decides, as it does for claude.
+		{"https://downloads.claude.ai/anything", "", true},
+	} {
+		final, err := url.Parse(tc.final)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := withinOriginPath(final, entry, tc.prefix); got != tc.want {
+			t.Errorf("withinOriginPath(%q, %q) = %v, want %v", tc.final, tc.prefix, got, tc.want)
+		}
 	}
 }

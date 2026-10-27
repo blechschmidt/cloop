@@ -1,4 +1,5 @@
-# Publishes the two container images this repository's defaults point at.
+# Publishes the container images this repository's defaults point at, and the
+# harness image's copilot variant (Task 20450).
 #
 # Both were referenced long before they existed. `deploy/helm/cloop-hub`
 # defaults image.repository to ghcr.io/blechschmidt/cloop, and
@@ -71,6 +72,15 @@ jobs:
           # The sandbox workload image. Its arm64 leg runs npm under QEMU.
           - image: cloop-harness
             target: harness
+            platforms: linux/amd64,linux/arm64
+          # The same with the GitHub Copilot CLI, for copilot projects (Task
+          # 20450). A variant rather than the default because the CLI adds
+          # 445 MB unpacked, 217 MB compressed, to every pull (the Dockerfile's
+          # harness stage says how it was measured). Its :latest is published
+          # from main the first time this runs, by the bootstrap below, and
+          # moves on release tags from then on.
+          - image: cloop-harness-copilot
+            target: harness-copilot
             platforms: linux/amd64,linux/arm64
 
     steps:
@@ -185,7 +195,7 @@ jobs:
             echo "::error::image runs as root by default (User=${user:-<unset>})"; exit 1; }
           echo "default user: $user"
 
-          if [ "${{ matrix.target }}" = "harness" ]; then
+          case "${{ matrix.target }}" in harness*)
             # The contract on pkg/executor/container.DefaultImage, asserted
             # against the artifact. Each of these is a failure mode that is
             # invisible inside a sandbox: a swallowed argv, a missing provider
@@ -196,18 +206,41 @@ jobs:
               exit 1; }
             echo "entrypoint: none"
 
+            # What the image says it carries (org.cloop.harnesses, Task 20450),
+            # which a hub refuses a project by — so every program it lists is
+            # asserted present below, as the uid the driver would pass.
+            carries=$(docker image inspect "$ref" --format '{{index .Config.Labels "org.cloop.harnesses"}}')
+            [ -n "$carries" ] || { echo "::error::harness image has no org.cloop.harnesses label"; exit 1; }
+            echo "carries: $carries"
+
             # An arbitrary uid, because that is what the driver passes: --user is
             # derived from the project directory's owner, never from the image.
+            # A read-only root and the driver's 512 MB tmpfs, because that is
+            # where it runs: the copilot CLI must start without unpacking its
+            # runtime into /tmp, which the image did at build time.
             docker run --rm --user 12345:12345 --cap-drop ALL \
-              --security-opt no-new-privileges --network none \
-              --tmpfs /tmp:rw,nosuid,nodev,exec,size=64m \
+              --security-opt no-new-privileges --network none --read-only \
+              --tmpfs /tmp:rw,nosuid,nodev,exec,size=512m \
+              -e CARRIES="$carries" \
               "$ref" sh -euc '
                 test -x /usr/local/bin/cloop
+                for p in $(echo "$CARRIES" | tr , " "); do
+                  command -v "$p" >/dev/null || { echo "the label lists $p, which is not on PATH"; exit 1; }
+                done
                 command -v claude >/dev/null
                 command -v git >/dev/null
                 test -f /etc/ssl/certs/ca-certificates.crt
                 git config --global user.email probe@example.invalid
-                echo "contract OK as uid $(id -u): cloop, claude, git, CA bundle, writable HOME=$HOME"'
-          else
+                case ",$CARRIES," in *,copilot,*)
+                  copilot --version
+                  test "$COPILOT_AUTO_UPDATE" = false
+                  used=$(du -sm /tmp | cut -f1)
+                  [ "$used" -lt 32 ] || { echo "copilot --version wrote ${used} MB to /tmp: it unpacked its runtime at start"; exit 1; }
+                  ;;
+                esac
+                echo "contract OK as uid $(id -u): $CARRIES, CA bundle, writable HOME=$HOME"'
+            ;;
+          *)
             docker run --rm "$ref" version
-          fi
+            ;;
+          esac

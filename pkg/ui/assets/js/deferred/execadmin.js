@@ -651,7 +651,8 @@
         + _evxField('Runtime', '<input class="form-input" id="evxRuntime" list="evxRuntimes" value="' + esc(sb.runtime || '')
           + '" placeholder="engine default"><datalist id="evxRuntimes">' + _evxOpts(d.oci_runtimes || [], '') + '</datalist>')
         + '</div>';
-      h += _evxField('Image', '<input class="form-input" id="evxImage" value="' + esc(sb.image || '') + '" placeholder="the device default">');
+      h += _evxField('Image', '<input class="form-input" id="evxImage" value="' + esc(sb.image || '') + '" placeholder="the device default">',
+        'For copilot projects, ghcr.io/blechschmidt/cloop-harness-copilot: the default image carries claude only.');
       h += _fwMeta(cur.metadata);
       h += _evxNet(d, sb, fw);
       h += '<div class="modal-footer">'
@@ -2096,7 +2097,7 @@
             <div class="form-group">
               <label class="form-label" for="execSandboxImage">Container image</label>
               <input class="form-input" id="execSandboxImage" placeholder="executor default" spellcheck="false">
-              <div class="form-hint">Left empty, the executor uses its own configured image. A project's <code>.cloop/sandbox.yaml</code> may still override it, subject to the image trust policy.</div>
+              <div class="form-hint">Left empty, the executor uses its own configured image. A project's <code>.cloop/sandbox.yaml</code> may still override it, subject to the image trust policy. The published <code>ghcr.io/blechschmidt/cloop-harness</code> carries <code>claude</code>; for <code>copilot</code> projects use <code>ghcr.io/blechschmidt/cloop-harness-copilot</code>. An image's <code>org.cloop.harnesses</code> label says what it carries, and a project whose harness it lacks is refused before it starts.</div>
             </div>
             <div class="form-group">
               <label class="form-label" for="execSandboxNetwork">Container network</label>

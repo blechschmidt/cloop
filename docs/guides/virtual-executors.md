@@ -129,6 +129,27 @@ after.
 Then bind a project to it like to any executor — the **Executor** card on the
 project's overview — and set its **Limits** and **Access** from its own card.
 
+### The image, and the project's harness
+
+A virtual executor's sandboxes run the image it names, or the device's default
+when it names none — the published `ghcr.io/blechschmidt/cloop-harness`, which
+carries `claude`, `cloop` and `git`. A project on the `copilot` provider needs
+the `copilot` CLI in the image: name `ghcr.io/blechschmidt/cloop-harness-copilot`,
+the same image with the GitHub Copilot CLI added, or an image of your own built
+on it (`FROM ghcr.io/blechschmidt/cloop-harness-copilot:latest`). Because a
+container brings its own harness, the device never installs one on its host for
+a virtual executor's run.
+
+Both published images list what they carry in an `org.cloop.harnesses` label.
+The device's container driver reads it before it starts a sandbox, so a
+`copilot` project bound to a virtual executor whose image lists no `copilot` is
+refused before anything runs (409 `sandbox_image_lacks_harness`), naming the
+copilot image — rather than failing inside the sandbox once it has its
+credentials. An agent from before this check does not read the label, and an
+image without the label is not refused. See [the published
+images](../reference/sandbox.md#the-published-images-and-what-an-image-carries)
+for what each carries and why the copilot one is separate.
+
 ## Network access
 
 A virtual executor's sandboxes are networked in one of three ways, and the

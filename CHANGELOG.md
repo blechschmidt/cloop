@@ -73,6 +73,53 @@ schema and the hub's HTTP API may change in any release.
   lease and every in-hub path to the pin. Single-user hubs are unchanged
   (Task 20449).
 
+### Added
+
+- **Copilot projects run in sandboxes: a published image carries the GitHub
+  Copilot CLI, and a device installs it on request.** A `copilot` project could
+  not run on the flagship isolation path: the published harness image had only
+  Claude Code, so in a container it failed inside the sandbox after its lease
+  was issued, and a device without the CLI refused every dispatch until someone
+  installed it by hand.
+  - `ghcr.io/blechschmidt/cloop-harness-copilot` is the harness image with the
+    CLI added, for `linux/amd64` and `linux/arm64`. It is a variant because the
+    CLI is a 199 MB binary that unpacks a 247 MB runtime: measured on amd64 it
+    adds 445 MB unpacked and 217 MB compressed (+65%, +81%) to the 685 MB /
+    268 MB default image, which keeps carrying `claude` only. The CLI is pinned
+    by version and by the sha512 integrity of every npm tarball the install
+    unpacks, installed offline from those tarballs only, and checked with
+    `copilot --version` at build (`scripts/copilot-cli-pins.sh` prints the pins
+    for a newer one). Its runtime is unpacked at build time, read-only
+    (`COPILOT_PKG_CACHE_HOME`), so a start writes nothing to the sandbox's
+    512 MB in-memory `/tmp`; `COPILOT_HOME` is on that tmpfs for any uid, and
+    `COPILOT_AUTO_UPDATE` is `false`.
+  - Images say what they carry in an `org.cloop.harnesses` label
+    (`claude,copilot,cloop,git`). The container executor — the hub's, or a
+    device's in container mode or through a virtual executor — reads it in the
+    inspect it runs before every start, and under `require_signature` the hub
+    reads it for the digest it resolved at the registry. A project whose
+    harness the label lacks is refused before anything runs, `409
+    sandbox_image_lacks_harness`, naming an image that carries it; an image
+    without the label is never refused.
+  - A device installs `copilot` on request from GitHub's documented installer,
+    `https://gh.io/copilot-install`, as it does `claude`, unless
+    `executors.auto_install_harness` is off. `gh.io` redirects onto
+    `raw.githubusercontent.com`, which serves every repository on GitHub, so
+    the installer table now pins a path as well as a domain and accepts the
+    script only from `github/copilot-cli`. Proved on sgx with
+    `scripts/e2e/copilot-device`, and in CI by a copilot task run end to end
+    in the image the commit builds, against a bring-your-own-key stand-in
+    model (Task 20450).
+
+### Fixed
+
+- **A device's card lists a harness it installed on request without waiting
+  for the agent to reconnect, and a device without the project's harness is a
+  409, not a 500.** The Fleet panel read the device's hello, so after an
+  install the card kept saying the harness was missing; and a dispatch the
+  device refused for lack of a harness it was not allowed to install fell
+  through to an internal server error (Task 20450).
+
 ### Changed
 
 - **Hub health no longer costs a doctor run and two identity-provider fetches

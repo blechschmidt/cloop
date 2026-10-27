@@ -63,9 +63,10 @@ func TestHostModeRefusesMissingHarness(t *testing.T) {
 	}
 }
 
-// TestARefusedCopilotHarnessIsNotSentToTheClaudeImage: the published image
-// carries claude and not copilot, so a copilot project's remedy must not name
-// it, and a device that has copilot is not refused.
+// TestARefusedCopilotHarnessIsNotSentToTheClaudeImage: the default published
+// image carries claude and not copilot, so a copilot project's remedy must not
+// name it — it names the copilot variant, which carries it (Task 20450) — and
+// a harness no published image carries gets "an image with it installed".
 func TestARefusedCopilotHarnessIsNotSentToTheClaudeImage(t *testing.T) {
 	ex := sandboxExecutor(t, executor.SandboxSettings{Mode: executor.SandboxModeHost}, nil)
 	_, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"},
@@ -81,10 +82,16 @@ func TestARefusedCopilotHarnessIsNotSentToTheClaudeImage(t *testing.T) {
 	if strings.Contains(err.Error(), remote.HarnessImageHint) {
 		t.Errorf("the remedy sends a copilot project to an image without copilot: %q", err)
 	}
-	for _, want := range []string{"copilot", "an image with copilot installed"} {
+	for _, want := range []string{"copilot", "image " + executor.HarnessImageFor("copilot")} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("diagnostic should mention %q; got %q", want, err)
 		}
+	}
+
+	spec.Harness = "codex"
+	_, err = ex.Start(context.Background(), spec)
+	if !errors.Is(err, remote.ErrHarnessUnavailable) || !strings.Contains(err.Error(), "an image with codex installed") {
+		t.Errorf("a harness no published image carries = %v, want a remedy naming an image of the operator's own", err)
 	}
 }
 

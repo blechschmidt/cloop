@@ -120,7 +120,50 @@ func (e *Executor) authorizeProjectImage(ctx context.Context, spec executor.Spec
 		// names, so there is no digest a signature could be checked against.
 		return "", false, unresolvedImage(image, e.subject(), err)
 	}
+	if err := checkImageHarness(ctx, enforcer.Resolver, image, res, spec.Harness); err != nil {
+		return "", false, err
+	}
 	return res.Ref, res.Verified, nil
+}
+
+// checkImageHarness refuses the image a project names when its label says it
+// does not carry the harness the project's provider drives (Task 20450).
+//
+// Here, because this is where the hub already holds the image's manifest: under
+// require_signature it has just resolved the tag at the registry and verified
+// the digest. One more step along the same path reads the configuration that
+// digest names, and a copilot project whose image lists claude, cloop and git
+// is refused before anything is leased — instead of failing inside the sandbox
+// once the run has its credentials, which is all checkHarness can promise in
+// container mode, where it asks the device nothing.
+//
+// Nothing is resolved for this alone: without a resolver — no signature
+// required, so the device pins the tag in its own store — the hub has no
+// manifest and the device's container driver reads the label instead, before
+// it runs the image. And a registry that will not say is unknown, never no:
+// the digest was verified, and the labels are a convenience on top of it.
+func checkImageHarness(ctx context.Context, resolver imagepolicy.Resolver, image string,
+	res imagepolicy.Result, want string) error {
+	labels, ok := resolver.(imagepolicy.LabelResolver)
+	if !ok || !res.Pinned() || strings.TrimSpace(want) == "" {
+		return nil
+	}
+	read, err := labels.Labels(ctx, res.Ref)
+	if err != nil {
+		return nil
+	}
+	return imagepolicy.CheckHarness(image, read, want,
+		"name one that carries "+strings.TrimSpace(want)+" as image: in the project's .cloop/sandbox.yaml"+
+			publishedImageClause(want))
+}
+
+// publishedImageClause names a published image that carries want, for a
+// remedy, or says nothing when none does.
+func publishedImageClause(want string) string {
+	if ref := executor.HarnessImageFor(want); ref != "" {
+		return " — " + ref + " does — or remove image: so the executor's own image is used"
+	}
+	return ", or remove image: so the executor's own image is used"
 }
 
 // unresolvedImage is the refusal of a tag the hub could not resolve to a

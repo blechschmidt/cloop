@@ -3569,9 +3569,16 @@ code execution primitive, and it is constrained exactly like the first:
 | ---------------------- | ---------------------------------------------- |
 | a harness name, a reason | a URL, a script, an argv, an env, an interpreter |
 
-The device holds the name→installer table, compiled in, and today it has one
-entry: `claude` → `https://claude.ai/install.sh`. A hub that has been taken over
-can ask for Claude Code from Anthropic and for nothing else.
+The device holds the name→installer table, compiled in, and today it has two
+entries: `claude` → `https://claude.ai/install.sh` and `copilot` →
+`https://gh.io/copilot-install` (Task 20450). A hub that has been taken over can
+ask for Claude Code from Anthropic or the Copilot CLI from GitHub and for
+nothing else. Each entry bounds where its URL may redirect: Anthropic's to
+`.claude.ai`, GitHub's to `raw.githubusercontent.com` — and, because that host
+serves every repository on GitHub, only under `/github/copilot-cli/`. A table
+entry whose domain is such a shared host without a path pin fails
+`TestEveryInstallerIsHTTPS`, and `TestOnlyVettedHarnessesAreInstallable` pins
+every field of every entry.
 `TestInstallHarnessPayloadHasNoRemoteCodeExecutionFields` enforces the right-hand
 column by reflection, so a later field that widens it fails the build rather than
 quietly enlarging the blast radius of a hub compromise.
@@ -3588,8 +3595,8 @@ and destroys the session its reply would travel on, so the best it can report is
 the binary is now there — which is what makes install-then-continue possible
 inside one dispatch.
 
-**PATH is half the feature.** The official installer needs no root and writes no
-system path: `claude` lands in `~/.local/bin`, which is not on a systemd unit's
+**PATH is half the feature.** The official installers need no root and write no
+system path: `claude` and `copilot` land in `~/.local/bin`, which is not on a systemd unit's
 `PATH`. Without a fix for that the device would install the harness, fail to
 detect it, refuse the dispatch it was trying to unblock, and install it again
 next time. The agent therefore adds its per-user harness directories to its own

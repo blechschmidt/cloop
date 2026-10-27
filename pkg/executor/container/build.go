@@ -28,6 +28,7 @@ package container
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -73,6 +74,10 @@ type ImageIdentity struct {
 	// ID is the local content ID ("sha256:..."), always present for an image
 	// that exists locally.
 	ID string
+	// Labels are the image's own labels, nil when it has none. Read for
+	// org.cloop.harnesses (imagepolicy.HarnessesLabel): what the image says it
+	// carries, checked against the harness a workload needs (Task 20450).
+	Labels map[string]string
 }
 
 // Pinned returns the strongest reference that still resolves to this exact
@@ -100,10 +105,16 @@ func InspectImage(ctx context.Context, rt Runtime, ref string) (ImageIdentity, e
 	if err := ValidateImageRef(ref); err != nil {
 		return ImageIdentity{}, err
 	}
-	// Both runtimes expose .RepoDigests and .Id on `image inspect`; unlike the
-	// `info` schema, this part of the API is common to them. The separator
-	// keeps the two values apart without needing a JSON decode.
-	const format = "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}\x1f{{.Id}}"
+	// Both runtimes expose .RepoDigests, .Id and .Config on `image inspect`;
+	// unlike the `info` schema, this part of the API is common to them. The
+	// separator keeps the values apart; the configuration is the one that needs
+	// a JSON decode, and comes last so nothing in it can split the others.
+	//
+	// The whole configuration rather than {{json .Config.Labels}}: docker
+	// renders .Config as a map and its templates fail on a missing key, and an
+	// image with no labels at all — alpine:3.20 among them — has no Labels key,
+	// so the narrower template made every such image read as absent.
+	const format = "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}\x1f{{.Id}}\x1f{{json .Config}}"
 	res, err := runCLITimeout(ctx, rt, imageInspectTimeout, "image", "inspect", "--format", format, "--", ref)
 	if err != nil {
 		return ImageIdentity{}, fmt.Errorf("container: inspect image %s: %w", ref, err)
@@ -113,10 +124,21 @@ func InspectImage(ctx context.Context, rt Runtime, ref string) (ImageIdentity, e
 			"container: image %s is not present locally (fix: %s pull %s): %s",
 			ref, rt.Name, ref, firstLine(res.Stderr))
 	}
-	parts := strings.SplitN(strings.TrimSpace(res.Stdout), "\x1f", 2)
+	parts := strings.SplitN(strings.TrimSpace(res.Stdout), "\x1f", 3)
 	id := ImageIdentity{Ref: ref, RepoDigest: strings.TrimSpace(parts[0])}
-	if len(parts) == 2 {
+	if len(parts) >= 2 {
 		id.ID = normalizeImageID(strings.TrimSpace(parts[1]))
+	}
+	if len(parts) == 3 {
+		// Unreadable labels are no labels: the image carries what it carries
+		// either way, and "unknown" is the answer an image without the label
+		// gets too.
+		var cfg struct {
+			Labels map[string]string `json:"Labels"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(parts[2])), &cfg) == nil {
+			id.Labels = cfg.Labels
+		}
 	}
 	return id, nil
 }
@@ -231,6 +253,20 @@ func (e *Executor) sandboxImage(ctx context.Context, spec executor.Spec) (ImageI
 	}
 	baseID, err := InspectImage(ctx, e.rt, base)
 	if err != nil {
+		return ImageIdentity{}, err
+	}
+	// The harness the project's provider drives, against what the image says
+	// it carries (Task 20450): refused here, before anything runs, rather than
+	// by `exec: "copilot": executable file not found` from inside the sandbox
+	// once the run has its credentials. The image is named as it was
+	// configured, not by the digest it was pinned to. A setup: build cannot
+	// remove a program, so the base's word stands for the derived image too.
+	shown := strings.TrimSpace(spec.Image)
+	if shown == "" {
+		shown = e.opts.Image
+	}
+	if err := imagepolicy.CheckHarness(shown, baseID.Labels, spec.Harness,
+		executor.HarnessImageRemedy(spec.Harness)); err != nil {
 		return ImageIdentity{}, err
 	}
 	if len(spec.SetupCommands) == 0 {

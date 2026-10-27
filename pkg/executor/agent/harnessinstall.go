@@ -48,6 +48,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -80,6 +81,22 @@ type harnessInstaller struct {
 	// vendor does not control — while surviving the vendor moving assets
 	// between their own hosts, which they evidently do.
 	OriginSuffix string
+	// OriginPath pins where on that domain the script may come from: after a
+	// redirect, the final URL's path must lie under it. Written with a leading
+	// and a trailing slash, so "/github/copilot-cli/" admits that repository's
+	// files and not "/github/copilot-cli-evil/".
+	//
+	// A domain names a vendor only when nobody else serves files from it. That
+	// holds for claude.ai and fails for raw.githubusercontent.com, which
+	// serves every public repository on GitHub — and is where GitHub's own
+	// documented installer, https://gh.io/copilot-install, redirects (Task
+	// 20450). Admitted by domain alone, a redirect to any GitHub user's script
+	// would pass the check this table exists to make. TestEveryInstallerIsHTTPS
+	// refuses an entry whose domain is such a shared host without one.
+	//
+	// The URL the table names, served without a redirect, needs no pin: it is
+	// the one a person vetted.
+	OriginPath string
 	// MirrorURLs are other official locations of the same script, tried in
 	// order when ScriptURL does not serve it. Constants like ScriptURL, and
 	// each must itself lie inside OriginSuffix, which TestEveryInstallerIsHTTPS
@@ -110,13 +127,15 @@ type harnessInstaller struct {
 // officialHarnessInstallers is the complete set of harnesses a device will
 // install on the control plane's request.
 //
-// Only Claude Code is here, and the omissions are deliberate rather than
-// pending. `cloop` itself is excluded because it already has a purpose-built
-// path with a stronger guarantee — the upgrade frame, which verifies Sigstore
-// provenance against a pinned identity — and routing it through a shell script
-// instead would be a downgrade. codex and gemini are excluded because this
-// table is an assertion that a URL is the vendor's official installer, and that
-// assertion has to be made one harness at a time by someone who checked.
+// Claude Code and the GitHub Copilot CLI are here, and the omissions are
+// deliberate rather than pending. `cloop` itself is excluded because it already
+// has a purpose-built path with a stronger guarantee — the upgrade frame, which
+// verifies Sigstore provenance against a pinned identity — and routing it
+// through a shell script instead would be a downgrade. codex and gemini are
+// excluded because this table is an assertion that a URL is the vendor's
+// official installer, and that assertion has to be made one harness at a time
+// by someone who checked: TestOnlyVettedHarnessesAreInstallable pins every
+// field of every entry.
 var officialHarnessInstallers = map[string]harnessInstaller{
 	// Documented at https://code.claude.com/docs/en/setup as
 	// `curl -fsSL https://claude.ai/install.sh | bash`.
@@ -136,6 +155,46 @@ var officialHarnessInstallers = map[string]harnessInstaller{
 		Binary:      "claude",
 		VersionArgs: []string{"--version"},
 	},
+	// Documented at https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli
+	// as `curl -fsSL https://gh.io/copilot-install | bash` (Task 20450, checked
+	// against the live URLs on 2026-10-27).
+	//
+	// gh.io is GitHub's link shortener and serves nothing itself: it answers
+	// 301 with
+	// https://raw.githubusercontent.com/github/copilot-cli/refs/heads/main/install.sh,
+	// the script in GitHub's own copilot-cli repository. That host serves every
+	// repository on GitHub, so the redirect is admitted only into that one
+	// repository; see OriginPath.
+	//
+	// The script installs the CLI as a user into ~/.local/bin/copilot (as
+	// root, /usr/local/bin), from the release's tarball on github.com,
+	// checking it against the release's SHA256SUMS.txt, and needs bash, curl
+	// or wget, tar and gzip on the device. Its first start unpacks a runtime
+	// of about 250 MB under ~/.cache/copilot.
+	//
+	// No mirror: the device the claude entry's mirror was added for — sgx, an
+	// Alibaba Cloud VM the claude.ai website answers with a Cloudflare
+	// challenge — gets gh.io's redirect, the script and the release download
+	// without one.
+	"copilot": {
+		ScriptURL:    "https://gh.io/copilot-install",
+		OriginSuffix: ".raw.githubusercontent.com",
+		OriginPath:   "/github/copilot-cli/",
+		Binary:       "copilot",
+		VersionArgs:  []string{"--version"},
+	},
+}
+
+// installOrigin is where an installer's script may finally be served from:
+// the entry's OriginSuffix and OriginPath, for the fetch to check.
+type installOrigin struct {
+	Suffix string
+	Path   string
+}
+
+// origin is the entry's installOrigin.
+func (h harnessInstaller) origin() installOrigin {
+	return installOrigin{Suffix: h.OriginSuffix, Path: h.OriginPath}
 }
 
 // sources lists where the installer may be fetched from, in the order to try
@@ -317,7 +376,7 @@ func (a *Agent) fetchFirstAvailable(ctx context.Context, spec harnessInstaller) 
 		if i > 0 {
 			a.logf("harness install: %s; trying %s", attempts[len(attempts)-1], src)
 		}
-		script, err := installScriptFetcher(ctx, src, spec.OriginSuffix)
+		script, err := installScriptFetcher(ctx, src, spec.origin())
 		if err == nil {
 			return script, nil
 		}
@@ -379,14 +438,15 @@ func (a *Agent) runInstallScript(ctx context.Context, bash, script, home string)
 }
 
 // fetchInstallScript retrieves the script over HTTPS, refusing anything that
-// leaves the vendor domain the table named.
+// leaves the vendor domain the table named — or, for a domain shared by many
+// owners, the vendor's own path on it.
 //
 // The final URL is checked, not the requested one. A redirect is the whole
 // point of the check: an attacker who can answer for the vendor's host, or
 // poison a CDN in front of it, redirects to their own origin — and a client
 // that validated only what it asked for would follow along and hand the result
 // to a shell.
-func fetchInstallScript(ctx context.Context, rawURL, originSuffix string) (string, error) {
+func fetchInstallScript(ctx context.Context, rawURL string, origin installOrigin) (string, error) {
 	want, err := url.Parse(rawURL)
 	if err != nil {
 		return "", fmt.Errorf("the installer URL is unparseable: %w", err)
@@ -419,11 +479,17 @@ func fetchInstallScript(ctx context.Context, rawURL, originSuffix string) (strin
 					"connection that could have been rewritten in transit",
 				errInstallSourceRefused, final.Scheme)
 		}
-		if !withinOrigin(final.Hostname(), want.Hostname(), originSuffix) {
+		if !withinOrigin(final.Hostname(), want.Hostname(), origin.Suffix) {
 			return "", fmt.Errorf(
 				"%w: it redirected from %s to %s, which is outside %s; refusing to run a "+
 					"script from an origin the vendor does not control",
-				errInstallSourceRefused, want.Hostname(), final.Hostname(), originSuffix)
+				errInstallSourceRefused, want.Hostname(), final.Hostname(), origin.Suffix)
+		}
+		if !withinOriginPath(final, want, origin.Path) {
+			return "", fmt.Errorf(
+				"%w: it redirected from %s to %s%s, which is not under %s on that host; refusing "+
+					"to run a script from a repository the vendor does not own",
+				errInstallSourceRefused, want.Redacted(), final.Hostname(), final.EscapedPath(), origin.Path)
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -486,6 +552,35 @@ func withinOrigin(host, requested, suffix string) bool {
 	// The bare domain as well as its subdomains: ".claude.ai" admits
 	// "claude.ai" itself, which is the host the entry names in the first place.
 	return host == strings.TrimPrefix(suffix, ".") || strings.HasSuffix(host, suffix)
+}
+
+// withinOriginPath reports whether a fetch that ended at final stayed inside
+// the path the table pinned: the URL the table names itself, or a path under
+// prefix. An empty prefix pins nothing.
+//
+// The escaped path is what is compared, and it must already be in its plain
+// form: an encoded slash, backslash or dot, a dot segment or an empty one is
+// refused rather than decoded, because a server may read such a path in a way
+// this check did not — "/github/copilot-cli/..%2f..%2fanyone/repo/x" starts
+// with the prefix and names another repository.
+func withinOriginPath(final, requested *url.URL, prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	escaped := final.EscapedPath()
+	if strings.EqualFold(final.Host, requested.Host) && escaped == requested.EscapedPath() {
+		return true
+	}
+	lower := strings.ToLower(escaped)
+	for _, encoded := range []string{"%2f", "%5c", "%2e", "\\"} {
+		if strings.Contains(lower, encoded) {
+			return false
+		}
+	}
+	if path.Clean(escaped) != escaped || strings.Contains(escaped, "//") {
+		return false
+	}
+	return strings.HasPrefix(escaped, prefix)
 }
 
 // harnessVersion asks the freshly installed binary what it is, for the report.

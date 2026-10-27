@@ -2,6 +2,7 @@ package remote
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/version"
@@ -53,12 +54,26 @@ func (e *Executor) AgentVersion() string {
 // The bool matters because the zero AgentCapabilities is indistinguishable from
 // a device that genuinely reported nothing, and rendering "0 CPUs, no
 // harnesses" for a merely-offline device would invent a fault.
+//
+// The harnesses include those the device installed on request since it said
+// hello (recordHarness): the advertisement predates them, and the Fleet panel
+// renders this list — without them the card of a device that had just
+// installed copilot kept saying it had none until the agent reconnected (Task
+// 20450, on sgx).
 func (e *Executor) AgentInventory() (AgentCapabilities, bool) {
 	sess := e.currentSession()
 	if sess == nil {
 		return AgentCapabilities{}, false
 	}
-	return sess.Capabilities(), true
+	caps := sess.Capabilities()
+	harnesses := append([]string(nil), caps.Harnesses...)
+	for _, h := range e.AgentCapabilities().Harnesses {
+		if !slices.ContainsFunc(harnesses, func(have string) bool { return strings.EqualFold(have, h) }) {
+			harnesses = append(harnesses, h)
+		}
+	}
+	caps.Harnesses = harnesses
+	return caps, true
 }
 
 // BuildSequence reports the connected agent build's place on main (Task
