@@ -90,12 +90,18 @@ if [ -z "${BIN:-}" ]; then
 	BIN=$ROOT/cloop
 	(cd "$REPO" && CGO_ENABLED=0 go build -trimpath -o "$BIN" .)
 fi
-"$BIN" version | head -1
+# Every local cloop runs in a directory of the rig's own. From wherever the
+# rig was started — a hub's own checkout, say — a command would open that
+# directory's .cloop/state.db, the live one, and a build ahead of it migrates it.
+cd "$ROOT"
+"$BIN" version | sed -n 1p
 "$COSIGN" version 2>/dev/null | grep GitVersion || true
 
 # The digest the registry serves for the signed tag now, asked independently
 # of the hub: the one the hub must verify and the device must run.
-digest_of() { docker buildx imagetools inspect "$1" | awk '/^Digest:/ { print $2; exit }'; }
+# awk reads to the end: an early exit closes the pipe under docker, which dies
+# of SIGPIPE, and pipefail ends the script.
+digest_of() { docker buildx imagetools inspect "$1" | awk '/^Digest:/ && !seen { print $2; seen = 1 }'; }
 repo_of() { echo "${1%:*}"; }
 signed_digest=$(digest_of "$SIGNED")
 unsigned_digest=$(digest_of "$UNSIGNED")
@@ -124,7 +130,12 @@ scp -q "$BIN" "$DEVICE:$REMOTE/bin/cloop"
 scp -q "$ROOT/bundle" "$DEVICE:$REMOTE/"
 remote "docker pull -q $signed_ref >/dev/null && docker image inspect --format '{{.Id}}' $signed_ref"
 DPATH=$REMOTE/bin:/usr/local/bin:/usr/bin:/bin
-remote "chown -R $AGENT_USER: $REMOTE && chmod 0600 $REMOTE/bundle &&
+# The agent is one simple command under setsid on a line of its own: chained
+# to the commands before it with &&, the whole list is what goes to the
+# background — a subshell holding the ssh channel open for as long as the agent
+# lives, whose PID is not the agent's session. Here `$!` is the session leader,
+# which teardown kills as a group.
+remote "chown -R $AGENT_USER: $REMOTE && chmod 0600 $REMOTE/bundle || exit 1
 	setsid nohup runuser -u $AGENT_USER -- env -i HOME=$REMOTE/home PATH=$DPATH \
 		$REMOTE/bin/cloop executor agent --token-file $REMOTE/bundle --credential $REMOTE/agent.json \
 		--workdir-root $REMOTE/work </dev/null >$REMOTE/agent.log 2>&1 &
@@ -172,7 +183,7 @@ say "1. required, and the device's image unsigned: refused at the hub, the devic
 sandbox "$UNSIGNED"
 since=$(remote date +%s)
 run_and_wait
-cat "$ROOT/run.out" | head -c 900; echo
+head -c 900 "$ROOT/run.out"; echo
 check "the run is refused with 409" grep -qx 409 <(tail -1 "$ROOT/run.out")
 check "the refusal is the provenance check's, naming the setting" \
 	grep -q 'image-provenance.*image_provenance is required' "$ROOT/run.out"
@@ -205,7 +216,7 @@ done
 add_task "Say hello again"
 since=$(remote date +%s)
 run_and_wait
-cat "$ROOT/run.out" | head -c 600; echo
+head -c 600 "$ROOT/run.out"; echo
 check "the run is refused with 409" grep -qx 409 <(tail -1 "$ROOT/run.out")
 check "the refusal says the signature is not the publishing workflow's" \
 	grep -q 'not from the workflow that publishes them' "$ROOT/run.out"
@@ -218,12 +229,16 @@ for _ in $(seq 60); do
 	api GET /api/executors | sed '$d' | grep -q '"status":"online"' && break; sleep 1
 done
 sandbox "$UNSIGNED"
+# The device's own copy of the tag: its engine's store pins it, and the
+# device's driver runs that digest — which need not be the registry's.
+device_copy=$(remote "docker image inspect --format '{{index .RepoDigests 0}}' $UNSIGNED")
+echo "the device's copy of $UNSIGNED is $device_copy; the registry's is $unsigned_digest"
 since=$(remote date +%s)
 run_and_wait
 created=$(creates "$since")
 echo "created on the device: $created"
-check "the device ran its own copy of the tag" grep -qxF "$UNSIGNED" <<<"$created"
-echo "journal: $(journal image_provenance | head -c 400)"
+check "the device ran its own copy of the tag, as its own store pins it" grep -qxF "$device_copy" <<<"$created"
+echo "journal: $(journal image_provenance | cut -c1-400)"
 check "the run's journal carries the warning, naming the device's own copy" \
 	grep -q "without a signature on .*from the device's own copy of the tag" <(journal image_provenance)
 check "the run's record claims no digest the hub did not dispatch" python3 -c 'import json,sys

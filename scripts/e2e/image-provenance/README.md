@@ -23,7 +23,7 @@ on any failure.
 | `image_provenance: required`, the device's image unsigned (`cloop-harness:latest`) | **409** under the `image-provenance` rule naming the setting, and no container created on the device |
 | `required`, the device's image signed (`cloop-harness:edge`) | the device creates its sandbox from `repo@<digest>` — the digest the registry serves, asked independently — and from no tag; the run's `.cloop/sandbox-run.json` records `image_provenance: verified` and that digest; the task is **done** |
 | `warn`, the hub's pin repointed at the edge identity (`CLOOP_PROVENANCE_IMAGES_IDENTITY`) | the same signed image is wrongly signed: **409**, "not from the workflow that publishes them", nothing created |
-| `warn`, the device's image unsigned | runs the device's own copy of the tag; the journal carries `image_provenance` "ran without a signature … from the device's own copy of the tag", and the run's record names no digest — the registry's, which the hub checked, need not be the device's copy |
+| `warn`, the device's image unsigned | runs the device's own copy of the tag, as its own store pins it; the journal carries `image_provenance` "ran without a signature … from the device's own copy of the tag", and the run's record names no digest — the registry's, which the hub checked, need not be the device's copy |
 
 ## Running it
 
@@ -48,3 +48,24 @@ environment built from nothing), the `ssh -R` tunnel, and on the device a second
 agent under `/tmp/cloop-image-provenance-$PORT`, run as the production agent's
 user and stopped by the PID it recorded. The production agent is not touched.
 The pulled digest stays in the device's image store.
+
+## First run (2026-10-27, sgx)
+
+All fifteen checks passed against sgx, with the hub and the device agent built
+from `f9acc052` and `:edge` signed by that commit's publish run
+(`sha256:f87165a2…`). Under `required` the unsigned `:latest` was refused before
+the device was asked anything, and the signed `:edge` was resolved at ghcr.io and
+verified on the hub, and sgx created its sandbox from exactly
+`ghcr.io/blechschmidt/cloop-harness@sha256:f87165a2…` — the task done there in
+the published image's own `cloop`. Repointed at the edge identity, the same
+signature was refused as wrongly signed. Under `warn` the unsigned tag ran as
+sgx's own copy, a v0.0.2 pull whose digest (`sha256:69194362…`) is not the one
+ghcr.io serves today (`sha256:3ad7a636…`), with the warning naming that.
+
+The run found two defects, fixed with it: the run's record named the registry's
+digest as the image a device ran when the device had run its own copy of an
+unverified tag, and the warning did not say whose copy it was. And the rig
+itself once ran `cloop hub verify-image` from the directory it was started in —
+the hub's own checkout — which opened that checkout's live `state.db` with a
+build ahead of it and applied the additive migration 0083 there early (the
+deployed build tolerates it); every local cloop now runs in the rig's directory.
