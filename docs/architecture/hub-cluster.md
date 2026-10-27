@@ -573,7 +573,10 @@ either would reach whichever process answers there.
 **Upgrades.** Replace members one at a time: start the new one, then stop an
 old one. The stopping member hands over its runs and agents before it exits.
 Run one build across the cluster otherwise; mixed versions are meant for the
-length of a rolling update.
+length of a rolling update. Every push to main rehearses this from the latest
+published release, with the real release binary beside the new build — see
+[Rehearsing a rolling upgrade](../operations/runbook.md#rehearsing-a-rolling-upgrade)
+for what it checks and its last result.
 
 **Schema during an upgrade.** The first member of the new build applies its
 migrations, and the old members go on serving the migrated database only as
@@ -738,3 +741,14 @@ readiness does not depend on leadership: every member serves.
 - The chart job in CI installs the Helm chart into a kind cluster, scales it to
   three replicas, and asserts one cluster with one leader on one node — before
   and after a rolling restart that replaces every member.
+- [`tests/upgrade`](../../tests/upgrade/main_test.go) — a rolling upgrade from
+  the latest published release, verified against the release identity before
+  it runs: two release members, a release agent's device run with its lease and
+  proxy sessions, then a member of the build under test that migrates while the
+  release members keep serving, and the release members stopped one at a time;
+  every column the new build added must survive the release's writes, the run
+  must settle on the new build with its credentials, and the release must
+  refuse or tolerate the migrated database exactly as the runbook's Rollback
+  section says. CI's *Upgrade rehearsal* job, on every push; the release
+  workflow runs it from the release before. See
+  [Rehearsing a rolling upgrade](../operations/runbook.md#rehearsing-a-rolling-upgrade).

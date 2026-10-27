@@ -112,6 +112,30 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      - name: Rehearse the rolling upgrade from the release before
+        # No release is cut while the upgrade rehearsal is red (Task 20452).
+        # CI's Upgrade rehearsal job runs it on every push to main, from the
+        # latest release; the release procedure requires it green on the
+        # commit being tagged. Here it runs once more against the binary about
+        # to be published: the build reports this tag, so tests/upgrade
+        # rehearses from the published release before it — "latest" may be
+        # this very tag once a re-run publishes it — and nothing below signs or
+        # publishes anything if it fails or is skipped.
+        timeout-minutes: 12
+        env:
+          CLOOP_UPGRADE_E2E: "1"
+          CLOOP_UPGRADE_MAIN_BIN: /tmp/verify/cloop
+          CLOOP_UPGRADE_CACHE: ${{ runner.temp }}/release-cache
+        run: |
+          set -euo pipefail
+          go test ./tests/upgrade/ -v -count=1 -timeout 8m 2>&1 | tee "$RUNNER_TEMP/upgrade.log"
+          for t in TestRollingUpgradeFromTheLatestRelease TestRollbackToTheReleaseAfterMainMigrated; do
+            grep -qE "^--- PASS: $t \(" "$RUNNER_TEMP/upgrade.log" || {
+              echo "::error::the upgrade rehearsal did not pass $t, so ${GITHUB_REF_NAME} is not published"
+              exit 1
+            }
+          done
+
       - name: Sign every artifact and the checksum list
         # The checksums proved the download arrived intact. They cannot prove
         # where it came from: checksums.txt is served from this same release, so

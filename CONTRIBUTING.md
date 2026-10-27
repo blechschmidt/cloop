@@ -458,3 +458,36 @@ commits are exempt.
 
 Pre-commit hooks must not be bypassed (`--no-verify` is forbidden) — fix the
 underlying issue instead.
+
+## Cutting a release
+
+A release is a tag on a commit of main whose CI is green, the *Upgrade
+rehearsal* job among it. In order:
+
+1. **The commit that will be tagged** moves `CHANGELOG.md`'s `[Unreleased]`
+   entries under `## [x.y.z] - YYYY-MM-DD` with an introduction, and adds the
+   release to `publishedReleases` in
+   [`pkg/version/releases.go`](pkg/version/releases.go): its tag, the executor
+   protocol its binaries speak (`ProtocolVersion` in
+   `pkg/executor/remote/proto.go`) and its sequence — that commit's own
+   `git rev-list --count --first-parent HEAD`, one more than before the commit.
+   Bump the Helm chart's version if its templates changed since the last
+   release.
+2. **Push it and wait for CI**, every job green on that commit — the *Upgrade
+   rehearsal* job included, which rehearses a rolling upgrade from the latest
+   published release to that very commit with both real binaries on one
+   database and one cluster
+   ([Rehearsing a rolling upgrade](docs/operations/runbook.md#rehearsing-a-rolling-upgrade)).
+   A red job means a new commit, and so a new sequence, before any tag. Do not
+   cut a release while the rehearsal is red: what it found red is what every
+   hub on the latest release meets when it upgrades.
+3. **Tag the commit** with an annotated tag and push the tag. Never move a
+   pushed tag — the Go checksum database is append-only; cut the next version
+   instead.
+4. **The Release workflow** builds every platform, checks the binary reports
+   the tag and its sequence, and rehearses the upgrade once more — from the
+   published release before this one, against the very binary it is about to
+   publish — before it signs or uploads anything. A red rehearsal there
+   publishes nothing; fix it on main and cut the next version.
+5. **The Released installer workflow**, which the release triggers, must pass
+   both jobs.

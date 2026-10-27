@@ -2529,6 +2529,110 @@ upgrading in lockstep, but check `cloop executor ls` afterwards. Confirm
 re-enables host execution is the regression worth looking for after every
 upgrade.
 
+### Rehearsing a rolling upgrade
+
+A [hub cluster](../architecture/hub-cluster.md#operating-it) is upgraded by
+starting a member of the new build beside the old ones and stopping the old
+ones one at a time, and for that while two builds serve one database: the old
+members tolerate the migrations they lack and hand their runs over as they
+stop. [`tests/upgrade`](../../tests/upgrade/main_test.go) rehearses exactly that
+with the real binaries — cloop's latest published release beside the build
+under test — on every push to main (CI's *Upgrade rehearsal* job), and the
+release workflow rehearses it once more, from the release before, against the
+binary it is about to publish:
+
+```console
+$ CLOOP_UPGRADE_E2E=1 go test ./tests/upgrade/ -v -count=1 -timeout 12m
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `CLOOP_UPGRADE_E2E=1` | Run it; without, both scenarios skip saying so |
+| `CLOOP_UPGRADE_MAIN_BIN` | The build under test; otherwise one is built from the checkout, stamped like the :8888 deploy (`dev+g<commit>`, its sequence on main) |
+| `CLOOP_UPGRADE_FROM` | The release to start from; otherwise `releases/latest`, or — when the build under test is a release — the published release before it |
+| `CLOOP_UPGRADE_CACHE` | Where release archives are cached, by tag (default: the user cache directory) |
+| `CLOOP_UPGRADE_COSIGN` | The cosign binary, when it is not on `PATH` |
+| `CLOOP_UPGRADE_KEEP=1` | Leave the scratch tree and every process's log behind |
+
+**Nothing of the release runs unverified.** Its linux-amd64 archive, Sigstore
+bundle and `checksums.txt` come from the release's download URLs; on every use,
+cached or not, the archive is checked against `checksums.txt` and its bundle
+verified with cosign against the release identity
+[`pkg/provenance`](../../pkg/provenance/provenance.go) pins — what a device's
+installer requires — before the binary is extracted, and the binary must report
+the tag it was asked for. A cached archive that fails is dropped and downloaded
+again. Without the network the scenarios skip, naming the host they could not
+reach; CI requires them to have passed by name.
+
+**Forward — `TestRollingUpgradeFromTheLatestRelease`.** In one hub directory,
+behind a load balancer, with single sign-on (a test identity provider, an
+operator role mapping, deny-by-default), a token, and `--listen 127.0.0.1`:
+
+1. the release builds a project and saves its tasks; two release members serve
+   it, an operator signs in, and the release's own agent enrolls through the
+   load balancer;
+2. the operator starts a device run, which a release member dispatches with a
+   secret lease and a git proxy and a Kubernetes monitor session (a GitHub App
+   and a kubeconfig, each against a fake upstream); the release records CI
+   exchanges and the run's quota counter;
+3. a member of the build under test joins and migrates the control plane and
+   both projects, recording each migration's verdict and the build that applied
+   it; the release members keep serving;
+4. every column the build under test added, plus a column no build knows on each
+   table older builds rewrote (`plan_tasks`, `ci_exchanges`, `quota_counters`),
+   is set in every row; then release members write — a task saved, a CI
+   exchange recorded, a second project's run dispatched and settled on the
+   migrated database with its quota slot taken and given back, the build under
+   test's session used — and every row must keep what it held;
+5. the release members are stopped one at a time, the one holding the run first:
+   the run moves to the other release member and then to the build under test,
+   which must hold its lease and both proxy sessions, and through which the
+   workload then pushes and lists pods;
+6. the release's agent, reconnected to the build under test, must be listed
+   online as an older build, not refused, with an Upgrade target its installer
+   accepts; the run settles once, its lease released after its takeover;
+7. both audit chains verify against the checkpoints both builds sealed, with the
+   build under test's `cloop hub audit verify` and the release's.
+
+**Backward — `TestRollbackToTheReleaseAfterMainMigrated`.** Once the build under
+test has migrated a hub, the release must tolerate or refuse it exactly as
+[Rollback](#rollback) says: the migrations really applied are judged by the
+verdicts recorded for them, and copies of the database with one more migration
+recorded `breaking`, unclassified, under an unknown verdict, `additive` and
+`additive-columns` exercise every branch. A refusal must come before the member
+binds its port or touches the membership and lease rows, in the very words the
+Rollback section shows for `cloop ui` and `cloop status` (the test reads them
+from this page), with the release's `hub doctor` failing `storage.schema`; and
+`CLOOP_ALLOW_SCHEMA_DOWNGRADE=1` must open it with `storage.schema_guard`
+failing.
+
+It does not cover container or Kubernetes executors, releases from before the
+hub cluster (v0.0.4 and earlier), or the device's own upgrade: the Upgrade offer
+is checked, not pressed.
+
+**Last result — 2026-10-27, v0.0.7 → `dev+gf3002f67` (sequence 1175),
+Task 20452.** Both scenarios pass on this host in 23 s once built (the forward
+one 17 s, the rollback 6 s). Getting there found four defects, each fixed:
+
+- this section's Rollback example showed what `cloop status` prints, not what
+  `cloop ui` prints — since the hub cluster it says
+  `hubcluster: open <path>: statedb: …` — so an operator matching the runbook
+  against a refused rollback found a different sentence;
+- every command of a binary refusing a database printed the refusal twice, the
+  first time as an `executor: handle persistence unavailable` warning about
+  surviving restarts;
+- the release's agent under a build of main was shown as a material "cannot be
+  compared" skew, although both builds carry their place on main — it is shown
+  as `older` now, which is not material on its own;
+- a run handed from member to member never gave its tenant's concurrency slot
+  back: the member that dispatched it gave it back only when its own stream
+  closed, which a stopping member never sees, and the member that adopted the
+  run did not know it held one. Every rolling update narrowed every tenant with
+  a run in flight by one slot until a member started alone. The slot is now
+  recorded on the run's owner row and given back by the member that settles
+  the run. A run a release from before this fix dispatched still keeps it — the
+  rehearsal of v0.0.7 reports that rather than failing on it.
+
 ### Long-lived runs after an upgrade
 
 An upgrade replaces the hub's binary; it does not replace the runs the hub
@@ -2671,11 +2775,27 @@ migrated.
 
 ```console
 $ cloop ui
+Error: hubcluster: open /srv/cloop/.cloop/state.db: statedb: database schema is newer
+than this binary: database is at schema version 30 but this binary carries 29 (applied
+by cloop v0.4.0 as 0030_widget_policy.sql at 2026-05-02T09:14:22Z); … Incompatible:
+0030_widget_policy.sql. …
+$ cloop status
 Error: statedb: database schema is newer than this binary: database is at schema
 version 30 but this binary carries 29 (applied by cloop v0.4.0 as
 0030_widget_policy.sql at 2026-05-02T09:14:22Z); … Incompatible:
 0030_widget_policy.sql. …
 ```
+
+`cloop ui` refuses while it joins the [hub cluster](../architecture/hub-cluster.md),
+and names the database it could not join on; every other command says the same
+without that prefix. A migration recorded with a verdict the binary does not
+know is listed with what was recorded — `0060_widget_policy.sql (recorded
+"additive-columns", a verdict this build does not know)`, as every build before
+Task 20388 says of that verdict — and one nothing classified as `(unclassified)`.
+Builds before Task 20452 printed the whole refusal a second time first, as an
+`executor: handle persistence unavailable` warning. The
+[upgrade rehearsal](#rehearsing-a-rolling-upgrade) holds the latest release to
+these words on every push to main.
 
 The refusal happens before the hub binds a port or takes the control-plane
 lease, so a rolled-back image fails its health check instead of serving from a

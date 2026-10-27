@@ -111,6 +111,29 @@ schema and the hub's HTTP API may change in any release.
     in the image the commit builds, against a bring-your-own-key stand-in
     model (Task 20450).
 
+- **Every push to main rehearses a rolling upgrade from the latest published
+  release, and no release is published while the rehearsal is red.**
+  `tests/upgrade` fetches the latest release's linux-amd64 archive, verifies it
+  against cloop's release identity with cosign before any of it runs (cached by
+  tag, verified on every use; without the network it skips, naming the host),
+  and runs it beside the build under test on one database and one cluster: two
+  release members with single sign-on, a release agent's device run holding a
+  secret lease and git-proxy and Kubernetes-monitor sessions, CI exchanges and
+  quota counters; then a member of the new build migrates, every column it
+  added must survive the release members' writes, the release members are
+  stopped one at a time, and the run must settle on the new build with its
+  credentials, the audit chains and their checkpoints must verify, and the
+  release's agent must be listed as an older build with an upgrade on offer.
+  The rollback half holds the release to the runbook's Rollback section, word
+  for word, for every verdict a migration can be recorded with. CI runs it as
+  the *Upgrade rehearsal* job; the release workflow runs it from the release
+  before against the binary it is about to publish and signs nothing while it
+  fails; and the release procedure, now written down in CONTRIBUTING.md
+  ("Cutting a release") and `pkg/version/releases.go`, requires it green on the
+  commit being tagged. The runbook's example refusal now shows what `cloop ui`
+  prints — `hubcluster: open <path>: statedb: …` since the hub cluster — beside
+  what every other command prints (Task 20452).
+
 ### Fixed
 
 - **A device's card lists a harness it installed on request without waiting

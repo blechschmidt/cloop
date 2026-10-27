@@ -43,7 +43,12 @@ type Release struct {
 //
 // To maintain it, add the release's entry in the commit being tagged: the
 // release's own binary then knows it is a release and what it speaks, and every
-// later build inherits the entry. The protocol is the `ProtocolVersion = N` line
+// later build inherits the entry. Tag only a commit whose CI is green with the
+// Upgrade rehearsal job among it (tests/upgrade: a rolling upgrade from the
+// latest published release to that commit, both real binaries on one
+// database); release.yml rehearses again from the release before this one and
+// publishes nothing while it is red (Task 20452). The whole procedure is
+// CONTRIBUTING.md's "Cutting a release". The protocol is the `ProtocolVersion = N` line
 // of pkg/executor/remote/proto.go at that commit; TestPublishedReleaseProtocols
 // MatchTheirTags checks every entry against its tag wherever git and the tags
 // are available. The sequence is `git rev-list --count --first-parent HEAD` at

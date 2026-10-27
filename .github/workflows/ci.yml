@@ -1908,6 +1908,122 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/ci-step.sh --why
 
+  upgrade-rehearsal:
+    name: Upgrade rehearsal (latest release → this commit)
+    runs-on: ubuntu-latest
+    # A rolling upgrade from cloop's latest published release to this commit,
+    # with the real release binary and this build side by side on one database
+    # and one cluster (Task 20452). docs/architecture/hub-cluster.md promises
+    # it — old members keep serving the migrated database and hand their runs
+    # over as they stop — and each half was tested within one build only.
+    # tests/upgrade fetches the release, verifies its signature against the
+    # pinned release identity before running any of it, and runs two release
+    # members with an SSO sign-in, an enrolled release agent's device run
+    # holding a lease and git proxy and Kubernetes monitor sessions, CI
+    # exchanges and quota counters; then a member of this build joins and
+    # migrates, the release members are stopped one at a time, and the run
+    # must settle on this build with its credentials. The rollback half holds
+    # the release to docs/operations/runbook.md#rollback, word for word. See
+    # tests/upgrade/main_test.go.
+    #
+    # The release procedure requires this job green on the commit a release is
+    # cut from, and release.yml runs the rehearsal again, from the release
+    # before, and publishes nothing while it is red.
+    #
+    # Wall-time budget: 15 minutes for the job. Observed locally: ~25 s for
+    # both scenarios once built; the build is about a minute here. The go test
+    # timeout below is 6m, and the budget gate after it fails the job when the
+    # suite takes more than 60% of that — before a slow runner turns it into a
+    # timeout.
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # The whole history: this commit is built the way the :8888 deploy
+          # builds its own, stamped with its place on main, and a shallow clone
+          # counts only what it fetched.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install cosign
+        # What the release is verified with before it runs, as a device's
+        # installer verifies it.
+        uses: sigstore/cosign-installer@v3
+
+      - name: Which release
+        # The cache key. releases/latest by its redirect, as the suite resolves
+        # it (a push to main is never a release tag, where it would take the
+        # release before instead). The cache only saves a download: every use
+        # verifies the archive again.
+        id: release
+        run: |
+          set -euo pipefail
+          tag=$(curl -fsSI https://github.com/blechschmidt/cloop/releases/latest | tr -d '\r' |
+            sed -n 's#^[Ll]ocation: .*/releases/tag/##p' || true)
+          echo "tag=${tag:-unresolved}" >> "$GITHUB_OUTPUT"
+          echo "rehearsing from ${tag:-a release this step could not resolve}"
+
+      - name: Restore the release
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/release-cache
+          key: cloop-release-linux-amd64-${{ steps.release.outputs.tag }}
+
+      - name: Build this commit as the deploy builds it
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          pkg=github.com/blechschmidt/cloop/pkg/version
+          CGO_ENABLED=0 go build -trimpath -ldflags "-X $pkg.Version=dev+g$(git rev-parse --short HEAD) \
+            -X $pkg.Sequence=$(git rev-list --count --first-parent HEAD) -X $pkg.Commit=$(git rev-parse HEAD)" \
+            -o "$RUNNER_TEMP/cloop-main" .
+          "$RUNNER_TEMP/cloop-main" version --json
+
+      - name: Rehearse the rolling upgrade and the rollback
+        timeout-minutes: 8
+        env:
+          CLOOP_UPGRADE_E2E: "1"
+          CLOOP_UPGRADE_MAIN_BIN: ${{ runner.temp }}/cloop-main
+          CLOOP_UPGRADE_CACHE: ${{ runner.temp }}/release-cache
+        # Required to have passed by name: the suite skips — exit 0 — without
+        # the network, naming what it could not reach, and a skip here would
+        # prove nothing.
+        run: |
+          set -euo pipefail
+          go test ./tests/upgrade/ -v -count=1 -timeout 6m 2>&1 | tee "$RUNNER_TEMP/upgrade.log"
+          for t in TestRollingUpgradeFromTheLatestRelease TestRollbackToTheReleaseAfterMainMigrated; do
+            grep -qE "^--- PASS: $t \(" "$RUNNER_TEMP/upgrade.log" || {
+              echo "::error::go test succeeded but $t did not pass — it was skipped:"
+              grep -E -A2 "^--- SKIP: $t" "$RUNNER_TEMP/upgrade.log" || true
+              exit 1
+            }
+          done
+
+      - name: The rehearsal stayed within 60% of its -timeout
+        if: ${{ !cancelled() }}
+        run: ./scripts/test-budget.py --timeout 6m "$RUNNER_TEMP/upgrade.log"
+
+      - name: Save the release
+        if: always() && github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' && steps.release.outputs.tag != 'unresolved'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/release-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   eval-stack:
     name: Eval stack (SSO + remote executor)
     runs-on: ubuntu-latest
