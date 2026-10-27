@@ -281,7 +281,28 @@ async function clickIn(cdp, name, act) {
 async function scenarioImagePreview(cdp) {
   const id = await clickIn(cdp, 'plots/latency.png', 'preview');
   const img = `document.querySelector('#td-files .td-file[data-file="${id}"] img.td-file-img')`;
-  await waitFor(cdp, `!!${img} && ${img}.complete && ${img}.naturalWidth > 0`, 'the image to decode');
+  try {
+    await waitFor(cdp, `!!${img} && ${img}.complete && ${img}.naturalWidth > 0`, 'the image to decode');
+  } catch (e) {
+    // Timed out once in CI only (fe48b3a8, pkg/ui shard 1/3), with nothing
+    // saying whether the preview was never asked for, failed with a message,
+    // or was drawn into a pane a re-render had replaced: say which.
+    const seen = await cdp.eval(`(() => {
+      const row = document.querySelector('#td-files .td-file[data-file="${id}"]');
+      const pane = row && row.querySelector('.td-file-preview');
+      const im = row && row.querySelector('img.td-file-img');
+      return JSON.stringify({
+        rows: document.querySelectorAll('#td-files .td-file').length,
+        row: !!row,
+        button: row ? (row.querySelector('button[data-act="preview"]') || {}).textContent : null,
+        pane_hidden: pane ? pane.hidden : null,
+        pane: pane ? pane.innerHTML.slice(0, 300) : null,
+        img: im ? {complete: im.complete, width: im.naturalWidth, src: (im.getAttribute('src') || '').slice(0, 40)} : null,
+        details_open: document.getElementById('td-overlay').classList.contains('open'),
+      });
+    })()`).catch(err => 'unreadable: ' + err.message);
+    throw new Error(e.message + ' — preview: ' + seen);
+  }
   results.image_preview = await cdp.eval(`({width: ${img}.naturalWidth, height: ${img}.naturalHeight,
     src: ${img}.getAttribute('src').slice(0, 40)})`);
 }
