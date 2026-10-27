@@ -213,16 +213,16 @@ echo "TASK_DONE"`)
 }
 
 func TestBackgroundPolicyResolve(t *testing.T) {
-	got := BackgroundPolicy{}.resolve()
+	got := BackgroundPolicy{}.Resolve()
 	if got.Grace != DefaultBackgroundGrace || got.Wait != DefaultBackgroundWait || got.TerminateGrace != DefaultTerminateGrace {
 		t.Errorf("zero value must resolve to defaults, got %+v", got)
 	}
 	// A negative wait is the documented way to say "report it, do not wait".
-	if got := (BackgroundPolicy{Wait: -1}).resolve(); got.Wait != 0 {
+	if got := (BackgroundPolicy{Wait: -1}).Resolve(); got.Wait != 0 {
 		t.Errorf("negative Wait must resolve to no wait, got %v", got.Wait)
 	}
 	custom := BackgroundPolicy{Grace: time.Second, Wait: time.Hour, TerminateGrace: time.Minute}
-	if got := custom.resolve(); got != custom {
+	if got := custom.Resolve(); got != custom {
 		t.Errorf("explicit values must be preserved, got %+v", got)
 	}
 }
