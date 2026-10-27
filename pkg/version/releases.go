@@ -64,6 +64,10 @@ var publishedReleases = []Release{
 	// Protocol v22: the device channels of forwarded USB and L2 devices
 	// (Task 20431).
 	{Tag: "v0.0.6", Protocol: 22, Sequence: 1116},
+	// Protocol v26: the isolation probe, after the model relay's CA for the
+	// harness (v23), firewall denial reports (v24) and two hub CAs during a
+	// rotation (v25) (Task 20445).
+	{Tag: "v0.0.7", Protocol: 26, Sequence: 1170},
 }
 
 // ReleaseSequence returns the sequence the release tag's binaries carry, and

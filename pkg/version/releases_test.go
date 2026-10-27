@@ -96,7 +96,7 @@ func TestIsRelease(t *testing.T) {
 
 // TestReleaseProtocolBounds pins the bounds for the four positions a tag can
 // have relative to the table, using the real entries: v0.0.1 speaks v6,
-// v0.0.4 v13, v0.0.5 v21 and v0.0.6 v22.
+// v0.0.4 v13, v0.0.5 v21, v0.0.6 v22 and v0.0.7 v26.
 func TestReleaseProtocolBounds(t *testing.T) {
 	for _, tc := range []struct {
 		tag    string
@@ -107,6 +107,7 @@ func TestReleaseProtocolBounds(t *testing.T) {
 		{"v0.0.4", 13, 13},
 		{"v0.0.5", 21, 21},
 		{"v0.0.6", 22, 22},
+		{"v0.0.7", 26, 26},
 		// Between two listed releases. v0.0.2 and v0.0.3 are real tags that
 		// were never published; their true protocols (v7, v13) lie inside.
 		{"v0.0.2", 6, 13},
@@ -114,11 +115,12 @@ func TestReleaseProtocolBounds(t *testing.T) {
 		{"v0.0.4-rc1", 6, 13},
 		{"v0.0.5-rc1", 13, 21},
 		{"v0.0.6-rc1", 21, 22},
+		{"v0.0.7-rc1", 22, 26},
 		// Before everything listed: nothing below, the oldest above.
 		{"v0.0.0", 0, 6},
 		// After everything listed: newer than this build, no upper bound.
-		{"v0.0.7", 22, 0},
-		{"v1.0.0", 22, 0},
+		{"v0.0.8", 26, 0},
+		{"v1.0.0", 26, 0},
 		// Not a release at all.
 		{"dev", 0, 0},
 		{"dev+g8b418e2", 0, 0},

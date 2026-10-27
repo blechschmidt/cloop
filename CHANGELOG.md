@@ -10,6 +10,38 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-10-27
+
+Three things to know before upgrading. **Grants to a label selector issued on
+an earlier build start delivering.** 0.0.6 accepted, listed and audited a grant
+to `label:region=eu,gpu=true` and gave it to no run; 0.0.7 gives it to every
+executor the hub records with those labels. List the grants whose subject
+begins `label:` with `cloop secret grants` and `cloop egress list`, and revoke
+the ones you did not mean to keep before you upgrade (Task 20432). **Executor
+agents speak protocol v26**, against 0.0.6's v22: v23 hands the model relay's
+CA to the harness, v24 reports firewall refusals, v25 takes two CAs during a
+rotation and v26 answers the isolation probe. A device left on 0.0.6 keeps
+running its work, but its runtimes stay unverified and its refusals unreported
+until it is upgraded. **Migrations 0079–0082 are additive and guarded**: four
+defaulted columns on `broker_keks` and four new tables created `IF NOT EXISTS`,
+each recorded `additive`, so a 0.0.6 build sharing the database — a hub member
+not yet upgraded, or a dashboard or `cloop run` left on an older build — still
+opens it.
+
+The release carries the security fixes `main` has made since 0.0.6: a build
+with Go 1.26.10, for crypto/x509's GO-2026-6809 (Task 20440); a git proxy that
+read a SHA-256 repository's ref delete as an update, so a session allowed to
+update but not to delete could delete (Task 20436); dashboard model calls that
+ran an agent on the hub's host on the hub's own Claude login (Task 20442); and
+resumed and failed-over runs that acted on that login rather than on their
+starter's (Task 20443). With them come verified isolation claims (Task 20439),
+online rotation of the hub's CA (Task 20438), push scanning (Task 20436), the
+model relay (Task 20435), firewall refusals and denial logs (Task 20437),
+label-selector grants that deliver (Task 20432), sealing keys held in a KMS
+(Task 20433), Hub health in Settings (Task 20434) and a `copilot` provider
+(Task 20447). Read *Upgrading from 0.0.6* before upgrading a hub, a Helm release
+or a device.
+
 ### Security
 
 - **A run the hub carries on by itself acts on its starter's Claude account,
@@ -205,6 +237,115 @@ schema and the hub's HTTP API may change in any release.
   log holds of an old page lasts until the log is reused, an image a build
   before this one freed lasts until SQLite reuses its space, and a backup taken
   before the retirement keeps everything (Task 20433).
+
+### Upgrading from 0.0.6
+
+0.0.7 starts delivering grants 0.0.6 accepted and never delivered, and refuses
+some pushes, connections and dashboard calls 0.0.6 let through. Act on *Before
+you upgrade*, then upgrade every hub process on a control plane together, then
+the edge devices, and run 0.0.7's `cloop hub doctor` right after.
+
+#### Before you upgrade
+
+- **Revoke the label grants you did not mean to keep.** On 0.0.7 a grant to a
+  label selector reaches every executor the hub records with those labels — an
+  enrolled device by its agent credential's labels, a virtual executor by its
+  device's, a configured executor by `executors.container.labels` or
+  `executors.kubernetes.labels` — on every credential path: a run's lease, its
+  egress session, the workspace fetch, the GitHub App picker. List them with
+  `cloop secret grants` and `cloop egress list` and revoke with `cloop secret
+  revoke <grant-id>` or `cloop egress revoke <grant-id>`; after the upgrade the
+  Secrets panel shows which executors each one reaches (Task 20432).
+- **Back up: a rollback is a restore.** Migrations 0079–0082 add four defaulted
+  columns to `broker_keks` and the tables `network_denials`,
+  `hub_ca_rotations`, `hub_ca_members` and `isolation_evidence`, all created
+  `IF NOT EXISTS` and recorded `additive`, so a 0.0.6 binary still opens and
+  saves an upgraded database — and ignores what they hold: it places runs by
+  their runtimes' names alone, records no firewall refusal and knows nothing of
+  a CA rotation. Run `cloop db backup` in the hub's directory and in each
+  project's (Tasks 20433, 20437, 20438, 20439).
+
+#### Running 0.0.6 and 0.0.7 side by side
+
+Members of one control plane can run both releases during the upgrade, but
+0.0.7's fixes hold only on its own members:
+
+- **A 0.0.6 member delivers no label grant**, runs the Split preview, Revise,
+  the blocker analysis and the plan assistant inside the hub on the hub's own
+  Claude login, and resumes a capped or failed-over run on that login rather
+  than its starter's (Tasks 20432, 20442, 20443).
+- **A 0.0.6 member's git proxy scans no push** and reads a SHA-256 repository's
+  delete as an update (Task 20436).
+- **Turn on `executors.model_relay` and `secrets.kms` only once every member
+  runs 0.0.7.** A 0.0.6 member serves no relay session, and once a KMS holds a
+  live key-encryption key a 0.0.6 member refuses to start or seal: the key's
+  salt is a decoy no passphrase derives (Tasks 20433, 20435).
+- **A CA rotation's `--activate` is refused while any member runs an older
+  build** (Task 20438).
+
+#### Executors and devices
+
+- **A device on 0.0.6 speaks protocol v22 and keeps running its work.** A 0.0.7
+  hub records its runtimes as unverified — a project requiring isolation is
+  then admitted with a warning, or refused under
+  `executors.isolation_evidence: required` — reports none of its sandboxes'
+  firewall refusals, and relays none of its runs: they get their Claude
+  credential as before, and the run's history says why. Press Upgrade on its
+  row in the Executors panel (Tasks 20435, 20437, 20439).
+- **The hub probes each runtime it can dispatch to**: a short-lived sandbox
+  from the executor's own image, never a project's, runs `cloop isolation-probe`
+  at every reconcile, a device's hello, a runtime change and daily (Task
+  20439).
+- **A sandbox's firewall refuses what it blocks** — a TCP reset, otherwise an
+  ICMP "administratively prohibited" — where 0.0.6 dropped it, so a workload
+  that waited out a timeout now fails at once. `drop_denied: true` on a rule set
+  (`executors.container.egress_filter` for the hub's own executor) keeps the
+  silent drop (Task 20437).
+
+#### Operations, CLI and API
+
+- **New routes**, for a path allowlist in front of the hub: `GET
+  /api/hub/health`, `GET /api/hub/ca` and `POST /api/hub/ca/rotate`
+  (`config.write`), `POST /api/tasks/{id}/blocker`, `GET
+  /api/tasks/{id}/network`, `GET /api/firewall/blocked`, `GET
+  /api/grants/matches`, `GET` and `PUT /api/executors/{id}/labels`, `POST
+  /api/executors/{id}/isolation-probe` and `PUT
+  /api/projects/{idx}/model-relay`. The model relay answers under
+  `/_anthropic` on the git proxy's listener, or on the hub's own with
+  `executors.model_relay.listener: dashboard` (Tasks 20432, 20434, 20435, 20437,
+  20438, 20439, 20442).
+- **The blocker analysis is a `POST`.** `GET
+  /api/tasks/{id}/blocker?analyze=true` answers 405, and `cloop task ai-blocker
+  --json` frames its report between `<<<cloop-json:begin>>>` and
+  `<<<cloop-json:end>>>` (Task 20442).
+- **The Split preview, Revise, the blocker analysis and the plan assistant run
+  on the project's executor** on the caller's Claude account: a sandboxed
+  project needs a Claude credential granted for them as for a run (409
+  `harness_credential_missing`), and a provider-call or task replay is refused
+  for a project bound to an isolating executor (Task 20442).
+- **A resumed or failed-over run that cannot act for its starter stays
+  paused** with the reason `starter_unavailable` — their Claude home gone, they
+  denied or left off the executor's access list — and is not retried: someone
+  starts it again (Task 20443).
+- **The git proxy scans every push** (`executors.git_proxy.push_scan: values`,
+  the default whenever the proxy runs): a push carrying a value the run was
+  given is refused, as is one past `push_scan_max_object_mb` (1024),
+  `push_scan_max_push_mb` (4096) or `push_scan_seconds` (300). `off` keeps
+  0.0.6's behaviour; a project may tighten the scan, never loosen it (Task
+  20436).
+- **`budget.block_extra_usage` applies to `claudecode` runs only**, and its
+  hold is a usage-cap pause the hub resumes when the window reopens (Task
+  20440).
+- **Cost reports and `daily_cost_usd`** count Claude Opus 4.5 and 4.6 at a
+  third of what 0.0.6 counted and Haiku 4.5 at a quarter more (Task 20435).
+- **Retire a KMS-held key with 0.0.7 or later**: an older `cloop hub key
+  retire` leaves the KMS's ciphertext of the key behind (Task 20433).
+- **Helm chart 0.5.0 → 0.6.0**: the `kms.*` values run a KMS v2 plugin
+  sidecar or reach Vault Transit; `kms.enabled` is off by default, so a release
+  upgraded with its old values behaves as before (Task 20433).
+- **`cloop hub doctor`** checks `executors.isolation`, `secrets.kms.*` and the
+  hub CA's rotation and expiry, and its probes honour `HTTPS_PROXY` (Tasks
+  20433, 20434, 20438, 20439).
 
 ### Added
 
