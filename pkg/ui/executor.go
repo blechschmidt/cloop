@@ -812,8 +812,16 @@ type dispatchOptions struct {
 // it, before the dispatch returns: a run its member could not record is one
 // nothing would adopt, so it is refused rather than run.
 func (s *Server) recordingRun(workDir, handler string) dispatchOption {
+	return s.recordingRunHolding(workDir, handler, nil)
+}
+
+// recordingRunHolding is recordingRun for a run that holds its tenant's
+// concurrency slot: the slot is the run's from the moment it is recorded, so
+// the owner row names it for whichever member settles the run (Task 20452).
+func (s *Server) recordingRunHolding(workDir, handler string, slot *heldSlot) dispatchOption {
 	return func(o *dispatchOptions) {
 		o.record = func(ex executor.Executor, handleID string) error {
+			slot.bind(ex.ID(), handleID)
 			return s.recordRunDispatch(workDir, handler, ex, handleID)
 		}
 	}

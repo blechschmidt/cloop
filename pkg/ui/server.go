@@ -720,6 +720,11 @@ type Server struct {
 	// while this one was streaming them, until their consumer notices. Guarded
 	// by runHandleMu.
 	handedOverRuns map[string]bool
+	// runSlots holds the tenants' concurrency slots this hub holds for the
+	// runs it streams, recorded on their owner rows (Task 20452). See
+	// run_quota_slot.go.
+	runSlotsOnce sync.Once
+	runSlots     *slotRegistry
 
 	// Suggest jobs, one per project and keyed by workDir: each project's
 	// latest brainstorm or plan, held while its proposals are reviewed. See
@@ -3802,13 +3807,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every path from here must give the slot back exactly once, or a run
 	// that never started narrows the tenant until the next reconciliation.
-	slotHeld := true
-	releaseSlot := func() {
-		if slotHeld {
-			slotHeld = false
-			s.releaseQuota(quotaID, quota.ResConcurrentTasks, 1)
-		}
-	}
+	// Once dispatched, the slot is the run's, and goes with it to a member
+	// that adopts it (Task 20452).
+	slot := s.holdRunSlot(quotaID, quota.ResConcurrentTasks, 1)
+	releaseSlot := slot.giveBack
 
 	args := []string{"run"}
 
@@ -3843,7 +3845,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	// returns: a run that cannot be recorded is refused (Task 20419).
 	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), harnessClear, payer,
 		workDir, append([]string{exe}, args...), map[string]string{"handler": "run"},
-		s.recordingRun(workDir, "run"))
+		s.recordingRunHolding(workDir, "run", slot))
 	if err != nil {
 		// 409 when strict no-host-execution mode refused the dispatch, so
 		// the browser can show the remediation instead of a generic 500
@@ -7056,11 +7058,10 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Every path from here gives the slot back exactly once: the error paths
-	// below, or the run's own watcher when it ends.
-	var slotOnce sync.Once
-	releaseSlot := func() {
-		slotOnce.Do(func() { s.releaseQuota(quotaID, quota.ResConcurrentTasks, 1) })
-	}
+	// below, or the run's own watcher when it ends — or the member the run
+	// moves to, when it ends there (Task 20452).
+	slot := s.holdRunSlot(quotaID, quota.ResConcurrentTasks, 1)
+	releaseSlot := slot.giveBack
 
 	exe := s.selfExe()
 	args := []string{"run"}
@@ -7079,7 +7080,7 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	ex, handle, err := startWorkloadAs(s.claudeEnvResolver(r), harnessClear, payer,
 		entry.Path, append([]string{exe}, args...),
 		map[string]string{"handler": "project-run", "project_name": entry.Name},
-		s.recordingRun(entry.Path, "project-run"))
+		s.recordingRunHolding(entry.Path, "project-run", slot))
 	if err != nil {
 		releaseSlot()
 		s.releaseRunClaim(entry.Path)
@@ -7450,7 +7451,8 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		// The run meets handleRun's admission gates (Task 20391) — the
 		// executor's access list, the daily budget, a concurrency slot. A
 		// refusal is returned beside the project, which was created anyway.
-		refusal, releaseSlot := s.autorunAdmission(r, abs)
+		refusal, slot := s.autorunAdmission(r, abs)
+		releaseSlot := slot.giveBack
 		if refusal != nil {
 			autorunRefused = refusal
 			fmt.Fprintf(os.Stderr, "ui: auto-run for new project %s refused: %v\n", abs, refusal["error"])
@@ -7467,7 +7469,7 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 			runEx, runHandle, startErr := startWorkloadAs(s.claudeEnvResolver(r), s.harnessClearanceFor(r, abs), autoPayer,
 				abs, append([]string{exe}, runArgs...),
 				map[string]string{"handler": "project-new-autorun"},
-				s.recordingRun(abs, "project-new-autorun"))
+				s.recordingRunHolding(abs, "project-new-autorun", slot))
 			streamCtx, cancelStream := context.WithCancel(context.Background())
 			if refused, ok := asHarnessRefusal(startErr); ok {
 				autorunRefused = map[string]any{

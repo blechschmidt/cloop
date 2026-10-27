@@ -74,7 +74,10 @@ type runOwnerMeta struct {
 	// driver keeps for the run's push write-back, which the member adopting
 	// it takes over and restores (Task 20390).
 	Workspace *runWorkspaceMeta `json:"workspace,omitempty"`
-	Started   time.Time         `json:"started,omitzero"`
+	// Slot is the tenant's concurrency slot the run holds, which whichever
+	// member settles it gives back (Task 20452).
+	Slot    *runQuotaSlot `json:"quota_slot,omitempty"`
+	Started time.Time     `json:"started,omitzero"`
 	// RunClaimMeta carries Dispatching, which every observer of the claim
 	// judges by — members and, since Task 20374, processes that are not
 	// members at all. It is embedded rather than restated so the field is
@@ -177,6 +180,8 @@ func (s *Server) writeRunRecord(n *hubcluster.Node, workDir string, ex executor.
 	meta runOwnerMeta) error {
 	defer lockRunMeta(workDir)()
 	fillRunCredentials(&meta, ex.ID(), handleID)
+	// And the tenant's concurrency slot the run holds here (Task 20452).
+	meta.Slot = s.slots().get(ex.ID(), handleID)
 	_, found, err := n.Lookup(ownerRun, workDir)
 	if err != nil {
 		s.log().Warn("cluster", 0, "could not read the run's owner row",
@@ -406,6 +411,10 @@ func (s *Server) detachRun(workDir string) bool {
 		s.markHandedOverLocked(cur.handleID)
 	}
 	s.runHandleMu.Unlock()
+	// Its concurrency slot goes with it, before the stream's consumer wakes
+	// and would give it back: the adopter, whose owner row names the slot,
+	// gives it back when the run ends there (Task 20452).
+	s.slots().moved(run.ex.ID(), run.handleID)
 	if run.cancel != nil {
 		run.cancel()
 	}
@@ -617,6 +626,9 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 	if err != nil || !ok {
 		return
 	}
+	// The tenant's concurrency slot the run holds is this member's to give
+	// back now (Task 20452).
+	slot := s.adoptRunSlot(ex.ID(), meta.Handle, meta.Slot)
 	s.log().Info("cluster", 0, "adopting a run from another hub member",
 		map[string]interface{}{"project": workDir, "from": o.InstanceID, "executor": meta.Executor,
 			"handle": meta.Handle, "reason": why})
@@ -665,6 +677,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 			journalPushWriteBack(workDir, ex, st)
 		}
 		s.reconcileDeadRun(workDir, verdict)
+		slot.giveBack()
 		// Settled here, so counted here: the member that dispatched it, and
 		// counted its start, is gone, and the cluster's sum needs the end.
 		countRunSettled(ex, st, stErr, false, meta.Started)
@@ -684,7 +697,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 	// process that composed them.
 	s.adoptRunDenials(workDir, ex, meta)
 	go watchAdoptedSessions(ex, meta.Handle)
-	s.resumeRun(workDir, ex, meta.Handle)
+	s.resumeRun(workDir, ex, meta.Handle, slot)
 }
 
 // adoptRunDenials routes an adopted run's refusals to it.
@@ -729,12 +742,16 @@ func (s *Server) settleOrphanedLostRun(o hubcluster.Owner, meta runOwnerMeta, lo
 		if ok, _ := n.Drop(o); ok {
 			s.log().Info("cluster", 0, "cleared the owner row of a run that was failed over",
 				map[string]interface{}{"project": workDir, "member": o.InstanceID})
+			// Its replacement holds no slot, so this one comes back with the
+			// row rather than never (Task 20452).
+			s.releaseRecordedSlot(meta.Slot)
 		}
 		return
 	}
 	if ok, _ := n.Drop(o); !ok {
 		return // another member got there first
 	}
+	s.releaseRecordedSlot(meta.Slot)
 	detail := fmt.Sprintf("executor %s stopped answering and nothing replaced the run", meta.Executor)
 	if loss.Exhausted() {
 		detail = exhaustedDetail(meta.Executor, max(loss.Attempt-1, 0))
@@ -748,7 +765,10 @@ func (s *Server) settleOrphanedLostRun(o hubcluster.Owner, meta runOwnerMeta, lo
 }
 
 // resumeRun starts streaming and settling a run this member did not dispatch.
-func (s *Server) resumeRun(workDir string, ex executor.Executor, handleID string) {
+//
+// slot is the concurrency slot the run holds, given back when it is settled
+// here; nil when it holds none.
+func (s *Server) resumeRun(workDir string, ex executor.Executor, handleID string, slot *heldSlot) {
 	streamCtx, cancel := context.WithCancel(context.Background())
 	lines, err := ex.Stream(streamCtx, handleID)
 	if err != nil {
@@ -756,6 +776,7 @@ func (s *Server) resumeRun(workDir string, ex executor.Executor, handleID string
 		fmt.Fprintf(os.Stderr, "ui: adopted run %s on %s cannot be streamed: %v\n", handleID, ex.ID(), err)
 		s.releaseRunClaim(workDir)
 		s.runEnded(workDir, ex, handleID)
+		slot.giveBack()
 		return
 	}
 	s.liveLogSetRunning(workDir, true)
@@ -767,7 +788,7 @@ func (s *Server) resumeRun(workDir string, ex executor.Executor, handleID string
 	_ = s.recordRunDispatch(workDir, "adopted", ex, handleID)
 	s.broadcastRunState(workDir, true, true)
 	s.publishRunState(workDir, true)
-	go s.consumeRunOutput(workDir, ex, handleID, lines, nil)
+	go s.consumeRunOutput(workDir, ex, handleID, lines, slot.giveBack)
 }
 
 // scanRunning is multiui.ScanRunningDirs plus the runs no walk of this

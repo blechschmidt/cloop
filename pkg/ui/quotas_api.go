@@ -408,26 +408,33 @@ func (s *Server) ReconcileQuotas() {
 
 	entries := s.allProjectEntries()
 	for _, entry := range entries {
+		// A run in flight holds the slot its owner row names (Task 20452):
+		// the identity that pressed Run, recorded so that whichever member
+		// settles the run gives the slot back. A run whose row names none — a
+		// build before that dispatched it — is attributed to the project's
+		// owner, the only attribution derivable for it, and the right one for
+		// its spend either way; on a shared project, to nobody.
+		if st, err := state.LoadLite(entry.Path); err == nil && st != nil {
+			// A run waiting out a full disk still holds its slot (Task 20381).
+			if st.ClaimsLiveRun() {
+				if slot := s.recordedRunSlot(entry.Path); slot != nil &&
+					quota.Resource(slot.Resource) == quota.ResConcurrentTasks {
+					live.Tasks[slot.Identity] += slot.N
+				} else if entry.Owner != "" {
+					live.Tasks[entry.Owner]++
+				}
+			}
+		}
+
 		if entry.Owner == "" {
 			continue // shared project: owned by the deployment, not a tenant
 		}
 		// A feature (Task 20341) carries its project's owner but is part of
 		// that project: it takes no project slot of its own — creating one
 		// never charged one, so counting it here would take a slot that
-		// removing it could never give back. Its run still counts below.
+		// removing it could never give back. Its run still counts above.
 		if !entry.IsFeature() {
 			live.Projects[entry.Owner]++
-		}
-
-		// A run in flight is attributed to the project's owner. That is the
-		// only attribution derivable after a restart — the identity that
-		// pressed Run did not survive the process — and it is the right one:
-		// the owner is who the run's spend lands on either way.
-		if st, err := state.LoadLite(entry.Path); err == nil && st != nil {
-			// A run waiting out a full disk still holds its slot (Task 20381).
-			if st.ClaimsLiveRun() {
-				live.Tasks[entry.Owner]++
-			}
 		}
 	}
 
@@ -808,9 +815,10 @@ var metricsMu sync.Mutex
 // start the moment it is created (Task 20391), without writing a response:
 // the project was created either way, and a refused run is reported beside it.
 //
-// It returns the refusal, or nil and the function that gives the slot back,
-// which the caller must call exactly once when the run ends or fails to start.
-func (s *Server) autorunAdmission(r *http.Request, workDir string) (refusal map[string]any, release func()) {
+// It returns the refusal, or nil and the slot the run holds — nil when it
+// holds none — which the caller gives back once when the run ends or fails to
+// start, and which goes with the run to a member that adopts it (Task 20452).
+func (s *Server) autorunAdmission(r *http.Request, workDir string) (refusal map[string]any, slot *heldSlot) {
 	registerBuiltinExecutors()
 	if ex, err := executor.ResolveBinding(workDir); err == nil && ex != nil {
 		allowed, err := s.callerMayUseExecutor(r, ex.ID())
@@ -830,11 +838,10 @@ func (s *Server) autorunAdmission(r *http.Request, workDir string) (refusal map[
 			}, nil
 		}
 	}
-	noop := func() {}
 	e := s.quotas()
 	subject := s.quotaSubject(r)
 	if e == nil || subject == nil {
-		return nil, noop
+		return nil, nil
 	}
 	denied := func(err error) map[string]any {
 		out := map[string]any{"code": string(apierror.CodeQuotaExceeded), "error": err.Error()}
@@ -850,7 +857,5 @@ func (s *Server) autorunAdmission(r *http.Request, workDir string) (refusal map[
 	if _, err := e.Admit(subject, quota.ResConcurrentTasks, 1); err != nil {
 		return denied(err), nil
 	}
-	var once sync.Once
-	identity := subject.Label()
-	return nil, func() { once.Do(func() { e.Release(identity, quota.ResConcurrentTasks, 1) }) }
+	return nil, s.holdRunSlot(subject.Label(), quota.ResConcurrentTasks, 1)
 }

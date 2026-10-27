@@ -216,7 +216,13 @@ database.
 
 - **Quota counters** are checked and incremented in one database transaction,
   so two members admitting the same tenant at once cannot both slip under a
-  limit. Overrides changed on one member are reloaded by all.
+  limit. Overrides changed on one member are reloaded by all. A run's
+  concurrency slot is recorded on its owner row and goes where the run goes:
+  the member that settles the run gives it back, and a member that lets go of
+  a run gives nothing back (Task 20452). Before, a run that moved between
+  members kept its slot for good — every rolling update narrowed every tenant
+  with a run in flight by one. A run a build from before that dispatched still
+  does.
 - **CI token replay protection**: a token's `jti` presented to one member is
   spent on all of them.
 - **Session revocation** evicts the session from every member's cache, not
@@ -703,7 +709,8 @@ readiness does not depend on leadership: every member serves.
   one member is dispatched by the agent's member and watched from the third; its
   member is SIGKILLed and a survivor adopts the run without restarting it; Stop
   pressed on a member not streaming a run reaches the one that is; a SIGTERM
-  hands a run over. Along the way it scrapes every member's `/metrics`: the
+  hands a run over, and each run gives its tenant's concurrency slot back on the
+  member that settles it. Along the way it scrapes every member's `/metrics`: the
   gauges read from the shared database come from the leader alone, before and
   after a member dies, and the run's start, completion and cancellation are each
   counted once across the cluster. It runs in CI as the `hub-cluster` job,

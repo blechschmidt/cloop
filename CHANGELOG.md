@@ -150,6 +150,19 @@ schema and the hub's HTTP API may change in any release.
   its hub process; that is now stated as a residual risk and pinned by a test
   (Task 20451).
 
+- **A run that moves between hub members gives its tenant's concurrency slot
+  back when it ends.** The member that dispatched a run gave the slot back only
+  when its own stream of the run closed: a member stopped mid-run — every
+  member, in a rolling update — exited first and never did, and the member that
+  adopted the run did not know it held one, so every rolling update narrowed
+  each tenant with a run in flight by one concurrent task until a member
+  started alone and rebuilt the gauges; a tenant capped at one run could not
+  start another. And a live member letting go of a run gave the slot back while
+  the run went on elsewhere. The slot is now recorded on the run's owner row
+  (`quota_slot`), given back once by whichever member settles the run, and
+  never by a member the run left; the gauges a lone member rebuilds count a run
+  for the identity that started it. A run dispatched by a build before this one
+  carries no record and still keeps its slot past a handover (Task 20452).
 - **A device on the latest release is no longer shown as a material "cannot be
   compared" skew under a hub running a build of main.** Version strings cannot
   order a release against a build of main, so the Executors panel and

@@ -42,6 +42,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -108,6 +109,9 @@ type world struct {
 	// rootEnv replaces the hubs' root key setting when set — the sources a
 	// change of root rolls out (Task 20425).
 	rootEnv []string
+	// runToken starts runs as a scoped API token's minter, whose
+	// concurrency slot each run holds (Task 20452); empty, the static token.
+	runToken string
 }
 
 type hub struct {
@@ -129,6 +133,11 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	}
 	w := newWorld(t)
 	w.initProjects()
+	// The runs are started with a scoped API token, so each holds its
+	// tenant's concurrency slot — which must come back when the run ends on
+	// whichever member settles it (Task 20452).
+	w.runToken = strings.TrimSpace(w.runOut(w.hubDir, "hub", "token", "create", "cluster-e2e-runner",
+		"--role", "admin", "--quiet"))
 	for i := 0; i < 3; i++ {
 		w.startHub()
 	}
@@ -161,7 +170,7 @@ func TestHubClusterEndToEnd(t *testing.T) {
 
 	// ── 3. A run started on a member that does not hold the agent ──────────
 	starter, watcher := w.otherTwo(holder)
-	resp := w.post(starter, fmt.Sprintf("/api/run?project_idx=%d", projIdx))
+	resp := w.startRun(starter, projIdx)
 	if resp.status != http.StatusOK {
 		t.Fatalf("POST /api/run on hub %d = %d: %s", starter.port, resp.status, resp.body)
 	}
@@ -172,6 +181,11 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	// Counted once, by the member that dispatched it — not by the member the
 	// request arrived at, which forwarded it.
 	w.waitClusterSum("the run's start", w.hubs, 1, `cloop_executor_task_starts_total{executor_kind="remote",`)
+	// It holds its tenant's slot, and its owner row says so.
+	w.waitSlots("the run to hold its tenant's concurrency slot", 1)
+	if slot, err := w.queryControlPlane(`SELECT json_extract(meta, '$.quota_slot.identity') FROM hub_owners WHERE kind = 'run' AND key = ?`, w.projDir); err != nil || slot == "" {
+		t.Fatalf("the run's owner row names no concurrency slot (%q, %v): a member adopting it could not give it back", slot, err)
+	}
 
 	// ── 4. Its output reaches a dashboard on the third member ──────────────
 	ws := w.openStream(watcher, projIdx)
@@ -218,6 +232,9 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	if n := w.stubStarts(); n != 1 {
 		t.Fatalf("the harness was started %d times for one task: the run was started over, not adopted", n)
 	}
+	// Given back by the member that adopted it: the one that dispatched it
+	// died holding it.
+	w.waitSlots("the adopted run's slot to be given back", 0)
 	// Settled — and counted — by the member that adopted it; the member that
 	// counted its start died with that count.
 	w.waitClusterSum("the adopted run's completion", survivors, 1,
@@ -236,7 +253,7 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	}
 	w.addTask("Write world.txt")
 	starts := w.stubStarts()
-	if r := w.post(survivors[0], fmt.Sprintf("/api/run?project_idx=%d", projIdx)); r.status != http.StatusOK {
+	if r := w.startRun(survivors[0], projIdx); r.status != http.StatusOK {
 		t.Fatalf("second run on hub %d = %d: %s", survivors[0].port, r.status, r.body)
 	}
 	w.waitStubStarts(starts + 1)
@@ -268,13 +285,14 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	if got, err := w.queryProject(`SELECT status FROM plan_tasks WHERE id = 2`); err != nil || got == "done" {
 		t.Fatalf("task 2 is %q (%v) after Stop; a stopped run must not complete it", got, err)
 	}
+	w.waitSlots("the stopped run's slot to be given back", 0)
 
 	// ── 9. A rolling update: the member streaming a run is shut down ───────
 	// SIGTERM is what an orchestrator sends a replica it is replacing. The
 	// member hands over what it owns on the way out, so the last one standing
 	// picks the run up without waiting out a failure-detection timeout.
 	starts = w.stubStarts()
-	if r := w.post(stopper, fmt.Sprintf("/api/run?project_idx=%d", projIdx)); r.status != http.StatusOK {
+	if r := w.startRun(stopper, projIdx); r.status != http.StatusOK {
 		t.Fatalf("resumed run on hub %d = %d: %s", stopper.port, r.status, r.body)
 	}
 	w.waitStubStarts(starts + 1)
@@ -300,6 +318,9 @@ func TestHubClusterEndToEnd(t *testing.T) {
 	if n := w.stubStarts() - starts; n != 1 {
 		t.Fatalf("the harness was started %d times for the resumed run: it was started over, not handed over", n)
 	}
+	// Neither given back by the member that handed the run over while the
+	// run went on, nor kept: the member it moved to gave it back.
+	w.waitSlots("the handed-over run's slot to be given back", 0)
 	// Whichever member led at the start, the one left standing leads now.
 	w.waitClusterVia(staying, "the last member to lead", func(s clusterStatus) bool {
 		return s.Leader == staying.id
@@ -677,11 +698,17 @@ type response struct {
 
 func (w *world) do(method, base, path string, body []byte) response {
 	w.t.Helper()
+	return w.doWith(token, method, base, path, body)
+}
+
+// doWith is do with another bearer credential.
+func (w *world) doWith(bearer, method, base, path string, body []byte) response {
+	w.t.Helper()
 	req, err := http.NewRequest(method, base+path, bytes.NewReader(body))
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -695,6 +722,15 @@ func (w *world) do(method, base, path string, body []byte) response {
 }
 
 func (w *world) post(h *hub, path string) response { return w.do(http.MethodPost, h.url(), path, nil) }
+
+// startRun starts the project's run at h, as runToken's minter when set.
+func (w *world) startRun(h *hub, projIdx int) response {
+	w.t.Helper()
+	if w.runToken == "" {
+		return w.post(h, fmt.Sprintf("/api/run?project_idx=%d", projIdx))
+	}
+	return w.doWith(w.runToken, http.MethodPost, h.url(), fmt.Sprintf("/api/run?project_idx=%d", projIdx), nil)
+}
 
 func (w *world) waitHTTP(u string) {
 	w.eventually("the hub at "+u+" to answer", 30*time.Second, func() bool {
@@ -876,6 +912,38 @@ func (w *world) waitProjectStatus(want string) {
 		got, err := w.queryProject(`SELECT value FROM metadata WHERE key = 'status'`)
 		return err == nil && got == want
 	})
+}
+
+// queryControlPlane reads one value from the hubs' shared database.
+func (w *world) queryControlPlane(query string, args ...any) (string, error) {
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(w.hubDir, ".cloop", "state.db")+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+	var v sql.NullString
+	err = db.QueryRow(query, args...).Scan(&v)
+	return v.String, err
+}
+
+// waitSlots waits until the tenants hold want concurrency slots between them,
+// as the members' shared counters record it.
+func (w *world) waitSlots(what string, want int) {
+	w.t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		got, err := w.queryControlPlane(`SELECT CAST(COALESCE(SUM(value), 0) AS INTEGER) FROM quota_counters ` +
+			`WHERE resource = 'max_concurrent_tasks' AND bucket = ''`)
+		if err == nil && got == strconv.Itoa(want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			rows, _ := w.queryControlPlane(`SELECT group_concat(identity || '/' || resource || '=' || value, ', ') FROM quota_counters`)
+			w.t.Fatalf("timed out after 60s waiting for %s: %d slot(s) wanted, %q held (%v); counters: %s",
+				what, want, got, err, rows)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // stubStarts counts the stub harness's invocations so far.
