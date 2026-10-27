@@ -1,0 +1,2 @@
+# github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/broken
+scripts/ci-annotate/testdata/red/broken/broken.go:6:38: undefined: sum

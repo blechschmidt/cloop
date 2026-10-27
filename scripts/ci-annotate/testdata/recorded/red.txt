@@ -1,0 +1,222 @@
+# github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/missing
+scripts/ci-annotate/testdata/red/missing/missing_test.go:8:2: no required module provides package github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/nowhere; to add it:
+	go get github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/nowhere
+FAIL	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/missing [setup failed]
+# github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/broken [github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/broken.test]
+scripts/ci-annotate/testdata/red/broken/broken.go:6:38: undefined: sum
+# github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/vetted
+# [github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/vetted]
+scripts/ci-annotate/testdata/red/vetted/vetted_test.go:12:14: fmt.Printf format %d has arg "seven" of wrong type string
+FAIL	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/broken [build failed]
+PASS
+the fixture's server did not shut down
+FAIL	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/exits	0.026s
+--- FAIL: TestAssertion (0.00s)
+    failing_test.go:14: comparing the totals
+    failing_test.go:16: 2+2 = 4, want 5
+--- FAIL: TestFatal (0.00s)
+    failing_test.go:21: cannot continue:
+        the store answered 503
+        after 3 attempts
+--- FAIL: TestNested (0.00s)
+    --- FAIL: TestNested/fails (0.00s)
+        failing_test.go:27: the leaf failed
+    --- FAIL: TestNested/deeper (0.00s)
+        --- FAIL: TestNested/deeper/still_deeper (0.00s)
+            failing_test.go:31: two levels down
+--- FAIL: TestLongLog (0.00s)
+    failing_test.go:48: progress line 1 of 80
+    failing_test.go:48: progress line 2 of 80
+    failing_test.go:48: progress line 3 of 80
+    failing_test.go:48: progress line 4 of 80
+    failing_test.go:48: progress line 5 of 80
+    failing_test.go:48: progress line 6 of 80
+    failing_test.go:48: progress line 7 of 80
+    failing_test.go:48: progress line 8 of 80
+    failing_test.go:48: progress line 9 of 80
+    failing_test.go:48: progress line 10 of 80
+    failing_test.go:48: progress line 11 of 80
+    failing_test.go:48: progress line 12 of 80
+    failing_test.go:48: progress line 13 of 80
+    failing_test.go:48: progress line 14 of 80
+    failing_test.go:48: progress line 15 of 80
+    failing_test.go:48: progress line 16 of 80
+    failing_test.go:48: progress line 17 of 80
+    failing_test.go:48: progress line 18 of 80
+    failing_test.go:48: progress line 19 of 80
+    failing_test.go:48: progress line 20 of 80
+    failing_test.go:48: progress line 21 of 80
+    failing_test.go:48: progress line 22 of 80
+    failing_test.go:48: progress line 23 of 80
+    failing_test.go:48: progress line 24 of 80
+    failing_test.go:48: progress line 25 of 80
+    failing_test.go:48: progress line 26 of 80
+    failing_test.go:48: progress line 27 of 80
+    failing_test.go:48: progress line 28 of 80
+    failing_test.go:48: progress line 29 of 80
+    failing_test.go:48: progress line 30 of 80
+    failing_test.go:48: progress line 31 of 80
+    failing_test.go:48: progress line 32 of 80
+    failing_test.go:48: progress line 33 of 80
+    failing_test.go:48: progress line 34 of 80
+    failing_test.go:48: progress line 35 of 80
+    failing_test.go:48: progress line 36 of 80
+    failing_test.go:48: progress line 37 of 80
+    failing_test.go:48: progress line 38 of 80
+    failing_test.go:48: progress line 39 of 80
+    failing_test.go:48: progress line 40 of 80
+    failing_test.go:48: progress line 41 of 80
+    failing_test.go:48: progress line 42 of 80
+    failing_test.go:48: progress line 43 of 80
+    failing_test.go:48: progress line 44 of 80
+    failing_test.go:48: progress line 45 of 80
+    failing_test.go:48: progress line 46 of 80
+    failing_test.go:48: progress line 47 of 80
+    failing_test.go:48: progress line 48 of 80
+    failing_test.go:48: progress line 49 of 80
+    failing_test.go:48: progress line 50 of 80
+    failing_test.go:48: progress line 51 of 80
+    failing_test.go:48: progress line 52 of 80
+    failing_test.go:48: progress line 53 of 80
+    failing_test.go:48: progress line 54 of 80
+    failing_test.go:48: progress line 55 of 80
+    failing_test.go:48: progress line 56 of 80
+    failing_test.go:48: progress line 57 of 80
+    failing_test.go:48: progress line 58 of 80
+    failing_test.go:48: progress line 59 of 80
+    failing_test.go:48: progress line 60 of 80
+    failing_test.go:48: progress line 61 of 80
+    failing_test.go:48: progress line 62 of 80
+    failing_test.go:48: progress line 63 of 80
+    failing_test.go:48: progress line 64 of 80
+    failing_test.go:48: progress line 65 of 80
+    failing_test.go:48: progress line 66 of 80
+    failing_test.go:48: progress line 67 of 80
+    failing_test.go:48: progress line 68 of 80
+    failing_test.go:48: progress line 69 of 80
+    failing_test.go:48: progress line 70 of 80
+    failing_test.go:48: progress line 71 of 80
+    failing_test.go:48: progress line 72 of 80
+    failing_test.go:48: progress line 73 of 80
+    failing_test.go:48: progress line 74 of 80
+    failing_test.go:48: progress line 75 of 80
+    failing_test.go:48: progress line 76 of 80
+    failing_test.go:48: progress line 77 of 80
+    failing_test.go:48: progress line 78 of 80
+    failing_test.go:48: progress line 79 of 80
+    failing_test.go:48: progress line 80 of 80
+    failing_test.go:50: the failure after eighty lines
+--- FAIL: TestHostileMessage (0.00s)
+    failing_test.go:56: 100% sure: 
+        ::error file=injected.go,line=1::an injected annotation
+        ::warning::another, with %0A in it
+--- FAIL: TestParallelTwo (0.00s)
+    failing_test.go:43: two of two parallel failures
+--- FAIL: TestParallelOne (0.00s)
+    failing_test.go:38: one of two parallel failures
+FAIL
+FAIL	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/failing	0.035s
+--- FAIL: TestPanics (0.00s)
+panic: runtime error: invalid memory address or nil pointer dereference [recovered, repanicked]
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x5e33a7]
+
+goroutine 8 [running]:
+testing.tRunner.func1.2({0x619400, 0x7ca2f0})
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:1974 +0x419
+testing.tRunner.func1()
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:1977 +0x67f
+panic({0x619400?, 0x7ca2f0?})
+	/opt/hostedtoolcache/go/1.26.10/x64/src/runtime/panic.go:860 +0x13a
+github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/panicking.(*config).limit(...)
+	/home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/panicking/panicking_test.go:9
+github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/panicking.cpuLimit(...)
+	/home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/panicking/panicking_test.go:11
+github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/panicking.TestPanics(0xc000140488)
+	/home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/panicking/panicking_test.go:17 +0x27
+testing.tRunner(0xc000140488, 0x6541e0)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2036 +0x21d
+created by testing.(*T).Run in goroutine 1
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2101 +0xb13
+FAIL	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/panicking	0.019s
+ok  	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing	1.023s
+==================
+WARNING: DATA RACE
+Read at 0x00c0000a2188 by goroutine 10:
+  github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/racy.(*counter).inc()
+      /home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/racy/racy_test.go:12 +0x7e
+  github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/racy.TestRace.func1()
+      /home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/racy/racy_test.go:21 +0x79
+
+Previous write at 0x00c0000a2188 by goroutine 9:
+  github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/racy.(*counter).inc()
+      /home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/racy/racy_test.go:12 +0x90
+  github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/racy.TestRace.func1()
+      /home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/racy/racy_test.go:21 +0x79
+
+Goroutine 10 (running) created at:
+  github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/racy.TestRace()
+      /home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/racy/racy_test.go:19 +0x84
+  testing.tRunner()
+      /opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2036 +0x21c
+  testing.(*T).Run.gowrap1()
+      /opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2101 +0x38
+
+Goroutine 9 (finished) created at:
+  github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/racy.TestRace()
+      /home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/racy/racy_test.go:19 +0x84
+  testing.tRunner()
+      /opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2036 +0x21c
+  testing.(*T).Run.gowrap1()
+      /opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2101 +0x38
+==================
+--- FAIL: TestRace (0.00s)
+    testing.go:1712: race detected during execution of test
+FAIL
+FAIL	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/racy	0.017s
+panic: test timed out after 5s
+	running tests:
+		TestHangs (5s)
+		TestHangs/waiting_on_the_store (5s)
+
+goroutine 8 [running]:
+testing.(*M).startAlarm.func1()
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2802 +0x605
+created by time.goFunc
+	/opt/hostedtoolcache/go/1.26.10/x64/src/time/sleep.go:215 +0x45
+
+goroutine 1 [chan receive]:
+testing.(*T).Run(0xc000132008, {0x645ae3, 0x9}, 0x6531d0)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2109 +0xb3e
+testing.runTests.func1(0xc000132008)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2585 +0x85
+testing.tRunner(0xc000132008, 0xc000139ad0)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2036 +0x21d
+testing.runTests({0x64ba5e, 0x1d}, {0x652534, 0x43}, 0xc000016060, {0x7cae20, 0x2, 0x2}, {0xc2b01d3c5fc3d7cb, 0x12a0bf9ee, ...})
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2583 +0x9ea
+testing.(*M).Run(0xc000102140)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2443 +0xf4c
+main.main()
+	_testmain.go:48 +0x165
+
+goroutine 6 [chan receive]:
+testing.(*T).Run(0xc000132248, {0x649152, 0x14}, 0x653278)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2109 +0xb3e
+github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/slow.TestHangs(0xc000132248)
+	/home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/slow/slow_test.go:11 +0x3a
+testing.tRunner(0xc000132248, 0x6531d0)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2036 +0x21d
+created by testing.(*T).Run in goroutine 1
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2101 +0xb13
+
+goroutine 7 [sleep]:
+time.Sleep(0x34630b8a000)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/runtime/time.go:363 +0x165
+github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/slow.TestHangs.func1(0xc000132488?)
+	/home/runner/work/cloop/cloop/scripts/ci-annotate/testdata/red/slow/slow_test.go:12 +0x27
+testing.tRunner(0xc000132488, 0x653278)
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2036 +0x21d
+created by testing.(*T).Run in goroutine 6
+	/opt/hostedtoolcache/go/1.26.10/x64/src/testing/testing.go:2101 +0xb13
+FAIL	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/slow	5.019s
+FAIL	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/vetted [build failed]
+FAIL

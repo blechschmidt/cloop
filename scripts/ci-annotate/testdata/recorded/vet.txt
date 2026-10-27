@@ -1,0 +1,1 @@
+scripts/ci-annotate/testdata/red/vetted/vetted_test.go:12:14: fmt.Printf format %d has arg "seven" of wrong type string

@@ -1,0 +1,38 @@
+{"Time":"2026-10-27T01:25:52.867469214Z","Action":"start","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing"}
+{"Time":"2026-10-27T01:25:52.869631067Z","Action":"run","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestLogs"}
+{"Time":"2026-10-27T01:25:52.869689998Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestLogs","Output":"=== RUN   TestLogs\n"}
+{"Time":"2026-10-27T01:25:52.869701304Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestLogs","Output":"    passing_test.go:9: FAIL is only a word here, and so is panic: and --- FAIL\n"}
+{"Time":"2026-10-27T01:25:52.869708735Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestLogs","Output":"--- PASS: TestLogs (0.00s)\n"}
+{"Time":"2026-10-27T01:25:52.869714584Z","Action":"pass","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestLogs","Elapsed":0}
+{"Time":"2026-10-27T01:25:52.869721344Z","Action":"run","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests"}
+{"Time":"2026-10-27T01:25:52.869725791Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests","Output":"=== RUN   TestSubtests\n"}
+{"Time":"2026-10-27T01:25:52.869730088Z","Action":"run","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/one"}
+{"Time":"2026-10-27T01:25:52.869733943Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/one","Output":"=== RUN   TestSubtests/one\n"}
+{"Time":"2026-10-27T01:25:52.869742105Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/one","Output":"--- PASS: TestSubtests/one (0.00s)\n"}
+{"Time":"2026-10-27T01:25:52.869747573Z","Action":"pass","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/one","Elapsed":0}
+{"Time":"2026-10-27T01:25:52.86975192Z","Action":"run","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/two"}
+{"Time":"2026-10-27T01:25:52.869755766Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/two","Output":"=== RUN   TestSubtests/two\n"}
+{"Time":"2026-10-27T01:25:52.869761815Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/two","Output":"    passing_test.go:14: skipped on purpose\n"}
+{"Time":"2026-10-27T01:25:52.869768385Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/two","Output":"--- SKIP: TestSubtests/two (0.00s)\n"}
+{"Time":"2026-10-27T01:25:52.869773112Z","Action":"skip","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests/two","Elapsed":0}
+{"Time":"2026-10-27T01:25:52.869777648Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests","Output":"--- PASS: TestSubtests (0.00s)\n"}
+{"Time":"2026-10-27T01:25:52.869792511Z","Action":"pass","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestSubtests","Elapsed":0}
+{"Time":"2026-10-27T01:25:52.869799542Z","Action":"run","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelA"}
+{"Time":"2026-10-27T01:25:52.869803528Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelA","Output":"=== RUN   TestParallelA\n"}
+{"Time":"2026-10-27T01:25:52.869807984Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelA","Output":"=== PAUSE TestParallelA\n"}
+{"Time":"2026-10-27T01:25:52.86981852Z","Action":"pause","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelA"}
+{"Time":"2026-10-27T01:25:52.869823087Z","Action":"run","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelB"}
+{"Time":"2026-10-27T01:25:52.869826993Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelB","Output":"=== RUN   TestParallelB\n"}
+{"Time":"2026-10-27T01:25:52.86983164Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelB","Output":"=== PAUSE TestParallelB\n"}
+{"Time":"2026-10-27T01:25:52.869835626Z","Action":"pause","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelB"}
+{"Time":"2026-10-27T01:25:52.869839832Z","Action":"cont","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelA"}
+{"Time":"2026-10-27T01:25:52.869843047Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelA","Output":"=== CONT  TestParallelA\n"}
+{"Time":"2026-10-27T01:25:52.869848124Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelA","Output":"--- PASS: TestParallelA (0.00s)\n"}
+{"Time":"2026-10-27T01:25:52.86985175Z","Action":"pass","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelA","Elapsed":0}
+{"Time":"2026-10-27T01:25:52.869855345Z","Action":"cont","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelB"}
+{"Time":"2026-10-27T01:25:52.869858861Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelB","Output":"=== CONT  TestParallelB\n"}
+{"Time":"2026-10-27T01:25:52.869863388Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelB","Output":"--- PASS: TestParallelB (0.00s)\n"}
+{"Time":"2026-10-27T01:25:52.869867503Z","Action":"pass","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Test":"TestParallelB","Elapsed":0}
+{"Time":"2026-10-27T01:25:52.869871549Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Output":"PASS\n"}
+{"Time":"2026-10-27T01:25:52.87014484Z","Action":"output","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Output":"ok  \tgithub.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing\t0.002s\n"}
+{"Time":"2026-10-27T01:25:52.870510862Z","Action":"pass","Package":"github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing","Elapsed":0.003}

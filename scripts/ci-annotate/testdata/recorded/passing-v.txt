@@ -1,0 +1,20 @@
+=== RUN   TestLogs
+    passing_test.go:9: FAIL is only a word here, and so is panic: and --- FAIL
+--- PASS: TestLogs (0.00s)
+=== RUN   TestSubtests
+=== RUN   TestSubtests/one
+=== RUN   TestSubtests/two
+    passing_test.go:14: skipped on purpose
+--- PASS: TestSubtests (0.00s)
+    --- PASS: TestSubtests/one (0.00s)
+    --- SKIP: TestSubtests/two (0.00s)
+=== RUN   TestParallelA
+=== PAUSE TestParallelA
+=== RUN   TestParallelB
+=== PAUSE TestParallelB
+=== CONT  TestParallelA
+--- PASS: TestParallelA (0.00s)
+=== CONT  TestParallelB
+--- PASS: TestParallelB (0.00s)
+PASS
+ok  	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing	0.002s

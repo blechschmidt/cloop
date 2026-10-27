@@ -1,0 +1,1 @@
+ok  	github.com/blechschmidt/cloop/scripts/ci-annotate/testdata/red/passing	0.005s
