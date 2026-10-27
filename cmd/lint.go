@@ -81,16 +81,7 @@ Examples:
 			}
 
 			if lintModel == "" {
-				switch pName {
-				case "anthropic":
-					lintModel = cfg.Anthropic.Model
-				case "openai":
-					lintModel = cfg.OpenAI.Model
-				case "ollama":
-					lintModel = cfg.Ollama.Model
-				case "claudecode":
-					lintModel = cfg.ClaudeCode.Model
-				}
+				lintModel = cfg.ModelFor(pName)
 			}
 			if lintModel == "" {
 				lintModel = s.Model

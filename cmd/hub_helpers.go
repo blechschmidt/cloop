@@ -55,16 +55,7 @@ func helperProvider(workdir string, s *state.ProjectState, flagProvider, flagMod
 
 	model := flagModel
 	if model == "" {
-		switch name {
-		case "anthropic":
-			model = cfg.Anthropic.Model
-		case "openai":
-			model = cfg.OpenAI.Model
-		case "ollama":
-			model = cfg.Ollama.Model
-		case "claudecode":
-			model = cfg.ClaudeCode.Model
-		}
+		model = cfg.ModelFor(name)
 	}
 	if model == "" && s != nil {
 		model = s.Model

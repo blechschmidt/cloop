@@ -114,16 +114,7 @@ Examples:
 
 		model := prioritizeModel
 		if model == "" {
-			switch provName {
-			case "anthropic":
-				model = cfg.Anthropic.Model
-			case "openai":
-				model = cfg.OpenAI.Model
-			case "ollama":
-				model = cfg.Ollama.Model
-			case "claudecode":
-				model = cfg.ClaudeCode.Model
-			}
+			model = cfg.ModelFor(provName)
 		}
 
 		provCfg := provider.ProviderConfig{

@@ -3152,6 +3152,27 @@ func (b *BackgroundConfig) Clamp() []string {
 	return notes
 }
 
+// ModelFor returns the model configured for the named provider — its
+// `<provider>.model` key — or "" when the provider has no such key.
+//
+// The one place that maps a provider to its section of this file. Every
+// command used to carry its own copy of this switch, and a provider added to
+// some copies and not others had its configured model honoured by some
+// commands and silently ignored by the rest.
+func (c *Config) ModelFor(providerName string) string {
+	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	case "anthropic":
+		return c.Anthropic.Model
+	case "openai":
+		return c.OpenAI.Model
+	case "ollama":
+		return c.Ollama.Model
+	case "claudecode":
+		return c.ClaudeCode.Model
+	}
+	return ""
+}
+
 // MockConfig holds settings for the deterministic offline mock provider.
 type MockConfig struct {
 	// ResponsesFile is the path (absolute or relative to workdir) to a YAML file

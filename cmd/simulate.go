@@ -94,16 +94,7 @@ Examples:
 
 		modelName := simulateModel
 		if modelName == "" {
-			switch provName {
-			case "anthropic":
-				modelName = cfg.Anthropic.Model
-			case "openai":
-				modelName = cfg.OpenAI.Model
-			case "ollama":
-				modelName = cfg.Ollama.Model
-			case "claudecode":
-				modelName = cfg.ClaudeCode.Model
-			}
+			modelName = cfg.ModelFor(provName)
 		}
 
 		provCfg := provider.ProviderConfig{
@@ -364,16 +355,7 @@ Examples:
 
 		modelName := simulateModel
 		if modelName == "" {
-			switch provName {
-			case "anthropic":
-				modelName = cfg.Anthropic.Model
-			case "openai":
-				modelName = cfg.OpenAI.Model
-			case "ollama":
-				modelName = cfg.Ollama.Model
-			case "claudecode":
-				modelName = cfg.ClaudeCode.Model
-			}
+			modelName = cfg.ModelFor(provName)
 		}
 
 		provCfg := provider.ProviderConfig{

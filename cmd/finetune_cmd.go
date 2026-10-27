@@ -102,16 +102,7 @@ Examples:
 				model = s.Model
 			}
 			if model == "" {
-				switch providerName {
-				case "anthropic":
-					model = appCfg.Anthropic.Model
-				case "openai":
-					model = appCfg.OpenAI.Model
-				case "ollama":
-					model = appCfg.Ollama.Model
-				case "claudecode":
-					model = appCfg.ClaudeCode.Model
-				}
+				model = appCfg.ModelFor(providerName)
 			}
 
 			timeout := 60 * time.Second

@@ -166,16 +166,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 
 	mdl := listenModel
 	if mdl == "" {
-		switch pName {
-		case "anthropic":
-			mdl = cfg.Anthropic.Model
-		case "openai":
-			mdl = cfg.OpenAI.Model
-		case "ollama":
-			mdl = cfg.Ollama.Model
-		case "claudecode":
-			mdl = cfg.ClaudeCode.Model
-		}
+		mdl = cfg.ModelFor(pName)
 	}
 	if mdl == "" && s != nil {
 		mdl = s.Model

@@ -268,16 +268,7 @@ Press Ctrl+C to pause gracefully.`,
 		// flag — unless those are only Default()'s and the project named its
 		// own, which the orchestrator reads from state when this stays empty.
 		if model == "" && !keepStateModel {
-			switch providerName {
-			case "anthropic":
-				model = cfg.Anthropic.Model
-			case "openai":
-				model = cfg.OpenAI.Model
-			case "ollama":
-				model = cfg.Ollama.Model
-			case "claudecode":
-				model = cfg.ClaudeCode.Model
-			}
+			model = cfg.ModelFor(providerName)
 		}
 
 		// Effort: flag > config default. Empty leaves the effort persisted in

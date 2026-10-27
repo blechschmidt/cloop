@@ -94,16 +94,7 @@ Examples:
 			model = s.Model
 		}
 		if model == "" {
-			switch providerName {
-			case "anthropic":
-				model = cfg.Anthropic.Model
-			case "openai":
-				model = cfg.OpenAI.Model
-			case "ollama":
-				model = cfg.Ollama.Model
-			case "claudecode":
-				model = cfg.ClaudeCode.Model
-			}
+			model = cfg.ModelFor(providerName)
 		}
 
 		provCfg := provider.ProviderConfig{

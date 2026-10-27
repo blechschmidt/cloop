@@ -2858,18 +2858,9 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	cfg, cfgErr := config.Load(workDir)
 	if cfgErr == nil {
 		if ps.Model == "" {
-			switch ps.Provider {
-			case "anthropic":
-				ps.Model = cfg.Anthropic.Model
-			case "openai":
-				ps.Model = cfg.OpenAI.Model
-			case "ollama":
-				ps.Model = cfg.Ollama.Model
-			case "claudecode":
-				ps.Model = cfg.ClaudeCode.Model
-				if ps.Model == "" {
-					ps.Model = "claude-sonnet-4-6"
-				}
+			ps.Model = cfg.ModelFor(ps.Provider)
+			if ps.Model == "" && ps.Provider == "claudecode" {
+				ps.Model = "claude-sonnet-4-6"
 			}
 		}
 	}

@@ -947,18 +947,9 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 	// Fall back to config model when state doesn't have one
 	if ps.Model == "" {
 		if cfg, cfgErr := config.Load(entry.Path); cfgErr == nil {
-			switch ps.Provider {
-			case "anthropic":
-				ps.Model = cfg.Anthropic.Model
-			case "openai":
-				ps.Model = cfg.OpenAI.Model
-			case "ollama":
-				ps.Model = cfg.Ollama.Model
-			case "claudecode":
-				ps.Model = cfg.ClaudeCode.Model
-				if ps.Model == "" {
-					ps.Model = "claude-sonnet-4-6" // Claude Code default
-				}
+			ps.Model = cfg.ModelFor(ps.Provider)
+			if ps.Model == "" && ps.Provider == "claudecode" {
+				ps.Model = "claude-sonnet-4-6" // Claude Code default
 			}
 		}
 	}

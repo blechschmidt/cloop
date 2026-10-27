@@ -151,16 +151,7 @@ Examples:
 				}
 				// Derive model from the profile-applied config if not already set.
 				if s.Model == "" {
-					switch cfg.Provider {
-					case "anthropic":
-						s.Model = cfg.Anthropic.Model
-					case "openai":
-						s.Model = cfg.OpenAI.Model
-					case "ollama":
-						s.Model = cfg.Ollama.Model
-					case "claudecode":
-						s.Model = cfg.ClaudeCode.Model
-					}
+					s.Model = cfg.ModelFor(cfg.Provider)
 				}
 			} else {
 				color.Yellow("⚠ profile %q not found: %v", activeProfileName, err)

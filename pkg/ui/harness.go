@@ -81,18 +81,7 @@ func resolveProviderName(workDir string) string {
 // in its state.
 func resolveProjectModel(workDir, providerName string, st *state.ProjectState) string {
 	if cfg, err := config.Load(workDir); err == nil {
-		var m string
-		switch providerName {
-		case "anthropic":
-			m = cfg.Anthropic.Model
-		case "openai":
-			m = cfg.OpenAI.Model
-		case "ollama":
-			m = cfg.Ollama.Model
-		case claudecode.ProviderName:
-			m = cfg.ClaudeCode.Model
-		}
-		if m = strings.TrimSpace(m); m != "" {
+		if m := strings.TrimSpace(cfg.ModelFor(providerName)); m != "" {
 			return m
 		}
 	}
