@@ -6,6 +6,7 @@ package ui
 // against its quota; refused for good when its grant was revoked meanwhile.
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -189,8 +191,15 @@ func TestEgressHeldRequestRetriesAPendingRestore(t *testing.T) {
 	if ok, err := svc.db.TakeProxySession(statedb.ProxySessionEgress, id, "hub_old", "hub_new"); err != nil || !ok {
 		t.Fatalf("take the record over = %v, %v", ok, err)
 	}
-	addPendingEgress(id, pendingEgressRestore{workDir: project, ex: ex, handleID: "h-p"})
-	t.Cleanup(func() { dropPendingEgress(id) })
+	// Kept to try again, as a restore that decided nothing is (Task 20451),
+	// with the retry of its own pushed past the test.
+	takeoverTest(t, time.Hour)
+	s := &Server{WorkDir: project}
+	s.settleFirstTakeover(takeoverEgress, project, ex, "h-p", id, "", takeoverResult{
+		outcome: hubmetrics.TakeoverRetrying, err: errors.New("the grant store could not be read")})
+	if pendingTakeovers.get(takeoverEgress, id) == nil {
+		t.Fatal("the undecided restore is not kept")
+	}
 
 	resp, err := client.Get(origin.URL)
 	if err != nil {
@@ -206,10 +215,7 @@ func TestEgressHeldRequestRetriesAPendingRestore(t *testing.T) {
 		t.Fatalf("restored = %+v", restored)
 	}
 	t.Cleanup(func() { restored.close("test over") })
-	pendingEgress.Lock()
-	_, still := pendingEgress.m[id]
-	pendingEgress.Unlock()
-	if still {
+	if pendingTakeovers.get(takeoverEgress, id) != nil {
 		t.Fatal("a restored session is still pending")
 	}
 }
@@ -240,6 +246,7 @@ func TestEgressSessionOfALiveHolderIsLeftWithIt(t *testing.T) {
 	id := egr.sess.ID
 
 	holder.Store("hub_new")
+	takeoverTest(t, time.Hour)
 	(&Server{WorkDir: project}).restoreRunEgress(project, ex, "h-l", []string{id})
 	row, err := svc.db.GetProxySession(statedb.ProxySessionEgress, id)
 	if err != nil || row.Holder != "hub_old" || !row.Open() {
@@ -247,5 +254,10 @@ func TestEgressSessionOfALiveHolderIsLeftWithIt(t *testing.T) {
 	}
 	if svc.broker.Session(id) == nil {
 		t.Fatal("the live holder's session stopped being served")
+	}
+	// Kept, so the run's owner row still names it and this process takes it
+	// over once its holder stops (Task 20451).
+	if p := pendingTakeovers.get(takeoverEgress, id); p == nil || !p.elsewhere() {
+		t.Fatalf("the session left with its live holder is not kept: %+v", p)
 	}
 }

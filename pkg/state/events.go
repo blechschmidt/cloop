@@ -73,6 +73,7 @@ const (
 	EventGitPushRefused    = statedb.EventGitPushRefused
 	EventNetworkBlocked    = statedb.EventNetworkBlocked
 	EventIsolationEvidence = statedb.EventIsolationEvidence
+	EventLeaseTakeover     = statedb.EventLeaseTakeover
 )
 
 // LogEvent appends one row to the project's event journal. Best-effort: any

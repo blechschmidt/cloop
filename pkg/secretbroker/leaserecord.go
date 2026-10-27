@@ -184,7 +184,11 @@ func (b *Broker) LeaseRecords() ([]LeaseRecord, error) {
 // The returned Lease names the materials the lease carries — grant, secret,
 // kind, constraints — and holds none of their values: the workload already has
 // them, and this process has no business re-reading them to hold a lease.
-func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
+func (b *Broker) Restore(ctx context.Context, leaseID string, opts ...RestoreOption) (*Lease, error) {
+	var o restoreOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	ev := Event{Action: ActionRenew, LeaseID: leaseID}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -264,6 +268,17 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 	}
 	from := rec.Holder
 	if from != b.leaseHolder {
+		if o.mayTake != nil {
+			// Asked last, just before the conditional write: a holder that
+			// changes after the answer fails the write below.
+			if err := o.mayTake(from); err != nil {
+				if errors.Is(err, ErrLeaseMoved) {
+					return nil, b.denyf(ev, ErrLeaseMoved, "lease %s cannot be taken over from hub process %s: %v",
+						leaseID, from, err)
+				}
+				return nil, fmt.Errorf("secretbroker: take over lease %s: %w", leaseID, err)
+			}
+		}
 		took, err := ls.TakeLease(leaseID, from, b.leaseHolder)
 		if err != nil {
 			return nil, fmt.Errorf("secretbroker: take over lease %s: %w", leaseID, err)
@@ -316,6 +331,27 @@ func (b *Broker) Restore(ctx context.Context, leaseID string) (*Lease, error) {
 		Materials:  b.heldMaterials(rec.GrantIDs),
 		Withdrawn:  withdrawn,
 	}, nil
+}
+
+// RestoreOption narrows what Restore takes over.
+type RestoreOption func(*restoreOptions)
+
+type restoreOptions struct {
+	mayTake func(holder string) error
+}
+
+// TakingFrom has Restore ask may whether it may take the lease from the
+// process holding it (Task 20451), after every other check and just before
+// the conditional write that takes it — so a holder that changes after the
+// answer fails the write. nil lets it; an error wrapping ErrLeaseMoved refuses
+// the takeover as moved, with a denied row; any other error is returned as
+// one the caller may try again.
+//
+// The hub's process adopting a run asks it whether it still owns the run: a
+// retry from a process the run has moved away from must not take the lease
+// back from the process that adopted the run since and holds it for the run.
+func TakingFrom(may func(holder string) error) RestoreOption {
+	return func(o *restoreOptions) { o.mayTake = may }
 }
 
 // HeldLease describes a lease this broker holds — its ids, its current

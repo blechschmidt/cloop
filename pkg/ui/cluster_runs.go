@@ -80,6 +80,11 @@ type runOwnerMeta struct {
 	// members at all. It is embedded rather than restated so the field is
 	// written here under the name pkg/hubcluster reads.
 	hubcluster.RunClaimMeta
+	// RunTakeoverMeta names the credentials above that the member adopting
+	// the run could not take over yet and keeps trying (Task 20451), for
+	// `cloop hub doctor` and Settings → Hub health. Embedded for the same
+	// reason as RunClaimMeta.
+	hubcluster.RunTakeoverMeta
 }
 
 // orphanRunGrace is how long a run whose owner died keeps its project marked
@@ -149,9 +154,29 @@ func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor
 		meta.Seeded, meta.Provenance = true, &prov
 		meta.Feature = d.feature
 	}
-	meta.Leases = liveLeases.forHandle(ex.ID(), handleID)
-	meta.Egress = liveEgress.idsForHandle(handleID)
-	meta.Workspace = liveLeases.workspaceForHandle(ex.ID(), handleID)
+	// What this member holds for the workload, and what it keeps trying to
+	// take over (Task 20451): an adopter merges rather than overwrites, so
+	// an id an attempt could not decide stays on the row for whoever adopts
+	// the run next.
+	if err := s.writeRunRecord(n, workDir, ex, handleID, meta); err != nil {
+		return err
+	}
+	if err := forgetDispatchIntentForHandle(ex.ID(), handleID); err != nil {
+		// The run is on record, which is what an adopter reads; the intent is
+		// retired by the reaper, which finds its run recorded.
+		s.log().Warn("cluster", 0, "could not retire the dispatch intent of a recorded run",
+			map[string]interface{}{"project": workDir, "handle": handleID, "error": err.Error()})
+	}
+	return nil
+}
+
+// writeRunRecord writes meta, with the credentials this member holds and keeps
+// trying for the workload, as workDir's owner row — under the project's
+// owner-row lock, which a takeover's refresh takes too.
+func (s *Server) writeRunRecord(n *hubcluster.Node, workDir string, ex executor.Executor, handleID string,
+	meta runOwnerMeta) error {
+	defer lockRunMeta(workDir)()
+	fillRunCredentials(&meta, ex.ID(), handleID)
 	_, found, err := n.Lookup(ownerRun, workDir)
 	if err != nil {
 		s.log().Warn("cluster", 0, "could not read the run's owner row",
@@ -180,12 +205,6 @@ func (s *Server) recordRunDispatch(workDir, handler string, ex executor.Executor
 			}
 			return errors.New("record the run's executor for adoption: this hub member no longer holds the run's claim")
 		}
-	}
-	if err := forgetDispatchIntentForHandle(ex.ID(), handleID); err != nil {
-		// The run is on record, which is what an adopter reads; the intent is
-		// retired by the reaper, which finds its run recorded.
-		s.log().Warn("cluster", 0, "could not retire the dispatch intent of a recorded run",
-			map[string]interface{}{"project": workDir, "handle": handleID, "error": err.Error()})
 	}
 	return nil
 }
@@ -370,14 +389,30 @@ func (s *Server) detachRun(workDir string) bool {
 		return false
 	}
 	s.runHandleMu.Lock()
+	if cur, still := s.runHandles[workDir]; still && cur.handleID == run.handleID && cur.handedOver {
+		// Let go of already — on the bus's word and the watcher's both, or
+		// as a lost run — and by whoever did so.
+		s.runHandleMu.Unlock()
+		return true
+	}
 	if cur, still := s.runHandles[workDir]; still && cur.handleID == run.handleID {
 		cur.handedOver = true
 		s.runHandles[workDir] = cur
+		// Marked before the stream is cancelled: its consumer, which the
+		// cancel wakes, asks takeHandedOver whether to settle the run, and
+		// a run settled here as well as by its adopter ends twice — its
+		// egress session closed, its result merged and its credentials
+		// retired under the member that took it over.
+		s.markHandedOverLocked(cur.handleID)
 	}
 	s.runHandleMu.Unlock()
 	if run.cancel != nil {
 		run.cancel()
 	}
+	// What this member could not take over yet goes with the run first: the
+	// adopter reads it off the owner row, which names it still, and an
+	// attempt still running lets go of what it takes (Task 20451).
+	s.handOverRunTakeovers(run.ex, run.handleID)
 	// The run's credentials go with it (Task 20383): the leases its adopter
 	// takes over hand over now rather than at their next extension, so the
 	// sessions they feed stop being served here. The adopter announces itself
@@ -399,6 +434,11 @@ func (s *Server) detachRun(workDir string) bool {
 			continue
 		}
 		go awaitLeaseTakeover(sl)
+	}
+	// The egress session stays, served from here until the run ends, which
+	// this member learns from the run's owner row (Task 20451).
+	if egr := liveEgress.byHandle(run.handleID); egr != nil {
+		go s.followMovedRunEgress(workDir, egr, run.ex.ID(), run.handleID)
 	}
 	s.untrackRunKeepClaim(workDir)
 	s.liveLogSetRunning(workDir, false)

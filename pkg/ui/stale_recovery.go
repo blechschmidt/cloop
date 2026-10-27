@@ -149,12 +149,9 @@ func (s *Server) untrackRun(workDir string) {
 func (s *Server) untrackRunKeepClaim(workDir string) {
 	s.runHandleMu.Lock()
 	defer s.runHandleMu.Unlock()
-	if run, ok := s.runHandles[workDir]; ok && run.handedOver {
-		if s.handedOverRuns == nil {
-			s.handedOverRuns = make(map[string]bool)
-		}
-		s.handedOverRuns[run.handleID] = true
-	}
+	// A run handed over was marked so when it was (detachRun,
+	// retireLostRun), before its stream was cancelled; marking it again here
+	// would leave a mark nobody takes once its consumer has taken the first.
 	delete(s.runHandles, workDir)
 }
 
@@ -343,6 +340,10 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	closeRunEgress(handleID, "the run ended")
 	// And its forwarded devices (Task 20430), for the same reason.
 	closeRunForwards(handleID, "the run ended")
+	// And whatever of an adopted run's credentials could not be taken over
+	// yet: recorded on the run as failed, the run having ended without them
+	// (Task 20451).
+	s.endRunTakeovers(ex, handleID, "the run ended", true)
 	// First: a run on an executor that does not share this filesystem kept
 	// its outcomes in its own copy of the project, and everything below reads
 	// this hub's. Merging it before recovery means a task the run left in

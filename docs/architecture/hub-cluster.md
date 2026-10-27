@@ -325,8 +325,39 @@ scope; and the run's egress session, named in the owner row and restored with
 its byte counters from a member that is gone. An owner that is still alive when
 its run moves — its agent reconnected elsewhere — stops serving the lease's
 sessions once the adopter has taken the lease, and gives up its claim on them so
-requests are forwarded to the adopter; it keeps the run's egress session, which
-no member forwards.
+requests are forwarded to the adopter. It keeps the run's egress session, which
+no member forwards, and since Task 20451 ends it when the run ends, which it
+learns from the run's owner row: before, it renewed the session for up to a day
+because it could no longer ask the device whether the run was over. The adopter
+keeps naming that session in the owner row, as one a live member serves, and
+takes it over if that member stops first.
+
+**A takeover the store cannot decide is tried again** (Task 20451). An attempt
+to take a credential over is decided when it ends one way or the other for
+good: taken over; held by the member that adopted the run first; released;
+revoked, and taken back; refused because it lapsed or its grants no longer
+allow it. It is undecided when the secret store could not be read for a moment,
+the database was locked, the disk was at its floor, or a KMS was down for a
+member that had not opened the store yet. The adopter keeps an undecided
+credential — a lease, the workspace lease or an egress session — on the run's
+owner row beside what it holds, names it there as undecided, and tries again
+itself: two seconds later, then with the wait doubling to a minute, until an
+attempt decides it or the credential's recorded expiry passes. A request
+presenting a session it feeds brings the next attempt forward, and a member
+adopting the run after this one finds the id on the row and tries too. An
+attempt takes the credential only while its member still owns the run — the
+broker asks just before its conditional write — so a retry made after the run
+moved to another member never takes back what that member holds, and one that
+finds its takeover ended while it ran lets go of what it took. While it
+lasts, the run's event history has a `lease_takeover` row saying so,
+`cloop hub doctor` and Settings → Hub health warn `runs.lease_takeovers`, and
+`cloop_lease_takeovers_total` counts the attempts. Once taken over, a second
+row says so and what the lease feeds is restored. One still undecided when it
+lapses, or when the run ends, is recorded on the run as failed, and the run
+carries on without it. Before, the adopter printed one line on stderr and
+rewrote the owner row without it: nobody extended the lease, the janitor
+retired it at its TTL, and the run's next push or kubectl call failed with
+nothing on the run saying why.
 A cluster of one is the same: a hub restarted in its own directory adopts the
 runs its previous process left, by the same rows. See [a hub restarted
 mid-run](executors.md#the-project-comes-back-task-20339) and
@@ -607,7 +638,15 @@ readiness does not depend on leadership: every member serves.
   address a restarted process binds again. Egress is not forwarded: a restored
   egress session is served by the adopter's own listener, so the egress
   `advertise_addr` has to reach the adopter, which on a single hub is the
-  address the restarted process binds again.
+  address the restarted process binds again. A run that moves between two live
+  members keeps its egress session on the member that served it, until the run
+  ends or that member stops and the run's owner takes it over (Task 20451).
+- **A takeover the store cannot decide** is retried by the adopter until its
+  credential's recorded expiry (Task 20451, [above](#runs-agents-and-failover));
+  for that long what the credential feeds is not served — the request that
+  needs it waits up to 60 seconds, as before an adoption — and a fault that
+  outlasts the lease costs the run its credentials, recorded on its history as
+  a failed takeover.
 - **A CI relay session** stands on no lease and belongs to no run, so it is
   restored by whichever member receives the job's next call once its holder is
   gone (Task 20390): the record taken over by a conditional write, the session
@@ -628,7 +667,9 @@ readiness does not depend on leadership: every member serves.
 
   What is still forgotten: a Kubernetes Pod's workspace session, minted over a broker
   that keeps no lease records — an init container that fetches after its member
-  died gets a 401.
+  died gets a 401. It is a residual risk of the
+  [security model](../security/model.md#what-is-not-mitigated), pinned by
+  `TestAPodsWorkspaceSourceKeepsNoLeaseRecords`.
 - **Rate limits and connection caps are per member.** Five members admit five
   times the per-address request rate one would.
 - **`cloop serve`**, the standalone REST server, is not a member. It sweeps
@@ -667,6 +708,19 @@ readiness does not depend on leadership: every member serves.
   after a member dies, and the run's start, completion and cancellation are each
   counted once across the cluster. It runs in CI as the `hub-cluster` job,
   against a binary built with the race detector.
+- [`pkg/ui/takeover_retry_test.go`](../../pkg/ui/takeover_retry_test.go) — a
+  lease whose takeover a locked store refuses a few times, kept on the owner
+  row as undecided and held once the store answers, its git and Kubernetes
+  sessions served again and a push landing; the same for a workspace lease; one
+  the store refuses past the lease's expiry, or past its run, recorded on the
+  run as failed; and both halves of a run moving between two live members — the
+  adopter keeping the egress session named and taking it over when its holder
+  stops, the holder ending it when the run ends.
+- [`tests/e2e/hubrestart_takeover_test.go`](../../tests/e2e/hubrestart_takeover_test.go)
+  — a real hub SIGKILLed mid-run with its lease's record made unreadable, the
+  restarted process warning `runs.lease_takeovers`, counting retries, and
+  taking the lease over once the record is repaired; the run settles as the
+  other restart scenarios do.
 - [`tests/cluster/revocation_test.go`](../../tests/cluster/revocation_test.go)
   — two real members; the one holding a run's lease is SIGKILLed and the lease,
   then its grant, are revoked through the survivor. For a container run the

@@ -393,6 +393,10 @@ func (s *Server) letGoOfLostRun(run dispatchedRun, reason string) {
 	closeRunEgress(run.handleID, reason)
 	closeRunForwards(run.handleID, reason)
 	closeRunLeases(run.ex.ID(), run.handleID)
+	// And what this member could not take over yet (Task 20451): failed, and
+	// its records left for the janitor, whose sweep takes a lapsed lease back
+	// from the device should it ever come back holding it.
+	s.endRunTakeovers(run.ex, run.handleID, "the run was failed over", false)
 	abandonWorkload(run.ex, run.handleID, reason)
 	if run.cancel != nil {
 		run.cancel()

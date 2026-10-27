@@ -4945,6 +4945,20 @@ the Pod is deleted: by the hub that adopts the run, by the orphan sweep, or by
 an operator. The material inside is short-lived on the broker's own TTL
 regardless.
 
+**A Pod's workspace session does not survive the hub process that minted it.**
+A Pod's init container fetches its workspace through a pinned git proxy
+session, minted over the workspace credential source the Kubernetes driver is
+built with — and that source's broker keeps no lease records
+(`TestAPodsWorkspaceSourceKeepsNoLeaseRecords`). Nothing names the lease in
+`secret_leases`, so the session is never recorded as durable and no owner row
+names it: a hub process adopting the Pod after the one that minted the session
+stopped has nothing to take over or restore, and an init container that fetches
+after that gets a 401, failing the Pod's provisioning until the run is started
+again. It fails closed — no process serves a session it cannot account for. A
+device workspace's lease, by contrast, is recorded, kept alive and restored
+with its run (`TestAWorkspaceSessionSurvivesARestart`), and every lease-path
+session a Pod's own git uses is restored on every executor.
+
 **A workspace credential is scoped by the grant, not by GitHub, and a push
 write-back keeps it for the whole run.** The broker refuses to lease a PAT whose
 repository allowlist excludes the repository being fetched, so a run cannot

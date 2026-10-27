@@ -1372,10 +1372,14 @@ What remains is either deliberate or beyond what the hub can reach today:
    — its workspace lease recorded, kept alive and taken over — and a write-back
    push through it after a restart lands. The Kubernetes driver's workspace
    credential source is built during reconciliation over a broker that keeps
-   no lease records, so a Pod's session is minted unrecorded, as before: an
+   no lease records (pinned by `TestAPodsWorkspaceSourceKeepsNoLeaseRecords`,
+   and stated among the [residual risks](../security/model.md#what-is-not-mitigated)),
+   so a Pod's session is minted unrecorded, as before: an
    init container that fetches after its hub restarted gets a 401, and the Pod
    fails its provisioning. Lease-path sessions — everything the workload's own
-   git uses — are restored on every executor.
+   git uses — are restored on every executor, and since Task 20451 one whose
+   lease's takeover the store could not decide is restored once a retry takes
+   the lease over.
 5. **A device checkout provisioned through the proxy before Task 20349 has no
    recorded upstream.** Turning the proxy *on*, or moving it, works for every
    checkout, because the forge URL is the new route's upstream; turning it

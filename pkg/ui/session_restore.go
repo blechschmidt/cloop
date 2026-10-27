@@ -33,7 +33,9 @@ package ui
 // tick; a request presenting it meanwhile waits for that (session_hold.go).
 //
 // An egress session belongs to the run rather than to a lease, and is restored
-// with the run (restoreRunEgress): its grant re-read, its counters resumed.
+// with the run (restoreRunEgress): its grant re-read, its counters resumed. A
+// restore that decided nothing is tried again with the run's other undecided
+// takeovers (takeover_retry.go, Task 20451).
 
 import (
 	"context"
@@ -43,7 +45,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
@@ -725,117 +726,62 @@ func auditSessionEnd(db *statedb.DB, row statedb.ProxySessionRow, reason string)
 // ── egress ───────────────────────────────────────────────────────────────────
 
 // restoreRunEgress brings back the egress sessions an adopted run held, by
-// the ids its owner row names.
+// the ids its owner row names. One an attempt could not decide is tried again
+// from here (Task 20451); one a live member still serves is left with it, and
+// taken over here if that member stops.
 func (s *Server) restoreRunEgress(workDir string, ex executor.Executor, handleID string, ids []string) {
 	if len(ids) == 0 || ex == nil {
 		return
 	}
+	for _, id := range ids {
+		res := s.takeOverEgress(workDir, ex, handleID, id)
+		s.settleFirstTakeover(takeoverEgress, workDir, ex, handleID, id, "", res)
+	}
+}
+
+// takeOverEgress makes one attempt at restoring the egress session id of the
+// run on ex, and reports what it decided. A session a live member serves is
+// moved, with that member as its holder.
+func (s *Server) takeOverEgress(workDir string, ex executor.Executor, handleID, id string) takeoverResult {
 	db, closeDB := egressRecordDB()
 	if db == nil {
-		return
+		return takeoverResult{outcome: hubmetrics.TakeoverRetrying,
+			err: errors.New("the control plane's database could not be opened to read the session's record")}
 	}
 	defer closeDB()
-	for _, id := range ids {
-		countEgressRestore(id, restoreOneEgress(db, workDir, ex, handleID, id), workDir, ex, handleID)
+	r := restoreOneEgress(db, workDir, ex, handleID, id)
+	if r.outcome != "" {
+		hubmetrics.SessionRestores.Inc(hubmetrics.RestoreKindEgress, r.outcome)
 	}
-}
-
-// countEgressRestore counts an egress restore's outcome and keeps a session
-// whose restore failed for a reason that may pass, to try again.
-func countEgressRestore(id, outcome, workDir string, ex executor.Executor, handleID string) {
-	switch outcome {
+	switch r.outcome {
 	case "":
-		dropPendingEgress(id)
-		return
+		if r.holder != "" {
+			return takeoverResult{outcome: hubmetrics.TakeoverMoved, holder: r.holder,
+				err: fmt.Errorf("hub process %s still serves it", r.holder)}
+		}
+		return takeoverResult{outcome: hubmetrics.TakeoverNotFound, err: errors.New("it has no open record")}
+	case hubmetrics.RestoreRestored:
+		return takeoverResult{outcome: hubmetrics.TakeoverTakenOver}
 	case hubmetrics.RestoreFailed:
-		addPendingEgress(id, pendingEgressRestore{workDir: workDir, ex: ex, handleID: handleID})
-	default:
-		dropPendingEgress(id)
+		return takeoverResult{outcome: hubmetrics.TakeoverRetrying, err: r.err}
+	case hubmetrics.RestoreLost:
+		return s.lostWhileOwned(workDir, ex, handleID, takeoverResult{outcome: hubmetrics.TakeoverMoved,
+			err: errors.New("another hub process restored it first")})
+	default: // refused, expired
+		return takeoverResult{outcome: hubmetrics.TakeoverRefused, err: r.err}
 	}
-	hubmetrics.SessionRestores.Inc(hubmetrics.RestoreKindEgress, outcome)
-}
-
-// pendingEgressRestore is an adopted run's egress session whose restore failed
-// for a reason that may pass: the store busy, the grant unreadable.
-type pendingEgressRestore struct {
-	workDir  string
-	ex       executor.Executor
-	handleID string
-	// next is when the watcher's tick may try again.
-	next time.Time
-}
-
-// egressRetryInterval spaces the watcher's retries of one session.
-const egressRetryInterval = 30 * time.Second
-
-// pendingEgress holds the egress restores to try again, by session id: on the
-// watcher's tick, and at once for a request presenting one (Task 20383).
-var pendingEgress = struct {
-	sync.Mutex
-	m map[string]pendingEgressRestore
-}{m: map[string]pendingEgressRestore{}}
-
-func addPendingEgress(id string, p pendingEgressRestore) {
-	p.next = time.Now().Add(egressRetryInterval)
-	pendingEgress.Lock()
-	pendingEgress.m[id] = p
-	pendingEgress.Unlock()
-}
-
-func dropPendingEgress(id string) {
-	pendingEgress.Lock()
-	delete(pendingEgress.m, id)
-	pendingEgress.Unlock()
-}
-
-// retryPendingEgress retries, off the caller's goroutine, the egress restores
-// that are due. Called on the watcher's tick; cheap when there is none.
-func retryPendingEgress(now time.Time) {
-	pendingEgress.Lock()
-	due := map[string]pendingEgressRestore{}
-	for id, p := range pendingEgress.m {
-		if !now.Before(p.next) {
-			due[id] = p
-			// Claimed for this attempt, so the next tick does not start
-			// another while it runs.
-			p.next = now.Add(egressRetryInterval)
-			pendingEgress.m[id] = p
-		}
-	}
-	pendingEgress.Unlock()
-	if len(due) == 0 {
-		return
-	}
-	go func() {
-		defer recoverGoroutine("retry egress session restores")
-		db, closeDB := egressRecordDB()
-		if db == nil {
-			return
-		}
-		defer closeDB()
-		for id, p := range due {
-			countEgressRestore(id, restoreOneEgress(db, p.workDir, p.ex, p.handleID, id), p.workDir, p.ex, p.handleID)
-		}
-	}()
 }
 
 // retryPendingEgressNow retries one pending egress restore at once, for a
 // request presenting it, and reports whether the session is served here now.
 func retryPendingEgressNow(id string) bool {
-	pendingEgress.Lock()
-	p, ok := pendingEgress.m[id]
-	pendingEgress.Unlock()
-	if !ok {
+	p := pendingTakeovers.get(takeoverEgress, id)
+	if p == nil || p.elsewhere() {
 		return false
 	}
-	db, closeDB := egressRecordDB()
-	if db == nil {
-		return false
-	}
-	defer closeDB()
-	outcome := restoreOneEgress(db, p.workDir, p.ex, p.handleID, id)
-	countEgressRestore(id, outcome, p.workDir, p.ex, p.handleID)
-	return outcome == hubmetrics.RestoreRestored
+	p.srv.attemptPending(p)
+	svc := activeEgressProxy()
+	return svc != nil && svc.broker.Session(id) != nil
 }
 
 // egressRecordDB returns a handle on the control plane's database: the hosted
@@ -855,60 +801,71 @@ func egressRecordDB() (*statedb.DB, func()) {
 	return db, func() { _ = db.Close() }
 }
 
-// restoreOneEgress restores one egress session of an adopted run, and returns
-// the outcome, or "" for a session with no record to restore.
-func restoreOneEgress(db *statedb.DB, workDir string, ex executor.Executor, handleID, id string) string {
+// egressRestore is what one attempt at an egress session came to: the
+// SessionRestores outcome, or "" for a session with no open record to restore
+// — or, with holder set, one a live hub process still serves — and why, for an
+// outcome that is not restored.
+type egressRestore struct {
+	outcome string
+	holder  string
+	err     error
+}
+
+// restoreOneEgress restores one egress session of an adopted run.
+func restoreOneEgress(db *statedb.DB, workDir string, ex executor.Executor, handleID, id string) egressRestore {
 	row, err := db.GetProxySession(statedb.ProxySessionEgress, id)
 	switch {
 	case errors.Is(err, statedb.ErrProxySessionNotFound):
-		return ""
+		return egressRestore{}
 	case err != nil:
 		fmt.Fprintf(os.Stderr, "ui: read egress session %s (will retry): %v\n", id, err)
-		return hubmetrics.RestoreFailed
+		return egressRestore{outcome: hubmetrics.RestoreFailed, err: fmt.Errorf("read its record: %w", err)}
 	case !row.Open():
-		return ""
+		return egressRestore{}
 	}
 	if !sessionNow().Before(row.ExpiresAt) {
 		retireSessionRow(db, row, fmt.Sprintf("lapsed at %s while no hub process held it",
 			row.ExpiresAt.UTC().Format(time.RFC3339)))
 		logEgress(workDir, fmt.Sprintf("egress: proxy session %s was not restored — it lapsed while no hub process "+
 			"held it; the run's next start redeems a new one", id))
-		return hubmetrics.RestoreExpired
+		return egressRestore{outcome: hubmetrics.RestoreExpired,
+			err: fmt.Errorf("it lapsed at %s while no hub process held it", row.ExpiresAt.UTC().Format(time.RFC3339))}
 	}
 	self := leaseHolderID()
 	from := row.Holder
 	if self == "" {
-		return hubmetrics.RestoreFailed
+		return egressRestore{outcome: hubmetrics.RestoreFailed, err: errors.New("this hub process has no member id to hold it under")}
 	}
 	if from != self && from != "" && egressHolderAlive(from) {
 		// Its holder still serves it, and nothing forwards egress to another
 		// process: the workload's proxy address may be that process's own.
-		// Left with it (Task 20383).
-		return ""
+		// Left with it (Task 20383), and taken over here if it stops (Task
+		// 20451).
+		return egressRestore{holder: from}
 	}
 	if from != self {
 		took, err := db.TakeProxySession(row.Kind, id, from, self)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ui: take over egress session %s (will retry): %v\n", id, err)
-			return hubmetrics.RestoreFailed
+			return egressRestore{outcome: hubmetrics.RestoreFailed, err: fmt.Errorf("take its record over: %w", err)}
 		}
 		if !took {
-			return hubmetrics.RestoreLost
+			return egressRestore{outcome: hubmetrics.RestoreLost}
 		}
 		row.Holder = self
 	}
-	refuse := func(why string) string {
+	refuse := func(why string) egressRestore {
 		closeHeldSession(db, row, "not restored by the hub process that adopted its run: "+why)
 		logEgress(workDir, fmt.Sprintf("egress: proxy session %s was not restored by the hub process that adopted "+
 			"this run — %s", id, why))
-		return hubmetrics.RestoreRefused
+		return egressRestore{outcome: hubmetrics.RestoreRefused, err: errors.New(why)}
 	}
 	svc := activeEgressProxy()
 	if svc == nil {
 		return refuse(egressProxyUnavailable())
 	}
 	if svc.broker.Session(id) != nil {
-		return hubmetrics.RestoreRestored
+		return egressRestore{outcome: hubmetrics.RestoreRestored}
 	}
 	rec, err := sessionrecord.EgressRecord(row)
 	if err != nil {
@@ -919,20 +876,20 @@ func restoreOneEgress(db *statedb.DB, workDir string, ex executor.Executor, hand
 	cancel()
 	if err != nil {
 		if errors.Is(err, egressbroker.ErrSessionExists) {
-			return hubmetrics.RestoreRestored
+			return egressRestore{outcome: hubmetrics.RestoreRestored}
 		}
 		if errors.Is(err, egressbroker.ErrStoreUnavailable) || errors.Is(err, context.DeadlineExceeded) ||
 			errors.Is(err, context.Canceled) {
 			// Says nothing about the grant: held here, tried again.
 			fmt.Fprintf(os.Stderr, "ui: restore egress session %s (will retry): %v\n", id,
 				secretbroker.RedactString(err.Error()))
-			return hubmetrics.RestoreFailed
+			return egressRestore{outcome: hubmetrics.RestoreFailed, err: err}
 		}
-		outcome := refuse(egressEndReason(err))
+		r := refuse(egressEndReason(err))
 		if errors.Is(err, egressbroker.ErrSessionExpired) {
-			return hubmetrics.RestoreExpired
+			r.outcome = hubmetrics.RestoreExpired
 		}
-		return outcome
+		return r
 	}
 	egr := &runEgress{svc: svc, sess: sess, grantID: rec.GrantID, workDir: workDir, executorID: ex.ID()}
 	liveEgress.add(egr)
@@ -943,7 +900,7 @@ func restoreOneEgress(db *statedb.DB, workDir string, ex executor.Executor, hand
 	logEgress(workDir, fmt.Sprintf("egress: proxy session %s restored by the hub process that adopted this run "+
 		"(held until then by %s); it counts on from %s up and %s down against its grant's quota",
 		id, from, egressByteCount(sess.BytesUp()), egressByteCount(sess.BytesDown())))
-	return hubmetrics.RestoreRestored
+	return egressRestore{outcome: hubmetrics.RestoreRestored}
 }
 
 // egressHolderAlive reports whether the hub process holding an egress

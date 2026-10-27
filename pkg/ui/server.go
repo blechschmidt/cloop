@@ -6216,9 +6216,6 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 	// message saying so may not have arrived (Task 20396).
 	s.maybeSweepLostRuns(now)
 	s.maybeSweepProxySessionRecords(now)
-	// Egress restores of adopted runs that failed for a reason that may pass
-	// (Task 20383): cheap when there is none.
-	retryPendingEgress(now)
 	running := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		running[e.Path] = live.Contains(e.Path)

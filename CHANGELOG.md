@@ -119,6 +119,36 @@ schema and the hub's HTTP API may change in any release.
   install the card kept saying the harness was missing; and a dispatch the
   device refused for lack of a harness it was not allowed to install fell
   through to an internal server error (Task 20450).
+- **A run adopted after a hub restart keeps a lease whose takeover failed for a
+  moment, and tries again, instead of losing its credentials.** When the
+  restarted hub — or the cluster member adopting a run — could not take a
+  lease over because the secret store was unreadable for a moment, the
+  database locked, the disk at its floor or a KMS down, it printed one line on
+  stderr and moved on: the lease vanished from the run's owner row, nobody
+  extended it, and the run's git-proxy and Kubernetes-monitor sessions and its
+  App-token refresh went with it, so its next push or kubectl call failed with
+  nothing on the run saying why. Now such a takeover stays on the owner row —
+  a member adopting the run later sees it too — and the adopter retries it, two
+  seconds later and then with the wait doubling to a minute, until it is
+  decided or the lease's recorded expiry passes; a request presenting one of
+  its sessions brings the next attempt forward. The same holds for the
+  workspace lease and the egress session. The run's event history records a
+  `lease_takeover` row when a takeover is first undecided and another when it
+  is taken over or fails, with the reason; `cloop hub doctor` and Settings →
+  Hub health warn `runs.lease_takeovers` while one is undecided; and
+  `cloop_lease_takeovers_total{kind,outcome}` counts every attempt. A retry
+  takes a credential only while its member still owns the run — the broker
+  asks just before its conditional write — so it never takes back what a member
+  that adopted the run since holds. A run that moves between two live members
+  no longer has its egress session renewed by the old member for up to a day
+  after the run ends: the old member ends it with the run, and the run's owner
+  takes it over if the old member stops first. And the old member no longer
+  settles a run it has just handed over: its output stream was cancelled before
+  the run was marked handed over, so the stream's consumer could settle it
+  here too — closing its egress session and recording it ended while the other
+  member ran it. A Kubernetes Pod's workspace session still does not survive
+  its hub process; that is now stated as a residual risk and pinned by a test
+  (Task 20451).
 
 ### Changed
 

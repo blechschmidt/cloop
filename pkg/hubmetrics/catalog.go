@@ -735,6 +735,35 @@ const (
 	RestoreFailed   = "failed"
 )
 
+// What a hub process adopting a run made of each credential the run's owner
+// row names (Task 20451): its secret leases, its workspace lease and its
+// egress sessions. Every attempt is counted, so a takeover the store could not
+// decide shows as retrying until its last attempt counts what it came to. Per
+// process: the member that adopts the run counts its takeovers.
+var (
+	LeaseTakeovers = Default.MustRegister(Definition{
+		Name:   "cloop_lease_takeovers_total",
+		Help:   "Attempts by a hub process adopting a run to take over a credential the run's owner row names, by kind (run — a secret lease; workspace — the lease a pinned git session stands on; egress — an egress proxy session) and outcome (taken_over; moved — another process holds it; not_found — released, or never recorded; revoked — revoked while no process held it, and taken back; refused — lapsed, or its grant was withdrawn; retrying — nothing could be decided, the store unreadable for a moment, and it is tried again; failed — still undecided when it lapsed or its run ended, recorded on the run).",
+		Type:   TypeCounter,
+		Labels: []string{"kind", "outcome"},
+	})
+)
+
+// LeaseTakeovers label values.
+const (
+	TakeoverKindRun       = "run"
+	TakeoverKindWorkspace = "workspace"
+	TakeoverKindEgress    = "egress"
+
+	TakeoverTakenOver = "taken_over"
+	TakeoverMoved     = "moved"
+	TakeoverNotFound  = "not_found"
+	TakeoverRevoked   = "revoked"
+	TakeoverRefused   = "refused"
+	TakeoverRetrying  = "retrying"
+	TakeoverFailed    = "failed"
+)
+
 // Quotas and admission control.
 //
 // These four preserve the names and label schemas the hand-built exposition

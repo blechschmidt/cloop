@@ -153,7 +153,7 @@ What it checks, and what each one catches that nothing else does:
 | <a id="doctor-offboard"></a>`offboard` | whether the Claude Code home of an identity the control plane denies — an offboarded or deactivated user — is still on this host (`offboard.claude_homes`): it holds that person's refresh token in plaintext. Running members remove such homes from their own trees at start and hourly, so a copy found here is a stopped member's, or one a sweep could not remove |
 | <a id="doctor-images"></a>`images` | policy validity, whether it constrains registries at all (asked of the policy's own evaluation), digest pinning, cosign installed and its keys readable wherever signatures are verified — the container and Kubernetes executors, and the hub itself for a device or virtual executor whose sandbox runs a container (Task 20424) — the operator's own executor images (exempt from the policy, and reported as such), and reachability of the registries the policy names, which a device fleet needs from the hub too: the hub resolves a device's tag there before verifying it |
 | <a id="doctor-executors"></a>`executors` | reconciliation diagnostics, the strict-mode gate (asked of the check `/readyz` serves), and a liveness probe plus capability report per executor; and each device on the edge channel against this build's place on `main` — a warning past 20 sequences behind, or for a build carrying no sequence, which rollback protection does not cover yet (`executors.edge_lag`); and each device that follows releases whose build carries no sequence — every release before v0.0.5 — with the way to cover it (`executors.rollback_protection`); and each executor's isolation claim against what the isolation probe found under its runtime — a failure for a runtime named for isolation that runs on less (a `kata` that is runc), which projects requiring isolation are refused on, and a warning for a claim never verified or evidence older than two days (`executors.isolation`) |
-| <a id="doctor-runs"></a>`runs` | the build each `cloop run` on this host executes, against the hub's (`runs.build_lag`): a run behind it, which a host-process run can adopt at its next task boundary, and one that recorded no build, which has to be restarted once before it can. See [Long-lived runs after an upgrade](#long-lived-runs-after-an-upgrade) |
+| <a id="doctor-runs"></a>`runs` | the build each `cloop run` on this host executes, against the hub's (`runs.build_lag`): a run behind it, which a host-process run can adopt at its next task boundary, and one that recorded no build, which has to be restarted once before it can. See [Long-lived runs after an upgrade](#long-lived-runs-after-an-upgrade); and every adopted run whose hub process could not take a credential over yet (`runs.lease_takeovers`, Task 20451): a **warning** per lease, workspace lease or egress session the run's owner row names as undecided, saying since when, how many attempts, why and until when it is tried, and whether the member owning the run still serves — read from the run claims, so it works with no member running. See [A takeover the store cannot decide](#after-a-control-plane-restart) |
 | <a id="doctor-gitproxy"></a>`gitproxy` | whether pushes are brokered at all; whether the proxy would start — its TLS material loaded as the listener loads it, its base judged by `gitproxy.NormalizeBaseURL` — the base sandboxes are pointed at (`advertise_url`, or the bound address as the hub advertises it) and whether only this machine can reach it, plus a bounded dial of it; the branch allowlist and delete authority; and, with the proxy off, any GitHub grant whose branch list therefore cannot be enforced (`gitproxy.branch_grants`); and, under `tls: auto`, the certificate the hub issued the proxy — readable, verifying against the hub CA, naming the advertised host, not about to lapse — and the hub CA's expiry (`hubca.expiry`, see `hubca` below) |
 | <a id="doctor-hubca"></a>`hubca` | the hub's own CA under `tls: auto` (Task 20438): its expiry (`hubca.expiry`, a warning within a year and a failure within 30 days, naming the rotation); a rotation under way (`hubca.rotation`: a stage older than the longest `session_minutes` a monitor grants — the runs it waits for should have ended — a previous CA still trusted that long after its activation, and a failure when the leader has not reissued the certificates minutes after an activation); every live member taking part (`hubca.members`: a member on a build that predates rotation, which an activation refuses to run beside, or one that has fallen behind); and the active CA's name constraints against the names the monitors are configured at (`hubca.names`, a failure for a name they do not permit). See [Rotating the hub CA](#rotating-the-hub-ca) |
 | <a id="doctor-kubeguard"></a>`kubeguard` | whether kubeconfig grants are brokered at all; whether the monitor would start — its TLS material and CA bundle read as the hub reads them, its base judged by `kubeguard.NormalizeBaseURL` — where sandboxes are pointed and whether only this machine can reach it, plus a bounded dial; and the verb ceiling; under `tls: auto`, the hub-issued certificate and the hub CA, as for the git proxy |
@@ -2919,10 +2919,48 @@ who could write to it. The workload then gets a 401 (git,
 kubectl) or a 407 (egress) from there on; stop and start the run to lease it
 afresh. A line ending *"(will retry)"* is a restore that failed for a reason
 that may pass — the database busy, GitHub unreachable for the App token — and is
-retried every minute by the lease's keepalive (every 30 seconds for egress), and
-at once by a request presenting the session. Count them with
+retried every minute by the lease's keepalive (an egress session two seconds
+later, the wait doubling to a minute), and at once by a request presenting the
+session. Count them with
 `cloop_proxy_session_restores_total{kind,outcome}` (see
 [metrics](metrics.md#sessions-restored-with-an-adopted-run)).
+
+**A takeover the store cannot decide is tried again** (Task 20451). Taking the
+lease over can end undecided — the secret store unreadable for a moment, the
+database locked, the disk at its floor, a KMS down for a process that has not
+opened the store yet. The adopting process says so,
+
+```
+ui: take over lease lease_9f1c… of the run on edge-1 (will retry): secretbroker: take over lease lease_9f1c…: read its revocations: … database is locked
+```
+
+and keeps trying: two seconds later, then with the wait doubling to a minute,
+until an attempt decides it or the lease's recorded expiry passes. Meanwhile:
+
+- the lease stays named in the run's owner row, beside an entry saying its
+  takeover is undecided, so a process that adopts the run after this one tries
+  it too;
+- the run's event history has a `lease_takeover` row: *"The run's secret lease
+  … could not be taken over by the hub process that adopted this run (…): …. It
+  is tried again until it lapses at …"*;
+- `cloop hub doctor` and Settings → Hub health warn
+  [`runs.lease_takeovers`](#doctor-runs), naming the run, the lease, the
+  attempts and the reason, and `cloop_lease_takeovers_total{outcome="retrying"}`
+  counts the attempts;
+- a request the workload makes waits up to 60 seconds, as it does before the
+  adoption, and brings the next attempt forward.
+
+Fix what the doctor's other findings name — the storage checks, and
+`secrets.kms.reachable` for a KMS that does not answer. The next attempt then
+takes the lease over and restores what it feeds, and a second `lease_takeover`
+row says it *"was taken over … after N attempts"*; nothing needs restarting. A
+lease still undecided when it lapses, or when its run ends, gets a last row
+saying it *"was never taken over"* and why, and counts as `failed`: the run
+carried on without it and its git pushes and kubectl calls through the hub were
+refused, so stop and start it to lease afresh. The run's workspace lease and
+its egress session are retried the same way. Before Task 20451 the line on
+stderr was all there was: the lease dropped off the owner row, nobody extended
+it, and the run's next push failed with nothing on the run saying why.
 
 **A device workspace's pinned session comes back too** (Task 20390), when the
 device keeps it for a push write-back (`executors.write_back: push`): the run's

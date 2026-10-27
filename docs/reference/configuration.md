@@ -844,13 +844,18 @@ run's session rather than closing it; a SIGKILL can lose at most a minute of
 traffic from the count. A session whose grant was revoked or expired meanwhile is
 not restored, and its proxy requests are refused (`407`) from then on; one that
 could not be restored for a reason that may pass — the grant store unreadable —
-is tried again every 30 seconds and by its next request. A request made before
+is tried again two seconds later, then with the wait doubling to a minute, and
+by its next request, until it is restored or its recorded expiry passes (Task
+20451; the run's history and `cloop hub doctor` say so meanwhile). A request made before
 the run is adopted waits up to 60 seconds for the restore. The restored session
 is served by the adopting process's proxy, at the address the run was given, so
 `advertise_addr` must reach that process: on a single hub it is the address the
 restarted process binds again. Nothing forwards egress between cluster members,
-so a session is restored only from a member that is gone; when a run moves
-between two live members, the old one keeps serving its egress session.
+so a session is restored only from a member that is gone. When a run moves
+between two live members, the old one keeps serving its egress session until
+the run ends, which it learns from the run's owner row, and then ends it; the
+run's owner row keeps naming the session meanwhile, and the member owning the
+run takes it over if the old one stops first (Task 20451).
 
 **One session per run.** When a run is dispatched — a task run, a helper
 subcommand such as `cloop suggest`, a `cloop task reproduce` — and its project

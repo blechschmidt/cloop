@@ -41,6 +41,36 @@ type RunClaimMeta struct {
 	RunID string `json:"run_id,omitempty"`
 }
 
+// RunTakeover is a credential the member owning an adopted run has not been
+// able to take over yet (Task 20451): the lease, workspace lease or egress
+// session the run's owner row names, which an attempt could neither take over
+// nor rule out — the secret store unreadable for a moment, the database
+// locked, a KMS down. The member retries it until the outcome is decided or
+// Until passes; the id stays in the row's credential lists meanwhile, so a
+// member adopting the run after this one tries it too.
+type RunTakeover struct {
+	// Kind is what it is: "run" (a secret lease), "workspace" (the lease a
+	// pinned git session stands on) or "egress" (an egress proxy session).
+	Kind string `json:"kind"`
+	// ID is the lease's or the session's id.
+	ID string `json:"id"`
+	// Since is when the first attempt decided nothing.
+	Since time.Time `json:"since"`
+	// Attempts counts the attempts so far.
+	Attempts int `json:"attempts,omitempty"`
+	// Reason is the last attempt's error, with any credential redacted.
+	Reason string `json:"reason,omitempty"`
+	// Until is the recorded expiry it is tried until.
+	Until time.Time `json:"until,omitzero"`
+}
+
+// RunTakeoverMeta is the part of a run claim's metadata naming the takeovers
+// still undecided. The hub's own run metadata embeds it, so it is written and
+// read — by `cloop hub doctor`, which is not a member — under one name.
+type RunTakeoverMeta struct {
+	Takeovers []RunTakeover `json:"takeovers,omitempty"`
+}
+
 // MayHaveWorkload reports whether a claim may have a workload behind it: one
 // past dispatch, or one whose dispatch got as far as its executor.
 func (m RunClaimMeta) MayHaveWorkload() bool {

@@ -271,6 +271,21 @@ const (
 	// executors.isolation_evidence — what would refuse the placement instead —
 	// is on the hub.
 	EventIsolationEvidence EventType = "isolation_evidence"
+
+	// EventLeaseTakeover records what became of a credential an adopted run's
+	// owner row names when the hub process adopting the run could not take it
+	// over at once (Task 20451): its secret lease, its workspace lease or its
+	// egress session. One row when an attempt decides nothing — the secret
+	// store unreadable for a moment, the database locked, a KMS down — and it
+	// is tried again; one more when it is taken over, or when it fails: it
+	// lapsed, or the run ended, before an attempt could decide. The details
+	// carry the kind, the id, the outcome, the attempts and the reason; never
+	// a credential.
+	//
+	// On the project's journal because the symptom — the run's next git push
+	// or kubectl call through the hub refused — lands on the people running
+	// the project, and the cause is on the hub, out of their sight.
+	EventLeaseTakeover EventType = "lease_takeover"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

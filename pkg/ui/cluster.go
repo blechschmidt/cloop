@@ -588,6 +588,9 @@ func (s *Server) onMembershipChange(live []hubcluster.Member) {
 		wipeDeadMembersLeaseDirs(controlPlaneDir(), "")
 		// Runs a dead member owned are up for adoption.
 		s.adoptOrphanedRuns()
+		// And the egress sessions it served for runs this member adopted
+		// while it lived are this member's to take over (Task 20451).
+		wakeTakeoversHeldElsewhere()
 	}()
 }
 

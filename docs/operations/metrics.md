@@ -1062,7 +1062,7 @@ its rule was deleted, disabled or no longer admits the pipeline). Since Task
 | `refused` | will not come back: its grant was revoked or expired while no process held it, its recorded scope is wider than the grant or this hub's proxy policy allow now, its upstream is not the forge this hub's git proxy fronts, or this process runs no proxy to serve it. Closed with the reason |
 | `expired` | lapsed while no process held it |
 | `lost` | another process restored it first, or took it — or its lease — over before a retry; or the lease was handed over or released while it waited |
-| `failed` | its upstream credential could not be re-derived for a reason that may pass — the store busy, GitHub unreachable. Held by this process and retried every lease keepalive tick (egress: every 30 seconds), and at once when the workload's next request presents it |
+| `failed` | its upstream credential could not be re-derived for a reason that may pass — the store busy, GitHub unreachable. Held by this process and retried every lease keepalive tick (egress: two seconds later, the wait doubling to a minute, with the run's other [undecided takeovers](#credentials-taken-over-with-an-adopted-run)), and at once when the workload's next request presents it |
 
 After a restart, `refused` and `expired` are the ones to read: each is a
 workload that gets a 401 on its next git, kubectl or proxied request, and the
@@ -1071,6 +1071,37 @@ that does not turn into `restored` is GitHub out of reach from the hub.
 
 ```promql
 sum by (kind, outcome) (increase(cloop_proxy_session_restores_total[1h]))
+```
+
+## Credentials taken over with an adopted run
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_lease_takeovers_total` | counter | `kind`, `outcome` |
+
+The credentials themselves, one level up from the sessions above (Task 20451).
+A hub process adopting a run tries to take over each credential the run's owner
+row names, and counts every attempt here: `kind` is `run` (a secret lease),
+`workspace` (the lease a device workspace's pinned git session stands on) or
+`egress` (an egress proxy session).
+
+| `outcome` | Meaning |
+| --- | --- |
+| `taken_over` | held by this process now; what it feeds is restored |
+| `moved` | another process holds it: the one that adopted the run first, or — an egress session — a live member that still serves it, which this process takes it over from if that member stops |
+| `not_found` | released, or never recorded |
+| `revoked` | revoked while no process held it, and taken back from the workload |
+| `refused` | lapsed, or its grants no longer authorise it; taken back |
+| `retrying` | nothing could be decided — the secret store unreadable for a moment, the database locked, a KMS down — and it is tried again, two seconds later and then with the wait doubling to a minute, until it is decided or its recorded expiry passes |
+| `failed` | still undecided when it lapsed or when its run ended. Recorded on the run's event history (`lease_takeover`); the run carried on without it, its git pushes and kubectl calls through the hub refused |
+
+A run of `retrying` that ends in `taken_over` was a store that came back in
+time. Alert on `failed`: each is a run that lost a credential to a fault the
+hub could not see past. While one is `retrying`, `cloop hub doctor` and
+Settings → Hub health warn `runs.lease_takeovers`, naming the run.
+
+```promql
+sum by (kind) (increase(cloop_lease_takeovers_total{outcome="failed"}[1h])) > 0
 ```
 
 ## Quotas and admission control

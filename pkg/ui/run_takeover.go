@@ -25,6 +25,10 @@ package ui
 //	failover to find if the device then died holding it. The sweep now leaves
 //	a device's session open (pkg/executor/reconcile), and the adopter watches
 //	it to its end, as its dispatcher would have.
+//
+// A takeover the store could not decide — unreadable for a moment, locked, a
+// KMS down — is kept and tried again (takeover_retry.go, Task 20451), so the
+// lease stays on the run's owner row instead of lapsing with nobody holding it.
 
 import (
 	"context"
@@ -35,6 +39,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -44,14 +49,19 @@ import (
 // moves here, and the returned lease is kept alive from this process until it
 // is closed. It carries no material — the workload has it already — so it
 // renders nothing; closing it releases the lease at the broker.
-func restoreSecretLease(controlPlaneDir, workDir, leaseID string) (*secretLease, error) {
+func restoreSecretLease(controlPlaneDir, workDir, leaseID string, opts ...secretbroker.RestoreOption) (*secretLease, error) {
+	if testRestoreSecretLease != nil {
+		if err := testRestoreSecretLease(leaseID); err != nil {
+			return nil, err
+		}
+	}
 	broker, db, closeDB, err := openUIBrokerDB(controlPlaneDir)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), leaseTimeout)
 	defer cancel()
-	lease, err := broker.Restore(ctx, leaseID)
+	lease, err := broker.Restore(ctx, leaseID, opts...)
 	if err != nil {
 		closeDB()
 		return nil, err
@@ -64,86 +74,113 @@ func restoreSecretLease(controlPlaneDir, workDir, leaseID string) (*secretLease,
 	return sl, nil
 }
 
+// testRestoreSecretLease, when set, is asked before each attempt to take a
+// recorded lease over, and an error it returns ends the attempt as the broker's
+// would — a test's store that cannot be read for a moment (Task 20451), as
+// testWithdrawGrantFanout stands in for a fan-out. Nil in production.
+var testRestoreSecretLease func(leaseID string) error
+
 // takeOverRunLeases takes over the leases an adopted run holds, binds them to
-// its handle, and closes each when the workload ends.
+// its handle, and closes each when the workload ends. One an attempt could not
+// decide is tried again from here (Task 20451).
 func (s *Server) takeOverRunLeases(workDir string, ex executor.Executor, handleID string, leaseIDs []string) {
 	for _, id := range leaseIDs {
-		if liveLeases.held(id) {
-			continue // already held here: this process adopted the run before
+		res := s.takeOverRunLease(workDir, ex, handleID, id)
+		s.settleFirstTakeover(takeoverRun, workDir, ex, handleID, id, "", res)
+	}
+}
+
+// takeOverRunLease makes one attempt at taking over the lease id of the run on
+// ex, and reports what it decided. Everything a decided outcome calls for is
+// done here — the lease bound and kept alive, or taken back from the workload
+// — so an attempt the retry makes later ends exactly as the first would have.
+func (s *Server) takeOverRunLease(workDir string, ex executor.Executor, handleID, id string) takeoverResult {
+	if liveLeases.held(id) {
+		return takeoverResult{} // already held here: this process adopted the run before
+	}
+	if ex.Capabilities().SecretFilesFromHostPath {
+		// The material is files in a lease directory on the host of the
+		// process that held it — which alone could keep them current or
+		// wipe them — read by a run that outlived it: a forked child is
+		// reparented, not killed. They are wiped now, before the record
+		// goes (Task 20419); the run carries on without them. Death
+		// detection wipes them too (onMembershipChange); this is the
+		// adopter making sure, since retiring the record says they are
+		// gone.
+		if _, gone := wipeDeadMembersLeaseDirs(controlPlaneDir(), id); gone {
+			const why = "its credential files were wiped when the hub process holding them stopped"
+			retireLeaseRecord(id, why)
+			settleRevocationsOfLease(id, why)
+		} else {
+			// A directory not visible from here, or a wipe that failed: the
+			// record stays, so the lease lapses on schedule and the sweep
+			// takes the files back through the adopted handle's bindings.
+			fmt.Fprintf(os.Stderr, "ui: lease %s of the adopted run on %s: not every credential file it "+
+				"materialised could be wiped from this host; its record is kept until it lapses\n", id, ex.ID())
 		}
-		if ex.Capabilities().SecretFilesFromHostPath {
-			// The material is files in a lease directory on the host of the
-			// process that held it — which alone could keep them current or
-			// wipe them — read by a run that outlived it: a forked child is
-			// reparented, not killed. They are wiped now, before the record
-			// goes (Task 20419); the run carries on without them. Death
-			// detection wipes them too (onMembershipChange); this is the
-			// adopter making sure, since retiring the record says they are
-			// gone.
-			if _, gone := wipeDeadMembersLeaseDirs(controlPlaneDir(), id); gone {
-				const why = "its credential files were wiped when the hub process holding them stopped"
-				retireLeaseRecord(id, why)
-				settleRevocationsOfLease(id, why)
-			} else {
-				// A directory not visible from here, or a wipe that failed: the
-				// record stays, so the lease lapses on schedule and the sweep
-				// takes the files back through the adopted handle's bindings.
-				fmt.Fprintf(os.Stderr, "ui: lease %s of the adopted run on %s: not every credential file it "+
-					"materialised could be wiped from this host; its record is kept until it lapses\n", id, ex.ID())
-			}
-			continue
+		return takeoverResult{}
+	}
+	sl, err := restoreSecretLease(controlPlaneDir(), workDir, id, s.takeoverGuard(workDir))
+	switch {
+	case err == nil:
+		sl.bindHandle(ex.ID(), handleID)
+		// The hub scrubs the run's output with what its lease carries —
+		// the live log, and the result it merges into the project. The
+		// handle this process rehydrated has no such set; its dispatcher
+		// built one from the Spec, which is never persisted.
+		if r, ok := ex.(executor.HandleRedactor); ok {
+			r.AddHandleRedactions(handleID, sl.broker.RedactionValues(id)...)
 		}
-		sl, err := restoreSecretLease(controlPlaneDir(), workDir, id)
-		switch {
-		case err == nil:
-			sl.bindHandle(ex.ID(), handleID)
-			// The hub scrubs the run's output with what its lease carries —
-			// the live log, and the result it merges into the project. The
-			// handle this process rehydrated has no such set; its dispatcher
-			// built one from the Spec, which is never persisted.
-			if r, ok := ex.(executor.HandleRedactor); ok {
-				r.AddHandleRedactions(handleID, sl.broker.RedactionValues(id)...)
-			}
-			// And the run's pushes are scanned for the same values (Task
-			// 20436) — recorded before its sessions are restored below, so
-			// no push through one is scanned without them, and forgotten
-			// once the run and every session naming it are over.
-			adoptRunPushScan(sl.lease.RunID, workDir, id, sl.broker.RedactionCredentials(id))
-			go func(runID string) {
-				watchWorkloadExit(ex, handleID)
-				endRunPushScan(runID)
-			}(sl.lease.RunID)
-			liveLeases.add(sl)
-			go wipeLeaseOnExit(ex, handleID, sl, nil)
-			s.log().Info("cluster", 0, "took over the secret lease of an adopted run",
-				map[string]interface{}{"project": workDir, "lease": id, "executor": ex.ID(), "handle": handleID,
-					"expires_at": sl.ExpiresAt().UTC().Format(time.RFC3339)})
-			// A grant revoked while no hub held the lease is taken back from
-			// the workload now, before anything is restored on its behalf;
-			// the lease keeps the grants nobody revoked (Task 20403).
-			s.withdrawOnAdoption(sl)
-			// And a label grant its executor's labels stopped matching while
-			// no hub held it (Task 20432).
-			s.relabelAdoptedLease(sl)
-			// And what it feeds: the run's git proxy and Kubernetes monitor
-			// sessions, under the ids and tokens its workload holds, and the
-			// App tokens behind them (Task 20383).
-			restoreLeaseSessions(sl)
-		case errors.Is(err, secretbroker.ErrLeaseRevoked):
-			// Revoked while no hub process held it (Task 20419): the material
-			// is taken back from the workload this process can now reach, and
-			// nothing the lease fed is restored.
-			s.enforceRevokedTakeover(workDir, ex, handleID, id, err)
-		case errors.Is(err, secretbroker.ErrLeaseMoved), errors.Is(err, secretbroker.ErrLeaseNotFound):
-			// Held by the process that adopted the run first, or already
-			// released: either way not this process's to keep.
-		case leaseRefusedForGood(err):
-			s.withdrawLapsedLease(id, fmt.Sprintf("the hub process that adopted its run could not take the lease over: %v", err))
-		default:
-			// Nothing decided — the store could not be read. The record stays,
-			// and the janitor sweeps it once it lapses.
-			fmt.Fprintf(os.Stderr, "ui: take over lease %s of the run on %s: %v\n", id, ex.ID(), err)
-		}
+		// And the run's pushes are scanned for the same values (Task
+		// 20436) — recorded before its sessions are restored below, so
+		// no push through one is scanned without them, and forgotten
+		// once the run and every session naming it are over.
+		adoptRunPushScan(sl.lease.RunID, workDir, id, sl.broker.RedactionCredentials(id))
+		go func(runID string) {
+			watchWorkloadExit(ex, handleID)
+			endRunPushScan(runID)
+		}(sl.lease.RunID)
+		liveLeases.add(sl)
+		go wipeLeaseOnExit(ex, handleID, sl, nil)
+		s.log().Info("cluster", 0, "took over the secret lease of an adopted run",
+			map[string]interface{}{"project": workDir, "lease": id, "executor": ex.ID(), "handle": handleID,
+				"expires_at": sl.ExpiresAt().UTC().Format(time.RFC3339)})
+		// A grant revoked while no hub held the lease is taken back from
+		// the workload now, before anything is restored on its behalf;
+		// the lease keeps the grants nobody revoked (Task 20403).
+		s.withdrawOnAdoption(sl)
+		// And a label grant its executor's labels stopped matching while
+		// no hub held it (Task 20432).
+		s.relabelAdoptedLease(sl)
+		// And what it feeds: the run's git proxy and Kubernetes monitor
+		// sessions, under the ids and tokens its workload holds, and the
+		// App tokens behind them (Task 20383).
+		restoreLeaseSessions(sl)
+		return takeoverResult{outcome: hubmetrics.TakeoverTakenOver}
+	case errors.Is(err, secretbroker.ErrLeaseRevoked):
+		// Revoked while no hub process held it (Task 20419): the material
+		// is taken back from the workload this process can now reach, and
+		// nothing the lease fed is restored.
+		s.enforceRevokedTakeover(workDir, ex, handleID, id, err)
+		return takeoverResult{outcome: hubmetrics.TakeoverRevoked, err: err}
+	case errors.Is(err, secretbroker.ErrLeaseMoved):
+		// This process no longer owns the run (takeoverGuard): not its to
+		// keep. Lost to a process that does not own it either, it is tried
+		// again (lostWhileOwned).
+		return s.lostWhileOwned(workDir, ex, handleID, takeoverResult{outcome: hubmetrics.TakeoverMoved, err: err})
+	case errors.Is(err, secretbroker.ErrLeaseNotFound):
+		// Already released, or issued by a hub that kept no record.
+		return takeoverResult{outcome: hubmetrics.TakeoverNotFound, err: err}
+	case leaseRefusedForGood(err):
+		s.withdrawLapsedLease(id, fmt.Sprintf("the hub process that adopted its run could not take the lease over: %v", err))
+		return takeoverResult{outcome: hubmetrics.TakeoverRefused, err: err}
+	default:
+		// Nothing decided — the store could not be read, the database was
+		// locked, a KMS did not answer. The record stays, and the caller
+		// keeps the lease on the run's owner row and tries again.
+		fmt.Fprintf(os.Stderr, "ui: take over lease %s of the run on %s (will retry): %v\n", id, ex.ID(),
+			secretbroker.RedactString(err.Error()))
+		return takeoverResult{outcome: hubmetrics.TakeoverRetrying, err: err}
 	}
 }
 

@@ -116,6 +116,12 @@ func steps(dir string, cfg *config.Config, opts Options, wal walSample, rep *Rep
 			checkIsolationEvidence(dir, add)
 		}},
 		{"runs.build_lag", "Builds of the runs on this host", func(_ context.Context, add addFn) { checkRunBuilds(add) }},
+		// Beside it: the credentials an adopted run's hub process could not
+		// take over yet and keeps trying, read from the run claims (Task
+		// 20451).
+		{"runs.lease_takeovers", "Credentials of adopted runs", func(_ context.Context, add addFn) {
+			checkRunTakeovers(dir, opts, add)
+		}},
 	}
 	if set.networkPolicy != nil {
 		// After the executor check, and not optional about the ordering: the

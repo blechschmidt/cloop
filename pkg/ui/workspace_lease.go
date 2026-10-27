@@ -37,6 +37,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitcreds"
 	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -206,19 +207,36 @@ func (lr *leaseRegistry) workspaceForHandle(executorID, handleID string) *runWor
 // takeOverWorkspaceLease takes over the workspace lease an adopted run's
 // owner row names, and restores the pinned session it feeds, for the run's
 // push write-back (Task 20390). It ends with the workload, as the run's own
-// leases do.
+// leases do. One an attempt could not decide is tried again from here (Task
+// 20451).
 func (s *Server) takeOverWorkspaceLease(workDir string, ex executor.Executor, handleID string, ws *runWorkspaceMeta) {
-	if ws == nil || strings.TrimSpace(ws.Lease) == "" || liveLeases.held(ws.Lease) {
+	if ws == nil || strings.TrimSpace(ws.Lease) == "" {
 		return
+	}
+	res := s.takeOverWorkspace(workDir, ex, handleID, ws)
+	s.settleFirstTakeover(takeoverWorkspace, workDir, ex, handleID, ws.Lease, ws.Session, res)
+}
+
+// takeOverWorkspace makes one attempt at taking over the workspace lease ws
+// names, and reports what it decided.
+func (s *Server) takeOverWorkspace(workDir string, ex executor.Executor, handleID string, ws *runWorkspaceMeta) takeoverResult {
+	if liveLeases.held(ws.Lease) {
+		return takeoverResult{}
 	}
 	// The owner row is read back from a database: the lease it names must
 	// be one issued for this run's executor and project, or a pinned session
 	// of another run's would be revived on its say-so.
-	if why := workspaceLeaseMismatch(ws.Lease, ex, workDir); why != "" {
-		fmt.Fprintf(os.Stderr, "ui: not taking over workspace lease %s of the run on %s: %s\n", ws.Lease, ex.ID(), why)
-		return
+	why, readable := workspaceLeaseMismatch(ws.Lease, ex, workDir)
+	if !readable {
+		// Not taken over on an owner row's say-so while its record cannot
+		// be read — and not given up on either: tried again.
+		return takeoverResult{outcome: hubmetrics.TakeoverRetrying, err: errors.New(why)}
 	}
-	sl, err := restoreSecretLease(controlPlaneDir(), workDir, ws.Lease)
+	if why != "" {
+		fmt.Fprintf(os.Stderr, "ui: not taking over workspace lease %s of the run on %s: %s\n", ws.Lease, ex.ID(), why)
+		return takeoverResult{outcome: hubmetrics.TakeoverRefused, err: errors.New(why)}
+	}
+	sl, err := restoreSecretLease(controlPlaneDir(), workDir, ws.Lease, s.takeoverGuard(workDir))
 	switch {
 	case err == nil:
 	case errors.Is(err, secretbroker.ErrLeaseRevoked):
@@ -228,18 +246,24 @@ func (s *Server) takeOverWorkspaceLease(workDir string, ex executor.Executor, ha
 		retireLeaseRecord(ws.Lease, "revoked while no hub process held it")
 		settleRevocationsOfLease(ws.Lease, "the hub process that adopted its run did not restore its session")
 		s.broadcastSecretsUpdate("lease_revoked", ws.Lease)
-		return
+		return takeoverResult{outcome: hubmetrics.TakeoverRevoked, err: err}
 	case leaseRefusedForGood(err):
 		// Nothing of it is on the device — its session token is the device's,
 		// and the session is not restored — so there is nothing to scrub:
 		// the record and the session's go.
 		retireLeaseRecord(ws.Lease, fmt.Sprintf("the hub process that adopted its run could not take the "+
 			"workspace lease over: %v", secretbroker.RedactString(err.Error())))
-		return
+		return takeoverResult{outcome: hubmetrics.TakeoverRefused, err: err}
+	case errors.Is(err, secretbroker.ErrLeaseMoved):
+		return s.lostWhileOwned(workDir, ex, handleID, takeoverResult{outcome: hubmetrics.TakeoverMoved, err: err})
+	case errors.Is(err, secretbroker.ErrLeaseNotFound):
+		return takeoverResult{outcome: hubmetrics.TakeoverNotFound, err: err}
 	default:
-		// Taken over by another process, released, or not readable just
-		// now: either way nothing for this one to restore.
-		return
+		// Not readable just now: kept on the run's owner row and tried
+		// again.
+		fmt.Fprintf(os.Stderr, "ui: take over workspace lease %s of the run on %s (will retry): %v\n", ws.Lease,
+			ex.ID(), secretbroker.RedactString(err.Error()))
+		return takeoverResult{outcome: hubmetrics.TakeoverRetrying, err: err}
 	}
 	sl.mu.Lock()
 	sl.workspace = true
@@ -252,37 +276,38 @@ func (s *Server) takeOverWorkspaceLease(workDir string, ex executor.Executor, ha
 		map[string]interface{}{"project": workDir, "lease": ws.Lease, "session": ws.Session,
 			"executor": ex.ID(), "handle": handleID})
 	restoreLeaseSessions(sl)
+	return takeoverResult{outcome: hubmetrics.TakeoverTakenOver}
 }
 
 // workspaceLeaseMismatch reports why leaseID's record is not a workspace lease
 // issued for a run of workDir on ex, or "". It fails closed — a record that
-// cannot be read just now is not taken over on an owner row's say-so — except
-// for one that does not exist, which restoreSecretLease refuses taking
-// nothing over.
-func workspaceLeaseMismatch(leaseID string, ex executor.Executor, workDir string) string {
+// cannot be read just now is not taken over on an owner row's say-so, and
+// readable is false so the caller tries again — except for one that does not
+// exist, which restoreSecretLease refuses taking nothing over.
+func workspaceLeaseMismatch(leaseID string, ex executor.Executor, workDir string) (why string, readable bool) {
 	dir := controlPlaneDir()
 	if dir == "" {
-		return "this hub process keeps no lease records"
+		return "this hub process keeps no lease records", true
 	}
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {
-		return "its record could not be read: " + err.Error()
+		return "its record could not be read: " + err.Error(), false
 	}
 	defer db.Close()
 	row, err := db.GetSecretLease(leaseID)
 	switch {
 	case errors.Is(err, statedb.ErrSecretLeaseNotFound):
-		return ""
+		return "", true
 	case err != nil:
-		return "its record could not be read: " + err.Error()
+		return "its record could not be read: " + err.Error(), false
 	}
 	if row.ExecutorID != ex.ID() {
-		return fmt.Sprintf("it was issued to executor %q, not %q", row.ExecutorID, ex.ID())
+		return fmt.Sprintf("it was issued to executor %q, not %q", row.ExecutorID, ex.ID()), true
 	}
 	if want := secretbroker.NormalizeProjectID(executor.PolicyProjectPath(workDir)); row.ProjectID != want {
-		return fmt.Sprintf("it was issued for project %q, not %q", row.ProjectID, want)
+		return fmt.Sprintf("it was issued for project %q, not %q", row.ProjectID, want), true
 	}
-	return ""
+	return "", true
 }
 
 // ── restoring a pinned session ───────────────────────────────────────────────

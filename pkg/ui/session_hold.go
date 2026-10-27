@@ -190,6 +190,10 @@ func pollSessionRestore(row statedb.ProxySessionRow, served, claimedElsewhere fu
 		if served() {
 			return true, false
 		}
+		// The adoption may be done and the lease's takeover — or the egress
+		// session's — kept for a retry this process makes (Task 20451): the
+		// request brings the attempt forward, and the retry spaces them.
+		nudgeTakeoverOf(row)
 		if claimedElsewhere != nil && claimedElsewhere() {
 			return false, true
 		}
