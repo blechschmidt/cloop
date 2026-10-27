@@ -9,6 +9,7 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -397,6 +398,81 @@ func TestHarnessCredentialAPIRefusesBadPastesWithoutRepeatingThem(t *testing.T) 
 	}
 	if rows := h.logs.String(); strings.Contains(rows, refresh) {
 		t.Error("a refused paste reached the log")
+	}
+}
+
+// TestClassifyPastedGitHubTokens: a copilot project's dialog takes a GitHub
+// token the Copilot CLI signs in with, and refuses the kinds it does not —
+// saying why, without repeating the paste. Any other project takes none.
+func TestClassifyPastedGitHubTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name, paste, provider, want string
+		err                         error
+	}{
+		{"fine-grained", fakeGitHubToken("github" + "_pat_"), "copilot", envCopilotGitHubToken, nil},
+		{"oauth", fakeGitHubToken("gh" + "o_"), "copilot", envCopilotGitHubToken, nil},
+		{"app user", fakeGitHubToken("gh" + "u_"), "copilot", envCopilotGitHubToken, nil},
+		{"classic", fakeGitHubToken("gh" + "p_"), "copilot", "", errCopilotTokenClassic},
+		{"installation", fakeGitHubToken("gh" + "s_"), "copilot", "", errCopilotTokenNotUser},
+		{"refresh", fakeGitHubToken("gh" + "r_"), "copilot", "", errCopilotTokenNotUser},
+		{"nonsense", "hello-world-token", "copilot", "", errCopilotTokenShape},
+		{"nothing", "  ", "copilot", "", errCopilotTokenEmpty},
+		// Classified, then refused by the handler as the wrong kind.
+		{"a claude token", fakeAnthropicToken("oat01", "forcopilot"), "copilot", envClaudeOAuthToken, nil},
+		{"github for claudecode", fakeGitHubToken("github" + "_pat_"), "claudecode", "", errTokenShape},
+	} {
+		got, err := classifyPastedToken(tc.paste, tc.provider)
+		if got != tc.want || err != tc.err {
+			t.Errorf("%s: = %q, %v; want %q, %v", tc.name, got, err, tc.want, tc.err)
+		}
+	}
+}
+
+// The dialog end to end for a copilot project: a pasted token is stored and
+// granted as COPILOT_GITHUB_TOKEN, a Claude token is refused naming what the
+// project needs, and the grant leaves the project's Claude grant standing.
+func TestHarnessCredentialAPIGrantsACopilotToken(t *testing.T) {
+	h := newHarnessHub(t)
+	// A Claude credential first, while the project runs claudecode.
+	code, claude := h.do(t, "alice", "POST", harnessPath, map[string]any{"token": fakeAnthropicToken("oat01", "beforeswitch"), "ttl_minutes": 1440})
+	if code != http.StatusOK {
+		t.Fatalf("claude paste = %d %v", code, claude)
+	}
+	claudeGrant := claude["granted"].(map[string]any)["grant_id"].(string)
+
+	setProvider(t, h.srv.WorkDir, "copilot")
+	code, view := h.do(t, "alice", "GET", harnessPath, nil)
+	if code != http.StatusOK || view["provider"] != "copilot" || view["state"] != "missing" {
+		t.Fatalf("copilot project's view = %d %v", code, view)
+	}
+	code, out := h.do(t, "alice", "POST", harnessPath, map[string]any{"token": fakeAnthropicToken("oat01", "wrongharness")})
+	if msg, _ := out["error"].(map[string]any); code != http.StatusBadRequest || !strings.Contains(fmt.Sprint(msg["message"]), envCopilotGitHubToken) {
+		t.Errorf("a Claude token for a copilot project = %d %v", code, out)
+	}
+
+	token := fakeGitHubToken("github" + "_pat_")
+	code, granted := h.do(t, "alice", "POST", harnessPath, map[string]any{"token": token})
+	if code != http.StatusOK {
+		t.Fatalf("copilot paste = %d %v", code, granted)
+	}
+	g := granted["granted"].(map[string]any)
+	if keys, _ := g["env_keys"].([]any); len(keys) != 1 || keys[0] != envCopilotGitHubToken {
+		t.Errorf("env_keys = %v, want only %s", g["env_keys"], envCopilotGitHubToken)
+	}
+	if !strings.HasPrefix(fmt.Sprint(g["secret_name"]), "copilot-token-") || granted["state"] != "ok" {
+		t.Errorf("granted = %v, state %v", g, granted["state"])
+	}
+	if sup, _ := g["superseded"].([]any); len(sup) != 0 {
+		t.Errorf("the Copilot grant superseded %v; a Claude grant is not its to replace", sup)
+	}
+	_, grants := h.do(t, "alice", "GET", "/api/grants?active=1", nil)
+	if !strings.Contains(fmt.Sprint(grants), claudeGrant) {
+		t.Errorf("the project's Claude grant %s is no longer active after a Copilot one was granted", claudeGrant)
+	}
+	for _, body := range h.bodies {
+		if strings.Contains(body, token) {
+			t.Fatal("a response repeated the pasted token")
+		}
 	}
 }
 

@@ -39,6 +39,8 @@
         if (cfg.provider) provSel.value = cfg.provider;
         // ClaudeCode
         document.getElementById('cfgCCModel').value = cfg.claudecode?.model || '';
+        // GitHub Copilot (Task 20447)
+        document.getElementById('cfgCopilotModel').value = cfg.copilot?.model || '';
         // Anthropic
         document.getElementById('cfgAnthropicModel').value = cfg.anthropic?.model || '';
         document.getElementById('cfgAnthropicBase').value  = cfg.anthropic?.base_url || '';
@@ -186,6 +188,9 @@
     }
     function saveCCModel() {
       return saveConfigField('claudecode.model', document.getElementById('cfgCCModel').value);
+    }
+    function saveCopilotModel() {
+      return saveConfigField('copilot.model', document.getElementById('cfgCopilotModel').value);
     }
 
     // Single sign-on settings (Task 20308).
@@ -1898,7 +1903,7 @@
 
     return h.mount({
       open, saveConfigField, saveAnthropicCfg, saveOpenAICfg, saveOllamaCfg, saveSTTCfg,
-      clearSTTCfg, confirmReset, saveProvider, saveCCModel, loadOIDCSettings, oidcAddMapping,
+      clearSTTCfg, confirmReset, saveProvider, saveCCModel, saveCopilotModel, loadOIDCSettings, oidcAddMapping,
       saveOIDCSettings, oidcClearSecret, oidcTestIssuer, oidcEnforce, loadSCIM, scimMint, scimRotate, scimRevoke,
       holdPlace, holdRelease, loadStaticToken, retireStaticToken,
       loadTelemetryPolicy, loadNotifications, notifyAdd, notifyEdit, notifyRemove, notifyTest, saveNotifyDashboard,
@@ -1928,6 +1933,7 @@
             <label class="form-label">Active provider</label>
             <select class="form-select" id="cfgProvider">
               <option value="claudecode">claudecode</option>
+              <option value="copilot">copilot</option>
               <option value="anthropic">anthropic</option>
               <option value="openai">openai</option>
               <option value="ollama">ollama</option>
@@ -1943,6 +1949,16 @@
             <input class="form-input" id="cfgCCModel" placeholder="e.g. claude-opus-4-6">
           </div>
           <button class="btn settings-save" data-act="saveCCModel">Save</button>
+        </div>
+
+        <div class="settings-section">
+          <h3>GitHub Copilot</h3>
+          <div class="form-group">
+            <label class="form-label">Model</label>
+            <input class="form-input" id="cfgCopilotModel" placeholder="e.g. auto, gpt-5.4, claude-sonnet-4.5">
+          </div>
+          <p class="form-hint">Runs the <code>copilot</code> CLI under its own sign-in (<code>copilot login</code>, or <code>COPILOT_GITHUB_TOKEN</code>). Empty uses the CLI's own default.</p>
+          <button class="btn settings-save" data-act="saveCopilotModel">Save</button>
         </div>
 
         <div class="settings-section">

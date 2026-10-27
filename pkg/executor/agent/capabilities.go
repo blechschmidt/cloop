@@ -32,7 +32,7 @@ var knownContainerRuntimes = []string{"docker", "podman", "nerdctl"}
 // knownHarnesses are the agent CLIs a cloop workload might invoke. This list
 // mirrors the providers cloop supports; a device missing all of them can still
 // run shell workloads, so an empty result is informative, not fatal.
-var knownHarnesses = []string{"claude", "codex", "gemini", "cloop"}
+var knownHarnesses = []string{"claude", "copilot", "codex", "gemini", "cloop"}
 
 // DetectOptions tunes capability detection.
 type DetectOptions struct {

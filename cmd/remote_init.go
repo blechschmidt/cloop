@@ -682,12 +682,18 @@ func settleClaudeCredential(ctx context.Context, c *hubclient.Client, p hubclien
 		}
 	}
 	if pick == "" {
+		// The hub words both for the project's provider; these stand in only
+		// when it says nothing.
+		noun := "Claude credential"
+		if hc.Provider == "copilot" {
+			noun = "Copilot credential"
+		}
 		res.Reason, res.Remedy = strings.TrimSpace(hc.Reason), strings.TrimSpace(hc.Remedy)
 		if res.Reason == "" {
-			res.Reason = "no grant gives the project's sandbox a Claude credential"
+			res.Reason = "no grant gives the project's sandbox a " + noun
 		}
 		if res.Remedy == "" {
-			res.Remedy = "Grant one from the project's Overview in the dashboard (Claude credential)."
+			res.Remedy = "Grant one from the project's Overview in the dashboard (" + noun + ")."
 		}
 		return res
 	}
@@ -821,7 +827,7 @@ func init() {
 	f.StringVar(&rinitProvider, "provider", "", "AI provider (default: the hub's)")
 	f.StringVar(&rinitModel, "model", "", "Model (default: the provider's)")
 	f.StringVar(&rinitEffortLevel, "effort", "", "Model effort: low, medium, high, xhigh or max")
-	f.StringVar(&rinitClaudeSecret, "claude-secret", "", "The env secret holding the Claude credential its sandbox signs in with")
+	f.StringVar(&rinitClaudeSecret, "claude-secret", "", "The env secret holding the credential its sandbox signs in with: Claude's, or COPILOT_GITHUB_TOKEN for a copilot project")
 	f.StringVar(&rinitJustification, "justification", "", "Why, for any credential requested from an approver (default: the goal)")
 	f.BoolVar(&remoteJSON, "json", false, "Print what was created, granted and requested as JSON")
 	remoteCmd.AddCommand(remoteInitCmd)

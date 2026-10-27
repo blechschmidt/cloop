@@ -17,6 +17,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
+	"github.com/blechschmidt/cloop/pkg/provider/copilot"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -93,15 +94,18 @@ func resolveProjectModel(workDir, providerName string, st *state.ProjectState) s
 
 // harnessForProvider maps a provider name to the CLI it drives.
 //
-// A switch with one case, on purpose. claudecode is the only provider in the
-// tree that execs anything — the others open an HTTP connection — and writing
-// it as a lookup makes the next CLI-backed provider a one-line addition at the
-// place that already has to be found, instead of an `if name == "claudecode"`
+// A switch with a case per CLI-backed provider — claudecode's `claude` and,
+// since Task 20447, copilot's `copilot` — while every other provider opens an
+// HTTP connection and needs nothing on the executing machine. Written as a
+// lookup so the next CLI-backed provider is a one-line addition at the place
+// that already has to be found, instead of an `if name == "claudecode"`
 // somewhere in the dispatch path that nobody thinks to revisit.
 func harnessForProvider(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case claudecode.ProviderName:
 		return claudeHarnessBin
+	case copilot.ProviderName:
+		return copilot.Binary
 	default:
 		return ""
 	}

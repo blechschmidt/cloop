@@ -646,15 +646,16 @@ act('openProviderModelModal', function() {
   openOverlay('provider-model-overlay', {dismiss: closeProviderModelModal});
 });
 
-// Effort is only honored by the claudecode provider — gray it out (but keep
-// the saved value) for the others so the modal doesn't imply support.
+// Effort is only honored by the agent-CLI providers, claudecode and copilot —
+// gray it out (but keep the saved value) for the others so the modal doesn't
+// imply support.
 function updatePMEffortAvailability() {
   const prov   = (document.getElementById('pmProvider') || {}).value || 'claudecode';
   const effSel = document.getElementById('pmEffort');
   const hint   = document.getElementById('pmEffortHint');
-  const isCC   = prov === 'claudecode';
-  if (effSel) effSel.disabled = !isCC;
-  if (hint) hint.style.display = isCC ? 'none' : '';
+  const takes  = prov === 'claudecode' || prov === 'copilot';
+  if (effSel) effSel.disabled = !takes;
+  if (hint) hint.style.display = takes ? 'none' : '';
 }
 
 act('closeProviderModelModal', function() {
@@ -670,7 +671,10 @@ function populatePMModelDropdown(preselect) {
   const sel  = document.getElementById('pmModel');
   if (!sel) return;
   const prov = (document.getElementById('pmProvider') || {}).value || 'claudecode';
-  const models = providerModels[prov] || [{value:'', label:'(default)'}];
+  const models = (providerModels[prov] || [{value:'', label:'(default)'}]).slice();
+  // A saved model the list does not name is kept, so opening and saving the
+  // dialog never silently changes it.
+  if (preselect && !models.some(m => m.value === preselect)) models.push({value: preselect, label: preselect});
   sel.innerHTML = models.map(m =>
     '<option value="'+esc(m.value)+'"'+(m.value===preselect?' selected':'')+'>'+esc(m.label)+'</option>'
   ).join('');

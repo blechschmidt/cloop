@@ -454,6 +454,18 @@ const providerModels = {
     {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
     {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
   ],
+  // GitHub Copilot (Task 20447). Its catalog depends on the plan — `copilot`,
+  // then /model, lists what yours offers — so these are a start, and a model
+  // saved on the project that is not among them is kept (populatePMModelDropdown).
+  copilot: [
+    {value: '', label: '(default — the CLI’s choice)'},
+    {value: 'auto', label: 'Auto (Copilot picks)'},
+    {value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5'},
+    {value: 'claude-opus-4.5', label: 'Claude Opus 4.5'},
+    {value: 'claude-haiku-4.5', label: 'Claude Haiku 4.5'},
+    {value: 'gpt-5.4', label: 'GPT-5.4'},
+    {value: 'gpt-5-mini', label: 'GPT-5 mini'},
+  ],
   anthropic: [
     {value: '', label: '(default — claude-opus-4-6)'},
     {value: 'claude-fable-5', label: 'Claude Fable 5'},

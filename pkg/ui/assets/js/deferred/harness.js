@@ -6,7 +6,9 @@
 // that would get none (harness_credential_missing / _expiring); this file is
 // the other half: a card on the Overview that says what the sandbox would sign
 // in with, and a dialog that grants a credential in one step — an env secret
-// the user already has, or a token pasted from `claude setup-token`.
+// the user already has, or a token pasted from `claude setup-token`. A copilot
+// project's harness signs in to GitHub Copilot instead (Task 20447), and the
+// card and dialog say so: words() is the one place the two differ.
 //
 // Fetched on demand rather than bundled (static.go, deferredScripts): first
 // paint has no room for it. It runs outside the dashboard's IIFE, so
@@ -32,6 +34,22 @@
 
     function el(id) { return document.getElementById(id); }
 
+    // What the project's harness signs in with, by the provider the view names.
+    function words(d) {
+      if (d && d.provider === 'copilot') {
+        return {
+          noun: 'Copilot credential', login: 'Copilot sign-in', service: 'GitHub Copilot',
+          paste: 'A fine-grained GitHub token (github_pat_…) whose only permission is Copilot Requests.',
+          placeholder: 'github_pat_…',
+        };
+      }
+      return {
+        noun: 'Claude credential', login: 'Claude login', service: 'Claude',
+        paste: 'From `claude setup-token` (sk-ant-oat01-…), or an Anthropic API key.',
+        placeholder: 'sk-ant-oat01-… or sk-ant-api03-…',
+      };
+    }
+
     // The Overview card, placed after the Executor card it qualifies.
     function card() {
       let c = el('harnessCredCard');
@@ -44,7 +62,7 @@
       c.tabIndex = 0;
       c.setAttribute('role', 'button');
       c.style.display = 'none';
-      c.innerHTML = '<div class="stat-label">Claude credential <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>' +
+      c.innerHTML = '<div class="stat-label"><span id="harnessCredLabel">Claude credential</span> <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>' +
         '<div class="stat-value" style="font-size:13px;margin-top:4px"><span id="harnessCredChip"></span></div>' +
         '<div class="stat-sub" id="harnessCredSub"></div>' +
         '<div class="stat-sub" id="harnessCredRelay" style="display:none"></div>';
@@ -86,6 +104,8 @@
       if (!c) return;
       if (!d || !d.applies) { c.style.display = 'none'; return; }
       c.style.display = '';
+      const w = words(d);
+      el('harnessCredLabel').textContent = w.noun;
       const t = tone(d);
       const chip = el('harnessCredChip');
       chip.className = 'hc-chip hc-' + (d.state || 'missing');
@@ -101,8 +121,8 @@
         rl.textContent = !r ? '' : r.relayed ? 'through the hub relay' : 'not relayed';
       }
       c.title = (d.state === 'ok'
-        ? 'This project’s sandbox signs in to Claude with ' + grantedBy(d) + '. Click to grant another.'
-        : (d.reason || 'This project’s sandbox has no Claude login.') + ' Click to grant one.') +
+        ? 'This project’s sandbox signs in to ' + w.service + ' with ' + grantedBy(d) + '. Click to grant another.'
+        : (d.reason || 'This project’s sandbox has no ' + w.login + '.') + ' Click to grant one.') +
         (r && r.relayed ? ' Its model calls go through the hub relay: the credential stays on the hub.' : '');
     }
 
@@ -186,9 +206,11 @@
 
     function renderDialog(d, refusal) {
       dialogView = d;
+      const w = words(d);
+      el('hcTitle').textContent = w.noun;
       const ex = d.executor || {};
       el('hcIntro').textContent = (ex.id ? 'This project runs on ' + ex.id + ' (' + ex.kind + '), a sandbox' : 'This project’s sandbox') +
-        ' that gets no Claude login of its own — only what is granted to ' +
+        ' that gets no ' + w.login + ' of its own — only what is granted to ' +
         (d.grant_target && d.grant_target !== d.project ? 'its project, ' + d.grant_target : 'the project') + '.' +
         (d.personal ? ' A personal credential is used only for runs you start.' : '');
 
@@ -206,7 +228,7 @@
       } else {
         cur.textContent = d.broker_unavailable
           ? 'Nothing can be granted on this hub: ' + d.broker_unavailable + '.'
-          : 'Now: no Claude credential is granted to this project.';
+          : 'Now: no ' + w.noun + ' is granted to this project.';
       }
 
       renderRelay(d);
@@ -223,7 +245,8 @@
       sel.disabled = !cands.length;
 
       el('hcPasteGroup').style.display = d.can_paste ? '' : 'none';
-      el('hcPasteHint').textContent = 'From `claude setup-token` (sk-ant-oat01-…), or an Anthropic API key. ' +
+      el('hcToken').placeholder = w.placeholder;
+      el('hcPasteHint').textContent = w.paste + ' ' +
         (d.personal ? 'Stored as a personal secret only you can grant.' : 'Stored as a secret on this hub.') +
         ' It is never shown again.';
       el('hcTTL').innerHTML = ttlOptions(d);
@@ -320,7 +343,7 @@
         btn.disabled = false;
         if (!d || d.error || !d.granted) { showError((d && d.error) || 'The credential was not granted'); return; }
         const g = d.granted;
-        h.toast('Claude credential granted: ' + g.secret_name + ', until ' +
+        h.toast(words(dialogView).noun + ' granted: ' + g.secret_name + ', until ' +
           new Date(g.expires_at).toLocaleDateString(), 'ok');
         if (h.idx() === idx) renderCard(d);
         close();

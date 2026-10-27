@@ -264,6 +264,7 @@
               <label class="form-label">Provider</label>
               <select class="form-select" id="initProvider" data-action-change="updateModelDropdown">
                 <option value="claudecode">claudecode (default)</option>
+                <option value="copilot">copilot</option>
                 <option value="anthropic">anthropic</option>
                 <option value="openai">openai</option>
                 <option value="ollama">ollama</option>
@@ -280,7 +281,7 @@
               <input class="form-input" id="initMaxSteps" type="number" min="0" value="0">
             </div>
             <div class="form-group">
-              <label class="form-label">Effort (claudecode)</label>
+              <label class="form-label">Effort (claudecode, copilot)</label>
               <select class="form-select" id="initEffort">
                 <option value="">(default)</option>
                 <option value="low">low</option>
@@ -1001,6 +1002,7 @@
               <option value="openai">openai</option>
               <option value="ollama">ollama</option>
               <option value="claudecode">claudecode</option>
+              <option value="copilot">copilot</option>
               <option value="mock">mock</option>
             </select>
             <input id="pcFilterTaskID" class="form-input" type="number" min="0" placeholder="task id" style="max-width:90px;padding:3px 6px;font-size:11px" data-action-input="_pcDebouncedReload" aria-label="Filter by task id">
@@ -1366,6 +1368,7 @@
         <select class="form-select" id="npProvider">
           <option value="">default</option>
           <option value="claudecode">claudecode</option>
+          <option value="copilot">copilot</option>
           <option value="anthropic">anthropic</option>
           <option value="openai">openai</option>
           <option value="ollama">ollama</option>
@@ -1378,7 +1381,7 @@
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label class="form-label">Effort (claudecode)</label>
+        <label class="form-label">Effort (claudecode, copilot)</label>
         <select class="form-select" id="npEffort">
           <option value="">(default)</option>
           <option value="low">low</option>
@@ -1466,6 +1469,7 @@
         <label class="form-label">Provider</label>
         <select class="form-select" id="pmProvider" data-action-change="onPMProviderChange">
           <option value="claudecode">claudecode</option>
+          <option value="copilot">copilot</option>
           <option value="anthropic">anthropic</option>
           <option value="openai">openai</option>
           <option value="ollama">ollama</option>
@@ -1490,7 +1494,7 @@
       </div>
       <div class="form-group" style="flex:1"></div>
     </div>
-    <p id="pmEffortHint" style="display:none;font-size:11px;color:var(--muted);margin-top:-6px;margin-bottom:6px">Effort applies to the claudecode provider only.</p>
+    <p id="pmEffortHint" style="display:none;font-size:11px;color:var(--muted);margin-top:-6px;margin-bottom:6px">Effort applies to the claudecode and copilot providers only.</p>
     <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:8px">
       Saved on the project. Used by all subsequent runs (Run, Run PM, Run with options) until changed.
     </p>
@@ -1510,11 +1514,11 @@
     <label class="form-label" style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="rgEnabled"> Review each task before its changes leave this machine</label>
     <div class="form-row">
       <div class="form-group" style="flex:1"><label class="form-label" for="rgProvider">Reviewer provider</label>
-        <select class="form-select" id="rgProvider" data-action-change="onRGProviderChange"><option value="">Same as the project</option><option value="claudecode">claudecode</option><option value="anthropic">anthropic</option><option value="openai">openai</option><option value="ollama">ollama</option></select></div>
+        <select class="form-select" id="rgProvider" data-action-change="onRGProviderChange"><option value="">Same as the project</option><option value="claudecode">claudecode</option><option value="copilot">copilot</option><option value="anthropic">anthropic</option><option value="openai">openai</option><option value="ollama">ollama</option></select></div>
       <div class="form-group" style="flex:1"><label class="form-label" for="rgModel">Reviewer model</label><select class="form-select" id="rgModel"></select></div>
     </div>
     <div class="form-row">
-      <div class="form-group" style="flex:1"><label class="form-label" for="rgEffort">Effort (claudecode)</label><select class="form-select" id="rgEffort"><option value="">(default)</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
+      <div class="form-group" style="flex:1"><label class="form-label" for="rgEffort">Effort (claudecode, copilot)</label><select class="form-select" id="rgEffort"><option value="">(default)</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></div>
       <div class="form-group" style="flex:1"><label class="form-label" for="rgMode">When changes are requested</label>
         <select class="form-select" id="rgMode" data-action-change="onRGModeChange"><option value="fix">Send back to the agent to fix</option><option value="block">Block: fail the task</option><option value="advisory">Advisory: publish anyway</option></select></div>
     </div>

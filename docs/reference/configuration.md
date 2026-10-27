@@ -70,8 +70,9 @@ next one against an artifact that is still being written. The incident this
 guards against had three consecutive tasks operating on a model the task before
 them was still training.
 
-cloop detects this. The `claude` CLI runs in its own process group, so anything
-it forks is still identifiable after it exits. When the harness returns, cloop
+cloop detects this. The `claude` CLI — and the `copilot` CLI, for the
+[copilot provider](../getting-started/providers.md#github-copilot) — runs in its
+own process group, so anything it forks is still identifiable after it exits. When the harness returns, cloop
 scans that group:
 
 - **Nothing left running** — the common case. Costs one procfs scan, and the
@@ -95,6 +96,7 @@ claudecode:
     keep_orphans: false  # true leaves survivors running (task still fails)
 ```
 
+`copilot.background` takes the same four keys for the `copilot` provider.
 `grace_seconds` is capped at 120 and `wait_minutes` at 1440; a value beyond
 either is clamped with a warning rather than silently reinterpreted.
 
@@ -611,7 +613,9 @@ rather than run on a weaker sandbox than it asked for — see
 
 - the cloop binary at `/usr/local/bin/cloop`;
 - the agent harness the project's provider needs (for the default `claudecode`
-  provider, the `claude` CLI on `PATH`);
+  provider, the `claude` CLI on `PATH`; for `copilot`, the `copilot` CLI —
+  which the published `cloop-harness` image does not carry, so a `copilot`
+  project needs an image of its own);
 - `git` and a CA bundle;
 - a non-root user, since the workload runs as the project directory's owner UID.
 
@@ -1404,9 +1408,10 @@ overlay merged in.
 
 ### Executors that bring their own Claude credential
 
-A `claudecode` or `anthropic` run on an executor that isolates from the hub gets
-a Claude credential only through a secret grant, and the hub refuses to dispatch
-one whose lease would carry none (`harness_credential_missing`; see [the Claude
+A `claudecode`, `anthropic` or `copilot` run on an executor that isolates from
+the hub gets its harness credential — a Claude one, or for `copilot` a Copilot
+one — only through a secret grant, and the hub refuses to dispatch one whose
+lease would carry none (`harness_credential_missing`; see [the Claude
 credential of a sandboxed run](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run)).
 An executor that supplies the credential itself — a device whose agent user is
 signed in to `claude`, an image with a key in its environment, a cloud role
@@ -1581,7 +1586,11 @@ the harness but still cannot resolve it says so rather than reporting success.
 device's host — the harness comes out of the image, which is the configuration
 that *fixes* a device without one. An agent older than protocol v12 does not
 know the frame, and gets the plain refusal rather than a complaint about its
-version.
+version. A `copilot` project's `copilot` CLI is not in the table either: the
+device advertises it when it is on the agent's `PATH` (or in `~/.local/bin`,
+where GitHub's install script puts it for a user), and a device without it is
+refused with the remedy of installing it there or running the project in an
+image that carries it.
 
 The policy is a **ratchet**: it can only tighten at runtime. A control plane
 manages many projects, each with its own `config.yaml`, and applying them

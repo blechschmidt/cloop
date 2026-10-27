@@ -30,6 +30,12 @@ func fakeAnthropicToken(lead, tag string) string {
 	return "sk-" + "ant-" + lead + "-" + body + "Qx7_Lm2-Pz9"
 }
 
+// fakeGitHubToken builds a GitHub token of the given lead — "github" + "_pat_",
+// "gh" + "o_" — the same way.
+func fakeGitHubToken(lead string) string {
+	return lead + "11AB2CD3" + strings.Repeat("eF4gH5", 12)
+}
+
 // harnessFixture is a control plane with a working broker, pointed at by the
 // package, plus helpers to put grants in it.
 type harnessFixture struct {
@@ -252,6 +258,30 @@ func TestPreflightRefusesEveryIsolatingExecutorWithoutACredential(t *testing.T) 
 	}
 }
 
+// A copilot project is told about the Copilot credential it lacks, in the
+// words the dialog uses — not sent to look for a Claude one.
+func TestPreflightRefusalForACopilotProjectNamesCopilot(t *testing.T) {
+	newHarnessFixture(t)
+	project := t.TempDir()
+	setProvider(t, project, "copilot")
+	rep := harnessPreflight(project, deviceExec(), harnessWho{}, "", true)
+	e, ok := asHarnessRefusal(rep.refusal())
+	if !ok || e.Code != codeHarnessCredentialMissing || e.Provider != "copilot" {
+		t.Fatalf("refusal = %v; want harness_credential_missing for copilot", rep.refusal())
+	}
+	for _, want := range []string{"Copilot credential", envCopilotGitHubToken, "Copilot Requests"} {
+		if !strings.Contains(e.Error()+" "+e.Remediation(), want) {
+			t.Errorf("refusal does not mention %q: %s / %s", want, e.Error(), e.Remediation())
+		}
+	}
+	if strings.Contains(e.Error()+e.Remediation(), "Claude") {
+		t.Errorf("a copilot project's refusal talks about Claude: %s / %s", e.Error(), e.Remediation())
+	}
+	if got := harnessGrantableSets("copilot"); len(got) != 1 || got[0][0] != envCopilotGitHubToken {
+		t.Errorf("the dialog grants %v for copilot, want only %s", got, envCopilotGitHubToken)
+	}
+}
+
 func TestPreflightLeavesTheHostAndOtherProvidersAlone(t *testing.T) {
 	newHarnessFixture(t)
 	project := t.TempDir()
@@ -307,6 +337,14 @@ func TestPreflightAcceptsWhatEachProviderAuthenticatesWith(t *testing.T) {
 		// platform's to check.
 		{"bedrock", "", []map[string]string{{envClaudeUseBedrock: "1", "AWS_REGION": "eu-central-1"}}, "ok"},
 		{"vertex", "", []map[string]string{{envClaudeUseVertex: "1"}}, "ok"},
+		// The Copilot CLI (Task 20447): its own token, or a model provider of
+		// the project's own. A repository grant's GH_TOKEN is not one: it may
+		// carry no Copilot access, and COPILOT_GITHUB_TOKEN outranks it.
+		{"copilot token", "copilot", []map[string]string{{envCopilotGitHubToken: fakeGitHubToken("github" + "_pat_")}}, "ok"},
+		{"copilot's own provider", "copilot", []map[string]string{{envCopilotProviderURL: "http://ollama:11434/v1"}}, "ok"},
+		{"copilot, repository tokens only", "copilot", []map[string]string{{"GH_TOKEN": "x", "GITHUB_TOKEN": "x"}}, "missing"},
+		{"copilot, a claude token", "copilot", []map[string]string{{envClaudeOAuthToken: token}}, "missing"},
+		{"claudecode, a copilot token", "", []map[string]string{{envCopilotGitHubToken: fakeGitHubToken("github" + "_pat_")}}, "missing"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

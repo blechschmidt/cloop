@@ -2254,7 +2254,8 @@ used to reach the Pod object as well: `Spec.Env` was rendered as plain `value:`
 entries, readable by every identity with `get pods` in the namespace. That is
 where a lease puts what it delivers as environment — an `env` grant's keys,
 including the harness login (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`,
-the only way a Pod gets one), `GITHUB_TOKEN`/`GH_TOKEN` for a grant over every
+or `COPILOT_GITHUB_TOKEN` for the copilot provider — the only way a Pod gets
+one), `GITHUB_TOKEN`/`GH_TOKEN` for a grant over every
 repository, an egress grant's proxy URLs and the egress session's
 `http://<id>:<token>@host:port` in all four proxy variables.
 

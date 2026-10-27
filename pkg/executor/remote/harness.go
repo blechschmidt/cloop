@@ -64,6 +64,18 @@ import (
 // problem.
 const HarnessImageHint = "ghcr.io/blechschmidt/cloop-harness:latest"
 
+// imageHintFor names an image that carries want, for a refusal's remedy: the
+// published one for the harness it has, and otherwise an image of the
+// operator's own. The published image carries no `copilot`, and a remedy that
+// named it would send an operator to pull something that does not fix their
+// problem.
+func imageHintFor(want string) string {
+	if want == "claude" {
+		return "image " + HarnessImageHint
+	}
+	return "an image with " + want + " installed"
+}
+
 // checkHarness clears a dispatch whose harness the device has — installing it
 // first if it does not, and refusing only when that cannot be done.
 //
@@ -109,9 +121,9 @@ func (e *Executor) checkHarness(
 					"(it has: %s). Installing it automatically did not work: %s. "+
 					"Install %s on the device by hand, or switch this executor to a container "+
 					"sandbox whose image carries it (Fleet → this executor → Sandbox, mode "+
-					"container, image %s), or bind this project to an executor that has it",
+					"container, %s), or bind this project to an executor that has it",
 				ErrHarnessUnavailable, e.id, e.name, want, describeHarnesses(caps.Harnesses),
-				detail, want, HarnessImageHint)
+				detail, want, imageHintFor(want))
 		}
 	}
 
@@ -119,9 +131,9 @@ func (e *Executor) checkHarness(
 		"%w: agent %s (%s) runs payloads on the device's own host and reports no %q there "+
 			"(it has: %s), so `cloop run` would fail with \"executable file not found in $PATH\" "+
 			"as soon as it started; install %s on the device, or switch this executor to a container "+
-			"sandbox whose image carries it (Fleet → this executor → Sandbox, mode container, image "+
+			"sandbox whose image carries it (Fleet → this executor → Sandbox, mode container, "+
 			"%s), or bind this project to an executor that has it",
-		ErrHarnessUnavailable, e.id, e.name, want, describeHarnesses(caps.Harnesses), want, HarnessImageHint)
+		ErrHarnessUnavailable, e.id, e.name, want, describeHarnesses(caps.Harnesses), want, imageHintFor(want))
 }
 
 // tryInstallHarness asks the device to install a missing harness, reporting

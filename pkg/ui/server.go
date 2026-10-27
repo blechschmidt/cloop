@@ -4062,6 +4062,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"model":  cfg.ClaudeCode.Model,
 			"effort": cfg.ClaudeCode.Effort,
 		},
+		"copilot": map[string]string{
+			"model":  cfg.Copilot.Model,
+			"effort": cfg.Copilot.Effort,
+		},
 	})
 }
 
@@ -4098,9 +4102,9 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 func applyUIConfigKey(cfg *config.Config, key, value string) error {
 	switch strings.ToLower(key) {
 	case "provider":
-		valid := map[string]bool{"anthropic": true, "openai": true, "ollama": true, "claudecode": true}
+		valid := map[string]bool{"anthropic": true, "openai": true, "ollama": true, "claudecode": true, "copilot": true}
 		if !valid[value] {
-			return fmt.Errorf("unknown provider %q — valid: anthropic, openai, ollama, claudecode", value)
+			return fmt.Errorf("unknown provider %q — valid: anthropic, openai, ollama, claudecode, copilot", value)
 		}
 		cfg.Provider = value
 	case "anthropic.api_key":
@@ -4126,6 +4130,13 @@ func applyUIConfigKey(cfg *config.Config, key, value string) error {
 			return fmt.Errorf("invalid effort %q — valid: %s (or empty to clear)", value, strings.Join(provider.EffortLevels, ", "))
 		}
 		cfg.ClaudeCode.Effort = value
+	case "copilot.model":
+		cfg.Copilot.Model = value
+	case "copilot.effort":
+		if !provider.ValidEffort(value) {
+			return fmt.Errorf("invalid effort %q — valid: %s (or empty to clear)", value, strings.Join(provider.EffortLevels, ", "))
+		}
+		cfg.Copilot.Effort = value
 	default:
 		return fmt.Errorf("unknown config key %q", key)
 	}
@@ -9033,7 +9044,7 @@ func (s *Server) handleProviderModelSet(w http.ResponseWriter, r *http.Request) 
 	// Whitelist providers to prevent garbage in state.json.
 	if req.Provider != "" {
 		switch req.Provider {
-		case "claudecode", "anthropic", "openai", "ollama":
+		case "claudecode", "copilot", "anthropic", "openai", "ollama":
 		default:
 			jsonErr(w, "unsupported provider: "+req.Provider, http.StatusBadRequest)
 			return

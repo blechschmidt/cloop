@@ -1120,6 +1120,7 @@ of these, delivered by a grant:
 | --- | --- |
 | `claudecode` | `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` together with `ANTHROPIC_BASE_URL` (a gateway), or `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` (the cloud's own credentials beside it, in the secret or the machine's role) |
 | `anthropic` | `ANTHROPIC_API_KEY` or `CLOOP_ANTHROPIC_API_KEY`, or `anthropic.api_key` in the project's `config.yaml` on a container executor, which reads the project's tree |
+| `copilot` | `COPILOT_GITHUB_TOKEN` (a fine-grained GitHub token with the Copilot Requests permission, or an OAuth token), or `COPILOT_PROVIDER_BASE_URL` (a model provider of the project's own, with its key beside it). `GH_TOKEN` and `GITHUB_TOKEN` do not count: a repository grant puts tokens there that need not carry Copilot access, and the CLI reads `COPILOT_GITHUB_TOKEN` before them |
 
 Other providers are not checked, and neither is a host executor, which runs the
 harness under the hub's or the requesting user's own login. The provider is the
@@ -1166,13 +1167,17 @@ lease loses the credential then, so grant for the length of the work — an
 auto-evolving project included.
 
 **Granting one takes one step.** On the project's Overview a *Claude credential*
-card sits beside the Executor card whenever the executor isolates: green with
+card — *Copilot credential* for a `copilot` project — sits beside the Executor
+card whenever the executor isolates: green with
 the credential's expiry, amber within three days of it, red when there is none.
 It opens a dialog — and so does a Run refused for this reason — that offers the
 env secrets you could grant (your own, and shared ones if you hold
 `secret.grant` on the project) by name and by the key names they hold, or takes
-a token pasted from `claude setup-token` or an Anthropic API key. A pasted token
-is checked against the [credential registry](../reference/credential-patterns.md)
+a token pasted from `claude setup-token` or an Anthropic API key — for a
+`copilot` project, a GitHub token the Copilot CLI signs in with (`github_pat_…`,
+`gho_…` or `ghu_…`; a classic `ghp_…` token, which the CLI refuses, and
+installation and refresh tokens, which act for no one with a seat, are refused
+here with the reason). A pasted token is checked against the [credential registry](../reference/credential-patterns.md)
 every scanner in cloop shares, stored as a personal `env` secret holding that one
 key (a shared one on a hub without single sign-on), and granted to the project;
 it is never echoed, logged, or stored anywhere but the secret store, and the
@@ -1182,6 +1187,8 @@ makes is held to, and carry the scope `claude-credential`. Granting again for
 longer replaces what the dialog granted before: its earlier grants to the project
 of the same owner's (or shared) secrets that end sooner are revoked — they would
 otherwise end the lease first — and the response lists them under `superseded`.
+A Copilot credential never supersedes a Claude one, or the reverse: a project
+that changes provider keeps the grant it would need to change back.
 Grants made from the Secrets panel or the CLI are left alone. The dialog grants
 by narrowing a secret to the keys the harness reads, so a Bedrock or Vertex
 secret, which has to travel whole, is granted from the Secrets panel instead.

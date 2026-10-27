@@ -38,6 +38,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/provider/copilot"
 	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
@@ -380,7 +381,7 @@ func (s *Server) handleProjectHarnessCredentialGrant(w http.ResponseWriter, r *h
 	needed := harnessGrantableSets(provider)
 	if len(needed) == 0 {
 		apierror.WriteError(w, apierror.New(apierror.CodeConflict, fmt.Sprintf(
-			"this project uses the %s provider, which reads no Claude credential", provider)))
+			"this project uses the %s provider, which reads no harness credential", provider)))
 		return
 	}
 	ttl := harnessGrantDefaultTTL
@@ -418,7 +419,7 @@ func (s *Server) handleProjectHarnessCredentialGrant(w http.ResponseWriter, r *h
 		minted  bool
 	)
 	if hasToken {
-		key, err := classifyPastedToken(req.Token)
+		key, err := classifyPastedToken(req.Token, provider)
 		if err != nil {
 			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()))
 			return
@@ -463,7 +464,7 @@ func (s *Server) handleProjectHarnessCredentialGrant(w http.ResponseWriter, r *h
 			Name:     name,
 			Kind:     secretbroker.KindEnv,
 			Payload:  payload,
-			Metadata: map[string]string{"purpose": "Claude credential", "project": filepath.Base(target)},
+			Metadata: map[string]string{"purpose": harnessCredentialNoun(provider), "project": filepath.Base(target)},
 			Actor:    actor,
 			Owner:    owner,
 			Personal: personal,
@@ -533,6 +534,19 @@ func (s *Server) handleProjectHarnessCredentialGrant(w http.ResponseWriter, r *h
 	jsonOK(w, view)
 }
 
+// harnessFamily names the harness a grant from this panel signs in — the keys
+// it delivers are one provider's (harnessGrantableSets) — so one harness's
+// credential never supersedes another's.
+func harnessFamily(keys []string) string {
+	for _, k := range keys {
+		switch k {
+		case envCopilotGitHubToken, envCopilotProviderURL, envCopilotProviderKey, envCopilotProviderAuth:
+			return copilot.ProviderName
+		}
+	}
+	return "claude"
+}
+
 // supersedeHarnessGrants revokes the grants this panel made to target earlier
 // that the new one replaces: over a secret of the same owner (or shared, like
 // it), ending before it. Without this, granting a credential again "for longer"
@@ -555,6 +569,12 @@ func (s *Server) supersedeHarnessGrants(ctx context.Context, r *http.Request, bs
 	var out []string
 	for _, g := range grants {
 		if g.ID == grant.ID || g.Scope != harnessGrantScope || !grantIssuedToProject(g, target) {
+			continue
+		}
+		// A Copilot token does not replace a Claude one, nor the reverse: a
+		// project that changes provider keeps the credential it would need to
+		// change back (Task 20447).
+		if harnessFamily(g.Constraints.EnvKeys) != harnessFamily(grant.Constraints.EnvKeys) {
 			continue
 		}
 		if secretbroker.NormalizeOwner(g.Owner) != secretbroker.NormalizeOwner(grant.Owner) {
@@ -654,19 +674,33 @@ var (
 	errTokenEmpty     = errors.New("paste a token: a Claude Code OAuth token from `claude setup-token`, or an Anthropic API key")
 	errTokenShape     = errors.New("that does not look like a Claude Code OAuth token (sk-ant-oat01-…, from `claude setup-token`) or an Anthropic API key (sk-ant-api03-…); paste the token alone, on one line")
 	errTokenIsRefresh = errors.New("that is a refresh token (sk-ant-ort01-…), which the harness cannot sign in with; run `claude setup-token` and paste the sk-ant-oat01-… token it prints")
+
+	// The Copilot CLI's (Task 20447). It signs in as a person with a Copilot
+	// seat: a fine-grained personal access token, an OAuth token or a GitHub
+	// App user token — never a classic token, which it refuses, or an
+	// installation token, which is an app and has no seat.
+	errCopilotTokenEmpty   = errors.New("paste a token: a fine-grained GitHub token (github_pat_…) with the Copilot Requests permission")
+	errCopilotTokenShape   = errors.New("that does not look like a GitHub token the Copilot CLI signs in with — a fine-grained personal access token (github_pat_…), an OAuth token (gho_…) or a GitHub App user token (ghu_…); paste the token alone, on one line")
+	errCopilotTokenClassic = errors.New("that is a classic personal access token (ghp_…), which the Copilot CLI does not accept; create a fine-grained token (github_pat_…) with the Copilot Requests permission instead")
+	errCopilotTokenNotUser = errors.New("that GitHub token does not act for a person — an installation (ghs_…) or refresh (ghr_…) token — and the Copilot CLI signs in as someone with a Copilot seat; paste a fine-grained token (github_pat_…) with the Copilot Requests permission")
 )
 
 // classifyPastedToken decides which variable a pasted token is, by its shape,
 // with the credential registry every scanner in cloop shares (pkg/redact): the
-// paste must be exactly one recognised Anthropic credential, from its first
-// byte to its last.
-func classifyPastedToken(token string) (string, error) {
+// paste must be exactly one recognised credential, from its first byte to its
+// last — an Anthropic one, or for a copilot project a GitHub token the Copilot
+// CLI signs in with. provider words the refusals.
+func classifyPastedToken(token, provider string) (string, error) {
+	empty, shape := errTokenEmpty, errTokenShape
+	if provider == copilot.ProviderName {
+		empty, shape = errCopilotTokenEmpty, errCopilotTokenShape
+	}
 	t := strings.TrimSpace(token)
 	if t == "" {
-		return "", errTokenEmpty
+		return "", empty
 	}
 	if len(t) > maxPastedTokenBytes || strings.ContainsAny(t, " \t\r\n") {
-		return "", errTokenShape
+		return "", shape
 	}
 	for _, m := range redact.Find(t) {
 		if m.Start != 0 || m.End != len(t) {
@@ -680,15 +714,31 @@ func classifyPastedToken(token string) (string, error) {
 			return "", errTokenIsRefresh
 		case "anthropic-api-key":
 			return envAnthropicAPIKey, nil
+		case "github-fine-grained-pat", "github-token", "github-token-long":
+			// A GitHub token signs in only the Copilot CLI; for any other
+			// project it is just not the token asked for.
+			if provider != copilot.ProviderName {
+				continue
+			}
+			switch m.Kind {
+			case "github_pat_", "gho_", "ghu_":
+				return envCopilotGitHubToken, nil
+			case "ghp_":
+				return "", errCopilotTokenClassic
+			}
+			return "", errCopilotTokenNotUser
 		}
 	}
-	return "", errTokenShape
+	return "", shape
 }
 
 // tokenNoun names what kind of credential key holds, for a sentence.
 func tokenNoun(key string) string {
-	if key == envClaudeOAuthToken {
+	switch key {
+	case envClaudeOAuthToken:
 		return "Claude Code OAuth token"
+	case envCopilotGitHubToken:
+		return "GitHub token for the Copilot CLI"
 	}
 	return "Anthropic API key"
 }
@@ -698,8 +748,11 @@ func tokenNoun(key string) string {
 // rotation — does not collide with the first.
 func pastedSecretName(key, target string) (string, error) {
 	stem := "claude-oauth"
-	if key == envAnthropicAPIKey {
+	switch key {
+	case envAnthropicAPIKey:
 		stem = "anthropic-api-key"
+	case envCopilotGitHubToken:
+		stem = "copilot-token"
 	}
 	var b strings.Builder
 	for _, r := range filepath.Base(target) {

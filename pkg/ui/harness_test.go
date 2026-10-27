@@ -20,6 +20,8 @@ func TestHarnessForProvider(t *testing.T) {
 		{"claudecode", "claude"},
 		{"CLAUDECODE", "claude"},
 		{"  claudecode  ", "claude"},
+		{"copilot", "copilot"},
+		{"Copilot", "copilot"},
 		// Every HTTP-API provider needs no binary on the executing machine, so
 		// naming one would refuse devices that can run them perfectly well.
 		{"anthropic", ""},
@@ -56,6 +58,21 @@ func TestProjectHarnessFollowsConfig(t *testing.T) {
 	}
 	if got := projectHarness(dir); got != "" {
 		t.Errorf("an anthropic project should need no harness; got %q", got)
+	}
+}
+
+// TestProjectHarnessForACopilotProject: a project on the copilot provider
+// needs the copilot CLI where it runs — and not claude, which a device without
+// it would otherwise be refused for.
+func TestProjectHarnessForACopilotProject(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.Provider = "copilot"
+	if err := config.Save(dir, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if got := projectHarness(dir); got != "copilot" {
+		t.Errorf("a copilot project needs the copilot harness; got %q", got)
 	}
 }
 

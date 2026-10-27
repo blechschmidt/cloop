@@ -57,6 +57,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/provider/anthropic"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
+	"github.com/blechschmidt/cloop/pkg/provider/copilot"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -76,6 +77,14 @@ const (
 	// cloop's own spelling of the anthropic provider's key (cmd/run.go,
 	// applyEnvOverrides).
 	envCloopAnthropicKey = "CLOOP_ANTHROPIC_API_KEY"
+	// The Copilot CLI (Task 20447): a GitHub token for a Copilot seat — the
+	// one variable the CLI reads before GH_TOKEN and GITHUB_TOKEN, which a
+	// repository grant may fill with a token that has no Copilot access — or
+	// a model provider of the project's own, with its key or bearer token.
+	envCopilotGitHubToken  = copilot.EnvGitHubToken
+	envCopilotProviderURL  = copilot.EnvProviderBaseURL
+	envCopilotProviderKey  = "COPILOT_PROVIDER_API_KEY"
+	envCopilotProviderAuth = "COPILOT_PROVIDER_BEARER_TOKEN"
 )
 
 // Refusal codes, carried on the 409 so a client can tell this refusal from the
@@ -123,6 +132,13 @@ func harnessKeySets(provider string) [][]string {
 		}
 	case anthropic.ProviderName:
 		return [][]string{{envAnthropicAPIKey}, {envCloopAnthropicKey}}
+	case copilot.ProviderName:
+		return [][]string{
+			{envCopilotGitHubToken},
+			// Bring your own provider: the base URL selects it, and a local
+			// one needs no key, so the URL is the part the hub can check.
+			{envCopilotProviderURL},
+		}
 	}
 	return nil
 }
@@ -130,15 +146,45 @@ func harnessKeySets(provider string) [][]string {
 // harnessGrantableSets are the alternatives the dialog grants by narrowing a
 // secret to the keys named: every one but the cloud platforms, whose secret
 // carries its platform credentials beside the flag and has to be granted
-// whole — from the Secrets panel or the CLI, where that choice is explicit.
+// whole — from the Secrets panel or the CLI, where that choice is explicit —
+// and, for the same reason, Copilot's own model provider, whose key, type and
+// model travel beside its URL.
 func harnessGrantableSets(provider string) [][]string {
 	var out [][]string
 	for _, set := range harnessKeySets(provider) {
-		if set[0] != envClaudeUseBedrock && set[0] != envClaudeUseVertex {
-			out = append(out, set)
+		switch set[0] {
+		case envClaudeUseBedrock, envClaudeUseVertex, envCopilotProviderURL:
+			continue
 		}
+		out = append(out, set)
 	}
 	return out
+}
+
+// harnessCredentialNoun names what provider's harness signs in with, for the
+// preflight's sentences: a Claude credential for claudecode and anthropic,
+// a Copilot one for copilot.
+func harnessCredentialNoun(provider string) string {
+	if provider == copilot.ProviderName {
+		return "Copilot credential"
+	}
+	return "Claude credential"
+}
+
+// harnessLoginNoun names what a sandbox lacks without one.
+func harnessLoginNoun(provider string) string {
+	if provider == copilot.ProviderName {
+		return "Copilot sign-in"
+	}
+	return "Claude login"
+}
+
+// harnessPasteHint says what the dialog takes as a pasted token.
+func harnessPasteHint(provider string) string {
+	if provider == copilot.ProviderName {
+		return "a fine-grained GitHub token with the Copilot Requests permission"
+	}
+	return "a token from `claude setup-token`"
 }
 
 // isHarnessKey reports whether k is one of the variables any provider's
@@ -147,7 +193,8 @@ func harnessGrantableSets(provider string) [][]string {
 func isHarnessKey(k string) bool {
 	switch k {
 	case envClaudeOAuthToken, envAnthropicAPIKey, envAnthropicAuth, envAnthropicBaseURL,
-		envClaudeUseBedrock, envClaudeUseVertex, envCloopAnthropicKey:
+		envClaudeUseBedrock, envClaudeUseVertex, envCloopAnthropicKey,
+		envCopilotGitHubToken, envCopilotProviderURL, envCopilotProviderKey, envCopilotProviderAuth:
 		return true
 	}
 	return false
@@ -648,6 +695,19 @@ func harnessKeysOf(o secretbroker.EnvOffer) []string {
 	return out
 }
 
+// offerNoun names the credential an offer carries: a Copilot one when every
+// harness key in it is the Copilot CLI's, a Claude one otherwise.
+func offerNoun(o secretbroker.EnvOffer) string {
+	for _, k := range harnessKeysOf(o) {
+		switch k {
+		case envCopilotGitHubToken, envCopilotProviderURL, envCopilotProviderKey, envCopilotProviderAuth:
+		default:
+			return harnessCredentialNoun(claudecode.ProviderName)
+		}
+	}
+	return harnessCredentialNoun(copilot.ProviderName)
+}
+
 // withholdForeign decides which grants the lease must not deliver: every
 // active personal grant carrying a harness key whose owner the dispatch does
 // not act for. Withheld whether or not the dispatch runs a harness — a test
@@ -662,7 +722,7 @@ func (rep *harnessReport) withholdForeign(offers []secretbroker.EnvOffer, who ha
 			rep.Withhold = map[string]string{}
 		}
 		rep.Withhold[o.Grant.ID] = fmt.Sprintf(
-			"personal Claude credential of %s, which is spent only on runs its owner starts", o.Grant.Owner)
+			"personal %s of %s, which is spent only on runs its owner starts", offerNoun(o), o.Grant.Owner)
 		rep.Foreign++
 	}
 }
@@ -846,9 +906,10 @@ func (rep harnessReport) explain() (cause, remedy string) {
 	project := filepath.Base(rep.WorkDir)
 	where := fmt.Sprintf("executor %s (%s)", rep.ExecutorID, rep.ExecutorKind)
 	needs := describeKeySets(rep.Needed)
-	grantStep := "Open the project's Overview and use Claude credential to grant an env secret holding " +
-		describeKeySets(harnessGrantableSets(rep.Provider)) + ", or paste a token from `claude setup-token` " +
-		"there. From a shell on the hub: cloop secret grant <secret> --to project:" +
+	noun, login := harnessCredentialNoun(rep.Provider), harnessLoginNoun(rep.Provider)
+	grantStep := "Open the project's Overview and use " + noun + " to grant an env secret holding " +
+		describeKeySets(harnessGrantableSets(rep.Provider)) + ", or paste " + harnessPasteHint(rep.Provider) +
+		" there. From a shell on the hub: cloop secret grant <secret> --to project:" +
 		policyProjectPath(rep.WorkDir) + " --env-keys " + rep.Needed[0][0] + "."
 	switch {
 	case rep.State == "expiring" && rep.EndedBy != nil:
@@ -856,23 +917,23 @@ func (rep harnessReport) explain() (cause, remedy string) {
 		if !rep.EndedBy.Foreign {
 			ended = rep.EndedBy.SecretName
 		}
-		cause = fmt.Sprintf("%s's sandbox on %s would lose its Claude credential at %s, in under %d minutes: "+
+		cause = fmt.Sprintf("%s's sandbox on %s would lose its %s at %s, in under %d minutes: "+
 			"a lease ends with the first of the project's grants to expire, and that is %s (grant %s).",
-			project, where, rep.ExpiresAt.UTC().Format(time.RFC3339), int(harnessExpiryMargin/time.Minute),
+			project, where, noun, rep.ExpiresAt.UTC().Format(time.RFC3339), int(harnessExpiryMargin/time.Minute),
 			ended, rep.EndedBy.GrantID)
 		remedy = "Grant " + rep.EndedBy.GrantID + " again for longer, or revoke it, before starting the run."
 		return cause, remedy
 	case rep.State == "expiring":
 		s := rep.Satisfied[0]
-		cause = fmt.Sprintf("The only Claude credential granted to %s for %s (%s, grant %s) expires at %s — "+
+		cause = fmt.Sprintf("The only %s granted to %s for %s (%s, grant %s) expires at %s — "+
 			"in under %d minutes, before a run could finish its first task.",
-			project, where, s.SecretName, s.GrantID,
+			noun, project, where, s.SecretName, s.GrantID,
 			rep.ExpiresAt.UTC().Format(time.RFC3339), int(harnessExpiryMargin/time.Minute))
 		remedy = "Grant it again for longer, or grant another credential, before starting the run. " + grantStep
 		return cause, remedy
 	case rep.BrokerProblem != "":
-		cause = fmt.Sprintf("%s runs %s's harness in a sandbox, which gets a Claude login only through a "+
-			"secret grant — and %s.", where, project, rep.BrokerProblem)
+		cause = fmt.Sprintf("%s runs %s's harness in a sandbox, which gets a %s only through a "+
+			"secret grant — and %s.", where, project, login, rep.BrokerProblem)
 		remedy = "Fix the secret broker, then grant the project an env secret holding " + needs + "."
 		switch {
 		case rep.NoControlPlane:
@@ -885,8 +946,8 @@ func (rep harnessReport) explain() (cause, remedy string) {
 		return cause, remedy
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "No active grant gives %s's sandbox on %s a Claude credential (%s): a sandbox has no "+
-		"Claude login but what is granted to its project.", project, where, needs)
+	fmt.Fprintf(&b, "No active grant gives %s's sandbox on %s a %s (%s): a sandbox has no "+
+		"%s but what is granted to its project.", project, where, noun, needs, login)
 	for _, l := range rep.Lapsed {
 		fmt.Fprintf(&b, " The grant of %s (%s) expired at %s.", l.SecretName, l.GrantID,
 			l.ExpiresAt.UTC().Format(time.RFC3339))

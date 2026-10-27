@@ -63,6 +63,31 @@ func TestHostModeRefusesMissingHarness(t *testing.T) {
 	}
 }
 
+// TestARefusedCopilotHarnessIsNotSentToTheClaudeImage: the published image
+// carries claude and not copilot, so a copilot project's remedy must not name
+// it, and a device that has copilot is not refused.
+func TestARefusedCopilotHarnessIsNotSentToTheClaudeImage(t *testing.T) {
+	ex := sandboxExecutor(t, executor.SandboxSettings{Mode: executor.SandboxModeHost}, nil)
+	_, sess := connect(t, ex, remote.AgentRecord{AgentID: "agent-1", Name: "edge-1"},
+		helloWithHarnesses(remote.MinSandboxModeVersion, "cloop", "claude"), nil)
+	defer sess.Close()
+
+	spec := plainSpec(t.TempDir())
+	spec.Harness = "copilot"
+	_, err := ex.Start(context.Background(), spec)
+	if !errors.Is(err, remote.ErrHarnessUnavailable) {
+		t.Fatalf("Start error = %v, want ErrHarnessUnavailable", err)
+	}
+	if strings.Contains(err.Error(), remote.HarnessImageHint) {
+		t.Errorf("the remedy sends a copilot project to an image without copilot: %q", err)
+	}
+	for _, want := range []string{"copilot", "an image with copilot installed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic should mention %q; got %q", want, err)
+		}
+	}
+}
+
 // TestContainerModeIgnoresDeviceHarnesses guards the remedy against the fix.
 //
 // Switching the executor to a container sandbox whose image carries `claude` is
