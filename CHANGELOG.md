@@ -150,6 +150,15 @@ schema and the hub's HTTP API may change in any release.
   its hub process; that is now stated as a residual risk and pinned by a test
   (Task 20451).
 
+- **A device on the latest release is no longer shown as a material "cannot be
+  compared" skew under a hub running a build of main.** Version strings cannot
+  order a release against a build of main, so the Executors panel and
+  `cloop executor list` flagged every such device in red — through every rolling
+  upgrade, and even under a hub at the release's own commit. Both builds carry
+  their place on main, which orders them: the same sequence is no skew, an
+  earlier one the new `older` class, which is not material on its own (the
+  protocol check still flags a device whose agent lacks what the hub needs),
+  and a later one `ahead` (Task 20452).
 - **A command run against a database migrated past its binary says so once.**
   Every command first printed the whole refusal as an
   `executor: handle persistence unavailable` warning about surviving restarts,

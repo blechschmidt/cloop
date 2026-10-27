@@ -3531,6 +3531,7 @@ ignore the one that matters.
 | `ahead` | newer than the hub — it can speak frames the hub does not implement | **yes** |
 | `legacy` | reported the placeholder that pre-inventory agents sent | **yes** |
 | `unknown` | reported no version at all | no |
+| `older` | an earlier build of main than the hub's, ordered by the place on main both are stamped with — a device on the latest release under a hub running a later build of main (Task 20452) | no |
 | `unversioned` | one side is an unstamped `dev` build, so the two cannot be ordered | **yes** |
 
 `legacy` is recognised explicitly rather than compared, because it is actively
@@ -3546,6 +3547,17 @@ stamped with
 (`dev+g4f7b5bc`, or `dev+g4f7b5bc.dirty` for an uncommitted tree), which is why
 an unstamped agent is classified `unversioned` rather than silently assumed
 current.
+
+Where the version strings cannot be ordered — a release under a hub running a
+build of main, or two builds of main — but both builds carry their place on
+main (the sequence releases, edge builds and the :8888 deploy are stamped with,
+Task 20380), the sequences order them: the same sequence is the same commit
+(`none`), a lower one `older`, a higher one `ahead`. `older` is not material on
+its own: it is where every device stands during a rolling upgrade, and whatever
+the device's build cannot do for the hub its protocol says, which is reported as
+material whatever the class. Before Task 20452 such a device was shown as a
+material `unversioned` "cannot be compared", even under a hub at its release's
+own commit.
 
 ### Installing a missing harness
 

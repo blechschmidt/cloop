@@ -132,6 +132,53 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+// TestClassifyBuildsOrdersByPlaceOnMain: a release and a build of main cannot
+// be ordered by their version strings, but the place on main both carry can
+// (Task 20452). The upgrade rehearsal found every device on the latest release
+// shown as a material "cannot be compared" under a hub running main — through
+// every rolling upgrade, and even under a hub at the release's own commit.
+func TestClassifyBuildsOrdersByPlaceOnMain(t *testing.T) {
+	ref := func(v string, seq int) BuildRef { return BuildRef{Version: v, Sequence: seq} }
+	tests := []struct {
+		name       string
+		hub, agent BuildRef
+		want       Skew
+		material   bool
+		says       string
+	}{
+		{"a release under a later build of main is older", ref("dev+gf3002f67", 1175), ref("v0.0.7", 1170),
+			SkewOlder, false, "5 build(s) behind"},
+		{"a release under a build of its own commit is the same build", ref("dev+gae88d50", 1170), ref("v0.0.7", 1170),
+			SkewNone, false, ""},
+		{"a build of main ahead of a release hub", ref("v0.0.7", 1170), ref("dev+g1234567", 1180),
+			SkewAhead, true, "10 build(s) ahead"},
+		{"two builds of main", ref("dev+g1234567", 1180), ref("dev+gabcdef0", 1100),
+			SkewOlder, false, "80 build(s) behind"},
+		{"a hub without a sequence cannot order them", ref("dev+gf3002f67", 0), ref("v0.0.7", 1170),
+			SkewUnversioned, true, "cannot be compared"},
+		{"a device without a sequence cannot be ordered", ref("dev+gf3002f67", 1175), ref("v0.0.4", 0),
+			SkewUnversioned, true, "cannot be compared"},
+		{"releases still order by version", ref("v0.0.7", 1170), ref("v0.0.6", 1116), SkewPatch, false, ""},
+		{"and a release ahead of a release hub is ahead", ref("v0.0.6", 1116), ref("v0.0.7", 1170), SkewAhead, true, ""},
+		{"an unreported build stays unknown", ref("dev+gf3002f67", 1175), ref("", 1170), SkewUnknown, false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, note := ClassifyBuilds(tc.hub, tc.agent)
+			if got != tc.want || got.Material() != tc.material {
+				t.Fatalf("ClassifyBuilds(%+v, %+v) = %q (material %v), want %q (material %v); note %q",
+					tc.hub, tc.agent, got, got.Material(), tc.want, tc.material, note)
+			}
+			if tc.says != "" && !strings.Contains(note, tc.says) {
+				t.Errorf("the note does not say %q: %q", tc.says, note)
+			}
+			if got == SkewNone && note != "" {
+				t.Errorf("SkewNone carried a note: %q", note)
+			}
+		})
+	}
+}
+
 // TestClassifyNeverNamesTheNonexistentFlag is the guard against reintroducing
 // the defect this work fixed: the panel told operators to run
 // `cloop executor agent install --upgrade` when no such flag existed.

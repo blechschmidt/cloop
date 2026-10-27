@@ -236,6 +236,14 @@ const (
 	// frames this control plane does not implement, and the usual cause is a
 	// half-finished hub upgrade.
 	SkewAhead Skew = "ahead"
+	// SkewOlder: an earlier build of main than the hub's, which a version
+	// string cannot say — a release under a hub running a build of main, or
+	// two builds of main — but the place on main both are stamped with can
+	// (Task 20452). It is what every device is in the middle of a rolling
+	// upgrade, and not material on its own: whatever the device's build
+	// cannot do for this hub, its protocol says, and that is reported as
+	// material whatever the build.
+	SkewOlder Skew = "older"
 )
 
 // Material reports whether this skew deserves an operator's attention now.
@@ -248,6 +256,42 @@ func (s Skew) Material() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// BuildRef is one side of a comparison: the version a build reports and its
+// place on main (its sequence), zero when it carries none.
+type BuildRef struct {
+	Version  string
+	Sequence int
+}
+
+// ClassifyBuilds is Classify for builds that may carry their place on main
+// (Task 20380). Version strings order releases; a release and a build of main,
+// or two builds of main, they cannot order — Classify calls that unversioned,
+// material, "cannot be compared" — but when both sides carry a sequence, the
+// sequences can: the same sequence is the same commit, a lower one an older
+// build, a higher one a newer build.
+//
+// Before Task 20452 every device on the latest release showed a material
+// "cannot be compared" skew under a hub running a build of main — through
+// every rolling upgrade, and even under a hub at the release's own commit.
+func ClassifyBuilds(hub, agent BuildRef) (Skew, string) {
+	skew, note := Classify(hub.Version, agent.Version)
+	if skew != SkewUnversioned || hub.Sequence <= 0 || agent.Sequence <= 0 {
+		return skew, note
+	}
+	agentV, hubV := strings.TrimSpace(agent.Version), strings.TrimSpace(hub.Version)
+	switch d := hub.Sequence - agent.Sequence; {
+	case d == 0:
+		return SkewNone, ""
+	case d > 0:
+		return SkewOlder, fmt.Sprintf("This device runs %s (%s), %d build(s) behind the hub's %s (%s).",
+			agentV, SequenceLabel(agent.Sequence), d, displayVersion(hubV), SequenceLabel(hub.Sequence))
+	default:
+		return SkewAhead, fmt.Sprintf("This device runs %s (%s), %d build(s) ahead of the hub's %s (%s). "+
+			"Upgrade the hub: an agent ahead of its control plane can speak frames the hub does not implement.",
+			agentV, SequenceLabel(agent.Sequence), -d, displayVersion(hubV), SequenceLabel(hub.Sequence))
 	}
 }
 

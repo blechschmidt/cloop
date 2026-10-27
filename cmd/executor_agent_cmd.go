@@ -564,7 +564,8 @@ what placement matches on.`,
 				}
 				inv := inventory[a.AgentID]
 				build := agentBuildCell(inv.AgentVersion)
-				skew, _ := version.Classify(hub, inv.AgentVersion)
+				skew, _ := version.ClassifyBuilds(version.BuildRef{Version: hub, Sequence: executor.HubSequence()},
+					version.BuildRef{Version: inv.AgentVersion, Sequence: sequences[a.AgentID]})
 				// A revoked agent's build is not actionable — nobody is going
 				// to upgrade a device that has been cut off — so it is shown
 				// without being counted or flagged.

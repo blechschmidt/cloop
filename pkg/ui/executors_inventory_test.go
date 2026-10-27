@@ -520,6 +520,52 @@ func TestAnnotateInventoryUnreleasedHubSkew(t *testing.T) {
 	}
 }
 
+// TestAnnotateInventoryOrdersAReleaseUnderABuildOfMainByItsPlaceOnMain is the
+// middle of every rolling upgrade (Task 20452): a device on the latest release
+// under a hub that already runs a later build of main, both speaking one
+// protocol. Their version strings cannot be ordered, and the panel showed the
+// device as a material "cannot be compared"; the sequences both carry order
+// them, so it is an older build — not material, since its protocol lacks
+// nothing — and under a hub at the release's own commit it is no skew at all.
+func TestAnnotateInventoryOrdersAReleaseUnderABuildOfMainByItsPlaceOnMain(t *testing.T) {
+	withHubVersion(t, "dev+gf3002f67")
+	prev := executor.HubSequence
+	t.Cleanup(func() { executor.HubSequence = prev })
+	ex, err := remote.NewExecutor(remote.Options{ID: "edge-rel", Name: "edge-rel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connectAnsweringCaps(t, ex, remote.ProtocolVersion, "v0.0.7",
+		remote.AgentCapabilities{BuildSequence: 1170}, nil)
+	defer conn()
+
+	for _, tc := range []struct {
+		hubSeq   int
+		want     string
+		material bool
+		says     string
+	}{
+		{1175, string(version.SkewOlder), false, "5 build(s) behind the hub's dev+gf3002f67"},
+		{1170, string(version.SkewNone), false, ""},
+		{0, string(version.SkewUnversioned), true, "cannot be compared"},
+	} {
+		executor.HubSequence = func() int { return tc.hubSeq }
+		var view executorView
+		annotateInventory(context.Background(), &view, remoteRow(statedb.ExecutorInventory{AgentVersion: "v0.0.7"}), ex)
+		sv := view.VersionSkew
+		if sv == nil {
+			t.Fatal("no skew view for a connected device")
+		}
+		if sv.Skew != tc.want || sv.Material != tc.material {
+			t.Errorf("hub at sequence %d: skew %q (material %v), want %q (material %v); note %q",
+				tc.hubSeq, sv.Skew, sv.Material, tc.want, tc.material, sv.Note)
+		}
+		if tc.says != "" && !strings.Contains(sv.Note, tc.says) {
+			t.Errorf("hub at sequence %d: the note does not say %q: %q", tc.hubSeq, tc.says, sv.Note)
+		}
+	}
+}
+
 // TestAnnotateInventoryReleasedHubOffersItsOwnRelease: on a hub that is a
 // release, the dialog prefills that release — never a "dev" string.
 func TestAnnotateInventoryReleasedHubOffersItsOwnRelease(t *testing.T) {

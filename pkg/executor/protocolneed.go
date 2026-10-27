@@ -45,6 +45,14 @@ import (
 // devices against the same value, so pinning it in a test moves both.
 var HubBuild = version.String
 
+// HubSequence reports the control plane's own place on main, zero for a
+// build stamped with none, unless a test pins it. A device's build is
+// ordered against it when their version strings cannot be (Task 20452).
+var HubSequence = func() int {
+	seq, _ := version.BuildSequence()
+	return seq
+}
+
 // MinRemoteUpgradeVersion is the first protocol version whose agents accept the
 // upgrade frame: remote.MinUpgradeVersion, mirrored here because this package
 // sits below pkg/executor/remote and writes the advice that depends on it.

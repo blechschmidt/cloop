@@ -177,7 +177,7 @@ type executorInventoryView struct {
 // executorSkewView is one device's build compared against the hub's.
 type executorSkewView struct {
 	// Skew is the classification: none|patch|behind|ahead|legacy|unknown|
-	// unversioned.
+	// unversioned|older.
 	Skew string `json:"skew"`
 	// Material is whether an operator should act on it now. Patch drift across
 	// a fleet is normal, and flagging it would train operators to ignore the
@@ -321,7 +321,11 @@ func annotateInventory(ctx context.Context, view *executorView, row statedb.Exec
 		}
 	}
 
-	skew, note := version.Classify(hub, inv.AgentVersion)
+	// Ordered by the place on main both builds carry, where their version
+	// strings cannot be: a device on the latest release under a hub running
+	// a build of main is older, not incomparable (Task 20452).
+	skew, note := version.ClassifyBuilds(version.BuildRef{Version: hub, Sequence: executor.HubSequence()},
+		version.BuildRef{Version: inv.AgentVersion, Sequence: sequence})
 	sv := &executorSkewView{
 		Skew:           string(skew),
 		HubVersion:     hub,
