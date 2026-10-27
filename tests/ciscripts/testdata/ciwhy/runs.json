@@ -1,0 +1,27 @@
+{
+ "total_count": 2,
+ "workflow_runs": [
+  {
+   "id": 38989510992,
+   "name": "CI",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "event": "push",
+   "status": "completed",
+   "conclusion": "failure",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992",
+   "check_suite_id": 105667132165,
+   "run_attempt": 1
+  },
+  {
+   "id": 38989511001,
+   "name": "Publish images",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "event": "push",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989511001",
+   "check_suite_id": 105667132177,
+   "run_attempt": 1
+  }
+ ]
+}

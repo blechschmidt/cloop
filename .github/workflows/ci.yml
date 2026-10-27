@@ -6,6 +6,21 @@ on:
   pull_request:
     branches: [main]
 
+# Every `run:` step runs under scripts/ci-step.sh, which runs the step's
+# script as GitHub would without it (`bash -e`) and records the script's
+# output and exit status. Each job's last step, "Say why the job failed",
+# hands that record to scripts/ci-annotate, which annotates the job with the
+# cause: each failing test, panic, data race, timeout, build or vet failure
+# in go's output, or else a failed step's last forty lines. Anyone can read
+# annotations (scripts/ci-why.sh does, with no token), while a job's log
+# needs admin rights on the repository: before this a red job said "Process
+# completed with exit code 1." and nothing else (Task 20444). No step names a
+# shell of its own, and every job ends with that step: tests/ciscripts holds
+# the workflow to both.
+defaults:
+  run:
+    shell: bash scripts/ci-step.sh {0}
+
 jobs:
   static-analysis:
     name: Static analysis
@@ -101,6 +116,12 @@ jobs:
           fi
           echo "go.mod and go.sum are tidy"
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   changelog:
     name: Every feature and fix has a changelog entry
     runs-on: ubuntu-latest
@@ -129,6 +150,12 @@ jobs:
 
       - name: Every task a feat, fix or perf commit names since the last release has a CHANGELOG.md entry
         run: python3 scripts/changelog-coverage.py
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   vulnerability-scan:
     name: Vulnerability scan
@@ -196,6 +223,12 @@ jobs:
           # PATH: if it were not, `govulncheck: command not found` would fail
           # this job for a reason that looks nothing like a vulnerability.
           "$(go env GOPATH)/bin/govulncheck" ./...
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   lint:
     name: Lint
@@ -287,6 +320,12 @@ jobs:
         with:
           path: ~/.cache/golangci-lint
           key: ${{ steps.analysis.outputs.cache-primary-key }}
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   build-and-test:
     name: Build and Test
@@ -417,6 +456,12 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   ui-shards:
     name: Test pkg/ui (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
@@ -519,6 +564,12 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   orchestrator-shards:
     name: Test pkg/orchestrator (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
@@ -583,6 +634,12 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   coverage:
     name: Coverage report
     runs-on: ubuntu-latest
@@ -624,6 +681,12 @@ jobs:
           name: coverage-report
           path: coverage.out
           retention-days: 7
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   browser-xss:
     name: Hostile strings in a real browser
@@ -687,6 +750,12 @@ jobs:
               exit 1
             }
           done
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   benchmarks:
     name: Benchmarks
@@ -777,6 +846,12 @@ jobs:
           path: bench.txt
           retention-days: 30
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   security-conformance:
     name: Security Conformance
     runs-on: ubuntu-latest
@@ -801,19 +876,18 @@ jobs:
         # concurrent redemptions against each other, and a non-atomic guard
         # is exactly what it is looking for.
         #
-        # The failing assertions are re-emitted as ::error:: annotations, not
-        # only left in the log. Reading a job log needs a token; annotations
-        # come back from the public check-runs API, so with this a maintainer
-        # without push rights — and anyone reproducing a failure from outside
-        # — can see *which* guarantee broke rather than "exit code 1". This
-        # suite failed on every commit for months while the only thing visible
-        # from outside was the exit code.
-        # Annotations are derived from -json rather than grepped out of the
-        # log. Grepping for `file.go:123:` cannot tell a t.Log from a t.Error
-        # — they are the same shape — so the first version of this reported
-        # eight failures when there was one, and the real assertion was the
-        # last of them. -json attributes every line to a test and says which
-        # tests failed, so only those are re-emitted.
+        # The failing assertions are re-emitted as annotations, not only left
+        # in the log: reading a job log needs a token, annotations come back
+        # from the public check-runs API, so anyone — scripts/ci-why.sh, on a
+        # machine with no token — can see *which* guarantee broke rather than
+        # "exit code 1". This suite failed on every commit for months while
+        # the only thing visible from outside was the exit code.
+        # scripts/ci-annotate reads them from the -json stream, which names
+        # the test each line belongs to and which tests failed: grepping the
+        # log for `file.go:123:` cannot tell a t.Log from a t.Error — they are
+        # the same shape — and the first version of this reported eight
+        # failures when there was one. Having annotated the step, it leaves
+        # the job's last step nothing to add.
         run: |
           set -o pipefail
           # -json is not readable in a job log, so the raw stream is kept for
@@ -837,49 +911,7 @@ jobs:
                | python3 -u /tmp/unjson.py; then
             exit 0
           fi
-          echo "::error::the threat-model conformance suite failed; the assertions are below"
-          python3 - <<'PY'
-          import json, collections
-
-          out, failed = collections.defaultdict(list), []
-          with open('/tmp/security.json') as fh:
-              for line in fh:
-                  try:
-                      e = json.loads(line)
-                  except ValueError:
-                      continue
-                  key = (e.get('Package', ''), e.get('Test') or '')
-                  if e.get('Action') == 'output':
-                      out[key].append(e.get('Output', ''))
-                  elif e.get('Action') == 'fail' and e.get('Test'):
-                      failed.append(key)
-
-          # A parent fails because its subtest did, and its own output is just
-          # the summary line — the subtest's annotation is the one carrying the
-          # assertion. Emitting both puts a content-free entry next to the real
-          # one, inside a per-step annotation budget.
-          names = {t for _, t in failed}
-          failed = [(p, t) for p, t in failed
-                    if not any(o != t and o.startswith(t + '/') for o in names)]
-
-          noise = ('=== RUN', '=== PAUSE', '=== CONT', '=== NAME')
-          shown = 0
-          for pkg, test in failed:
-              body = [l.rstrip() for l in out[(pkg, test)]
-                      if l.strip() and not l.lstrip().startswith(noise)]
-              if not body:
-                  continue
-              # GitHub caps annotations per step; the first failures are the
-              # ones worth reading, and the log above still has all of them.
-              shown += 1
-              if shown > 20:
-                  print(f'::notice::{len(failed) - 20} further failing test(s) '
-                        f'are in the log above')
-                  break
-              msg = '%0A'.join(l.replace('%', '%25').replace('\r', '')
-                               for l in body[:12])
-              print(f'::error title={test}::{msg}')
-          PY
+          go run ./scripts/ci-annotate /tmp/security.json
           exit 1
 
       - name: Fuzz the remote agent protocol framing
@@ -916,6 +948,12 @@ jobs:
             pkg/redact/testdata/fuzz/
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   parser-fuzz:
     name: Parser fuzzing
@@ -982,6 +1020,12 @@ jobs:
             pkg/*/*/testdata/fuzz/
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   docs-drift:
     name: Documentation drift
@@ -1107,6 +1151,12 @@ jobs:
           JS
           node /tmp/mermaid-tools/check.mjs
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   terraform-modules:
     name: Terraform ${{ matrix.make }} (${{ matrix.terraform }})
     runs-on: ubuntu-latest
@@ -1173,6 +1223,12 @@ jobs:
         # machine and failed here — which is exactly the class of difference a
         # single pinned version cannot see.
         run: make ${{ matrix.make }}
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   flagship-circuit:
     name: Flagship circuit
@@ -1477,6 +1533,12 @@ jobs:
             for-each-ref --format='%(refname) %(objectname:short) %(contents:subject)' 2>/dev/null \
             || echo "(no remote)"
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   concurrency-soak:
     name: Multi-tenant soak (bleed, leak, growth)
     runs-on: ubuntu-latest
@@ -1612,6 +1674,12 @@ jobs:
           echo "── disk ──"
           df -h / || true
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   hub-cluster:
     name: Hub cluster (three processes, one control plane)
     runs-on: ubuntu-latest
@@ -1677,9 +1745,13 @@ jobs:
             exit 1
           }
           # A race report fails the job even when the scenario completed: the
-          # member that raced may just have been lucky this time.
-          if grep -rl "WARNING: DATA RACE" "$TMPDIR" --include='*.log'; then
+          # member that raced may just have been lucky this time. Its stacks
+          # are annotated (scripts/ci-annotate reads any log).
+          if races=$(grep -rl "WARNING: DATA RACE" "$TMPDIR" --include='*.log'); then
+            echo "$races"
             echo "::error::a hub member or the agent reported a data race (files above)"
+            # shellcheck disable=SC2086 # one word per file
+            go run ./scripts/ci-annotate $races
             exit 1
           fi
 
@@ -1705,8 +1777,13 @@ jobs:
             echo "::error::go test succeeded but TestFailedOverRunOnAHubCluster did not pass — it was skipped"
             exit 1
           }
-          if grep -rl "WARNING: DATA RACE" "$TMPDIR" --include='*.log'; then
+          # A race report fails the job even when the scenario completed, and
+          # its stacks are annotated (scripts/ci-annotate reads any log).
+          if races=$(grep -rl "WARNING: DATA RACE" "$TMPDIR" --include='*.log'); then
+            echo "$races"
             echo "::error::a hub member or an agent reported a data race (files above)"
+            # shellcheck disable=SC2086 # one word per file
+            go run ./scripts/ci-annotate $races
             exit 1
           fi
 
@@ -1735,8 +1812,13 @@ jobs:
               exit 1
             }
           done
-          if grep -rl "WARNING: DATA RACE" /var/tmp/cloop-revoke-e2e-* --include='*.log'; then
+          # A race report fails the job even when the scenario completed, and
+          # its stacks are annotated (scripts/ci-annotate reads any log).
+          if races=$(grep -rl "WARNING: DATA RACE" /var/tmp/cloop-revoke-e2e-* --include='*.log'); then
+            echo "$races"
             echo "::error::a hub member reported a data race (files above)"
+            # shellcheck disable=SC2086 # one word per file
+            go run ./scripts/ci-annotate $races
             exit 1
           fi
 
@@ -1751,6 +1833,12 @@ jobs:
             echo "── $f ──"
             tail -150 "$f"
           done
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   eval-stack:
     name: Eval stack (SSO + remote executor)
@@ -1885,6 +1973,12 @@ jobs:
           docker network ls --filter label=com.docker.compose.project=cloop-eval -q || true
           echo "── disk, which a failed image build exhausts first ──"
           df -h / || true
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   deploy-artifacts:
     name: Deployment artifacts
@@ -2646,6 +2740,12 @@ jobs:
             kubectl -n "$ns" logs deploy/forge --tail=100 || true
           done
 
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   kube-share:
     name: Kubernetes share (exec plugin, renewal, revoke) on kind
     runs-on: ubuntu-latest
@@ -2701,6 +2801,12 @@ jobs:
             echo "::error::go test succeeded but TestKubeShareWithAnExecPlugin did not pass — it was skipped"
             exit 1
           }
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
 
   kms-transit:
     name: KMS Transit (${{ matrix.server }})
@@ -2758,3 +2864,9 @@ jobs:
             echo "::error::go test succeeded but TestTransitAgainstARealVault did not pass — it was skipped"
             exit 1
           }
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why

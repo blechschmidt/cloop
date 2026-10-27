@@ -1,0 +1,1981 @@
+{
+ "total_count": 27,
+ "jobs": [
+  {
+   "id": 117268531669,
+   "run_id": 38989510992,
+   "name": "Terraform terraform-test (1.7.5)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531669",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Terraform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "terraform-test",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    }
+   ]
+  },
+  {
+   "id": 117268531788,
+   "run_id": 38989510992,
+   "name": "Every feature and fix has a changelog entry",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531788",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Every task a feat, fix or perf commit names since the last release has a CHANGELOG.md entry",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    }
+   ]
+  },
+  {
+   "id": 117268531810,
+   "run_id": 38989510992,
+   "name": "Documentation drift",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531810",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Docs cover every executor kind, secret kind, role and permission",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Relative links inside docs/ resolve",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Set up Node",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Every mermaid diagram still renders",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Post Set up Node",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 14
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 15
+    }
+   ]
+  },
+  {
+   "id": 117268531821,
+   "run_id": 38989510992,
+   "name": "Benchmarks",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531821",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Benchmark the control-plane hot paths",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Every benchmark actually ran",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Upload benchmark results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    }
+   ]
+  },
+  {
+   "id": 117268531827,
+   "run_id": 38989510992,
+   "name": "Test pkg/orchestrator (shard 1/2)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531827",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "The test suite does not depend on a clean home directory",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Every pkg/orchestrator test is in exactly one shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Test this shard with race detector and coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "The shard stayed within 60% of its -timeout",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "The seeded home directory was left untouched",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Upload this shard's coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 17
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 18
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 19
+    }
+   ]
+  },
+  {
+   "id": 117268531828,
+   "run_id": 38989510992,
+   "name": "Hub cluster (three processes, one control plane)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531828",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Build cloop with the race detector",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Run the cluster",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Fail a run over between members",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Revoke a dead member's lease",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Member logs on failure",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 8
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 15
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 16
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 17
+    }
+   ]
+  },
+  {
+   "id": 117268531842,
+   "run_id": 38989510992,
+   "name": "Test pkg/ui (shard 2/3)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531842",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "The test suite does not depend on a clean home directory",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Warm the browser the dashboard tests drive",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Every pkg/ui test is in exactly one shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Test this shard with race detector and coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "The shard stayed within 60% of its -timeout",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "The seeded home directory was left untouched",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Upload this shard's coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 19
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 20
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 21
+    }
+   ]
+  },
+  {
+   "id": 117268531851,
+   "run_id": 38989510992,
+   "name": "Hostile strings in a real browser",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531851",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Node",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Warm the browser",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Press every control with hostile strings on the page",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Post Set up Node",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    }
+   ]
+  },
+  {
+   "id": 117268531879,
+   "run_id": 38989510992,
+   "name": "Static analysis",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531879",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "go vet",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "gofmt",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Every release platform compiles",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "No package is orphaned",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "go.mod and go.sum are tidy",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 15
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 16
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 17
+    }
+   ]
+  },
+  {
+   "id": 117268531890,
+   "run_id": 38989510992,
+   "name": "Build and Test",
+   "status": "completed",
+   "conclusion": "failure",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531890",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Build",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "The test suite does not depend on a clean home directory",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Every package that reads $HOME isolates it in TestMain",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Test with race detector and coverage",
+     "status": "completed",
+     "conclusion": "failure",
+     "number": 7
+    },
+    {
+     "name": "Every package stayed within 60% of its -timeout",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "End-to-end integration tests",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 9
+    },
+    {
+     "name": "The seeded home directory was left untouched",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Upload this job's coverage",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 21
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 22
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 23
+    }
+   ]
+  },
+  {
+   "id": 117268531898,
+   "run_id": 38989510992,
+   "name": "Test pkg/orchestrator (shard 2/2)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531898",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "The test suite does not depend on a clean home directory",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Every pkg/orchestrator test is in exactly one shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Test this shard with race detector and coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "The shard stayed within 60% of its -timeout",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "The seeded home directory was left untouched",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Upload this shard's coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 17
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 18
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 19
+    }
+   ]
+  },
+  {
+   "id": 117268531904,
+   "run_id": 38989510992,
+   "name": "Terraform terraform-test (latest)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531904",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Terraform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "terraform-test",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    }
+   ]
+  },
+  {
+   "id": 117268531912,
+   "run_id": 38989510992,
+   "name": "Multi-tenant soak (bleed, leak, growth)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531912",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Pre-pull the sandbox base image",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Drive the soak",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Soak diagnostics on failure",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 6
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    }
+   ]
+  },
+  {
+   "id": 117268531919,
+   "run_id": 38989510992,
+   "name": "Kubernetes share (exec plugin, renewal, revoke) on kind",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531919",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Create a kind cluster",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Build cloop",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Share a cluster, renew across a token's expiry, revoke",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Post Create a kind cluster",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    }
+   ]
+  },
+  {
+   "id": 117268531928,
+   "run_id": 38989510992,
+   "name": "Deployment artifacts",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531928",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Build the hub image",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Assert the image is what the chart assumes",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Boot the container hardened and probe it",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "An image started without sign-in refuses the network",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Bootstrap generates a config the binary accepts",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Set up Helm",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "helm lint",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "The monitors render what the hub and the Pods need",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "The chart renders with the defaults an upgrade from 0.2.0 sees",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    },
+    {
+     "name": "Chart guard rails refuse what they should",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Create a kind cluster",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    },
+    {
+     "name": "helm template | kubectl apply --dry-run",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 14
+    },
+    {
+     "name": "Install the chart and wait for the hub to be ready",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 15
+    },
+    {
+     "name": "Assert the installed hub answers both probes",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 16
+    },
+    {
+     "name": "Assert the root key reaches the hub as a file and is in no Pod object",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 17
+    },
+    {
+     "name": "Assert the executor Role grants exactly what the driver calls",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 18
+    },
+    {
+     "name": "Run a workload through the in-cluster executor",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 19
+    },
+    {
+     "name": "Set up Go for the Kubernetes end-to-end test",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 20
+    },
+    {
+     "name": "The chart's executor Role is exactly what the driver calls",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 21
+    },
+    {
+     "name": "The chart's KMS renders what the hub accepts",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 22
+    },
+    {
+     "name": "Prepare the Kubernetes end-to-end test",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 23
+    },
+    {
+     "name": "The driver's Secrets on a real kubelet",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Git proxy and kube guard end to end on kind",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Scale to three replicas and assert one hub cluster",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Git proxy and kube guard end to end on a hub cluster of three",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    },
+    {
+     "name": "Hub diagnostics on failure",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 28
+    },
+    {
+     "name": "Post Set up Go for the Kubernetes end-to-end test",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 54
+    },
+    {
+     "name": "Post Create a kind cluster",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 55
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 56
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 57
+    }
+   ]
+  },
+  {
+   "id": 117268531935,
+   "run_id": 38989510992,
+   "name": "Eval stack (SSO + remote executor)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531935",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Pre-pull the stack's third-party images",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Build the hub and executor images",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Boot the stack and assert the path end to end",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Stack diagnostics on failure",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 6
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    }
+   ]
+  },
+  {
+   "id": 117268531948,
+   "run_id": 38989510992,
+   "name": "Test pkg/ui (shard 3/3)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531948",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "The test suite does not depend on a clean home directory",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Warm the browser the dashboard tests drive",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Every pkg/ui test is in exactly one shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Test this shard with race detector and coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "The shard stayed within 60% of its -timeout",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "The seeded home directory was left untouched",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Upload this shard's coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 19
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 20
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 21
+    }
+   ]
+  },
+  {
+   "id": 117268531976,
+   "run_id": 38989510992,
+   "name": "Terraform terraform-validate (1.5.7)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531976",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Terraform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "terraform-validate",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    }
+   ]
+  },
+  {
+   "id": 117268531984,
+   "run_id": 38989510992,
+   "name": "Security Conformance",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531984",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Threat-model conformance suite",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Fuzz the remote agent protocol framing",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Upload fuzz failure corpus",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 6
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    }
+   ]
+  },
+  {
+   "id": 117268531991,
+   "run_id": 38989510992,
+   "name": "KMS Transit (vault)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268531991",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Start a vault dev server",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Transit against the real server",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    }
+   ]
+  },
+  {
+   "id": 117268532004,
+   "run_id": 38989510992,
+   "name": "Vulnerability scan",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268532004",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "The toolchain pin is in effect",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "govulncheck",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    }
+   ]
+  },
+  {
+   "id": 117268532041,
+   "run_id": 38989510992,
+   "name": "Test pkg/ui (shard 1/3)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268532041",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "The test suite does not depend on a clean home directory",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Warm the browser the dashboard tests drive",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Every pkg/ui test is in exactly one shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Test this shard with race detector and coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "The shard stayed within 60% of its -timeout",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "The seeded home directory was left untouched",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Upload this shard's coverage",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 19
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 20
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 21
+    }
+   ]
+  },
+  {
+   "id": 117268532053,
+   "run_id": 38989510992,
+   "name": "Flagship circuit",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268532053",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Build a static cloop for the sandbox",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Pre-pull the pinned sandbox base",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Run the circuit",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Run a feature in a container",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Reach an origin through the hub's egress proxy from a container",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Refresh a GitHub App token in a container",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Hub CA trusted for the git proxy only, in a container",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Project directories confined on a container sandbox",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    },
+    {
+     "name": "Circuit diagnostics on failure",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 12
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 23
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    }
+   ]
+  },
+  {
+   "id": 117268532076,
+   "run_id": 38989510992,
+   "name": "Parser fuzzing",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268532076",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Fuzz every parser that ingests untrusted input",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Upload fuzz failure corpus",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 5
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    }
+   ]
+  },
+  {
+   "id": 117268532142,
+   "run_id": 38989510992,
+   "name": "KMS Transit (openbao)",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268532142",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Start a openbao dev server",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Transit against the real server",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    }
+   ]
+  },
+  {
+   "id": 117268532287,
+   "run_id": 38989510992,
+   "name": "Lint",
+   "status": "completed",
+   "conclusion": "success",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117268532287",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Cache keys",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Restore the pinned linter",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Install the pinned linter",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Save the pinned linter",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 7
+    },
+    {
+     "name": "Restore the analysis cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "golangci-lint",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Save the analysis cache",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 10
+    },
+    {
+     "name": "Post Set up Go",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 19
+    },
+    {
+     "name": "Post Checkout code",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 20
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 21
+    }
+   ]
+  },
+  {
+   "id": 117271425073,
+   "run_id": 38989510992,
+   "name": "Coverage report",
+   "status": "completed",
+   "conclusion": "skipped",
+   "html_url": "https://github.com/blechschmidt/cloop/actions/runs/38989510992/job/117271425073",
+   "head_sha": "f6e1ab1f817fa4cd60e2b467fd5edd4780133d9f",
+   "steps": []
+  }
+ ]
+}
