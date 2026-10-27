@@ -305,9 +305,11 @@ func (s *Server) handleHubCARotate(w http.ResponseWriter, r *http.Request) {
 		writeHubCAStepError(w, err)
 		return
 	}
-	// Every member re-reads its CAs now, this one too.
+	// Every member re-reads its CAs now, this one too, and reports on them
+	// soon (Task 20446).
 	publishHubCAStep(step)
 	kickHubCA()
+	s.hubHealthEvent()
 	status, serr := s.hubCAStatus(env)
 	resp := map[string]any{"step": step, "result": result}
 	if serr == nil {

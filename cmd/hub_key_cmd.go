@@ -40,6 +40,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/sessionstore"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
+	"github.com/blechschmidt/cloop/pkg/ui"
 )
 
 var hubKeyCmd = &cobra.Command{
@@ -630,6 +631,13 @@ func appendKeyAuditEvent(workdir string, eventType auditaction.Action, keyID str
 			return
 		}
 		workdir = wd
+	}
+	// Running hubs' Hub health reports read the sealing keys: tell them, so
+	// each makes its next one within a bus poll rather than at its cadence
+	// (Task 20446). Best effort — the next scheduled report sees it anyway.
+	if db, closeDB, err := openHubDB(workdir); err == nil {
+		_ = ui.AnnounceHubHealthChange(db, cliOrigin(), string(eventType))
+		closeDB()
 	}
 	log, err := eventlog.Open(workdir)
 	if err != nil {

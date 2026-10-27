@@ -58,6 +58,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/globalbudget"
 	"github.com/blechschmidt/cloop/pkg/kms"
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
 
 // Severity is how much a finding matters. The three values are ordered, and
@@ -369,6 +370,16 @@ type Self struct {
 	// from. It replaces a probe of every executor on every member — leases a
 	// Kubernetes credential, asks a device another member holds — per report.
 	Probe func(ctx context.Context, ex executor.Executor) (source string, err error)
+
+	// IdP is what the hub's sign-in client holds of its issuer — the
+	// discovery document and keys it cached, and the last failure to fetch
+	// either — read without contacting the issuer (Task 20446). Nil when the
+	// process runs no sign-in client. The issuer checks report from it when
+	// it is the configured issuer, instead of resolving the issuer again on
+	// every report: that was two round trips to the identity provider per
+	// report, and a transient blip at the provider lit the dashboard's
+	// warning while every sign-in went through.
+	IdP *oidcauth.IdPState
 }
 
 // staticTokenFact is whether the hub has a static token, and how a finding

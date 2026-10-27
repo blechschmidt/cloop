@@ -51,6 +51,12 @@ var liveEvery = map[string]time.Duration{
 	"gitproxy":  15 * time.Minute,
 	"kubeguard": 15 * time.Minute,
 	"egress":    15 * time.Minute,
+	// Resolves the issuer over the network: its discovery document and key
+	// set, two round trips to the identity provider. A live run makes it only
+	// for an issuer the hub's own sign-in client is not using, and reads the
+	// one it is using from the client (Task 20446) — so the provider is asked
+	// at most once a quarter hour per member, and never once per report.
+	"oidc.preflight": 15 * time.Minute,
 }
 
 // stepSet is what differs between the diagnosis an operator runs and the one
@@ -70,6 +76,9 @@ func steps(dir string, cfg *config.Config, opts Options, wal walSample, rep *Rep
 		// What loading changed comes first: every check below reads the result.
 		{"config.repaired", "Configuration repairs", func(_ context.Context, add addFn) { checkLoadRepairs(cfg, add) }},
 		{"oidc", "Single sign-on", func(ctx context.Context, add addFn) { checkOIDC(ctx, cfg, opts, add) }},
+		// The half of single sign-on that contacts the issuer, apart so a live
+		// run can make it less often than reports are (liveEvery).
+		{"oidc.preflight", "Issuer discovery", func(ctx context.Context, add addFn) { checkOIDCIssuer(ctx, cfg, opts, add) }},
 		{"tls", "Transport security", func(_ context.Context, add addFn) { checkTLS(cfg, opts, add) }},
 		// Beside the transport checks: whether a hub that cannot tell people
 		// apart is reachable from the network (Task 20393).

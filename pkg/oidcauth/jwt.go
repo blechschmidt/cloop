@@ -422,6 +422,7 @@ func (a *Authenticator) fetchJWKSLocked(ctx context.Context) error {
 		return err
 	}
 	keys, err := fetchJWKS(ctx, a.client, a.cfg.Issuer, disc)
+	noteFetch(FetchDocumentJWKS, FetchClientSignIn, err)
 	if err != nil {
 		a.noteIdPErr(err)
 		return err
@@ -431,7 +432,7 @@ func (a *Authenticator) fetchJWKSLocked(ctx context.Context) error {
 	// Reaching here means discovery *and* a usable key set both resolved,
 	// which is the whole of what readiness asserts — so a hub that never ran
 	// a preflight still becomes ready the moment somebody signs in.
-	a.noteIdPOK()
+	a.noteIdPOK(len(keys), a.jwksFetched)
 	return nil
 }
 

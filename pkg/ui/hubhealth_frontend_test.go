@@ -1,10 +1,10 @@
 package ui
 
 // The hub health indicator and its Settings panel, driven through the real
-// dashboard bundle under the node DOM shim (Task 20434): an administrator's
-// indicator follows the hub's report — at load, on the hub_health push, at the
-// report's expiry — a viewer's page never asks, and the panel draws what a
-// check wrote as text.
+// dashboard bundle under the node DOM shim (Tasks 20434, 20446): an
+// administrator's indicator is asked once at load and on reconnect, and
+// follows the hub_health push with no request of its own; a viewer's page
+// never asks, and the panel draws what a check wrote as text.
 
 import (
 	"context"
@@ -28,16 +28,22 @@ type hubHealthBadgeState struct {
 
 type hubHealthScenario struct {
 	hubHealthBadgeState
-	Retry  bool                `json:"retry"`
-	First  hubHealthBadgeState `json:"first"`
-	Before hubHealthBadgeState `json:"before"`
-	After  hubHealthBadgeState `json:"after"`
-	HTML   string              `json:"html"`
-	CA     string              `json:"ca"`
-	Status string              `json:"status"`
-	Full   int                 `json:"full"`
-	XSS    any                 `json:"xss"`
-	Error  string              `json:"error"`
+	Retry   bool                `json:"retry"`
+	First   hubHealthBadgeState `json:"first"`
+	Before  hubHealthBadgeState `json:"before"`
+	After   hubHealthBadgeState `json:"after"`
+	Again   hubHealthBadgeState `json:"again"`
+	Expired hubHealthBadgeState `json:"expired"`
+	Me      int                 `json:"me"`
+	Opened  int                 `json:"opened"`
+	Same    int                 `json:"same"`
+	Newer   int                 `json:"newer"`
+	HTML    string              `json:"html"`
+	CA      string              `json:"ca"`
+	Status  string              `json:"status"`
+	Full    int                 `json:"full"`
+	XSS     any                 `json:"xss"`
+	Error   string              `json:"error"`
 }
 
 // The three tests below read one run of the scenarios: each run takes seconds
@@ -107,9 +113,10 @@ func hubHealthScenarioRun(dir string) (map[string]hubHealthScenario, string) {
 }
 
 // TestDashboard_HubHealthIndicator: lit with the failing count for an
-// administrator, asked once at load however many reasons arrive together, put
-// out by a push that brings an all-clear, asked again when the report
-// expires, and not asked again after a refusal.
+// administrator, asked once at load however many reasons arrive together and
+// once more when the socket opens again; not asked after a refusal, asked
+// again a minute after a failed answer, and put out — with /api/me re-read and
+// nothing asked — when the hub says this socket may no longer read the report.
 func TestDashboard_HubHealthIndicator(t *testing.T) {
 	results := runHubHealthScenarios(t)
 
@@ -118,15 +125,10 @@ func TestDashboard_HubHealthIndicator(t *testing.T) {
 		a.First.Asked != 1 {
 		t.Errorf("at load the indicator is %+v; want it lit with 2, asked once for /api/me and the socket together", a.First)
 	}
-	if a.After.Shown || a.After.Asked != 2 {
-		t.Errorf("after an all-clear push the indicator is %+v; want it out after one more question", a.After)
-	}
 
-	e := results["the_expiry_is_asked_about"]
-	if !e.Before.Shown || e.Before.Asked != 1 || !e.After.Shown || !strings.HasSuffix(e.After.Text, " 4") ||
-		e.After.Asked != 2 {
-		t.Errorf("past the report's expiry by the hub's clock, an hour behind the page's: before %+v, after %+v; "+
-			"want one more question and its answer shown", e.Before, e.After)
+	c := results["a_reconnect_asks_once"]
+	if c.Asked != 2 || !strings.HasSuffix(c.Text, " 3") {
+		t.Errorf("after the socket opened again the indicator is %+v; want one more question and its answer shown", c)
 	}
 
 	r := results["a_refusal_is_not_asked_again"]
@@ -137,6 +139,48 @@ func TestDashboard_HubHealthIndicator(t *testing.T) {
 	f := results["a_failed_answer_is_retried"]
 	if f.Asked != 1 || f.Shown || !f.Retry {
 		t.Errorf("after a 500 the indicator is %+v; want it asked once, out, and asking again in a minute", f)
+	}
+
+	w := results["a_withdrawal_puts_it_out"]
+	if !w.Before.Shown || w.After.Shown || w.After.Asked != w.Before.Asked || w.Me < 1 {
+		t.Errorf("a withdrawal left the indicator %+v (from %+v) after %d /api/me read(s); want it out, nothing asked, "+
+			"/api/me re-read", w.After, w.Before, w.Me)
+	}
+
+	o := results["an_older_hubs_push_is_asked_about"]
+	if o.Asked != 2 || !strings.HasSuffix(o.Text, " 6") {
+		t.Errorf("an empty push from an older hub left %+v; want it asked once more and the answer shown", o)
+	}
+}
+
+// TestDashboard_HubHealthPushNeedsNoFetch: the hub's push is the indicator's
+// news (Task 20446). An all-clear puts it out and a new failure lights it with
+// no request; a report's expiry passes without one, the next report arriving
+// by push; and a push of a new report re-reads Settings → Hub health while it
+// is on screen, while a push of the report it shows does not.
+func TestDashboard_HubHealthPushNeedsNoFetch(t *testing.T) {
+	results := runHubHealthScenarios(t)
+
+	a := results["admin_indicator_follows_the_report"]
+	if a.After.Shown || a.After.Asked != 1 {
+		t.Errorf("after an all-clear push the indicator is %+v; want it out with no further question", a.After)
+	}
+	if !a.Again.Shown || !strings.HasSuffix(a.Again.Text, " 5") || a.Again.Label != "5 hub health checks failing" ||
+		a.Again.Asked != 1 {
+		t.Errorf("after a push of 5 failing the indicator is %+v; want it lit with 5 and still one question", a.Again)
+	}
+
+	e := results["the_expiry_is_not_asked_about"]
+	if !e.Before.Shown || e.Before.Asked != 1 || e.Expired.Asked != 1 || !e.After.Shown ||
+		!strings.HasSuffix(e.After.Text, " 4") || e.After.Asked != 1 {
+		t.Errorf("around the report's expiry, by the hub's clock an hour behind the page's: before %+v, past it %+v, "+
+			"after the push %+v; want one question in all and the pushed count shown", e.Before, e.Expired, e.After)
+	}
+
+	p := results["a_push_while_the_panel_is_open_rereads_it"]
+	if p.Opened == 0 || p.Same != p.Opened || p.Newer != p.Opened+1 {
+		t.Errorf("Settings → Hub health read the report %d time(s) when opened, %d after a push of the same "+
+			"generation and %d after a newer one; want one more read, for the newer push only", p.Opened, p.Same, p.Newer)
 	}
 }
 

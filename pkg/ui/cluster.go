@@ -96,6 +96,11 @@ const (
 	// through a member (Task 20415); each re-reads it at once rather than at
 	// its next version check, so a removal from a group demotes everywhere.
 	invalidateSCIM = "scim"
+	// invalidateHubHealth: something every member's Hub health report checks
+	// changed outside any member — the sealing keys, by `cloop hub key`
+	// (Task 20446); each makes its next report soon rather than at its
+	// cadence.
+	invalidateHubHealth = "hub_health"
 )
 
 // clusterNode returns this hub's cluster membership, or nil when standalone.
@@ -432,8 +437,12 @@ func (s *Server) startClusterBus() {
 	n.Subscribe(busTopicInvalidate, s.onBusInvalidate)
 	n.Subscribe(busTopicOffboard, s.onBusOffboard)
 	// Another process took a hub CA rotation step (Task 20438): re-read the
-	// CAs now rather than at the next minute's tick.
-	n.Subscribe(busTopicHubCA, onBusHubCA)
+	// CAs now rather than at the next minute's tick, and report on them soon
+	// (Task 20446).
+	n.Subscribe(busTopicHubCA, func(ev hubcluster.Event) {
+		onBusHubCA(ev)
+		s.hubHealthEvent()
+	})
 	n.OnBusGap(s.onBusGap)
 	n.OnMembership(s.onMembershipChange)
 }
@@ -445,6 +454,11 @@ func (s *Server) onBusWS(ev hubcluster.Event) {
 	}
 	if ev.Key == "" {
 		s.deliverToAll(p.Msg)
+		// Another member's executor changed: so may what this member's Hub
+		// health report finds of the fleet (Task 20446).
+		if p.Msg.Type == "executor_update" {
+			s.hubHealthEvent()
+		}
 		return
 	}
 	s.deliverToProject(ev.Key, p.Msg)
@@ -629,6 +643,9 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 	case invalidateSCIM:
 		// The directory changed through another member (Task 20415).
 		s.onSCIMInvalidate()
+	case invalidateHubHealth:
+		// The sealing keys changed from a shell (Task 20446).
+		s.hubHealthEvent()
 	case invalidateApprovals:
 		// A grant request or a token changed on another member (Task
 		// 20427): if this member leads, its notifier passes now.

@@ -3014,6 +3014,29 @@ Default-on is deliberate. The alternative is what it replaced: an unattended
 fleet parked for the rest of a weekly window over a condition that had already
 cleared, and whose exact clearing time the hub already knew.
 
+#### Hub health cadence
+
+Each hub member runs `cloop hub doctor`'s checks on itself for Settings → **Hub
+health** and its header indicator, and pushes each report's summary to the
+dashboards of the administrators connected to it (Task 20446). It makes a report
+on a cadence, and sooner when one of its configuration files changes, when an
+executor, a hub CA rotation step or a sealing key changes, and when someone
+presses **Run the checks again**. Open dashboards never add reports: a page asks
+for the report only when its socket opens.
+
+```yaml
+ui:
+  hub_health_interval: 5m   # the default; a Go duration between 1m and 1h
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `hub_health_interval` | `5m` | How often a member reports on itself when nothing else made it. Shorter shows a certificate nearing expiry or a filling disk sooner, at one doctor run per interval per member. A value that does not parse, or lies outside `[1m, 1h]`, runs at the default, and `config.repaired` says so. |
+
+Per process: where several hub processes share a directory, a member may set its
+own in its `config.ui-<port>.yaml` overlay. See [Hub health in the
+dashboard](../operations/runbook.md#hub-health-in-the-dashboard).
+
 ### TLS
 
 **Serving.** `cloop ui` and `cloop serve` can terminate TLS themselves, or sit

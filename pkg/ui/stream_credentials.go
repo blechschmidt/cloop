@@ -413,9 +413,11 @@ func (s *Server) recheckTokenStreams(tokenID string) {
 }
 
 // recheckStaticTokenStreams re-checks every stream the static token opened,
-// after a retirement (Task 20406).
+// after a retirement (Task 20406). The retirement changes ui.static_token's
+// finding too, so the Hub health report is made again soon (Task 20446).
 func (s *Server) recheckStaticTokenStreams() {
 	s.queueCredentialRecheck(func(q *credentialRechecks) { q.static = true })
+	s.hubHealthEvent()
 }
 
 // recheckAllCredentialStreams re-checks every stream whose credential can end.
@@ -451,7 +453,7 @@ func (s *Server) runCredentialRechecks() {
 		q.mu.Unlock()
 		func() {
 			defer recoverGoroutine("credential stream re-check")
-			s.evictEndedCredentialStreams(func(c streamCredential) bool {
+			match := func(c streamCredential) bool {
 				if !c.revocable() {
 					return false
 				}
@@ -463,7 +465,12 @@ func (s *Server) runCredentialRechecks() {
 				}
 				_, ok := tokens[c.tokenID]
 				return ok && c.tokenID != ""
-			})
+			}
+			s.evictEndedCredentialStreams(match)
+			// A session whose claims were refreshed, or a credential that
+			// ended, may have changed who reads the Hub health report too
+			// (Task 20446): told now, not at the next half-minute's look.
+			s.recheckHubHealthAudience(match)
 		}()
 		q.passes.Add(1)
 	}

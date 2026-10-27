@@ -269,10 +269,12 @@ func Preflight(ctx context.Context, issuer string, opts PreflightOptions) (*Pref
 
 	client := opts.client()
 	doc, err := fetchDiscovery(ctx, client, issuer)
+	noteFetch(FetchDocumentDiscovery, FetchClientPreflight, err)
 	if err != nil {
 		return nil, err
 	}
 	keys, err := fetchJWKS(ctx, client, issuer, doc)
+	noteFetch(FetchDocumentJWKS, FetchClientPreflight, err)
 	if err != nil {
 		return nil, withResolved(err, issuer, doc)
 	}
@@ -494,10 +496,12 @@ func (a *Authenticator) IdPReady() error {
 	return a.unverified()
 }
 
-// noteIdPOK records that discovery and the key set both resolved.
-func (a *Authenticator) noteIdPOK() {
+// noteIdPOK records that discovery and the key set both resolved, with the
+// number of usable keys the set held and when it was fetched.
+func (a *Authenticator) noteIdPOK(keys int, at time.Time) {
 	a.idpMu.Lock()
-	a.idpReady, a.idpErr = true, nil
+	a.idpReady, a.idpErr, a.idpErrAt = true, nil, time.Time{}
+	a.idpKeys, a.idpKeysAt = keys, at
 	a.idpMu.Unlock()
 }
 
@@ -506,6 +510,6 @@ func (a *Authenticator) noteIdPOK() {
 // which is a different thing and must not be reported as a misconfiguration.
 func (a *Authenticator) noteIdPErr(err error) {
 	a.idpMu.Lock()
-	a.idpErr = err
+	a.idpErr, a.idpErrAt = err, time.Now()
 	a.idpMu.Unlock()
 }

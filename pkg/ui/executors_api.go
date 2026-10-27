@@ -2028,6 +2028,9 @@ func (s *Server) broadcastExecutorUpdate(event, executorID string) {
 	// Every hub member's clients, not only this one's (Task 20354): the
 	// change is to a hub-wide resource another member's dashboard is showing.
 	s.broadcastToAll(wsMessage{Type: "executor_update", Data: json.RawMessage(payload)})
+	// And what this member's Hub health report finds of its executors
+	// (Task 20446). The others hear it through the bus (onBusWS).
+	s.hubHealthEvent()
 }
 
 // broadcastExecutorUpdateLocal is broadcastExecutorUpdate for this hub
@@ -2041,6 +2044,7 @@ func (s *Server) broadcastExecutorUpdateLocal(event, executorID string) {
 		return
 	}
 	s.deliverToAll(wsMessage{Type: "executor_update", Data: json.RawMessage(payload)})
+	s.hubHealthEvent()
 }
 
 // makeExecutorStatusBroadcaster wraps a status mirror so a device going

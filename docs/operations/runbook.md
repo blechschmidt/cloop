@@ -59,7 +59,7 @@ Two rules that prevent most of the bad days:
 | `/healthz` | is the process alive? | never fails while it can accept a connection — do **not** wire a restart to a slow database |
 | `/readyz` | should traffic come here? | three gates: the state database, then the identity provider, then the execution path. Fails during startup, on storage loss, while an issuer has never resolved, and when strict mode leaves no isolating executor registered |
 | `/metrics` | Prometheus text | gated: requires the `audit.read` permission, unlike the two probes above |
-| `/api/hub/health` | will it keep working? | `cloop hub doctor`'s checks, run by the serving hub on itself and cached for a minute; gated on `config.write`, and shown in Settings → Hub health — see [Hub health in the dashboard](#hub-health-in-the-dashboard) |
+| `/api/hub/health` | will it keep working? | `cloop hub doctor`'s checks, run by each serving hub member on itself every five minutes (`ui.hub_health_interval`) and when something they check changes; gated on `config.write`, and shown in Settings → Hub health — see [Hub health in the dashboard](#hub-health-in-the-dashboard) |
 
 `/healthz` and `/readyz` bypass auth and rate limiting so a probe can never be
 locked out by a flood or a broken IdP. `/metrics` does not — it is an ordinary
@@ -144,7 +144,7 @@ What it checks, and what each one catches that nothing else does:
 | Group | Checks |
 | --- | --- |
 | <a id="doctor-policy"></a>`policy` | whether `executors.allow_host_process` was *decided* or merely defaulted |
-| <a id="doctor-oidc"></a>`oidc` | whether `cloop ui` would start with `ui.oidc` (`oidc.startup`: the verdict of `oidcauth.New`, the constructor startup runs); the redirect URI — its path by the hub's own rule, so any path under `/auth/` the router can serve passes (an Entra SPA registration is commonly `/auth/oidc`) and only a path the hub refuses fails, saying it will not start — and its origin against `ui.external_url`; issuer discovery, the document's own issuer name, JWKS keys cloop can actually verify with; client secret from the environment rather than the committed config |
+| <a id="doctor-oidc"></a>`oidc` | whether `cloop ui` would start with `ui.oidc` (`oidc.startup`: the verdict of `oidcauth.New`, the constructor startup runs); the redirect URI — its path by the hub's own rule, so any path under `/auth/` the router can serve passes (an Entra SPA registration is commonly `/auth/oidc`) and only a path the hub refuses fails, saying it will not start — and its origin against `ui.external_url`; issuer discovery, the document's own issuer name, JWKS keys cloop can actually verify with; client secret from the environment rather than the committed config. In Settings → Hub health the issuer the hub signs in with is read from its sign-in client instead of being resolved again: `oidc.discovery` and `oidc.jwks` report when the client resolved it and fetched its keys, and why its last fetch failed — **warn** for a key-set refresh that failed while it still holds keys; `oidc.running` **warns** that the configured issuer is not the one this process signs in with, until a restart |
 | <a id="doctor-tls"></a>`tls` | cert and key load as a matching pair the way the listener loads them (`tlsconf`), the chain the listener presents is ordered and parses, expiry (warns 30 days out), SANs cover the external hostname, key permissions, and the proxy-termination case — judged by the rule an edge agent applies to `ui.external_url` |
 | <a id="doctor-ui"></a>`ui` | `ui.exposure`: where the process on `--port` actually listens, read from the kernel's socket table, and whether it answers `GET /api/projects` without credentials. **Fail** for a hub without sign-in reachable beyond loopback — whichever build serves it, so a binary from before the loopback default is caught too — or one that would be (a `ui.listen` beyond loopback with `ui.allow_unauthenticated_network`, or one `cloop ui` would refuse to start with); **warn** for a hub with sign-in that serves plaintext beyond loopback while its public URL (`ui.external_url`, else `ui.oidc.redirect_url`) is https. With nothing on the port it judges what `cloop ui --port N` would do; export `CLOOP_UI_TOKEN` from `hub.env` first if the hub uses one. `ui.static_token`: **warn** while a static token is accepted — exported in the doctor's shell, or reported by a running hub — beside single sign-on with an enforced role policy, saying how long it has gone unused; **pass** once it is retired. Silent without SSO, where the token is the sign-in, and without a policy, where `rbac.enforced` is the finding |
 | <a id="doctor-secret_key"></a>`secret_key` | where the root key comes from (`secret_key.source`: a source the hub would refuse fails; an environment variable on a host systemd runs, or a copy of a file's key left in the environment, warns); `CLOOP_SECRET_KEY` present, generated key material rather than a passphrase or a placeholder out of the docs — a weak one is told to change the root, not to rotate; the key that opens this hub's sealing keys, asked of the keyring the broker opens, read-only — a live key no configured root derives fails, because the hub would not start (`secret_key.matches`); a warning for as long as `CLOOP_SECRET_KEY_PREVIOUS` is set (`secret_key.previous`); and the escrow on record (`secret_key.escrow`); and, with a KMS among the roots, its configuration (`secrets.kms.config`), whether each KMS answers and how fast (`secrets.kms.reachable`, a failure for one that does not), a change of root still in progress (`secrets.kms.previous`), and keys still wrapped under a KMS key version it no longer encrypts under (`secrets.kms.rewrap`) |
@@ -210,9 +210,20 @@ compose deployment, or one without shell access, does not have. Settings →
   process admits requests instead of sending it one without credentials, which a
   token-only hub would count as a failed sign-in; and the sealing-key checks use
   the KMS clients the hub pinned at startup, so a report never logs in to Vault.
-  The other network probes are the ones the checks already make — issuer
-  discovery and JWKS, registries, the advertised proxy addresses — each bounded
-  to 5 seconds.
+  The issuer the hub signs in with is read from its own sign-in client — the
+  discovery document and keys it holds, when it fetched them, and why its last
+  fetch failed — so a report of a resolved issuer asks the identity provider
+  nothing, and a blip at the provider is a finding only when it cost the hub
+  something: a sign-in that could not begin, a key set it could not refresh for
+  a token that needed it. While the client holds no usable resolution (it never
+  resolved the issuer, holds no keys, or its last fetch failed), a report asks
+  it to try again at most every 15 minutes, and **Run the checks again** at most
+  every minute, so a failure that has cleared does not stay red until somebody
+  signs in. Only an issuer the running process does not sign in with (single
+  sign-on switched on, or the issuer changed, since it started; `oidc.running`
+  says so) is resolved by the report itself, at most every 15 minutes. The other network
+  probes are the ones the checks already make — registries, the advertised
+  proxy addresses — each bounded to 5 seconds.
 - **When a check misbehaves.** Every check runs on a goroutine of its own, with
   a deadline of its own (20 seconds) and its panics recovered. One that does not finish is reported as
   `doctor.unfinished`, with whatever it found before its deadline; one that
@@ -221,29 +232,52 @@ compose deployment, or one without shell access, does not have. Settings →
   returns is not started a second time: until it does, each report says it is
   still running. `cloop hub doctor` on the host runs the same check without a
   deadline, which shows where it stops.
-- **How fresh.** A report is computed at most once at a time and served for
-  about a minute. A change to either configuration file — from Settings, from
-  another member, or an editor on the host — makes the next request compute a
-  new one, of everything. Six checks cost more than a minute's report is worth
-  and are made at most every 15 minutes, the reports in between carrying their
-  last result with the time it was made: `storage.integrity` (`quick_check` and
+- **How fresh.** Each member makes its report itself, one at a time: every
+  five minutes (`ui.hub_health_interval`, between `1m` and `1h`; per process, so
+  a member may set its own in its overlay), within a few seconds of a change to
+  either configuration file — from Settings, from another member, or an editor
+  on the host — and soon after an event that changes what the checks find: an
+  executor enrolled, lost or reconfigured, a step of a hub CA rotation, a
+  sealing key rotated, retired, rewrapped or escrowed with `cloop hub key`, or
+  the static token retired. A burst of events is one report, never sooner than
+  a minute after the last, and an event that arrives while a report is being
+  made makes the next one too. The events from outside the member — another
+  member's, and `cloop hub key`'s — come over the cluster bus, which a hub
+  started with `ui.cluster.exclusive` does not read: it sees them at its next
+  scheduled report. A read is answered from the latest report; behind a
+  load balancer the number of reports a member makes does not depend on how many
+  dashboards are open. Seven checks cost more than a report is worth and are made at
+  most every 15 minutes, the reports in between carrying their last result with
+  the time it was made: `storage.integrity` (`quick_check` and
   `foreign_key_check` read the whole database file), `retention` (it sums the
   largest tables' rows), `projects.confinement` (it walks every registered
-  project's tree), and `gitproxy`, `kubeguard` and `egress` (each dials the
-  address sandboxes reach the monitor at, often this process's own listener,
-  which logs the bare connection as a TLS handshake error). One of them that
-  takes longer than its deadline is still remembered when it finishes. **Run
-  the checks again** reruns everything whose last run is over a minute old, and
-  answers from the last report if that one is under ten seconds old.
+  project's tree), `gitproxy`, `kubeguard` and `egress` (each dials the address
+  sandboxes reach the monitor at, often this process's own listener, which logs
+  the bare connection as a TLS handshake error), and the resolution of an issuer
+  the process does not sign in with. One of them that takes longer than its
+  deadline is still remembered when it finishes. **Run the checks again** reruns
+  everything whose last run is over a minute old, and answers from the last
+  report if that one is under ten seconds old. `cloop_hub_health_reports_total`
+  counts the reports by what made them.
 - **Who sees it.** `config.write` across the hub, as for the hub-wide Settings
   around it: under an enforced role policy a viewer or an operator gets `403`,
   and their page never asks. An administrator's header shows a red ⚠ count while
-  any check fails, refreshed when the hub announces a changed report (the
-  `hub_health` WebSocket event, which carries nothing), on reconnect, and once
-  the report it last read expires by the hub's clock — so an open
-  administrator's page costs the member it reaches one run a minute, and the
-  page has no timer of its own beyond that expiry (and a retry a minute after a
-  failed read).
+  any check fails. The member pushes every report's summary — the failing
+  count, its generation, when it was made and when the next is due — over the
+  dashboard's socket (the `hub_health` event), and only to the sockets whose
+  identity may read the report, asked of the identity as it stands: the
+  session's current claims, the token as it reads now. When a session's claims
+  are refreshed or it ends, or a token or the static token is revoked, the member
+  asks again at once, and every thirty seconds for a change nobody announced,
+  such as a runtime role binding. A socket that was sent the summary — or
+  opened while its identity could read the report, since its page then read the
+  summary itself — and may no longer read it is told so, with no count, and its
+  page puts the indicator out. Deliveries are made one at a time with the latest
+  report, so a withdrawal is never overtaken by a count decided before it.
+  A page asks for the report only when its socket opens or reopens, and while
+  Settings → Hub health is on screen it re-reads the full report when a new one
+  is pushed, so an open administrator's page costs the member nothing beyond
+  the reports it makes anyway.
 - **What leaves the hub.** Every title, message, remedy and detail passes
   through two redactions first: the exact credential values the hub's
   configuration and environment hold (provider keys, the OIDC client secret,

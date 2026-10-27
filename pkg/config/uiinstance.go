@@ -51,7 +51,8 @@
 //	ui.*                   listen and allow_unauthenticated_network (where
 //	                       the dashboard binds, Task 20393), oidc, tls, the
 //	                       origin allowlists, the WebSocket caps, quotas,
-//	                       cluster, ci, telemetry, auto_resume_on_cap_reset
+//	                       cluster, ci, telemetry, auto_resume_on_cap_reset,
+//	                       hub_health_interval (Task 20446)
 //	stt                    the hub's dictation settings and key; a project's
 //	                       own stt section still overrides them for requests
 //	                       about that project

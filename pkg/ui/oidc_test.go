@@ -68,6 +68,11 @@ type uiFakeIdP struct {
 	authorizeRequests  int
 	promptNoneRequests int
 
+	// discoveryRequests and jwksRequests count fetches of the two metadata
+	// documents (Task 20446).
+	discoveryRequests int
+	jwksRequests      int
+
 	// silentError, when set, answers a prompt=none authorization request with
 	// that OAuth error instead of a code. login_required is what a provider
 	// says when it cannot see its own session — which is also what a browser
@@ -131,6 +136,9 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 	idp := &uiFakeIdP{t: t, key: key, email: "alice@example.com", sub: "sub-alice", name: "Alice"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		idp.mu.Lock()
+		idp.discoveryRequests++
+		idp.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"issuer":                 idp.server.URL,
 			"authorization_endpoint": idp.server.URL + "/authorize",
@@ -139,6 +147,9 @@ func newUIFakeIdP(t *testing.T) *uiFakeIdP {
 		})
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
+		idp.mu.Lock()
+		idp.jwksRequests++
+		idp.mu.Unlock()
 		pub := &idp.key.PublicKey
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"keys": []map[string]string{{

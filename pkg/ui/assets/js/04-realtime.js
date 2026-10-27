@@ -323,9 +323,10 @@ function handleRealtimeMsg(type, data, scope) {
       refreshPermissions();
       break;
     case 'hub_health':
-      // A hub health report found something the last one did not, or the
-      // configuration it read changed (Task 20434). Carries nothing.
-      refreshHubHealth();
+      // This member made a new Hub health report: its summary, sent only to
+      // sockets that may read it, or word that this one no longer may (Tasks
+      // 20434, 20446).
+      hubHealthPushed(data);
       break;
     case 'provider_call':
       // pkg/provideraudit pushes one envelope per Provider.Complete with the
@@ -396,6 +397,7 @@ function handleRealtimeMsg(type, data, scope) {
       try {
         // Pushes may have been among the dropped frames.
         _historyPush({gap: 1});
+        refreshHubHealth();
         const url = (typeof pUrl === 'function' && isMultiProject) ? pUrl('/api/state') : '/api/state';
         api(url).then(s => { try { render(s); } catch(_) {} }).catch(() => {});
         if (isMultiProject) {
@@ -602,7 +604,7 @@ function connectSSE() {
   };
   // Named SSE events carry the WebSocket message of the same type; 'log' is
   // step_output's older name.
-  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended']) {
+  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health']) {
     evtSource.addEventListener(t, (e) => {
       try { handleRealtimeMsg(t === 'log' ? 'step_output' : t, JSON.parse(e.data), scope); } catch(_) {}
     });

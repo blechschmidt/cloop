@@ -1,11 +1,14 @@
 // hubhealth_scenarios.js — drives the real dashboard bundle's hub health
-// indicator and its deferred Settings panel (Task 20434).
+// indicator and its deferred Settings panel (Tasks 20434, 20446).
 //
-// The indicator's only source is GET /api/hub/health?summary=1, asked once
-// /api/me has said the caller holds config.write across the hub, again when
-// the hub pushes hub_health (which carries nothing) or the socket reconnects,
-// and once the report it last read expires. A caller without the permission
-// never asks at all. The panel renders what a check wrote as text.
+// The indicator reads GET /api/hub/health?summary=1 once /api/me has said the
+// caller holds config.write across the hub, and again whenever the socket
+// opens; between those, the hub's hub_health push carries the summary itself,
+// and the page asks nothing — not at a report's expiry, not on a push. A push
+// without a count withdraws the indicator; an older hub's empty push still
+// means ask. A caller without the permission never asks at all. The panel
+// renders what a check wrote as text, and is re-read when a new report is
+// pushed while it is on screen.
 //
 // Run by TestDashboard_HubHealth* in hubhealth_frontend_test.go.
 // Usage: node hubhealth_scenarios.js <domshim.js> <bundle.js>
@@ -41,8 +44,12 @@ const CA_STATUS = {phase: 'staged', ready: false, running: 2, longest_session_mi
 // report's expiry by the hub's, from served_at, or it never asks again.
 const HUB_SKEW = -3600000;
 const hubTime = ms => new Date(Date.now() + HUB_SKEW + ms).toISOString();
-const summary = (failing, expiresIn) => ({failing, counts: {pass: 3, warn: 1, fail: failing},
+const summary = (failing, expiresIn, generation) => ({failing, generation: generation || 1,
+  counts: {pass: 3, warn: 1, fail: failing},
   checked_at: hubTime(0), served_at: hubTime(0), expires_at: hubTime(expiresIn || 600000)});
+// push is what the hub_health message carries: the summary without counts.
+const push = (failing, generation, expiresIn) => ({member: {id: 'hub-a1b2'}, failing, generation,
+  checked_at: hubTime(0), served_at: hubTime(0), expires_at: hubTime(expiresIn || 300000)});
 
 async function boot(me, answer, status) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
@@ -76,6 +83,7 @@ function badge() {
 }
 
 const asked = h => h.requests.filter(r => String(r.url).startsWith(HEALTH)).length;
+const askedMe = h => h.requests.filter(r => String(r.url).startsWith('/api/me')).length;
 const askedFull = h => h.requests.filter(r => String(r.url) === HEALTH || String(r.url).startsWith(HEALTH + '?fresh')).length;
 
 // The full report the panel draws, with what a hostile configuration or a
@@ -102,14 +110,17 @@ const REPORT = {
 
 const scenarios = {
   // An administrator's indicator: asked once at load, lit with the failing
-  // count; a push that brings an all-clear report puts it out.
+  // count; a push that brings an all-clear puts it out with no request, and
+  // so does one that lights it again.
   async admin_indicator_follows_the_report() {
     const {h, sock} = await boot(ADMIN, summary(2));
     const first = {...badge(), asked: asked(h)};
-    h.routes[HEALTH] = summary(0);
-    sock.deliver('hub_health', {});
+    sock.deliver('hub_health', push(0, 2));
     await settle();
-    return {first, after: {...badge(), asked: asked(h)}};
+    const after = {...badge(), asked: asked(h)};
+    sock.deliver('hub_health', push(5, 3));
+    await settle();
+    return {first, after, again: {...badge(), asked: asked(h)}};
   },
 
   // A caller without config.write never asks — not at load, not on a push,
@@ -123,15 +134,72 @@ const scenarios = {
     return {...badge(), asked: asked(h)};
   },
 
-  // Nobody announces that a report has expired; the indicator asks again
-  // once it has, by the hub's clock.
-  async the_expiry_is_asked_about() {
-    const {h} = await boot(ADMIN, summary(1, 1200));
+  // The report's expiry is the hub's to act on: it makes the next one and
+  // pushes it. Past the expiry the page has asked nothing more, and the push
+  // that follows is shown as it arrives.
+  async the_expiry_is_not_asked_about() {
+    const {h, sock} = await boot(ADMIN, summary(1, 1200));
     const before = {...badge(), asked: asked(h)};
-    h.routes[HEALTH] = summary(4, 600000);
-    for (let i = 0; i < 80 && asked(h) < 2; i++) await wait(50);
+    await wait(2000);
+    await globalThis.__settle(5);
+    const expired = {...badge(), asked: asked(h)};
+    sock.deliver('hub_health', push(4, 2));
     await settle();
-    return {before, after: {...badge(), asked: asked(h)}};
+    return {before, expired, after: {...badge(), asked: asked(h)}};
+  },
+
+  // The socket opening again is when the page may have missed a push: one
+  // question, however the reasons arrive.
+  async a_reconnect_asks_once() {
+    const {h, sock} = await boot(ADMIN, summary(2));
+    h.routes[HEALTH] = summary(3, 600000, 7);
+    sock.open();
+    await settle();
+    return {...badge(), asked: asked(h)};
+  },
+
+  // A push that says this socket may no longer read the report puts the
+  // indicator out and re-reads /api/me — which, still granting config.write
+  // to a stale page, must not loop into asking — and asks nothing itself.
+  async a_withdrawal_puts_it_out() {
+    const {h, sock} = await boot(ADMIN, summary(2));
+    const lit = {...badge(), asked: asked(h)}, me = askedMe(h);
+    sock.deliver('hub_health', {withdrawn: true});
+    await settle();
+    await globalThis.__settle(5);
+    return {before: lit, after: {...badge(), asked: asked(h)}, me: askedMe(h) - me};
+  },
+
+  // A hub on an older build pushes {} for "something changed": still asked.
+  async an_older_hubs_push_is_asked_about() {
+    const {h, sock} = await boot(ADMIN, summary(2));
+    h.routes[HEALTH] = summary(6, 600000, 2);
+    sock.deliver('hub_health', {});
+    await settle();
+    return {...badge(), asked: asked(h)};
+  },
+
+  // While Settings → Hub health is on screen, a pushed report of a new
+  // generation re-reads the panel, and a push of the one it shows does not.
+  async a_push_while_the_panel_is_open_rereads_it() {
+    const {h, sock} = await boot(ADMIN, Object.assign({}, REPORT, {generation: 1}));
+    h.routes['/api/hub/ca'] = CA_STATUS;
+    const el = {dataset: {action: 'openHubHealth'}, disabled: false};
+    document.dispatchEvent({type: 'click', target: {closest: sel => (sel === '[data-action]' ? el : null), dataset: {}}});
+    for (let i = 0; i < 40 && !String(document.getElementById('hubHealthBody').innerHTML).includes('Failing'); i++) {
+      await wait(50);
+      await globalThis.__settle(3);
+    }
+    const opened = askedFull(h);
+    sock.deliver('hub_health', push(1, 1));
+    await settle();
+    const same = askedFull(h);
+    sock.deliver('hub_health', push(1, 2));
+    for (let i = 0; i < 40 && askedFull(h) === same; i++) {
+      await wait(50);
+      await globalThis.__settle(3);
+    }
+    return {opened, same, newer: askedFull(h)};
   },
 
   // A hub that cannot answer — a 500, a dropped connection — is asked again

@@ -425,6 +425,7 @@ to the KMS key, which is what revoking it looks like from the hub's side.
 | `cloop_oidc_login_total` | counter | `outcome` |
 | `cloop_oidc_renewal_total` | counter | `outcome` |
 | `cloop_oidc_discovery_failures_total` | counter | — |
+| `cloop_oidc_idp_fetches_total` | counter | `document`, `client`, `outcome` |
 | `cloop_sessions_created_total` | counter | — |
 | `cloop_sessions_terminated_total` | counter | `reason` |
 | `cloop_sessions_live` | gauge | — |
@@ -495,6 +496,25 @@ the gate stays open: existing sessions keep authenticating through a later
 provider outage, and dropping the hub from its Service over one would turn a
 login outage into a total one. Run `cloop hub doctor` for which of the two
 round trips failed and why.
+
+`cloop_oidc_idp_fetches_total` counts the issuer's metadata documents this
+hub process fetched (Task 20446): `document` is `discovery` or `jwks`, `outcome`
+`ok` or `error`, and `client` says who asked. `signin` is the hub's own sign-in
+client, which resolves the issuer at startup and keeps the document, and
+refetches the key set only for a token signed by a key it does not hold — and,
+while it holds no usable resolution, when a Hub health report asks it to try
+again, at most every 15 minutes.
+`preflight` is a standalone resolution: `cloop hub doctor`, the **Test** button
+in Settings → Single sign-on, and Settings → Hub health's check of an issuer the
+running client is not using (at most once every 15 minutes per member). Hub
+health reads the issuer the hub signs in with from its sign-in client instead of
+asking the provider. A steady `preflight` rate with nobody pressing Test, or a
+`signin` rate with nobody signing in, is something asking the provider per
+request:
+
+```promql
+sum by (client) (rate(cloop_oidc_idp_fetches_total[1h])) * 3600 > 30
+```
 
 `cloop_oidc_renewal_total` counts *silent* renewals: the `prompt=none` round
 trip a signed-in dashboard makes from a hidden frame to re-assert its claims
@@ -1092,6 +1112,32 @@ min by (volume) (cloop_hub_disk_free_bytes) < 2 * 1073741824
 Every member exports it for its own disk, so members sharing a volume report
 the same reading; `min()` by volume is the answer, `sum()` is not. The series
 set resets at every scrape and is capped at 32 volumes.
+
+## Hub health
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_hub_health_reports_total` | counter | `trigger` |
+
+The Settings → Hub health reports each hub member makes of itself (Task
+20446). `trigger` is `schedule` (the member's cadence, `ui.hub_health_interval`,
+five minutes by default, came round), `config` (one of its configuration files
+changed), `event` (an executor enrolled, lost or reconfigured, a step of a CA
+rotation, or a sealing key changed; a burst is one report, at most one a
+minute), `rerun` (an administrator pressed **Run the checks again**) or
+`request` (a read found no report it could serve: the first after startup).
+
+A member pushes each report's summary to the dashboards that may read it, and a
+page asks for one only when its socket opens, so the rate does not grow with the
+number of administrators' tabs open. Each member counts its own; read it per
+member:
+
+```promql
+sum by (instance) (rate(cloop_hub_health_reports_total[1h])) * 3600 > 30
+```
+
+fires on a member making more than 30 an hour, which on the default cadence is
+something asking for reports on readers' behalf.
 
 ## Control-plane database
 

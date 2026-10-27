@@ -1,9 +1,9 @@
 package ui
 
 // GET /api/hub/health (Task 20434): the hub doctor's checks, run by the hub on
-// itself, cached for a minute, recomputed when the configuration changes,
-// refused to anyone who may not write the hub's configuration, and with
-// nothing secret in what it sends.
+// itself, made on the member's cadence and again when the configuration
+// changes (Task 20446), refused to anyone who may not write the hub's
+// configuration, and with nothing secret in what it sends.
 
 import (
 	"context"
@@ -103,8 +103,11 @@ func TestHubHealth_AnswersWithTheHubsOwnChecks(t *testing.T) {
 	if rep.Member.ID == "" || rep.Member.Hostname != host || !rep.Member.Leader || rep.Member.Clustered {
 		t.Errorf("member = %+v, want this standalone process on %s", rep.Member, host)
 	}
-	if ttl := rep.ExpiresAt.Sub(rep.CheckedAt); ttl < 50*time.Second || ttl > 2*time.Minute {
-		t.Errorf("the report is served for %s, want about a minute", ttl)
+	if ttl := rep.ExpiresAt.Sub(rep.CheckedAt); ttl != config.HubHealthIntervalDefault {
+		t.Errorf("the next report is due %s after this one, want the default cadence, %s", ttl, config.HubHealthIntervalDefault)
+	}
+	if rep.Generation < 1 {
+		t.Errorf("the report carries generation %d", rep.Generation)
 	}
 	if len(rep.Findings) < 20 {
 		t.Fatalf("only %d findings: %s", len(rep.Findings), body)
@@ -163,7 +166,7 @@ func TestHubHealth_AnswersWithTheHubsOwnChecks(t *testing.T) {
 	// The header's question leaves the findings out and answers the same.
 	code, short, body := getHubHealth(t, nil, ts.URL, "?summary=1")
 	if code != http.StatusOK || short.Findings != nil || short.Steps != nil || short.NotRun != nil ||
-		short.Failing != rep.Failing || !short.CheckedAt.Equal(rep.CheckedAt) {
+		short.Failing != rep.Failing || !short.CheckedAt.Equal(rep.CheckedAt) || short.Generation != rep.Generation {
 		t.Errorf("summary = %d %s, want the cached report's counts and nothing else", code, body)
 	}
 }
@@ -291,78 +294,98 @@ func TestHubHealth_HangingAndPanickingChecksReportThemselves(t *testing.T) {
 	}
 }
 
-// TestHubHealth_CachedThenRecomputedOnConfigChange: a second request inside
-// the minute is answered from the first run; writing the configuration makes
-// the next request run again — and tells this member's dashboards once.
+// TestHubHealth_CachedThenRecomputedOnConfigChange: a read inside the cadence
+// is answered from the last report and never makes another; a changed
+// configuration file makes the member report again on its own — once two looks
+// agree on the change — and push the new summary; so does the cadence coming
+// round (Task 20446).
 func TestHubHealth_CachedThenRecomputedOnConfigChange(t *testing.T) {
 	srv, ts := hubHealthServer(t, nil)
 	hc := &hubClient{ch: make(chan wsMessage, 16), resync: make(chan struct{}, 1), id: "hub-health"}
 	srv.hubMu.Lock()
 	srv.hubClients[srv.WorkDir] = map[*hubClient]struct{}{hc: {}}
 	srv.hubMu.Unlock()
-	nudges := func() int {
-		n := 0
+	pushes := func() []hubHealthPush {
+		var out []hubHealthPush
 		for {
 			select {
 			case m := <-hc.ch:
-				if m.Type == "hub_health" {
-					n++
+				if m.Type != "hub_health" {
+					continue
 				}
+				var p hubHealthPush
+				if err := json.Unmarshal(m.Data, &p); err != nil {
+					t.Fatalf("a hub_health push that is not a summary: %s", m.Data)
+				}
+				out = append(out, p)
 			default:
-				return n
+				return out
 			}
 		}
 	}
+	// A schedule whose first report would be due now.
+	started := time.Now().Add(-hubHealthFirstRun)
 
 	_, first, _ := getHubHealth(t, nil, ts.URL, "")
+	if p := pushes(); len(p) != 1 || p[0].Generation != first.Generation || p[0].Failing != first.Failing ||
+		!p[0].CheckedAt.Equal(first.CheckedAt) || !p[0].ExpiresAt.Equal(first.ExpiresAt) {
+		t.Errorf("the first report pushed %+v, want its own summary (generation %d, %d failing) once",
+			p, first.Generation, first.Failing)
+	}
 	_, again, _ := getHubHealth(t, nil, ts.URL, "")
-	if !again.CheckedAt.Equal(first.CheckedAt) {
-		t.Errorf("a second request inside the minute ran the checks again (%s, then %s)", first.CheckedAt, again.CheckedAt)
+	if !again.CheckedAt.Equal(first.CheckedAt) || again.Generation != first.Generation {
+		t.Errorf("a second read inside the cadence ran the checks again (%s, then %s)", first.CheckedAt, again.CheckedAt)
 	}
 	// A rerun asked for seconds after the last one is the last one.
 	_, rerun, _ := getHubHealth(t, nil, ts.URL, "?fresh=1")
 	if !rerun.CheckedAt.Equal(first.CheckedAt) {
 		t.Error("?fresh=1 seconds after a run ran the checks again")
 	}
-	srv.hubHealthConfigTick()
-	if n := nudges(); n != 0 {
-		t.Errorf("%d nudge(s) with the configuration unchanged", n)
+	// Nothing is due: the report is current, so the schedule makes none.
+	srv.hubHealthLook()
+	srv.hubHealthLook()
+	if next := srv.hubHealthTick(started); !next.Equal(first.ExpiresAt) {
+		t.Errorf("with nothing changed the next report is due at %s, want the cadence's %s", next, first.ExpiresAt)
+	}
+	if p := pushes(); len(p) != 0 {
+		t.Errorf("%d push(es) with nothing changed", len(p))
 	}
 
 	time.Sleep(10 * time.Millisecond) // a modification time the first write cannot share
 	writeHubConfig(t, config.ConfigPath(srv.WorkDir), "executors:\n  allow_host_process: false\n")
-	srv.hubHealthConfigTick()
-	srv.hubHealthConfigTick()
-	if n := nudges(); n != 1 {
-		t.Errorf("%d nudge(s) for one configuration change, want 1", n)
+	// One look is not yet a change: an editor may still be writing.
+	srv.hubHealthLook()
+	srv.hubHealthTick(started)
+	if p := pushes(); len(p) != 0 {
+		t.Errorf("%d push(es) on the first look at a change, want none until a second agrees", len(p))
+	}
+	srv.hubHealthLook()
+	srv.hubHealthTick(started)
+	p := pushes()
+	if len(p) != 1 || p[0].Generation != first.Generation+1 {
+		t.Fatalf("after the configuration changed the member pushed %+v, want one new report", p)
 	}
 	_, changed, body := getHubHealth(t, nil, ts.URL, "")
-	if changed.CheckedAt.Equal(first.CheckedAt) {
-		t.Fatal("the configuration changed and the cached report was served")
+	if changed.Generation != p[0].Generation || changed.CheckedAt.Equal(first.CheckedAt) {
+		t.Fatalf("the read after the change was answered with generation %d, want the pushed %d", changed.Generation, p[0].Generation)
 	}
 	if f := findingsByCheck(changed)["policy.host_execution"]; len(f) != 1 || f[0].Severity != "pass" || !changed.StrictMode {
 		t.Errorf("after allow_host_process: false, policy.host_execution = %+v (strict %v): %s", f, changed.StrictMode, body)
 	}
-	// What the new run found differs from the last: every dashboard hears.
-	if n := nudges(); n != 1 {
-		t.Errorf("%d nudge(s) for a report that changed, want 1", n)
-	}
-	srv.hubHealthConfigTick()
-	if n := nudges(); n != 0 {
-		t.Errorf("%d nudge(s) after the report caught up with the configuration", n)
-	}
 
-	// Once the report expires, the next request runs again; one that finds
-	// what the last found tells nobody.
+	// The cadence coming round makes the next report, and pushes it.
 	srv.hubHealth.mu.Lock()
-	srv.hubHealth.report.ExpiresAt = time.Now().Add(-time.Second)
+	srv.hubHealth.dueAt = time.Now().Add(-time.Second)
 	srv.hubHealth.mu.Unlock()
-	_, expired, _ := getHubHealth(t, nil, ts.URL, "")
-	if expired.CheckedAt.Equal(changed.CheckedAt) {
-		t.Error("an expired report was served")
+	srv.hubHealthTick(started)
+	if p := pushes(); len(p) != 1 || p[0].Generation != changed.Generation+1 {
+		t.Errorf("past the cadence the member pushed %+v, want generation %d", p, changed.Generation+1)
 	}
-	if n := nudges(); n != 0 {
-		t.Errorf("%d nudge(s) for a report that found the same", n)
+	if _, now, _ := getHubHealth(t, nil, ts.URL, "?summary=1"); now.Generation != changed.Generation+1 {
+		t.Errorf("the read after the scheduled report was answered with generation %d", now.Generation)
+	}
+	if p := pushes(); len(p) != 0 {
+		t.Errorf("%d push(es) for reads answered from the last report", len(p))
 	}
 }
 

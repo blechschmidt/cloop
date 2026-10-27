@@ -10,6 +10,31 @@ schema and the hub's HTTP API may change in any release.
 
 ## [Unreleased]
 
+### Changed
+
+- **Hub health no longer costs a doctor run and two identity-provider fetches
+  per open administrator's tab every minute.** The header's indicator asked
+  `GET /api/hub/health` again at each report's one-minute expiry, so every
+  open tab made its member run the doctor's checks once a minute, and each
+  run fetched the issuer's discovery document and key set: on :8888 the
+  summary was 39% of all dashboard fetches, and a blip at Entra lit the
+  warning while sign-ins went through. Now each member makes its own report
+  every five minutes (`ui.hub_health_interval`, 1m–1h), when its
+  configuration changes, after an executor, hub CA rotation or sealing-key
+  change, and on Run the checks again. It pushes the summary (failing count,
+  generation, when it was made and when the next is due) only to sockets whose
+  identity holds `config.write` across the hub. That is re-checked when a
+  session's claims change or a credential ends, and every 30 seconds, and a
+  socket that loses the permission is told so. A page asks only when its
+  socket opens, and while Settings → Hub health is on screen. The issuer the
+  hub signs in with is read from its sign-in client's cache and last fetch
+  error; while the client holds no usable resolution, a report asks it to try
+  again at most every 15 minutes. Only an issuer the running process does not
+  use is resolved by the report, at most every 15 minutes (`oidc.running` says
+  why). New metrics:
+  `cloop_hub_health_reports_total{trigger}` and
+  `cloop_oidc_idp_fetches_total{document,client,outcome}` (Task 20446).
+
 ## [0.0.7] - 2026-10-27
 
 Three things to know before upgrading. **Grants to a label selector issued on

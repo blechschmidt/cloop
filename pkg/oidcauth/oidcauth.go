@@ -524,6 +524,15 @@ type Authenticator struct {
 	idpMu    sync.Mutex
 	idpReady bool
 	idpErr   error
+	// What IdPState reports (Task 20446), kept under idpMu rather than read
+	// from disc and jwksKeys: their locks are held across the network fetch.
+	// idpDisc is a copy of the cached discovery document, idpKeys the size of
+	// the key set and idpErrAt when idpErr happened.
+	idpDisc   *discoveryDoc
+	idpDiscAt time.Time
+	idpKeys   int
+	idpKeysAt time.Time
+	idpErrAt  time.Time
 
 	// mu guards pending and cache. It is deliberately not held across a store
 	// call: the store has its own synchronisation, and holding a process-wide
@@ -1452,12 +1461,14 @@ func (a *Authenticator) discover(ctx context.Context) (*discoveryDoc, error) {
 	}
 
 	doc, err := fetchDiscovery(ctx, a.client, a.cfg.Issuer)
+	noteFetch(FetchDocumentDiscovery, FetchClientSignIn, err)
 	if err != nil {
 		a.noteIdPErr(err)
 		return nil, err
 	}
 	a.disc = doc
 	a.noteFrameOrigins(doc)
+	a.noteDiscovered(doc)
 	return a.disc, nil
 }
 

@@ -2,10 +2,12 @@
 //
 // The hub doctor's checks as the hub answering this page ran them on itself:
 // what fails, what is fragile and what passes, each with what was observed,
-// what fixes it and the runbook section that explains its group. GET
-// /api/hub/health computes a report at most once a minute, and again once the
-// configuration changes, and names the hub member that answered: the listener
-// checks are about that process. It never runs --smoke or
+// what fixes it and the runbook section that explains its group. Each hub
+// member makes its report itself, every few minutes and when its configuration
+// or what the checks find changes (Task 20446); GET /api/hub/health answers
+// with the latest and names the member that answered: the listener checks are
+// about that process. While the section is on screen it is re-read whenever
+// the indicator hears of a new report. It never runs --smoke or
 // --probe-network-policy, which start work, and the panel says how to run them
 // on the host instead.
 //

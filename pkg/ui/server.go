@@ -108,6 +108,10 @@ type sseClient struct {
 	// (cap 1). Whoever sends it has already removed the client from
 	// s.clients, so nothing new is queued for it.
 	kick chan streamEnd
+
+	// healthTold records that the stream was last sent the Hub health
+	// summary rather than told it may not read it (Task 20446).
+	healthTold atomic.Bool
 }
 
 // sseClientBufferSize mirrors hubClientBufferSize for SSE consumers.
@@ -249,6 +253,11 @@ type hubClient struct {
 	// where they were shared with it, not hub-wide (Task 20366). Who else is
 	// on that page is hub-wide knowledge, so it is not told (deliverPresence).
 	limited bool
+
+	// healthTold records that the socket was last sent the Hub health
+	// summary rather than told it may not read it (Task 20446): a socket
+	// whose identity stops being allowed to read the report is told so once.
+	healthTold atomic.Bool
 }
 
 // hubClientBufferSize is the per-client outgoing buffer for WebSocket clients.
@@ -1497,9 +1506,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// Every member watches its own state volume against the free-space floor
 	// (Task 20381): each one's disk is its own. See diskfloor.go.
 	go s.watchHubDisk(watcherCtx)
-	// Every member tells its dashboards when the configuration its Hub health
-	// report was computed under changes (Task 20434). See hubhealth.go.
-	go s.watchHubHealthConfig(watcherCtx)
+	// Every member makes its own Hub health report — on its cadence, when its
+	// configuration changes and after events that change findings — and
+	// pushes the summary to the dashboards that may read it (Tasks 20434,
+	// 20446). See hubhealth.go.
+	go s.watchHubHealth(watcherCtx)
 	// Every member re-reads the project memberships on its own, so a removed
 	// member's streams close here too when the change came from somewhere the
 	// bus does not reach (Task 20366).
@@ -3035,6 +3046,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		cred:    cred,
 		kick:    make(chan streamEnd, 1),
 	}
+	// As a socket does (handleWS): a page that may read the Hub health report
+	// reads its summary as the stream opens (Task 20446).
+	c.healthTold.Store(s.hubHealthMayRead(cred))
 	if s.streamJoinHook != nil {
 		s.streamJoinHook(c.workDir)
 	}
@@ -3339,6 +3353,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// the answer can read the role and membership tables.
 	limited := !projectScoped && s.oidcEnabled() &&
 		!s.grantFor(r).decide(authz.GlobalScope).Allows(authz.PermProjectRead)
+	// Whether its identity may read the Hub health report (Task 20446):
+	// then its page reads the summary itself as the socket opens, so the
+	// socket starts as told, and a demotion before the next report is
+	// withdrawn from it too.
+	healthReader := s.hubHealthMayRead(cred)
 	if s.streamJoinHook != nil {
 		s.streamJoinHook(workDir)
 	}
@@ -3393,6 +3412,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		kick:    make(chan streamEnd, 1),
 		limited: limited,
 	}
+	hc.healthTold.Store(healthReader)
 	if s.hubClients[workDir] == nil {
 		s.hubClients[workDir] = make(map[*hubClient]struct{})
 	}

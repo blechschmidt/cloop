@@ -91,6 +91,14 @@ const (
 	AuditCheckpointIntervalLower   = time.Minute
 	AuditCheckpointIntervalUpper   = 24 * time.Hour
 
+	// Hub health cadence bounds (Task 20446): how often each hub member
+	// computes its Settings → Hub health report of itself. A minute is the
+	// shortest a full run of the doctor's checks is worth; an hour the longest
+	// a certificate nearing expiry or a filling disk should go unannounced.
+	HubHealthIntervalDefault = 5 * time.Minute
+	HubHealthIntervalLower   = time.Minute
+	HubHealthIntervalUpper   = time.Hour
+
 	// Retention janitor bounds (Task 20229). Zero in YAML means "use the
 	// package default" for every one of these — see RetentionConfig for why
 	// this section defaults on where audit retention defaults off. Values
@@ -1880,6 +1888,16 @@ type UIConfig struct {
 	// Operators who want a human in that loop can set it to false.
 	AutoResumeOnCapReset *bool `yaml:"auto_resume_on_cap_reset,omitempty"`
 
+	// HubHealthInterval is how often each hub member computes its Settings →
+	// Hub health report of itself and pushes the summary to the dashboards of
+	// the administrators connected to it (Task 20446), as a Go duration ("5m",
+	// "15m"). Empty means HubHealthIntervalDefault; anything else must lie in
+	// [HubHealthIntervalLower, HubHealthIntervalUpper]. A configuration change,
+	// Run the checks again and the events that change findings — an executor
+	// enrolled or lost, a CA rotation step, a sealing key rotated — make a
+	// report sooner. Per process, so a member may set its own in its overlay.
+	HubHealthInterval string `yaml:"hub_health_interval,omitempty"`
+
 	// MaxWebSocketConns caps the total number of concurrent WebSocket
 	// connections the UI server will accept across all remote IPs.
 	// Zero substitutes WebSocketConnsDefault (256).
@@ -2004,6 +2022,32 @@ type UIConfig struct {
 	// Cluster configures how this hub process cooperates with others serving
 	// the same control plane. See ClusterConfig.
 	Cluster ClusterConfig `yaml:"cluster,omitempty"`
+}
+
+// EffectiveHubHealthInterval is the Hub health cadence in force: the
+// configured one when it parses and lies in bounds, the default otherwise.
+func (u UIConfig) EffectiveHubHealthInterval() time.Duration {
+	d, err := parseHubHealthInterval(u.HubHealthInterval)
+	if err != nil || d == 0 {
+		return HubHealthIntervalDefault
+	}
+	return d
+}
+
+// parseHubHealthInterval parses and bounds ui.hub_health_interval; "" is 0.
+func parseHubHealthInterval(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a duration (e.g. 5m, 15m)", s)
+	}
+	if d < HubHealthIntervalLower || d > HubHealthIntervalUpper {
+		return 0, fmt.Errorf("%s is outside [%s, %s]", d, HubHealthIntervalLower, HubHealthIntervalUpper)
+	}
+	return d, nil
 }
 
 // PublicURL is the URL browsers reach this hub at, and the key that says so:
@@ -3588,6 +3632,12 @@ func (c *Config) validateAndClamp(path string) {
 		warn("claudecode.max_weekly_sonnet_pct", fmt.Sprintf("value %.4f outside [0, 100]", c.ClaudeCode.MaxWeeklySonnetPct))
 		c.ClaudeCode.MaxWeeklySonnetPct = 0
 	}
+	// Hub health cadence (Task 20446): one that will not parse, or lies out of
+	// bounds, runs at the default rather than every few seconds or never.
+	if _, err := parseHubHealthInterval(c.UI.HubHealthInterval); err != nil {
+		warn("ui.hub_health_interval", err.Error())
+		c.UI.HubHealthInterval = ""
+	}
 	// UI WebSocket caps: zero means "use default"; non-zero must lie inside
 	// the allowed band. Out-of-range values fall back to zero so the
 	// runtime substitutes the sane default rather than honouring a
@@ -3918,6 +3968,9 @@ func (c *Config) ValidateNumeric() error {
 	}
 	if c.ClaudeCode.MaxWeeklySonnetPct < 0 || c.ClaudeCode.MaxWeeklySonnetPct > 100 {
 		return fmt.Errorf("claudecode.max_weekly_sonnet_pct must be between 0 and 100 (got %.4f)", c.ClaudeCode.MaxWeeklySonnetPct)
+	}
+	if _, err := parseHubHealthInterval(c.UI.HubHealthInterval); err != nil {
+		return fmt.Errorf("ui.hub_health_interval: %w", err)
 	}
 	if c.UI.MaxWebSocketConns != 0 && (c.UI.MaxWebSocketConns < WebSocketConnsLower || c.UI.MaxWebSocketConns > WebSocketConnsUpper) {
 		return fmt.Errorf("ui.max_websocket_conns must be between %d and %d (or 0 for the default %d) (got %d)",

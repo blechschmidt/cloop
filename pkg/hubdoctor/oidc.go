@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -69,6 +70,42 @@ func checkOIDC(ctx context.Context, cfg *config.Config, opts Options, add addFn)
 	checkOIDCClientSecret(oc, add)
 	checkRedirectURI(cfg, add)
 
+	// A hub diagnosing itself reads the issuer from what its own sign-in
+	// client holds, when that client is for the configured issuer; anything
+	// else is checkOIDCIssuer's to resolve over the network.
+	if st := opts.signInState(oc); st != nil {
+		checkIdPState(*st, add)
+	}
+}
+
+// checkOIDCIssuer resolves the configured issuer over the network, as a sign-in
+// does before it can begin: a step of its own, after checkOIDC, so a live run
+// can make it less often than reports are (liveEvery) — it costs the identity
+// provider two round trips. `cloop hub doctor` makes it every time. A hub
+// diagnosing itself makes it only for an issuer its sign-in client is not
+// using — single sign-on switched on, or the issuer changed, since the process
+// started — and reads the one it is using from the client instead (Task
+// 20446).
+func checkOIDCIssuer(ctx context.Context, cfg *config.Config, opts Options, add addFn) {
+	oc := cfg.UI.OIDC
+	if !oc.Enabled || opts.signInState(oc) != nil {
+		return
+	}
+	if self := opts.Self; self != nil {
+		// The configuration names an issuer this process does not sign in
+		// with, so whatever the network says, sign-ins today go elsewhere.
+		msg := "single sign-on is configured, but this hub process started without it"
+		if self.IdP != nil {
+			msg = fmt.Sprintf("this hub's sign-in client was started for issuer %s; the configuration names %s",
+				strings.TrimSpace(self.IdP.Issuer), strings.TrimSpace(oc.Issuer))
+		}
+		add(Finding{
+			Check: "oidc.running", Title: "Single sign-on in this process", Severity: SeverityWarn,
+			Message: msg + ", which takes effect when the hub restarts",
+			Remediation: "Restart the hub to sign in with the configured issuer once the checks below pass, " +
+				"or revert the ui.oidc change",
+		})
+	}
 	if opts.Offline {
 		add(Finding{
 			Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityWarn,
@@ -78,6 +115,113 @@ func checkOIDC(ctx context.Context, cfg *config.Config, opts Options, add addFn)
 		return
 	}
 	checkPreflight(ctx, oc, opts, add)
+}
+
+// signInState is the hub's own sign-in client state for oc's issuer: nil for
+// the shell's doctor, for a hub that runs no sign-in client, and for one
+// started for another issuer.
+func (o Options) signInState(oc config.OIDCConfig) *oidcauth.IdPState {
+	if o.Self == nil || o.Self.IdP == nil || !o.Self.SSO {
+		return nil
+	}
+	norm := func(s string) string { return strings.TrimRight(strings.TrimSpace(s), "/") }
+	if norm(o.Self.IdP.Issuer) != norm(oc.Issuer) {
+		return nil
+	}
+	return o.Self.IdP
+}
+
+// checkIdPState reports the issuer from what the hub's sign-in client holds of
+// it, under the check ids the network preflight reports under. It contacts
+// nothing: the client resolved the issuer at startup and keeps the document;
+// it refetches the key set when a token arrives signed by a key it does not
+// hold, and records why the last fetch failed. So a provider's blip is a
+// finding only when it cost something — a sign-in that could not begin, a key
+// set that could not be refreshed for a token that needed it — and the times
+// say when the client last spoke to the provider.
+func checkIdPState(st oidcauth.IdPState, add addFn) {
+	stamp := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+	var pe *oidcauth.PreflightError
+	failed := st.LastError != nil && errors.As(st.LastError, &pe)
+	failure := func(pe *oidcauth.PreflightError) (string, string, map[string]any) {
+		d := preflightDetails(pe)
+		d["failed_at"] = stamp(st.LastErrorAt)
+		return preflightMessage(pe), pe.Remediation(), d
+	}
+
+	if st.Discovery == nil {
+		f := Finding{Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityWarn,
+			Message: "this hub's sign-in client has not resolved the issuer since it started, and has not " +
+				"failed to: no sign-in has been attempted",
+			Remediation: "Sign in once, or run `cloop hub doctor` on the hub host, which contacts the issuer now"}
+		switch {
+		case failed:
+			f.Severity = SeverityFail
+			f.Message, f.Remediation, f.Details = failure(pe)
+			f.Message = "this hub's sign-in client could not resolve the issuer, last at " +
+				stamp(st.LastErrorAt) + ": " + f.Message
+		case st.LastError != nil:
+			f.Severity = SeverityFail
+			f.Message = "this hub's sign-in client could not resolve the issuer, last at " +
+				stamp(st.LastErrorAt) + ": " + st.LastError.Error()
+			f.Remediation = "Check that this host can reach the issuer and trusts its certificate"
+		}
+		add(f)
+		return
+	}
+
+	add(Finding{
+		Check: "oidc.discovery", Title: "Issuer discovery", Severity: SeverityPass,
+		Message: "this hub's sign-in client resolved the issuer at " + stamp(st.DiscoveredAt) +
+			", and its document agrees on the issuer name",
+		Details: map[string]any{
+			"authorization_endpoint": st.Discovery.AuthorizationEndpoint,
+			"token_endpoint":         st.Discovery.TokenEndpoint,
+			"jwks_uri":               st.Discovery.JWKSURI,
+		},
+	})
+	// What failed after discovery resolved is the key set: discovery is never
+	// fetched again.
+	jwksFailed := failed && pe.Stage == oidcauth.StageJWKS
+	switch {
+	case st.SigningKeys > 0 && st.LastError == nil:
+		add(Finding{
+			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityPass,
+			Message: fmt.Sprintf("this hub's sign-in client holds %d usable signing key(s) from %s, fetched at %s",
+				st.SigningKeys, st.Discovery.JWKSURI, stamp(st.KeysFetchedAt)),
+		})
+	case st.SigningKeys > 0:
+		// Tokens signed by a key it holds still verify, so sign-ins go on;
+		// one signed by a key the provider has rotated to does not.
+		msg := st.LastError.Error()
+		var details map[string]any
+		if jwksFailed {
+			msg, _, details = failure(pe)
+		}
+		add(Finding{
+			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityWarn,
+			Message: fmt.Sprintf("this hub's sign-in client holds %d signing key(s), fetched at %s, but its last "+
+				"refresh, at %s, failed: %s — a token signed by a key it does not hold is refused until a refresh "+
+				"succeeds", st.SigningKeys, stamp(st.KeysFetchedAt), stamp(st.LastErrorAt), msg),
+			Remediation: "Check that this host can reach " + st.Discovery.JWKSURI + "; the client refetches the set " +
+				"the next time a token needs a key it does not hold",
+			Details: details,
+		})
+	case jwksFailed:
+		msg, remedy, details := failure(pe)
+		add(Finding{
+			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityFail,
+			Message:     "this hub's sign-in client could not fetch a usable key set, last at " + stamp(st.LastErrorAt) + ": " + msg,
+			Remediation: remedy, Details: details,
+		})
+	default:
+		add(Finding{
+			Check: "oidc.jwks", Title: "Signing keys (JWKS)", Severity: SeverityWarn,
+			Message: "this hub's sign-in client resolved the issuer but has not fetched its key set yet, so no " +
+				"sign-in has been proven possible",
+			Remediation: "Sign in once, or run `cloop hub doctor` on the hub host, which fetches the key set now",
+		})
+	}
 }
 
 // checkPreflight runs the hub's own identity preflight and reports it as two

@@ -19,15 +19,41 @@ package ui
 // step that starts a workload, each step bounded and its panic recovered — and
 // this file's to answer for it where the shell's doctor would ask from
 // outside (hubHealthSelf): how the listener admits requests, the KMS clients
-// the hub pinned, what its executor supervisor last recorded.
+// the hub pinned, what its executor supervisor last recorded, what its own
+// sign-in client holds of the identity provider.
 //
-// A report is computed at most once at a time and served for hubHealthTTL, or
-// until the configuration files change, whichever comes first; the heaviest
-// checks are made less often still (hubdoctor's liveEvery). The dashboard asks
-// again when the hub says the report changed (the hub_health broadcast, which
-// carries nothing), on reconnect, and when the report it last saw expires by
-// the hub's clock — no timer of its own beyond that and a retry after a
-// failed read.
+// # When a report is made (Task 20446)
+//
+// Each member makes its report itself, at most one at a time: on a cadence
+// (ui.hub_health_interval, five minutes by default), when one of its
+// configuration files changes, when something happens that changes what the
+// checks find — an executor enrolled, lost or reconfigured, a step of a CA
+// rotation, a sealing key rotated — and when an administrator presses Run the
+// checks again. A read is answered from the last report for as long as it is
+// current. The heaviest checks are made less often still (hubdoctor's
+// liveEvery), and the identity provider is read from the hub's own sign-in
+// client rather than asked.
+//
+// It used to be the other way round: every open administrator's tab asked
+// again at each report's one-minute expiry, so a member made one run a
+// minute per tab and called its identity provider twice per run. Now the
+// member pushes each report's summary — the failing count, its generation,
+// when it was made and when the next is due — to the dashboards that may read
+// it, and a page asks only when it cannot have heard: when its socket opens
+// or reopens, and while Settings → Hub health is on screen.
+//
+// # Who hears it
+//
+// Only a stream whose identity may read the report — config.write across the
+// hub, the route's own permission — is sent the summary (hubHealthMayRead),
+// asked of the identity as it stands now rather than as it stood when the
+// stream opened: the session's current claims, the token as it reads now.
+// The same question is asked again whenever this member hears that a
+// credential changed — a session's claims refreshed or ended, a token or the
+// static token revoked — and every thirty seconds for a change nobody
+// announced, such as a runtime role binding; a stream that could read the
+// report and no longer may is told so, carrying no count, and one that has
+// become able to is sent the current summary.
 //
 // Everything a check wrote passes through two redactions before it leaves:
 // the exact credential values this hub's configuration and environment hold,
@@ -50,25 +76,23 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/blechschmidt/cloop/pkg/apitoken"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/hubdoctor"
+	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/kms"
 	"github.com/blechschmidt/cloop/pkg/logger"
+	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/rootkey"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 const (
-	// hubHealthTTL is how long a report is served before the next request
-	// computes another. Long enough that a dashboard left open costs the hub
-	// one run a minute, short enough that a certificate expiring or a disk
-	// filling shows within one.
-	hubHealthTTL = time.Minute
-
 	// hubHealthRerunFloor is how fresh a report may be before "Run the checks
 	// again" is answered from it rather than with a new run: the button
 	// dials whatever the checks dial, and pressing it twice is not a reason
@@ -80,54 +104,127 @@ const (
 	// check that needs longer to reach its issuer has found something to say.
 	hubHealthProbeTimeout = 5 * time.Second
 
-	// hubHealthWatchEvery is how often the hub looks at its configuration
-	// files' size and modification time, to tell dashboards a report no longer
-	// describes them.
+	// hubHealthWatchEvery is how often the member looks at its configuration
+	// files' size and modification time. A change it sees on two looks in a
+	// row — an editor that saves in two writes is one change — makes a report.
 	hubHealthWatchEvery = 3 * time.Second
+
+	// hubHealthFirstRun is how long after it starts a member makes its first
+	// report unasked: long enough for its executors to settle. A dashboard
+	// that asks sooner gets one made for it.
+	hubHealthFirstRun = 30 * time.Second
+
+	// hubHealthEventDelay is how long a report waits after an event that
+	// changes findings, so a burst — a fleet reconnecting after a restart —
+	// is one report; hubHealthEventSpacing is how soon after the last report
+	// an event may make the next one at all.
+	hubHealthEventDelay   = 5 * time.Second
+	hubHealthEventSpacing = time.Minute
+
+	// hubHealthAudienceEvery is how often a member asks again, of every
+	// stream, whether its identity may read the report: the fallback for a
+	// change of authority nobody announced.
+	hubHealthAudienceEvery = 30 * time.Second
+
+	// hubHealthIdPRetry is how often a report asks the hub's sign-in client to
+	// resolve its issuer again while the client holds no usable resolution —
+	// discovery missing, no keys, or a last fetch that failed — and
+	// hubHealthIdPRetryFresh how often Run the checks again may. The client
+	// asks the provider by itself only when a sign-in needs it, so a provider
+	// that blipped as the hub started, or while a key set was refreshed, would
+	// otherwise read as failing until somebody signed in. A client that holds
+	// a resolution is never asked.
+	hubHealthIdPRetry      = 15 * time.Minute
+	hubHealthIdPRetryFresh = time.Minute
 
 	// hubHealthDocsBase is the runbook page that explains each group of
 	// checks, on the published documentation site.
 	hubHealthDocsBase = "https://blechschmidt.github.io/cloop/docs/operations/runbook/"
 )
 
-// hubHealthState is one process's report cache. The zero value is ready.
+// Why a report was made: the trigger label of cloop_hub_health_reports_total.
+const (
+	hubHealthTriggerSchedule = "schedule" // the cadence came round
+	hubHealthTriggerConfig   = "config"   // a configuration file changed
+	hubHealthTriggerEvent    = "event"    // an executor, CA rotation or key change
+	hubHealthTriggerRerun    = "rerun"    // Run the checks again
+	hubHealthTriggerRequest  = "request"  // a read found no report it could serve
+)
+
+// hubHealthState is one process's report and its schedule. The zero value is
+// ready.
 type hubHealthState struct {
 	live hubdoctor.Live
 
 	mu sync.Mutex
-	// report is the last one computed, and print the fingerprint of the
-	// configuration files it was computed under.
+	// report is the last one made, and print the fingerprint of the
+	// configuration files it was made under.
 	report *hubHealthReport
 	print  string
-	// summary says what the last report found, to tell whether the next one
-	// changed anything a dashboard shows.
-	summary string
-	// nudged is the configuration fingerprint dashboards were last told about.
-	nudged string
-	// inflight is the run under way, which concurrent requests wait for.
+	// generation counts the reports this member has made; the latest
+	// carries it.
+	generation uint64
+	// madeAt is when the latest report's run began and dueAt when the next
+	// is due — the schedule's clock, kept monotonic, which the report's own
+	// wall-clock times are not.
+	madeAt, dueAt time.Time
+	// inflight is the run under way, which everybody else waits for.
 	inflight *hubHealthCall
+	// eventAt is when the first event no report has seen yet arrived, zero
+	// while none is waiting for one, and eventLast when the latest did.
+	eventAt, eventLast time.Time
+	// idpTriedAt is when a report last asked the sign-in client to resolve
+	// its issuer again.
+	idpTriedAt time.Time
+
+	// deliverMu makes deliveries one at a time, each deciding and sending
+	// with the latest report: two passes overlapping must not send a count
+	// decided before a demotion after the withdrawal decided after it, or
+	// an older report after a newer one. pushedGen, under it, is the latest
+	// generation pushed to everybody.
+	deliverMu sync.Mutex
+	pushedGen uint64
+	// looked is the fingerprint the scheduler's last look saw, and settled
+	// the last one two looks agreed on: files that changed are reported on
+	// once they have settled.
+	looked, settled string
+	// wake tells the scheduler an event arrived (cap 1, made by wakeLocked).
+	wake chan struct{}
 
 	// Test knobs, set before the server starts: the per-check deadline, the
-	// cache's lifetime and checks added to the hub's own.
+	// cadence (which replaces ui.hub_health_interval, unbounded) and checks
+	// added to the hub's own.
 	checkTimeout time.Duration
-	ttl          time.Duration
+	interval     time.Duration
 	extra        []hubdoctor.Check
 }
 
-// hubHealthCall is one run that requests wait on.
+// hubHealthCall is one run that others wait on.
 type hubHealthCall struct {
 	done   chan struct{}
 	report *hubHealthReport
 }
 
+// wakeLocked returns the scheduler's wake channel, making it the first time.
+// h.mu is held.
+func (h *hubHealthState) wakeLocked() chan struct{} {
+	if h.wake == nil {
+		h.wake = make(chan struct{}, 1)
+	}
+	return h.wake
+}
+
 // hubHealthReport is the response of GET /api/hub/health.
 type hubHealthReport struct {
 	// Member is the hub process that ran the checks.
-	Member    hubHealthMember `json:"member"`
-	CheckedAt time.Time       `json:"checked_at"`
-	ExpiresAt time.Time       `json:"expires_at"`
+	Member hubHealthMember `json:"member"`
+	// Generation numbers this member's reports, the latest highest.
+	Generation uint64    `json:"generation"`
+	CheckedAt  time.Time `json:"checked_at"`
+	// ExpiresAt is when the member's next report is due.
+	ExpiresAt time.Time `json:"expires_at"`
 	// ServedAt is when this response left the hub, so a page times the
-	// report's expiry by the hub's clock rather than its own.
+	// report by the hub's clock rather than its own.
 	ServedAt   time.Time `json:"served_at"`
 	DurationMS int64     `json:"duration_ms"`
 	// Config names the files the configuration was read from.
@@ -194,9 +291,9 @@ func (s *Server) hubHealthRoutes() []routeSpec {
 	}
 }
 
-// handleHubHealth answers with this member's report: the cached one while it
-// is fresh, otherwise a new run. ?summary=1 leaves the findings out — what
-// the header needs — and ?fresh=1 asks for a new run unless the cached one is
+// handleHubHealth answers with this member's report: the last one while it is
+// current, otherwise a new run. ?summary=1 leaves the findings out — what the
+// header needs — and ?fresh=1 asks for a new run unless the last one is
 // seconds old.
 //
 // GET /api/hub/health
@@ -211,20 +308,32 @@ func (s *Server) handleHubHealth(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, &out)
 }
 
-// hubHealthReport returns a report no older than the cache allows, computing
-// one if needed. One run at a time: a request that arrives during one waits
-// for it rather than starting another.
+// hubHealthReport returns the report a read is answered with: the last one,
+// while it was made under the configuration in force and its successor is not
+// yet due — and, for a rerun, while it is seconds old — or else a new one.
 func (s *Server) hubHealthReport(fresh bool) *hubHealthReport {
 	h := &s.hubHealth
 	fp := s.hubConfigFingerprint()
+	trigger := hubHealthTriggerRequest
+	if fresh {
+		trigger = hubHealthTriggerRerun
+	}
+	return s.hubHealthRun(trigger, fp, fresh, func(now time.Time) bool {
+		return h.print == fp && now.Before(h.dueAt) && !(fresh && now.Sub(h.madeAt) >= hubHealthRerunFloor)
+	})
+}
+
+// hubHealthRun returns the last report while current says it may stand, and
+// otherwise makes one. One run at a time: a caller that finds one under way
+// waits for it rather than starting another. current is asked with h.mu held,
+// and only when there is a report.
+func (s *Server) hubHealthRun(trigger, fp string, fresh bool, current func(now time.Time) bool) *hubHealthReport {
+	h := &s.hubHealth
 	for {
 		h.mu.Lock()
-		if rep := h.report; rep != nil && h.print == fp {
-			now := time.Now()
-			if now.Before(rep.ExpiresAt) && !(fresh && now.Sub(rep.CheckedAt) >= hubHealthRerunFloor) {
-				h.mu.Unlock()
-				return rep
-			}
+		if rep := h.report; rep != nil && current(time.Now()) {
+			h.mu.Unlock()
+			return rep
 		}
 		if c := h.inflight; c != nil {
 			h.mu.Unlock()
@@ -232,49 +341,60 @@ func (s *Server) hubHealthReport(fresh bool) *hubHealthReport {
 			if c.report != nil {
 				return c.report
 			}
-			continue // that run died; this request makes the next one
+			continue // that run died; this caller makes the next one
 		}
 		c := &hubHealthCall{done: make(chan struct{})}
 		h.inflight = c
 		h.mu.Unlock()
-		return s.runHubHealth(c, fp, fresh)
+		return s.runHubHealth(c, trigger, fp, fresh)
 	}
 }
 
-// runHubHealth makes one run and publishes it to the cache, telling
-// dashboards when it found something the last one did not.
-func (s *Server) runHubHealth(c *hubHealthCall, fp string, fresh bool) (rep *hubHealthReport) {
+// runHubHealth makes one run, publishes it, counts it, and pushes its summary
+// to the streams that may read it.
+func (s *Server) runHubHealth(c *hubHealthCall, trigger, fp string, fresh bool) (rep *hubHealthReport) {
 	h := &s.hubHealth
+	start := time.Now()
 	defer func() {
 		h.mu.Lock()
 		h.inflight = nil
-		changed := false
 		if rep != nil {
-			sum := hubHealthSummary(rep)
-			changed = h.report != nil && sum != h.summary
-			h.report, h.print, h.summary = rep, fp, sum
-			if h.nudged == "" {
-				h.nudged = fp
+			h.generation++
+			rep.Generation = h.generation
+			h.report, h.print = rep, fp
+			h.madeAt, h.dueAt = start, start.Add(rep.ExpiresAt.Sub(rep.CheckedAt))
+			// Events that arrived before this run began are in it; one that
+			// arrived while it ran may not be, and stays waiting.
+			if !h.eventAt.IsZero() && !start.Before(h.eventAt) {
+				if h.eventLast.After(start) {
+					h.eventAt = h.eventLast
+				} else {
+					h.eventAt, h.eventLast = time.Time{}, time.Time{}
+				}
 			}
 		}
+		wake := h.wakeLocked()
 		h.mu.Unlock()
 		c.report = rep
 		close(c.done)
-		if changed {
-			// Carries nothing: who may see a report is decided where it is
-			// read. Every member's dashboards, since a load balancer may send
-			// any of them here for the next read.
-			s.broadcastToAll(wsMessage{Type: "hub_health", Data: json.RawMessage(`{}`)})
+		if rep != nil {
+			hubmetrics.HubHealthReports.Inc(trigger)
+			s.deliverHubHealth(true, nil)
+			// The schedule counts from this report, whoever asked for it.
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
 		}
 	}()
 
-	start := time.Now()
 	cfg, cfgErr := s.loadHubConfig()
 	files := []string{config.ConfigPath(s.WorkDir)}
 	if overlay := s.hubConfigOverlay(); overlay != "" {
 		files = append(files, overlay)
 	}
 	scrub := hubHealthScrub{set: redact.New(hubSecretValues(cfg, files, os.Environ())...)}
+	s.hubHealthRetryIdP(cfg, fresh)
 	lr := h.live.Run(context.Background(), s.WorkDir, cfg, hubdoctor.LiveOptions{
 		Options: hubdoctor.Options{
 			Timeout: hubHealthProbeTimeout,
@@ -291,17 +411,20 @@ func (s *Server) runHubHealth(c *hubHealthCall, fp string, fresh bool) (rep *hub
 			})
 		},
 	})
-	ttl := h.ttl
-	if ttl <= 0 {
-		ttl = hubHealthTTL
+	every := h.interval
+	if every <= 0 {
+		every = config.HubHealthIntervalDefault
+		if cfg != nil {
+			every = cfg.UI.EffectiveHubHealthInterval()
+		}
 	}
 	end := time.Now()
 	// Built aside and published whole: a report that failed half-way must
-	// not be cached as though it were one.
+	// not be kept as though it were one.
 	out := &hubHealthReport{
 		Member:     s.hubHealthMember(),
 		CheckedAt:  start.UTC(),
-		ExpiresAt:  end.Add(ttl).UTC(),
+		ExpiresAt:  start.Add(every).UTC(),
 		DurationMS: end.Sub(start).Milliseconds(),
 		Config:     hubHealthConfig{Files: s.hubConfigFiles()},
 		StrictMode: lr.StrictMode,
@@ -346,17 +469,59 @@ func (s *Server) runHubHealth(c *hubHealthCall, fp string, fresh bool) (rep *hub
 	return out
 }
 
+// hubHealthRetryIdP asks the hub's sign-in client to resolve its issuer again,
+// through the client's own preflight — the round trips a sign-in makes first,
+// which warm its caches and clear its recorded failure — when the report will
+// read the issuer from the client (it is the configured one), the client holds
+// no usable resolution, and the last such request was hubHealthIdPRetry ago
+// (hubHealthIdPRetryFresh for Run the checks again).
+func (s *Server) hubHealthRetryIdP(cfg *config.Config, fresh bool) {
+	if cfg == nil || !cfg.UI.OIDC.Enabled || !s.oidcEnabled() {
+		return
+	}
+	norm := func(v string) string { return strings.TrimRight(strings.TrimSpace(v), "/") }
+	if norm(cfg.UI.OIDC.Issuer) != norm(s.OIDC.Issuer()) {
+		return // resolved by the report itself, at most every 15 minutes
+	}
+	if st := s.OIDC.IdPState(); st.Discovery != nil && st.SigningKeys > 0 && st.LastError == nil {
+		return
+	}
+	every := hubHealthIdPRetry
+	if fresh {
+		every = hubHealthIdPRetryFresh
+	}
+	h := &s.hubHealth
+	h.mu.Lock()
+	due := h.idpTriedAt.IsZero() || time.Since(h.idpTriedAt) >= every
+	if due {
+		h.idpTriedAt = time.Now()
+	}
+	h.mu.Unlock()
+	if !due {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hubHealthProbeTimeout)
+	defer cancel()
+	_, _ = s.OIDC.Preflight(ctx)
+}
+
 // hubHealthSelf is what this process knows about itself that the doctor would
 // otherwise ask from outside: how its listener admits a request, the KMS
-// roots it pinned, and what its supervisor last saw of each executor.
+// roots it pinned, what its supervisor last saw of each executor, and what its
+// sign-in client holds of the identity provider (Task 20446).
 func (s *Server) hubHealthSelf() *hubdoctor.Self {
-	return &hubdoctor.Self{
+	self := &hubdoctor.Self{
 		SSO:         s.OIDC != nil,
 		StaticToken: s.staticTokenConfigured(),
 		TLS:         strings.TrimSpace(s.TLSCertFile) != "",
 		KMS:         s.hubKMSRoots,
 		Probe:       s.hubHealthProbe(s.recordedExecutorHealth()),
 	}
+	if s.oidcEnabled() {
+		st := s.OIDC.IdPState()
+		self.IdP = &st
+	}
+	return self
 }
 
 // hubKMSRoots are the roots `cloop ui` resolved and pinned for every keyring
@@ -422,19 +587,6 @@ func (s *Server) hubHealthProbe(recorded map[string]executor.Health) func(contex
 	}
 }
 
-// hubHealthSummary is what a dashboard shows of a report: each check that did
-// not pass, by severity and title. A new report with the same summary changed
-// nothing worth telling anyone about.
-func hubHealthSummary(rep *hubHealthReport) string {
-	var b strings.Builder
-	for _, f := range rep.Findings {
-		if f.Severity != string(hubdoctor.SeverityPass) {
-			fmt.Fprintf(&b, "%s\x00%s\x00%s\n", f.Severity, f.Check, f.Title)
-		}
-	}
-	return b.String()
-}
-
 // hubHealthMember names this process among the hub's members.
 func (s *Server) hubHealthMember() hubHealthMember {
 	m := hubHealthMember{ID: s.hubInstanceID(), Port: s.Port, Leader: s.isLeader()}
@@ -480,38 +632,360 @@ func (s *Server) hubConfigFingerprint() string {
 	return b.String()
 }
 
-// watchHubHealthConfig tells this member's dashboards to ask again when the
-// configuration a report was computed under changes, so a saved setting —
-// from the Settings tab, from another member, or from an editor on the host —
-// shows without waiting out the report's minute.
-func (s *Server) watchHubHealthConfig(ctx context.Context) {
-	defer recoverGoroutine("watchHubHealthConfig")
-	t := time.NewTicker(hubHealthWatchEvery)
-	defer t.Stop()
+// ── The schedule (Task 20446) ───────────────────────────────────────────────
+
+// watchHubHealth makes this member's reports on its own: on the cadence, when
+// the configuration changes, after events that change findings — and asks,
+// every thirty seconds, who may still read them. Every member runs one: the
+// listener checks are about the member that makes them.
+func (s *Server) watchHubHealth(ctx context.Context) {
+	defer recoverGoroutine("watchHubHealth")
+	h := &s.hubHealth
+	started := time.Now()
+	fp := s.hubConfigFingerprint()
+	h.mu.Lock()
+	h.looked, h.settled = fp, fp
+	wake := h.wakeLocked()
+	h.mu.Unlock()
+
+	look := time.NewTicker(hubHealthWatchEvery)
+	defer look.Stop()
+	timer := time.NewTimer(hubHealthFirstRun)
+	defer timer.Stop()
+	asked := time.Now()
 	for {
+		timer.Reset(time.Until(s.hubHealthTick(started)))
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-timer.C:
+		case <-wake:
+		case <-look.C:
+			s.hubHealthLook()
+			if time.Since(asked) >= hubHealthAudienceEvery {
+				asked = time.Now()
+				func() {
+					defer recoverGoroutine("hub health audience")
+					s.recheckHubHealthAudience(nil)
+				}()
+			}
 		}
-		s.hubHealthConfigTick()
 	}
 }
 
-// hubHealthConfigTick is one look at the configuration files. It says so once
-// per change, and only while there is a report it makes stale.
-func (s *Server) hubHealthConfigTick() {
-	h := &s.hubHealth
+// hubHealthLook is one look at the configuration files: a fingerprint two
+// looks in a row agree on is the configuration the next report is due under.
+func (s *Server) hubHealthLook() {
 	fp := s.hubConfigFingerprint()
+	h := &s.hubHealth
 	h.mu.Lock()
-	stale := h.report != nil && h.print != fp && h.nudged != fp
-	if stale {
-		h.nudged = fp
+	if fp == h.looked {
+		h.settled = fp
 	}
+	h.looked = fp
 	h.mu.Unlock()
-	if stale {
-		s.deliverToAll(wsMessage{Type: "hub_health", Data: json.RawMessage(`{}`)})
+}
+
+// hubHealthTick makes a report if one is due, and returns when the next one
+// will be. started is when the schedule began.
+//
+// A report is labelled with the configuration files as they are when it is
+// made, whoever made it; the looks only decide whether a change is due.
+func (s *Server) hubHealthTick(started time.Time) (next time.Time) {
+	h := &s.hubHealth
+	live := s.hubConfigFingerprint()
+	h.mu.Lock()
+	due, why := h.dueLocked(live, started)
+	gen := h.generation
+	h.mu.Unlock()
+	if due.After(time.Now()) {
+		return due
 	}
+	func() {
+		defer recoverGoroutine("hub health report")
+		s.hubHealthRun(why, live, false, func(now time.Time) bool {
+			d, _ := h.dueLocked(live, started)
+			return d.After(now)
+		})
+	}()
+	h.mu.Lock()
+	next, _ = h.dueLocked(s.hubConfigFingerprint(), started)
+	made := h.generation != gen
+	h.mu.Unlock()
+	if !made {
+		// The run died without a report — a panic the log has — so it is
+		// not tried again at once, or every few seconds.
+		next = time.Now().Add(hubHealthEventSpacing)
+	}
+	return next
+}
+
+// dueLocked says when the next report is due, the configuration files being
+// live, and why: the first one hubHealthFirstRun after the schedule started,
+// then one a cadence after the last; at once for files the last was not made
+// under, once two looks have agreed on them — an editor may still be writing
+// — and soon after an event the last did not see. h.mu is held.
+func (h *hubHealthState) dueLocked(live string, started time.Time) (time.Time, string) {
+	rep := h.report
+	if rep == nil {
+		return started.Add(hubHealthFirstRun), hubHealthTriggerSchedule
+	}
+	if h.print != live && h.settled == live {
+		return time.Time{}, hubHealthTriggerConfig
+	}
+	due, why := h.dueAt, hubHealthTriggerSchedule
+	if !h.eventAt.IsZero() {
+		at := h.eventAt.Add(hubHealthEventDelay)
+		if floor := h.madeAt.Add(hubHealthEventSpacing); at.Before(floor) {
+			at = floor
+		}
+		if at.Before(due) {
+			due, why = at, hubHealthTriggerEvent
+		}
+	}
+	return due, why
+}
+
+// hubHealthEvent says something changed what a report would find — an
+// executor enrolled, lost or reconfigured, a CA rotation step, a sealing key
+// rotated — so the scheduler makes the next report soon: hubHealthEventDelay
+// after the first such event, so a burst is one report, and never sooner than
+// hubHealthEventSpacing after the last report. Cheap and non-blocking, for
+// the paths that announce those changes.
+func (s *Server) hubHealthEvent() {
+	h := &s.hubHealth
+	now := time.Now()
+	h.mu.Lock()
+	if h.eventAt.IsZero() {
+		h.eventAt = now
+	}
+	h.eventLast = now
+	wake := h.wakeLocked()
+	h.mu.Unlock()
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+// AnnounceHubHealthChange posts the bus notice that something every member's
+// Hub health report checks changed outside any member, for a writer that is
+// not one: `cloop hub key`, whose rotations, retirements, rewraps, escrows and
+// root changes are what the secret_key checks read (Task 20446). Every member
+// reading the bus makes its next report soon rather than at its cadence. A
+// failure is the caller's to report and never fatal: the next scheduled
+// report sees the change anyway.
+func AnnounceHubHealthChange(db *statedb.DB, origin, what string) error {
+	return appendInvalidations(db, origin, invalidateHubHealth, []any{map[string]string{"what": what}})
+}
+
+// ── Who hears it (Task 20446) ───────────────────────────────────────────────
+
+// hubHealthPush is what a hub_health message carries to a stream whose
+// identity may read the report: what the header shows, and when.
+//
+// The generation is the member's own, so the member is named beside it: behind
+// a load balancer the page's reads may be answered by another member than the
+// one holding its socket.
+type hubHealthPush struct {
+	Member     hubHealthPushMember `json:"member"`
+	Failing    int                 `json:"failing"`
+	Generation uint64              `json:"generation"`
+	CheckedAt  time.Time           `json:"checked_at"`
+	ServedAt   time.Time           `json:"served_at"`
+	ExpiresAt  time.Time           `json:"expires_at"`
+}
+
+// hubHealthPushMember names the member that made a pushed report, as the
+// report's own member field does.
+type hubHealthPushMember struct {
+	ID string `json:"id"`
+}
+
+// hubHealthWithdrawn is the hub_health message of a stream that was sent the
+// summary and may no longer read it. It carries no count; the page puts its
+// indicator out and re-reads what it may do.
+var hubHealthWithdrawn = json.RawMessage(`{"withdrawn":true}`)
+
+// recheckHubHealthAudience asks again whether each stream match selects (every
+// one for nil) may read the report: one that newly may is sent the current
+// summary, one that newly may not is told it is withdrawn.
+func (s *Server) recheckHubHealthAudience(match func(streamCredential) bool) {
+	s.deliverHubHealth(false, match)
+}
+
+// deliverHubHealth sends the latest report's summary to the streams match
+// selects (every one for nil) whose identity may read it — every such stream
+// when push and the report has not been pushed to everybody yet, else only
+// those not already sent one — and tells the streams that were sent it and
+// may no longer read it that it is withdrawn.
+//
+// Deliveries are made one at a time (deliverMu), each with the report current
+// when it begins, so a later pass never sends an older report or a verdict an
+// earlier pass has overtaken. Who may read is decided with no stream lock
+// held, once per credential: it reads the session and token stores. The
+// streams are then sent to under their locks if they are still connected, as
+// broadcastProjectsUpdate does.
+func (s *Server) deliverHubHealth(push bool, match func(streamCredential) bool) {
+	h := &s.hubHealth
+	h.deliverMu.Lock()
+	defer h.deliverMu.Unlock()
+	h.mu.Lock()
+	rep := h.report
+	h.mu.Unlock()
+	everyone := false
+	if push && rep != nil && rep.Generation > h.pushedGen {
+		everyone, h.pushedGen = true, rep.Generation
+	}
+
+	s.hubMu.Lock()
+	var sockets []*hubClient
+	for _, clients := range s.hubClients {
+		for hc := range clients {
+			if match == nil || match(hc.cred) {
+				sockets = append(sockets, hc)
+			}
+		}
+	}
+	s.hubMu.Unlock()
+	s.mu.Lock()
+	var streams []*sseClient
+	for c := range s.clients {
+		if match == nil || match(c.cred) {
+			streams = append(streams, c)
+		}
+	}
+	s.mu.Unlock()
+	if len(sockets) == 0 && len(streams) == 0 {
+		return
+	}
+
+	verdicts := map[streamCredential]bool{}
+	may := func(c streamCredential) bool {
+		v, seen := verdicts[c]
+		if !seen {
+			v = s.hubHealthMayRead(c)
+			verdicts[c] = v
+		}
+		return v
+	}
+	var summary json.RawMessage
+	if rep != nil {
+		raw, err := json.Marshal(hubHealthPush{Member: hubHealthPushMember{ID: rep.Member.ID}, Failing: rep.Failing,
+			Generation: rep.Generation, CheckedAt: rep.CheckedAt, ServedAt: time.Now().UTC(), ExpiresAt: rep.ExpiresAt})
+		if err == nil {
+			summary = raw
+		}
+	}
+	// decide is what one stream is sent, if anything, and what it was then
+	// last sent: the summary (true) or nothing it may keep (false).
+	decide := func(c streamCredential, told bool) (json.RawMessage, bool) {
+		switch {
+		case may(c) && summary != nil && (everyone || !told):
+			return summary, true
+		case !may(c) && told:
+			return hubHealthWithdrawn, false
+		}
+		return nil, told
+	}
+
+	type wsSend struct {
+		hc   *hubClient
+		data json.RawMessage
+		told bool
+	}
+	var wsSends []wsSend
+	for _, hc := range sockets {
+		if data, told := decide(hc.cred, hc.healthTold.Load()); data != nil {
+			wsSends = append(wsSends, wsSend{hc, data, told})
+		}
+	}
+	type sseSend struct {
+		c    *sseClient
+		data json.RawMessage
+		told bool
+	}
+	var sseSends []sseSend
+	for _, c := range streams {
+		if data, told := decide(c.cred, c.healthTold.Load()); data != nil {
+			sseSends = append(sseSends, sseSend{c, data, told})
+		}
+	}
+
+	if len(wsSends) > 0 {
+		s.hubMu.Lock()
+		present := make(map[*hubClient]bool, len(wsSends))
+		for _, clients := range s.hubClients {
+			for hc := range clients {
+				present[hc] = true
+			}
+		}
+		for _, w := range wsSends {
+			if present[w.hc] {
+				w.hc.healthTold.Store(w.told)
+				s.sendOrLag(w.hc, wsMessage{Type: "hub_health", Data: w.data})
+			}
+		}
+		s.hubMu.Unlock()
+	}
+	if len(sseSends) > 0 {
+		s.mu.Lock()
+		for _, e := range sseSends {
+			if _, still := s.clients[e.c]; still {
+				e.c.healthTold.Store(e.told)
+				s.sendSSEOrLag(e.c, sseEvent{Event: "hub_health", Data: string(e.data)})
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// hubHealthMayRead reports whether the identity behind a stream opened with c
+// may read the report now: the route's question — config.write across the hub
+// — asked of the credential as it stands, not as it stood when the stream
+// opened. A session is read as it is now, with whatever claims the identity
+// provider last asserted, so a refresh that narrowed them narrows this too; a
+// token as it reads now; the static token unless it was retired. A credential
+// that has ended reads nothing.
+//
+// The claims are not re-asserted here, as the route gate re-asserts them for
+// an administrator's request whose claims have aged: that is a round trip to
+// the identity provider, and this is asked of every stream for every report.
+// It is the rule /api/me lights the indicator by, and what the project-list
+// fan-out filters by, and the session's claims are re-asserted on its own
+// requests and renewals, which say so (onSessionChanged) and are re-asked.
+func (s *Server) hubHealthMayRead(c streamCredential) bool {
+	var user *oidcauth.Identity
+	var tok *apitoken.Token
+	switch {
+	case c.tokenID != "":
+		// A token presented beside a session is what the request path
+		// decides by, as newGrant does.
+		t, err := s.recheckToken(c.tokenID)
+		if err != nil {
+			return false
+		}
+		tok = t
+	case c.sessionHash != "":
+		rec, st := s.OIDC.CheckSession(c.sessionHash)
+		if st != oidcauth.SessionLive {
+			return false
+		}
+		id := rec.Identity
+		user = &id
+	case c.static:
+		if _, retired := s.ownStaticTokenRetirement(); retired {
+			return false
+		}
+	default:
+		// No credential at all: a hub with neither sign-on nor a static
+		// token, where the route admits everybody. With sign-on, no stream
+		// opens without one.
+		if s.oidcEnabled() {
+			return false
+		}
+	}
+	return s.recipientGrant(user, tok).decide(authz.GlobalScope).Allows(authz.PermConfigWrite)
 }
 
 // urlCredentials is the userinfo credential of raw when it is a URL that has

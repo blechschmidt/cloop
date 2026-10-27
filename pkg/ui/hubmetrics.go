@@ -141,9 +141,30 @@ func withScrape(fn func(*metricsScrape)) hubmetrics.Collector {
 	}
 }
 
+// observeIdPFetchesOnce installs the counter of the identity provider's
+// metadata fetches, once per process.
+var observeIdPFetchesOnce sync.Once
+
+// observeIdPFetches counts every fetch of an issuer's discovery document or
+// key set this process makes (Task 20446) — by the hub's sign-in client or by
+// a standalone resolution such as Settings → Single sign-on's Test — which
+// pkg/oidcauth, being stdlib-only, reports through an observer.
+func observeIdPFetches() {
+	observeIdPFetchesOnce.Do(func() {
+		oidcauth.ObserveFetches(func(f oidcauth.IdPFetch) {
+			outcome := "ok"
+			if f.Err != nil {
+				outcome = "error"
+			}
+			hubmetrics.OIDCIdPFetches.Inc(f.Document, f.Client, outcome)
+		})
+	})
+}
+
 // registerHubCollectors installs the scrape-time collectors, once per process.
 // Called at hub startup (bootstrapExecutors) and before every scrape.
 func registerHubCollectors() {
+	observeIdPFetches()
 	hubmetrics.RegisterCollectors(
 		hubmetrics.CollectorSpec{
 			Name: "quota",

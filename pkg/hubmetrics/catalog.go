@@ -354,6 +354,23 @@ var (
 	// watching here is interaction_required against ok — a hub where it climbs
 	// is one whose users are being sent back to the provider mid-session, most
 	// often because their browser blocks the provider's cookies inside a frame.
+	// The issuer's metadata documents fetched (Task 20446): its discovery
+	// document and its key set, by whom. client is signin — the hub's own
+	// sign-in client, which fetches them at startup, on a sign-in that finds
+	// them missing, and for a token signed by a key it does not hold — or
+	// preflight, a standalone resolution of an issuer: `cloop hub doctor`,
+	// Settings → Single sign-on's Test, and Hub health's check of an issuer
+	// the running client is not using. outcome is ok or error. All three are
+	// closed sets declared in pkg/oidcauth. A hub whose dashboards are open
+	// should fetch next to nothing: Hub health reads the sign-in client's own
+	// cache, so a steady rate is something asking the issuer per request.
+	OIDCIdPFetches = Default.MustRegister(Definition{
+		Name:   "cloop_oidc_idp_fetches_total",
+		Help:   "Fetches of the OIDC issuer's discovery document and key set, by document (discovery, jwks), client (signin, the hub's sign-in client; preflight, a standalone resolution such as cloop hub doctor or Settings' Test) and outcome (ok, error). Steady traffic while nobody signs in is something asking the issuer per request.",
+		Type:   TypeCounter,
+		Labels: []string{"document", "client", "outcome"},
+	})
+
 	OIDCRenewals = Default.MustRegister(Definition{
 		Name:   "cloop_oidc_renewal_total",
 		Help:   "Silent claim renewals that reached a verdict, by outcome (ok, interaction_required, no_session, not_enabled, idp_error, discovery_failed, state_error, invalid_state, exchange_failed, token_invalid, subject_mismatch, store_error). A rising interaction_required rate means users are being sent back to the provider mid-session.",
@@ -791,6 +808,26 @@ var (
 // writes to a handful of filesystems; one registering projects on hundreds is
 // past what a per-volume series is good for.
 const DiskVolumesMax = 32
+
+// Settings → Hub health (Task 20446): the doctor's checks a hub member runs on
+// itself. A report is made on a cadence (ui.hub_health_interval) and pushed to
+// the dashboards that may read it, so its rate is the member's, not its
+// audience's: an administrator's open tab used to cost one run a minute, and a
+// rate well above one per cadence per member is a regression of that kind.
+//
+// `trigger` is why the run was made — schedule (the cadence came round),
+// config (a configuration file changed), event (an executor, CA rotation or
+// sealing-key change), rerun (Run the checks again) or request (a read found no
+// report it could serve) — a closed set declared in pkg/ui. Counters, so each
+// member counts its own.
+var (
+	HubHealthReports = Default.MustRegister(Definition{
+		Name:   "cloop_hub_health_reports_total",
+		Help:   "Hub health reports this hub member computed of itself, by trigger (schedule, config, event, rerun, request). Made on the member's cadence, not per open dashboard: a rate far above one per ui.hub_health_interval is reports made on behalf of readers.",
+		Type:   TypeCounter,
+		Labels: []string{"trigger"},
+	})
+)
 
 // The control-plane database (Task 20392). Its write-ahead log takes every
 // write before a checkpoint copies it into the database, and SQLite never
