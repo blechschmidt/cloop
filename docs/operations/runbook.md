@@ -2610,8 +2610,11 @@ It does not cover container or Kubernetes executors, releases from before the
 hub cluster (v0.0.4 and earlier), or the device's own upgrade: the Upgrade offer
 is checked, not pressed.
 
-**Last result — 2026-10-27, v0.0.7 → `dev+gf3002f67` (sequence 1175),
-Task 20452.** Both scenarios pass on this host in 23 s once built (the forward
+**Last result — 2026-10-27, v0.0.7 → `dev+gba5e0984` (sequence 1179),
+Task 20452.** Green in CI on its first run (run 40565034886): the job took
+132 s, 67 s of it building the commit and 47 s the rehearsal step, which
+compiles the suite, downloads and verifies v0.0.7 into an empty cache and runs
+both scenarios. On this host the scenarios take 23 s once built (the forward
 one 17 s, the rollback 6 s). Getting there found four defects, each fixed:
 
 - this section's Rollback example showed what `cloop status` prints, not what
