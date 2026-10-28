@@ -533,9 +533,16 @@ func TestPruneIsSafeAgainstAConcurrentWriter(t *testing.T) {
 	}
 	defer db.Close() //nolint:errcheck // test cleanup
 
-	// A backlog worth batching: rowPruneBatch is 2000, so this forces the
-	// delete loop through several transactions and gives the writer real
-	// opportunity to interleave rather than racing one atomic statement.
+	// A backlog worth batching, in batches of 500 here, so the delete loop
+	// runs through several transactions and the writer has real opportunity to
+	// interleave rather than racing one atomic statement. Smaller than the
+	// production 2,000 so no single transaction outlasts the writer's busy
+	// timeout under the race detector on a loaded runner, where one 2,000-row
+	// batch did: that would fail the writer for lock latency, which is not the
+	// property this test pins.
+	prevBatch := rowPruneBatch
+	rowPruneBatch = 500
+	t.Cleanup(func() { rowPruneBatch = prevBatch })
 	const (
 		seeded = 5000
 		keep   = 100

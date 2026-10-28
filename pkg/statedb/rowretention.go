@@ -76,7 +76,13 @@ import (
 // unbounded DELETE would be faster in wall-clock terms and would hold the lock
 // for the whole backlog, which on a first pass is exactly the case where
 // somebody is watching.
-const rowPruneBatch = 2000
+//
+// A variable only so a test can run the same loop in smaller transactions: the
+// race detector slows the pure-Go SQLite engine enough that one 2,000-row
+// batch can hold the lock past another connection's busy timeout on a loaded
+// CI runner, which is lock latency under instrumentation, not what that test
+// is about.
+var rowPruneBatch = 2000
 
 // ageScanChunk bounds how many (id, timestamp) pairs the age scan holds at
 // once. The scan stops at the first row that is not older than the cutoff, so
