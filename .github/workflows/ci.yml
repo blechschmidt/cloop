@@ -3018,19 +3018,30 @@ jobs:
         # policy. See tests/kube/README.md.
         #
         # Advisory until it has passed on main twice, as the steps above were.
+        # An advisory step leaves its job green, so the job's last step
+        # annotates nothing: this one says why itself, with the test's own
+        # messages, which scripts/ci-why.sh reads back without a token.
         continue-on-error: true
         timeout-minutes: 30
         env:
           CLOOP_KUBE_E2E_KIND_CLUSTER: cloop-ci
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          log="$RUNNER_TEMP/kube-image-pin.log"
+          status=0
           CLOOP_KUBE_E2E_KUBECONFIG="$RUNNER_TEMP/kubeconfig" CLOOP_KUBE_E2E_CLOOP_BIN="$RUNNER_TEMP/cloop" \
             go test ./tests/kube/ -run TestAPodRunsTheDigestItsTagResolvedTo -count=1 -v -timeout 28m 2>&1 |
-            tee "$RUNNER_TEMP/kube-image-pin.log"
-          grep -q -- '--- PASS: TestAPodRunsTheDigestItsTagResolvedTo' "$RUNNER_TEMP/kube-image-pin.log" || {
-            echo "::error::the image resolution end-to-end test did not pass (see the log above)"
-            exit 1
-          }
+            tee "$log" || status=$?
+          if grep -q -- '--- PASS: TestAPodRunsTheDigestItsTagResolvedTo' "$log"; then
+            exit 0
+          fi
+          why=$(grep -E '^\s+[a-z_]+_test\.go:[0-9]+: |^--- FAIL|^panic:' "$log" |
+            grep -vE ': (run|workspace init|second run) \|' | tail -n 30 || true)
+          [ -n "$why" ] || why=$(tail -n 40 "$log" || true)
+          why=$(printf '%s' "$why" | sed -e 's/%/%25/g' |
+            awk 'BEGIN { ORS = "" } { gsub(/\r/, "%0D"); if (NR > 1) print "%0A"; print }')
+          echo "::warning title=TestAPodRunsTheDigestItsTagResolvedTo did not pass (exit $status)::$why"
+          exit 1
 
       - name: Hub diagnostics on failure
         if: failure()
