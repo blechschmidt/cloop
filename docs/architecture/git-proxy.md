@@ -1403,7 +1403,8 @@ What remains is either deliberate or beyond what the hub can reach today:
    with its session, and the process that adopts the Pod takes the lease over,
    restores the session and hands the driver its release, which the driver
    runs once the init container's fetch is confirmed — or with the workload for
-   a push write-back (`TestAPodsWorkspaceSessionSurvivesARestart`). What remains is
+   a push write-back (`TestAPodsWorkspaceSessionSurvivesARestart`; live on a
+   cluster, `TestAPodsWorkspaceSurvivesItsHubBeingKilled`). What remains is
    stated among the [residual risks](../security/model.md#what-is-not-mitigated):
    an init container that fetches before the adoption waits for it, at most a
    minute, and a Pod whose fetch outwaits it fails its provisioning. Lease-path

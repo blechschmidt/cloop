@@ -1886,6 +1886,37 @@ jobs:
             exit 1
           fi
 
+      # A Kubernetes Pod's workspace session is adopted by another member (Task
+      # 20455): two members run the git proxy and a Kubernetes executor against
+      # a stand-in API server, a run is dispatched through the one that is not
+      # the leader, and that member is SIGKILLed before the Pod's init
+      # container fetches. The survivor must take the workspace lease over,
+      # restore the session under the same id and token hash, serve the fetch
+      # the test makes with the Pod's token, and close the session once the
+      # Pod reports the fetch finished.
+      - name: Adopt a Pod's workspace session from a dead member
+        timeout-minutes: 5
+        env:
+          CLOOP_CLUSTER_E2E: "1"
+          CLOOP_CLUSTER_BIN: /tmp/cloop-cluster-bin
+          CLOOP_CLUSTER_KEEP: "1"
+          TMPDIR: /tmp/cloop-cluster-e2e
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          go test ./tests/cluster/ -run TestAPodsWorkspaceSessionIsAdoptedByAnotherMember -v -count=1 -timeout 4m 2>&1 | tee /tmp/cluster-pod-workspace.log
+          grep -qE '^--- PASS: TestAPodsWorkspaceSessionIsAdoptedByAnotherMember \(' /tmp/cluster-pod-workspace.log || {
+            echo "::error::go test succeeded but TestAPodsWorkspaceSessionIsAdoptedByAnotherMember did not pass — it was skipped (is git-http-backend installed?)"
+            exit 1
+          }
+          if races=$(grep -rl "WARNING: DATA RACE" "$TMPDIR" --include='*.log'); then
+            echo "$races"
+            echo "::error::a hub member reported a data race (files above)"
+            # shellcheck disable=SC2086 # one word per file
+            go run ./scripts/ci-annotate $races
+            exit 1
+          fi
+
       # A revocation outlives the member holding the lease (Task 20419): the
       # member holding a container run's lease is SIGKILLed, and the lease and
       # then its grant are revoked through the survivor. The credential must
@@ -2877,6 +2908,30 @@ jobs:
           # A skip is a pass to go test; here it would mean nothing was proven.
           grep -q -- '--- PASS: TestGitProxyAndKubeGuardOnKubernetes' "$RUNNER_TEMP/kube-e2e.log" || {
             echo "::error::the Kubernetes end-to-end test did not pass (see the log above)"
+            exit 1
+          }
+
+      - name: A Pod's workspace survives its hub being killed on kind
+        id: kube-hub-killed
+        # Task 20455: a Pod's init container fetches its workspace through a
+        # pinned git proxy session after the dispatch returned. tests/kube
+        # holds one before its fetch, SIGKILLs the hub's process from the kind
+        # node, and checks that the process the kubelet starts on the same
+        # database adopts the run, restores the session and serves the fetch:
+        # the Pod provisions, the run completes, its outcome reaches the hub's
+        # plan, and the session is closed once the fetch is confirmed. It needs
+        # the one replica the release has here, before the scale-up below. See
+        # tests/kube/README.md.
+        timeout-minutes: 30
+        env:
+          CLOOP_KUBE_E2E_KIND_CLUSTER: cloop-ci
+        run: |
+          set -euo pipefail
+          CLOOP_KUBE_E2E_KUBECONFIG="$RUNNER_TEMP/kubeconfig" CLOOP_KUBE_E2E_CLOOP_BIN="$RUNNER_TEMP/cloop" \
+            go test ./tests/kube/ -run TestAPodsWorkspaceSurvivesItsHubBeingKilled -count=1 -v -timeout 28m 2>&1 |
+            tee "$RUNNER_TEMP/kube-hub-killed.log"
+          grep -q -- '--- PASS: TestAPodsWorkspaceSurvivesItsHubBeingKilled' "$RUNNER_TEMP/kube-hub-killed.log" || {
+            echo "::error::the Kubernetes hub-restart test did not pass (see the log above)"
             exit 1
           }
 

@@ -1,10 +1,13 @@
 # Git proxy and kube guard on Kubernetes, end to end
 
-Two tests, on a real cluster:
+Three tests, on a real cluster:
 
 - [`TestGitProxyAndKubeGuardOnKubernetes`](#what-it-builds) runs a workload Pod
   through both monitors on the hub the Helm chart installed — the rest of this
   page;
+- [`TestAPodsWorkspaceSurvivesItsHubBeingKilled`](#a-pods-workspace-survives-its-hub-being-killed)
+  holds a Pod before its workspace fetch, SIGKILLs the hub and checks the new
+  hub process serves the fetch (Task 20455);
 - [`TestKubeShareWithAnExecPlugin`](#sharing-a-cluster-whose-kubeconfig-runs-a-plugin)
   shares the cluster with a hub running on the test host, through a kubeconfig
   that signs in only with an exec credential plugin (Task 20416) — the last
@@ -117,9 +120,50 @@ CLOOP_KUBE_E2E_KUBECONFIG=/tmp/kubeconfig CLOOP_KUBE_E2E_KIND_CLUSTER=cloop-ci \
 | `CLOOP_KUBE_E2E_CLOOP_BIN` | a static cloop for the harness image; unset, one is built (CI copies the hub image's) |
 | `CLOOP_KUBE_E2E_RELEASE`, `CLOOP_KUBE_E2E_NAMESPACE` | the release, `cloop` in `cloop` by default |
 | `CLOOP_KUBE_E2E_KEEP` | leave the forge, the target namespace and the helper Pod behind |
+| `CLOOP_KUBE_E2E_NODE_EXEC` | a command prefix that runs a command on the hub's node, for the restart test; `docker exec <node name>` by default |
 
 A kind node image is about 1 GB on disk and the test images another few
 hundred MB, loaded twice; check free space before running it on a small host.
+
+## A Pod's workspace survives its hub being killed
+
+[`workspace_restart_test.go`](workspace_restart_test.go) (Task 20455) runs on the
+same release, at one replica. A Pod's init container fetches its workspace
+through a pinned git proxy session after the dispatch returned; the test makes
+the hub die in that window and checks a new hub process serves the fetch.
+
+1. Builds the images (the harness image's `cloop` is
+   [`cloop-hold.sh`](cloop-hold.sh), which holds the workspace provisioner of the
+   repository `acme/held` until `/tmp/cloop-e2e-release` exists in its container
+   and runs everything else at once), serves the forge as github.com with
+   `acme/held`, and upgrades the release with the git proxy on.
+2. Registers a project whose origin is `https://github.com/acme/held.git`, grants
+   it a read-only PAT, a harness credential and the `kubernetes` executor, adds
+   one task — a check of the workspace — and presses Start.
+3. Waits for the run's Pod to sit in its provisioner, reads the session it holds
+   from the `cloop-ws-<handle>` Secret, and SIGKILLs the hub's process from the
+   node (`crictl inspect` for its pid, `kill -9`): no shutdown path runs. The
+   kubelet starts the container again in the same Pod, on the same database, as
+   a new cluster member.
+4. Waits for the new process to adopt the run and restore the session — a
+   `gitproxy.session_restored` row naming the killed process, and the run's
+   owner row naming the new one — then releases the provisioner.
+5. Checks that the provisioner exits 0; that the run completes, its check
+   finding the forge's commit checked out through the proxy (`HW1`, `HW2`); that
+   the hub's plan shows the task done on the `kubernetes` executor, which needs
+   the run's outcome to come back out of the Pod; and that the session was
+   closed — `gitproxy.session_closed` — once the fetch was confirmed.
+
+It needs to run a command on the hub's node: `docker exec <node>` by default,
+which is what a kind node is, or `CLOOP_KUBE_E2E_NODE_EXEC` — `docker exec k3s`
+for k3s in docker, whose node name is the container's hostname:
+
+```bash
+CLOOP_KUBE_E2E_KUBECONFIG=/tmp/kubeconfig CLOOP_KUBE_E2E_KIND_CLUSTER=cloop-ci \
+  go test ./tests/kube/ -run TestAPodsWorkspaceSurvivesItsHubBeingKilled -count=1 -v -timeout 28m
+```
+
+About two minutes; most of it is the hub's restart and its adoption of the run.
 
 ## Sharing a cluster whose kubeconfig runs a plugin
 

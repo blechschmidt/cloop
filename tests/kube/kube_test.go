@@ -189,7 +189,7 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 				"--wait=false")
 		})
 	}
-	forgeIP, forgePod := deployForge(ctx, t, x, leaf, pat)
+	forgeIP, forgePod := deployForge(ctx, t, x, leaf, pat, grantedRepo, otherRepo)
 	t.Logf("forge %s at %s serving %s and %s", forgePod, forgeIP, grantedRepo, otherRepo)
 
 	// ── 4. A namespace the kubeconfig grant covers, and its credential ────
@@ -486,6 +486,7 @@ func buildImages(ctx context.Context, t *testing.T, x tool) {
 
 	harnessCtx := t.TempDir()
 	copyFile(t, cloopBin, filepath.Join(harnessCtx, "cloop"))
+	copyFile(t, filepath.Join(root, "tests/kube/cloop-hold.sh"), filepath.Join(harnessCtx, "cloop-hold"))
 	copyFile(t, kubectlBin, filepath.Join(harnessCtx, "kubectl"))
 	copyFile(t, filepath.Join(root, "scripts/e2e/gitproxy/claude"), filepath.Join(harnessCtx, "claude"))
 	copyFile(t, filepath.Join(root, "tests/kube/harness.Dockerfile"), filepath.Join(harnessCtx, "Dockerfile"))
@@ -564,13 +565,14 @@ func probeNetworkPolicy(ctx context.Context, t *testing.T, x tool, ns, fullname 
 }
 
 // deployForge serves the forge in its own namespace as a Service on 443 and
-// returns the Service's ClusterIP and the forge Pod's name.
+// returns the Service's ClusterIP and the forge Pod's name. It serves repos,
+// each with one commit.
 //
 // The Pod listens on 9443, a port the workloads' egress filter does not open:
 // it opens the pod range on the monitors' ports only, so a forge on 8443 would
 // be reachable from a workload directly and the egress check would mean
 // nothing.
-func deployForge(ctx context.Context, t *testing.T, x tool, leaf secretbrokertest.Leaf, pat string) (string, string) {
+func deployForge(ctx context.Context, t *testing.T, x tool, leaf secretbrokertest.Leaf, pat string, repos ...string) (string, string) {
 	t.Helper()
 	crt, err := os.ReadFile(leaf.CertFile)
 	if err != nil {
@@ -608,7 +610,7 @@ func deployForge(ctx context.Context, t *testing.T, x tool, leaf secretbrokertes
 						"containers": []any{map[string]any{
 							"name": "forge", "image": forgeImage, "imagePullPolicy": "Never",
 							"args": []string{"--listen=:9443", "--root=/srv/git", "--home=/srv/home",
-								"--repos=" + grantedRepo + "," + otherRepo, "--pat-file=/pat/token"},
+								"--repos=" + strings.Join(repos, ","), "--pat-file=/pat/token"},
 							"ports":           []any{map[string]any{"containerPort": 9443, "name": "https"}},
 							"securityContext": nonRoot,
 							"readinessProbe": map[string]any{

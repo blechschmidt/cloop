@@ -9,8 +9,13 @@ FROM ${BASE}
 # image (cloop hub doctor --probe-image), which needs sh, httpd and wget — so
 # the probe pulls nothing from a registry.
 RUN apk add --no-cache git ca-certificates busybox-extras
-COPY cloop kubectl claude /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/cloop /usr/local/bin/kubectl /usr/local/bin/claude
+# cloop itself is cloop-real; cloop is the wrapper that holds one repository's
+# workspace provisioner until a test releases it, and runs every other
+# invocation at once (cloop-hold.sh, Task 20455).
+COPY cloop /usr/local/bin/cloop-real
+COPY cloop-hold /usr/local/bin/cloop
+COPY kubectl claude /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/cloop /usr/local/bin/cloop-real /usr/local/bin/kubectl /usr/local/bin/claude
 # The Pod's root filesystem is read-only; /tmp is the emptyDir the driver mounts.
 ENV HOME=/tmp
 USER 65532:65532
