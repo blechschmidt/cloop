@@ -25,11 +25,14 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy/registrytest"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 )
 
@@ -205,12 +208,48 @@ func TestPolicyReachesTheExecutorThatRunsTheImage(t *testing.T) {
 // TestChartDefaultPolicyIsRestrictive: the shipped Helm default must actually
 // deny something. A default that admits everything is worse than none, because
 // it reads as protection.
+//
+// Read from the chart's own values.yaml, so the policy asserted is the one that
+// ships. Its require_digest is off since Task 20457 — the hub pins a tag to its
+// digest at the registry before any Pod carries it — so the default still
+// refuses every registry but the hub's own, and a tag it admits is one it must
+// pin (NeedsPin), which TestATagReachesAPodOnlyAsItsDigest holds the Pod
+// builder to.
 func TestChartDefaultPolicyIsRestrictive(t *testing.T) {
-	// The values the chart renders with no overrides: the registry the hub's
-	// own image comes from, and digests required.
+	root, err := moduleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "deploy", "helm", "cloop-hub", "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values struct {
+		Image struct {
+			Repository string `yaml:"repository"`
+		} `yaml:"image"`
+		Sandbox struct {
+			ImagePolicy struct {
+				AllowedRegistries []string `yaml:"allowedRegistries"`
+				RequireDigest     bool     `yaml:"requireDigest"`
+				RequireSignature  bool     `yaml:"requireSignature"`
+			} `yaml:"imagePolicy"`
+		} `yaml:"sandbox"`
+	}
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		t.Fatalf("values.yaml: %v", err)
+	}
+	vp := values.Sandbox.ImagePolicy
+	registries := vp.AllowedRegistries
+	if len(registries) == 0 {
+		// The chart's default: the registry the hub's own image comes from
+		// (cloop-hub.imageRegistry).
+		registries = []string{strings.SplitN(values.Image.Repository, "/", 2)[0]}
+	}
 	shipped := config.ImagePolicyConfig{
-		AllowedRegistries: []string{"ghcr.io"},
-		RequireDigest:     true,
+		AllowedRegistries: registries,
+		RequireDigest:     vp.RequireDigest,
+		RequireSignature:  vp.RequireSignature,
 	}
 	p := shipped.Policy()
 	if err := p.Validate(); err != nil {
@@ -220,11 +259,67 @@ func TestChartDefaultPolicyIsRestrictive(t *testing.T) {
 		t.Fatal("the shipped chart default constrains nothing")
 	}
 	for _, ref := range []string{
-		"docker.io/library/alpine@" + allowedDigest, // wrong registry
-		"ghcr.io/acme/tools:latest",                 // right registry, no digest
+		"docker.io/library/alpine@" + allowedDigest,   // wrong registry
+		"evil.example/ghcr.io/tools@" + allowedDigest, // the allowed registry as a path
+		"ghcr.io.evil.example/acme/tools:latest",      // the allowed registry as a prefix
 	} {
 		if _, err := p.Evaluate(ref); err == nil {
 			t.Errorf("the shipped chart default admits %q", ref)
+		}
+	}
+	d, err := p.Evaluate(registries[0] + "/acme/tools:latest")
+	switch {
+	case vp.RequireDigest && err == nil:
+		t.Error("the shipped chart default requires digests and admits a tag")
+	case !vp.RequireDigest && (err != nil || !d.NeedsPin):
+		t.Errorf("the shipped chart default's tag on its own registry: %+v, %v; want it admitted to be pinned", d, err)
+	}
+}
+
+// TestATagReachesAPodOnlyAsItsDigest (Task 20457): the Pod builder of the hub's
+// Kubernetes driver — tags resolved, as reconciliation builds it — resolves a
+// project's tag at its registry, and the Pod carries the digest: a kubelet that
+// pulls later pulls what was evaluated, however the tag has moved. And under
+// require_digest or require_signature a tag the hub cannot resolve reaches no
+// Pod, the operator's included.
+func TestATagReachesAPodOnlyAsItsDigest(t *testing.T) {
+	reg := registrytest.New(t)
+	first := reg.PushManifest("acme/tools", "3.12", registrytest.MediaOCIIndex, "first")
+	opts := kubernetes.Options{
+		Image:          "ghcr.io/acme/hub@" + allowedDigest,
+		ImagePolicy:    imagepolicy.Policy{AllowedRegistries: []string{reg.Host()}},
+		ResolveTags:    true,
+		RegistryClient: reg.Client(),
+	}
+	ctx := context.Background()
+	spec := executor.Spec{Argv: []string{"cloop", "run"}, Image: reg.Host() + "/acme/tools:3.12"}
+
+	got, err := kubernetes.AuditPodImage(ctx, opts, spec)
+	if err != nil || got != reg.Host()+"/acme/tools@"+first {
+		t.Fatalf("Pod image = %q, %v; want the digest the tag resolved to", got, err)
+	}
+	second := reg.PushManifest("acme/tools", "3.12", registrytest.MediaOCIIndex, "second")
+	if got, err := kubernetes.AuditPodImage(ctx, opts, spec); err != nil || got != reg.Host()+"/acme/tools@"+second {
+		t.Fatalf("after the tag moved, Pod image = %q, %v; want the digest it names now", got, err)
+	}
+
+	host := reg.Host()
+	reg.Close()
+	for _, policy := range []imagepolicy.Policy{
+		{AllowedRegistries: []string{host}, RequireDigest: true},
+		{AllowedRegistries: []string{host}, RequireSignature: true, CosignPublicKeys: []string{"/k.pub"}},
+	} {
+		o := opts
+		o.ImagePolicy = policy
+		o.Image = host + "/ops/harness:v1"
+		for name, s := range map[string]executor.Spec{
+			"the project's tag":  spec,
+			"the operator's tag": {Argv: []string{"cloop", "run"}},
+		} {
+			if got, err := kubernetes.AuditPodImage(ctx, o, s); err == nil || !errors.Is(err, imagepolicy.ErrDenied) {
+				t.Errorf("require_digest=%t require_signature=%t, %s with the registry unreachable: Pod image %q, %v; "+
+					"want a refusal", policy.RequireDigest, policy.RequireSignature, name, got, err)
+			}
 		}
 	}
 }

@@ -53,6 +53,18 @@
 // the harness's wrapper prints and ProjectResult hands to the hub. See
 // projectresult.go.
 //
+// # The image a Pod runs
+//
+// A Pod carries a digest, not a tag. Before the Pod is built the hub resolves
+// every tag it would carry — the project's image, the operator's, one of
+// cloop's own — at the registry the kubelet will pull it from, checks the
+// digest against the image trust policy (and its signature, when the policy
+// asks), and writes repo@sha256:<digest> into the spec, so the artifact a
+// kubelet pulls later is the one that was evaluated however the tag moves in
+// between. A private registry is asked with the registry secret the hub holds
+// for this executor, never with the namespace's imagePullSecrets. See
+// imageresolve.go.
+//
 // # What the confinement is, and is not
 //
 // Every Pod is built by buildPod with runAsNonRoot, a read-only root
@@ -92,6 +104,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -307,23 +320,49 @@ type Options struct {
 	// ImagePolicy constrains the images a *project* may name in its
 	// .cloop/sandbox.yaml (Task 20177). The zero value constrains nothing.
 	//
-	// It matters more here than on the container backend. There, a tag is
-	// resolved against a local store and the digest is what runs; a cluster
-	// has no store the control plane can read, so a tag in a Pod spec is
-	// resolved by a kubelet, on a node, at a time nobody controls. Setting
-	// require_digest is the only way to make a Kubernetes run reproducible.
+	// A tag in a Pod spec is resolved by a kubelet, on a node, whenever the Pod
+	// is scheduled, so the policy's verdict holds for what runs only if the Pod
+	// carries the digest that was evaluated. Under ResolveTags it does: the hub
+	// resolves the tag at its registry first (imageresolve.go, Task 20457).
+	// require_digest and require_signature then also refuse any tag the hub
+	// cannot resolve, the operator's Image included.
 	//
-	// It reaches Image above only under govern_operator_images (Task 20453).
+	// Its allowlists reach Image above only under govern_operator_images (Task
+	// 20453).
 	ImagePolicy imagepolicy.Policy
 
 	// VerifyOwnImages checks every image from one of cloop's own repositories
 	// against the workflow that publishes it before a Pod runs it (Task
-	// 20453). Only a digest can be checked here — the cluster's image store
-	// belongs to its nodes, so there is nothing to resolve a tag in — and a
-	// tag is admitted with a warning saying so, or refused when
+	// 20453): its digest — the one a tag resolves to at the registry, under
+	// ResolveTags — and the Pod carries that digest. One that cannot be
+	// verified is admitted with a warning saying so, or refused when
 	// executor.ImageProvenanceRequired. A signature that is present and wrong
 	// refuses either way. The hub's driver sets it (pkg/executor/reconcile).
 	VerifyOwnImages bool
+
+	// ResolveTags resolves every tag a Pod would carry — a project's image,
+	// Image above, one of cloop's own — to the digest its registry serves for
+	// it, before the Pod is built, and the Pod carries the digest (Task
+	// 20457). The hub's driver sets it (pkg/executor/reconcile); an executor
+	// built without it resolves nothing, as before. See imageresolve.go.
+	ResolveTags bool
+
+	// RegistryLogins supplies the logins ResolveTags asks a private registry
+	// with, and cosign fetches a signature from it with: the registry secret
+	// the hub holds for this executor (executors.kubernetes.registry_secret).
+	// Nil asks anonymously. Never the namespace's imagePullSecrets, which are
+	// the kubelet's and which this driver does not read.
+	RegistryLogins RegistryLoginSource
+
+	// RegistryClient makes ResolveTags's requests. Nil uses the image policy
+	// package's default; tests point it at a local registry's certificate.
+	RegistryClient *http.Client
+
+	// ImageResolver replaces the registry resolver ResolveTags builds, and
+	// turns resolution on by itself. Tests set it, to stand in for a registry
+	// an image reference names that they cannot serve — ghcr.io. The registry
+	// login is still read from RegistryLogins, for cosign.
+	ImageResolver imagepolicy.Resolver
 
 	// GitCABundle is a CA bundle in the workload namespace that every Pod's
 	// git verifies particular https URLs against — the hub's git proxy, on a
@@ -1035,6 +1074,18 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		projectID = strings.TrimSpace(spec.WorkDir)
 	}
 
+	// What the Pod can carry, and the image it runs, before anything is leased
+	// (choosePodImage): resolving the image can take a registry round trip and
+	// a cosign run, and a refusal at the end of them must not cost a minted
+	// credential (Task 20457).
+	if err := checkPodSpec(spec); err != nil {
+		return executor.Handle{}, err
+	}
+	img, err := e.choosePodImage(ctx, spec)
+	if err != nil {
+		return executor.Handle{}, err
+	}
+
 	// The lease is acquired with a context detached from the caller's: the
 	// credential must outlive the request that started the workload, because
 	// the driver needs it to delete the Pod later.
@@ -1130,7 +1181,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 
 	// One request builds both objects, so the label the policy selects on and
 	// the label the Pod carries cannot drift apart.
-	req, err := e.podRequestFor(ctx, spec, handleID, namespace, ws.secret())
+	req, err := e.podRequestWith(spec, img, handleID, namespace, ws.secret())
 	if err != nil {
 		release()
 		return executor.Handle{}, err
@@ -1226,8 +1277,12 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 	// is the same stream that reaches the live-log room and the run artifact.
 	// A credential projected into the Pod above must not come back out of it.
 	rec.bus = logbus.New(rec.id, executor.StreamCombined, logbus.Options{Redact: spec.Redactor()})
-	// One of cloop's own images that runs unverified says so at the top of
-	// the run's log (Task 20453).
+	// What the image's tag resolved to, and anything that ran weaker than the
+	// policy wanted, at the top of the run's log (Task 20457) — then one of
+	// cloop's own images that runs unverified (Task 20453).
+	for _, line := range req.ImageLog {
+		rec.bus.Emit(line)
+	}
 	if p := req.ImageProvenance; p != nil && p.Warning != "" {
 		rec.bus.Emit("[cloop] warning: " + p.Warning + "\n")
 	}
@@ -1313,10 +1368,11 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		// a node this process cannot see, and host-side tooling that
 		// signals PIDs directly must go through Signal instead.
 		StartedAt: rec.startedAt,
-		// The reference as scheduled. Unlike the container driver there is no
-		// local store to resolve a tag against, so this is digest-pinned only
-		// when the spec pinned it; ImageWarnings() is what nudges an author
-		// toward doing so.
+		// The reference as scheduled: the digest a tag resolved to at its
+		// registry before the Pod was built (Task 20457), so it names what the
+		// kubelet pulls however the tag moves afterwards. A tag only when the
+		// hub could not resolve it and the policy let it through, which the
+		// run's log says.
 		Image: podImage(created, desired),
 		// What the check of one of cloop's own images found (Task 20453).
 		ImageProvenance: req.ImageProvenance,
@@ -1340,53 +1396,30 @@ func podImage(created, desired *pod) string {
 	return ""
 }
 
-// authorizeImage applies the hub's image trust policy to a project-supplied
-// image reference, returning the reference that must go into the Pod.
-//
-// There is no Resolver here: a cluster's image store belongs to its nodes, and
-// the control plane cannot read it. So a tag cannot be pinned at this layer —
-// it can only be *required* to arrive pinned, which is what
-// sandbox.image_policy.require_digest does and why the shipped chart default
-// sets it. Without it the Pod carries a tag, some kubelet resolves it whenever
-// it happens to schedule, and the artifact that runs is not the one anything
-// evaluated. Authorize returns a warning saying so rather than leaving the
-// operator to deduce it.
-func (e *Executor) authorizeImage(ctx context.Context, ref string) (string, error) {
-	enforcer := imagepolicy.Enforcer{
-		Policy:   e.opts.ImagePolicy,
-		Verifier: e.verifier,
-	}
-	res, err := enforcer.Authorize(ctx, ref)
-	if err != nil {
-		return "", classifyImageDenial(err)
-	}
-	for _, w := range res.Warnings {
-		fmt.Fprintf(os.Stderr, "[kubernetes] sandbox image: %s\n", w)
-	}
-	return res.Ref, nil
-}
-
 // VerifyOwnImage checks this executor's configured image the way a Pod
 // would be checked, when it is one of cloop's own, and records the verdict
-// (Task 20453). It creates nothing; `cloop hub doctor` calls it. A nil
+// (Task 20453) — resolving a tag at its registry first, as a dispatch does
+// (Task 20457). It creates nothing; `cloop hub doctor` calls it. A nil
 // Provenance means the image is not cloop's.
 func (e *Executor) VerifyOwnImage(ctx context.Context) (*imagepolicy.Provenance, error) {
 	if !imagepolicy.IsOwnImage(e.opts.Image) {
 		return nil, nil
 	}
-	p, err := e.checkOwnImage(ctx, e.opts.Image, "executors.kubernetes.image")
+	r, ctx := e.newImageResolution(ctx)
+	p, err := e.ownImageCheck(ctx, e.opts.Image, "executors.kubernetes.image", r.resolver)
 	return &p, err
 }
 
-// checkOwnImage verifies one of cloop's own images for a Pod (Task 20453).
-//
-// With no resolver: a cluster's image store is its nodes', so a tag here is a
-// pointer the hub cannot follow, and only a digest is verified. A tag is
+// ownImageCheck verifies one of cloop's own images for a Pod (Task 20453),
+// resolving a tag to the digest its registry serves with resolver (Task
+// 20457). With no resolver only a digest can be verified, and a tag is
 // unverifiable — admitted with a warning that says so, refused when
-// executor.ImageProvenanceRequired. Task 20457 resolves tags at the registry.
-func (e *Executor) checkOwnImage(ctx context.Context, image, field string) (imagepolicy.Provenance, error) {
+// executor.ImageProvenanceRequired.
+func (e *Executor) ownImageCheck(ctx context.Context, image, field string,
+	resolver imagepolicy.Resolver) (imagepolicy.Provenance, error) {
 	p, err := imagepolicy.OwnImageCheck{
 		Image:    image,
+		Resolver: resolver,
 		Verifier: e.provenance,
 		Required: executor.ImageProvenanceRequired(),
 		Subject:  "Kubernetes executor " + e.id,
@@ -1448,11 +1481,24 @@ func (e *Executor) buildPodFor(ctx context.Context, spec executor.Spec, handleID
 // the two structs it could have gone on are both persisted.
 func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handleID, namespace,
 	workspaceSecret string) (podRequest, error) {
+	if err := checkPodSpec(spec); err != nil {
+		return podRequest{}, err
+	}
+	img, err := e.choosePodImage(ctx, spec)
+	if err != nil {
+		return podRequest{}, err
+	}
+	return e.podRequestWith(spec, img, handleID, namespace, workspaceSecret)
+}
+
+// checkPodSpec refuses what a Pod cannot express, before anything is resolved
+// or leased for it.
+func checkPodSpec(spec executor.Spec) error {
 	if spec.ResourceLimits.PIDs > 0 {
 		// A Pod cannot express a PID cap: podPidsLimit is a kubelet flag,
 		// set per node by the cluster operator. Accepting the number and not
 		// enforcing it would be worse than saying so.
-		return podRequest{}, fmt.Errorf("%w: a Pod cannot carry a PID limit — it is the kubelet's "+
+		return fmt.Errorf("%w: a Pod cannot carry a PID limit — it is the kubelet's "+
 			"podPidsLimit, configured per node by the cluster operator", executor.ErrUnsupported)
 	}
 	if len(spec.SetupCommands) > 0 {
@@ -1461,51 +1507,89 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		// prelude would look equivalent and would not be: they would re-run on
 		// every task instead of once per sandbox, and their result would be
 		// discarded with the Pod. Refusing names the alternative.
-		return podRequest{}, fmt.Errorf("%w: the Kubernetes executor cannot build a sandbox image; "+
+		return fmt.Errorf("%w: the Kubernetes executor cannot build a sandbox image; "+
 			"build the setup: steps into an image, publish it, and reference it as "+
 			"image: in .cloop/sandbox.yaml", executor.ErrUnsupported)
 	}
+	return nil
+}
 
+// chosenImage is the image a Pod carries, as choosePodImage decided it: the
+// reference, the check of one of cloop's own images, and what the run's log
+// says about both.
+type chosenImage struct {
+	image string
+	prov  *imagepolicy.Provenance
+	log   []string
+}
+
+// choosePodImage decides the image a Pod for spec carries, resolving every tag
+// to the digest its registry serves for it (imageresolve.go, Task 20457).
+//
+// Start calls it before anything is leased, as a device's dispatch does: it can
+// take a registry round trip and a cosign run, and a credential minted for a
+// run that is then refused for its image is one the broker believes is out in
+// the world.
+func (e *Executor) choosePodImage(ctx context.Context, spec executor.Spec) (chosenImage, error) {
 	// A per-project image replaces the executor's configured one. It has
 	// already been through container.ValidateImageRef in the parser, and goes
 	// through this package's ValidateImageRef below on the way into the Pod.
 	//
-	// It also goes through the hub's image trust policy here, which is the
-	// last point before the reference becomes a field the API server accepts
-	// and a kubelet acts on. authorizeImage returns the digest-pinned form
-	// where the policy could obtain one, and that is what lands in the Pod:
-	// past this line the project's tag does not exist, so no later edit can
-	// reintroduce the window between deciding and pulling.
+	// Every image goes through the hub's resolution and trust policy here,
+	// the last point before the reference becomes a field the API server
+	// accepts and a kubelet acts on (imageresolve.go, Task 20457). What comes
+	// back is the digest the tag resolved to at its registry — verified, under
+	// require_signature — and that is what lands in the Pod: past this line
+	// the tag does not exist, so neither a later edit nor the registry
+	// repointing it can reintroduce the window between deciding and pulling.
+	res, ctx := e.newImageResolution(ctx)
 	image, field := e.opts.Image, "executors.kubernetes.image"
+	operator := true
 	if override := strings.TrimSpace(spec.Image); override != "" {
-		authorized, err := e.authorizeImage(ctx, override)
+		authorized, err := res.authorizeProject(ctx, override)
 		if err != nil {
-			return podRequest{}, err
+			return chosenImage{}, err
 		}
 		if err := ValidateImageRef(authorized); err != nil {
-			return podRequest{}, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
+			return chosenImage{}, fmt.Errorf("%w: sandbox image: %w", executor.ErrInvalidSpec, err)
 		}
-		image, field = authorized, "image: in the project's .cloop/sandbox.yaml"
+		image, field, operator = authorized, "image: in the project's .cloop/sandbox.yaml", false
 	} else if e.opts.ImagePolicy.GovernsOperatorImage(image) {
 		// The operator's own image, under the project rules because the
 		// operator asked for it (govern_operator_images, Task 20453).
-		authorized, err := e.authorizeImage(ctx, image)
+		authorized, err := res.authorizeProject(ctx, image)
 		if err != nil {
-			return podRequest{}, err
+			return chosenImage{}, err
 		}
-		image = authorized
+		image, operator = authorized, false
 	}
-	// One of cloop's own, however chosen: its digest verified against the
-	// workflow that publishes it before a kubelet is handed it (Task 20453).
 	var prov *imagepolicy.Provenance
-	if e.opts.VerifyOwnImages && imagepolicy.IsOwnImage(image) {
-		p, err := e.checkOwnImage(ctx, image, field)
+	switch {
+	case e.opts.VerifyOwnImages && imagepolicy.IsOwnImage(image):
+		// One of cloop's own, however chosen: its digest — the one its tag
+		// resolves to — verified against the workflow that publishes it
+		// before a kubelet is handed it (Task 20453).
+		p, err := res.checkOwnImage(ctx, image, field)
 		if err != nil {
-			return podRequest{}, err
+			return chosenImage{}, err
 		}
 		prov, image = &p, p.Ref
+	case operator:
+		// The operator's image, which the project rules do not govern: its
+		// tag still goes to the kubelet as a digest.
+		pinned, err := res.pinOperator(ctx, image, field)
+		if err != nil {
+			return chosenImage{}, err
+		}
+		image = pinned
 	}
+	return chosenImage{image: image, prov: prov, log: res.imageLogLines()}, nil
+}
 
+// podRequestWith assembles the request from spec and the image chosen for it.
+func (e *Executor) podRequestWith(spec executor.Spec, img chosenImage, handleID, namespace,
+	workspaceSecret string) (podRequest, error) {
+	image, prov := img.image, img.prov
 	req := podRequest{
 		ExecutorID:            e.id,
 		HandleID:              handleID,
@@ -1542,6 +1626,7 @@ func (e *Executor) podRequestFor(ctx context.Context, spec executor.Spec, handle
 		GitCA:                 podGitCA(spec.GitCA, e.opts.GitCABundle),
 		ProjectSeed:           len(spec.ProjectSeed) > 0,
 		ImageProvenance:       prov,
+		ImageLog:              img.log,
 
 		ActiveDeadlineSeconds:         e.opts.ActiveDeadlineSeconds,
 		TerminationGracePeriodSeconds: int64(e.opts.TerminationGracePeriod / time.Second),

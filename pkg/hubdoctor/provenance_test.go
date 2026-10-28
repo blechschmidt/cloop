@@ -111,9 +111,13 @@ func TestImageProvenanceReportsWhatDispatchesFound(t *testing.T) {
 	}
 }
 
-// TestImageProvenanceSaysAKubernetesTagCannotBeChecked: no dispatch needed to
-// know it.
-func TestImageProvenanceSaysAKubernetesTagCannotBeChecked(t *testing.T) {
+// TestImageProvenanceTreatsAKubernetesTagLikeAnyOther: a Kubernetes executor
+// resolves a tag of cloop's image at its registry and verifies the digest, as
+// every other executor does (Task 20457) — so until a dispatch has, the doctor
+// says the first one will, and once one has it reports what was found with the
+// remedy of an executor that resolves. It used to warn that a Pod ran the tag
+// unverified, which stopped being true.
+func TestImageProvenanceTreatsAKubernetesTagLikeAnyOther(t *testing.T) {
 	provenanceMode(t, false)
 	imagepolicy.ResetRecentProvenance()
 	t.Cleanup(imagepolicy.ResetRecentProvenance)
@@ -122,20 +126,32 @@ func TestImageProvenanceSaysAKubernetesTagCannotBeChecked(t *testing.T) {
 	got := provenanceFindings(t, cfg, Options{LookPath: noCosign})
 	var tag *Finding
 	for i := range got {
-		if strings.Contains(got[i].Message, "a tag") {
+		if strings.Contains(got[i].Message, executor.DefaultHarnessImage) {
 			tag = &got[i]
 		}
 	}
-	if tag == nil || tag.Severity != SeverityWarn || !strings.Contains(tag.Remediation, "by digest") {
-		t.Fatalf("a Kubernetes tag: %+v", got)
+	if tag == nil || tag.Severity != SeverityPass || !strings.Contains(tag.Message, "the first one will") ||
+		strings.Contains(tag.Message, "unverified") {
+		t.Fatalf("a Kubernetes tag before any dispatch: %+v", got)
 	}
 
-	// By digest there is nothing to say until a dispatch has checked it.
-	cfg.Executors.Kubernetes.Image = "ghcr.io/blechschmidt/cloop-harness@sha256:" + strings.Repeat("cd", 32)
-	for _, f := range provenanceFindings(t, cfg, Options{LookPath: noCosign})[1:] {
-		if f.Severity != SeverityPass || strings.Contains(f.Message, "a tag") {
-			t.Errorf("a digest: %+v", f)
+	// A dispatch that could not verify it: the remedy is the one for an
+	// executor that resolves — reach the registry and Sigstore — never "pin it
+	// by digest so the hub can verify it at all".
+	imagepolicy.RecordProvenance("kubernetes", imagepolicy.Provenance{
+		Image: executor.DefaultHarnessImage, Ref: executor.DefaultHarnessImage,
+		Status: imagepolicy.ProvenanceUnverifiable, Detail: "cosign is not on this host's PATH",
+		CheckedAt: time.Now(),
+	})
+	got = provenanceFindings(t, cfg, Options{LookPath: noCosign})
+	tag = nil
+	for i := range got {
+		if strings.Contains(got[i].Message, executor.DefaultHarnessImage) {
+			tag = &got[i]
 		}
+	}
+	if tag == nil || tag.Severity != SeverityWarn || !strings.Contains(tag.Remediation, "Install cosign") {
+		t.Fatalf("a Kubernetes tag a dispatch could not verify: %+v", got)
 	}
 }
 

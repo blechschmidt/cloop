@@ -29,6 +29,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/artifact"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -229,6 +230,34 @@ func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex exec
 	if _, err := artifact.WriteSandboxRun(workDir, rec); err != nil {
 		fmt.Fprintf(os.Stderr, "[ui] sandbox: record run environment for %s: %v\n", workDir, err)
 	}
+}
+
+// seededProvenance is what the hub records about a dispatch that carried its
+// project out as a seed — where it went, and the image it ran, as the executor
+// started it — for the merge of its outcome to stamp on the tasks and to write
+// on their task.dispatch rows (Task 20457). The same facts the run's own
+// placement record carries for a run on this filesystem (recordSandboxProvenance).
+func seededProvenance(ex executor.Executor, h executor.Handle, resolved *sandbox.Resolved, runID, payer string,
+	leaseIDs []string) projectseed.Provenance {
+	prov := projectseed.Provenance{
+		ExecutorID:   ex.ID(),
+		ExecutorKind: ex.Kind(),
+		Isolation:    string(ex.Capabilities().Isolation),
+		RunID:        runID,
+		Identity:     payer,
+		PinnedImage:  h.Image,
+		LeaseIDs:     leaseIDs,
+	}
+	if p := h.ImageProvenance; p != nil {
+		prov.ImageProvenance = string(p.Status)
+		prov.VerifiedDigest = p.VerifiedDigest()
+	}
+	if resolved.Present() {
+		prov.SpecHash = resolved.Hash
+		prov.RequestedImage = resolved.Spec.Image
+		prov.SetupHash = resolved.Spec.SetupHash()
+	}
+	return prov
 }
 
 // egressGrantChecker answers "does this project hold an active grant by this

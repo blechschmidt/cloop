@@ -1,9 +1,10 @@
 package kubernetes
 
 // provenance_test.go: the Kubernetes driver's check of cloop's own images (Task
-// 20453). A cluster's image store is its nodes', so there is nothing to resolve
-// a tag in: a digest is verified, and a tag is unverifiable — said, and refused
-// when executors.image_provenance is required.
+// 20453). A cluster's image store is its nodes', so the hub's driver resolves a
+// tag at the registry (Task 20457) and verifies the digest the Pod then carries;
+// a driver built without resolution verifies only a digest, and a tag is
+// unverifiable — said, and refused when executors.image_provenance is required.
 
 import (
 	"context"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
+	"github.com/blechschmidt/cloop/pkg/imagepolicy/registrytest"
 	"github.com/blechschmidt/cloop/pkg/provenance"
 )
 
@@ -118,10 +120,68 @@ func TestAnUnsignedDigestWarnsOrIsRefused(t *testing.T) {
 	}
 }
 
-// TestATagOfCloopsImageOnKubernetesIsSaidToBeUnverifiable: the default image is
-// a tag; the hub cannot follow it on a cluster, says so — naming the digest
-// pin that fixes it — and asks no verifier about a tag. Required refuses it.
-func TestATagOfCloopsImageOnKubernetesIsSaidToBeUnverifiable(t *testing.T) {
+// TestATagOfCloopsImageIsResolvedAndVerifiedBeforeAPodRunsIt: the hub's
+// driver resolves the default image's tag at its registry — a stand-in for
+// ghcr.io here — and verifies that digest against the workflow that publishes
+// it; the Pod carries the digest, so under required it runs (Task 20457). It
+// used to be refused there, the hub having nothing to resolve the tag in.
+func TestATagOfCloopsImageIsResolvedAndVerifiedBeforeAPodRunsIt(t *testing.T) {
+	reg := registrytest.New(t)
+	platform := reg.PushManifest("blechschmidt/cloop-harness", "", registrytest.MediaOCIManifest, "amd64")
+	index := reg.PushIndex("blechschmidt/cloop-harness", "latest", registrytest.MediaOCIIndex, platform)
+	ghcr := &imagepolicy.RegistryResolver{
+		Client:      reg.Client(),
+		Endpoint:    func(string) string { return reg.URL() },
+		Credentials: func(string) (imagepolicy.RegistryCredential, bool) { return imagepolicy.RegistryCredential{}, false },
+	}
+	requireProvenance(t, true)
+	v := podVerdict(imagepolicy.ProvenanceVerified)
+	ex := provenanceExecutor(t, DefaultImage, v, func(o *Options) { o.ImageResolver = ghcr })
+	req, err := ex.podRequestFor(context.Background(), testSpec(), "h1", "cloop", "")
+	if err != nil {
+		t.Fatalf("required: %v", err)
+	}
+	want := "ghcr.io/blechschmidt/cloop-harness@" + index
+	if req.Image != want || !req.ImageProvenance.Verified() || req.ImageProvenance.Digest != index ||
+		v.asked.Load() != 1 {
+		t.Fatalf("Pod image %q, provenance %+v after %d verifications; want %s verified", req.Image,
+			req.ImageProvenance, v.asked.Load(), want)
+	}
+	if !strings.Contains(strings.Join(req.ImageLog, ""), "image "+DefaultImage+" resolved at ghcr.io to "+want) {
+		t.Errorf("the run's log does not say what the tag resolved to: %q", req.ImageLog)
+	}
+
+	// The registry out of reach: unverifiable, with the remedy of an executor
+	// that resolves — reach the registry, or pin — and refused when required,
+	// or when the policy sends no tag to a Pod.
+	reg.Close()
+	requireProvenance(t, false)
+	req, err = ex.podRequestFor(context.Background(), testSpec(), "h1", "cloop", "")
+	if err != nil || req.Image != DefaultImage || req.ImageProvenance.Status != imagepolicy.ProvenanceUnverifiable ||
+		!strings.Contains(req.ImageProvenance.Warning, "unreachable") ||
+		!strings.Contains(req.ImageProvenance.Warning, "let the hub reach the registry") {
+		t.Fatalf("warn, unreachable: %q, %+v, %v", req.Image, req.ImageProvenance, err)
+	}
+	requireProvenance(t, true)
+	_, err = ex.podRequestFor(context.Background(), testSpec(), "h1", "cloop", "")
+	var denied *imagepolicy.DenyError
+	if !errors.As(err, &denied) || denied.Rule != imagepolicy.RuleProvenance {
+		t.Fatalf("required, unreachable: %v, want a %s refusal", err, imagepolicy.RuleProvenance)
+	}
+	requireProvenance(t, false)
+	ex.opts.ImagePolicy = imagepolicy.Policy{RequireDigest: true}
+	_, err = ex.podRequestFor(context.Background(), testSpec(), "h1", "cloop", "")
+	if !errors.As(err, &denied) || denied.Rule != imagepolicy.RuleResolution ||
+		!strings.Contains(denied.Reason, "ghcr.io") {
+		t.Fatalf("require_digest, unreachable: %v, want a %s refusal naming ghcr.io", err, imagepolicy.RuleResolution)
+	}
+}
+
+// TestATagOfCloopsImageIsUnverifiableWithoutResolution: a driver built without
+// ResolveTags — an embedder that is not the hub — verifies only a digest, says
+// a tag is unverifiable, names the digest pin that fixes it, asks no verifier
+// about a tag, and refuses it when required.
+func TestATagOfCloopsImageIsUnverifiableWithoutResolution(t *testing.T) {
 	requireProvenance(t, false)
 	v := podVerdict(imagepolicy.ProvenanceVerified)
 	ex := provenanceExecutor(t, DefaultImage, v, nil)

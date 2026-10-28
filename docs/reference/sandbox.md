@@ -405,11 +405,23 @@ runs *that* — the tag stops existing before anything is inspected, built from 
 started, so a tag repointed between the check and the pull cannot change what
 runs.
 
-The Kubernetes executor cannot do this. A cluster's image store belongs to its
-nodes, so the control plane has nothing to resolve against; the Pod carries the
-reference to an API server and some kubelet resolves it later, on a node, when
-it schedules. **On Kubernetes, `require_digest: true` is the only thing that
-closes that window**, which is why the shipped Helm chart sets it.
+The Kubernetes executor has no store of its own — a cluster's image store
+belongs to its nodes — so it asks the registry the kubelet will pull from
+(Task 20457). Before a Pod is built, every tag it would carry — the project's
+image, `executors.kubernetes.image`, one of cloop's own — is resolved to the
+digest its registry serves now, and the Pod carries `repo@sha256:…`. The
+kubelet, pulling whenever the Pod is scheduled, pulls exactly that, however the
+tag has moved in between. A private registry is asked with the login in
+`executors.kubernetes.registry_secret` (a registry secret the hub holds for
+itself, never the namespace's `imagePullSecrets`), or anonymously.
+
+When the hub cannot resolve a tag — its registry unreachable from the hub, or
+private with no login for it — `require_digest` and `require_signature` refuse
+the run, naming the registry and what to do; otherwise the tag goes into the Pod
+as written, with a warning on the run's log, and the window is open for that
+run. `require_digest` is therefore no longer what closes the window on
+Kubernetes, and the shipped Helm chart leaves it off: what it still buys is a
+repository that names an exact artifact, and a refusal instead of that warning.
 
 A device in container mode, and a virtual executor, run images from the device's
 own store, which the hub cannot read either. Without `require_signature` the hub

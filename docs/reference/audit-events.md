@@ -110,7 +110,7 @@ Payload keys:
 
 - `task.attachment_delete` — `id`, `attachment_id`, `name`, `size`, `sha256`
 - `task.delete` — `id`
-- `task.dispatch` — `task_id`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `requested_image`, `pinned_image`, `image_provenance`, `verified_digest`, `spec_sha256`, `setup_sha256`, `lease_ids`
+- `task.dispatch` — `task_id`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `requested_image`, `pinned_image`, `image_digest`, `image_provenance`, `verified_digest`, `spec_sha256`, `setup_sha256`, `lease_ids`, `recorded_by`
 - `task.finish` — `task_id`, `outcome`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `reason`, `started_at`, `completed_at`, `duration_ms`, `abort_class`, `abort_cleared`, `fail_count`, `write_back_commit`
 - `task.quarantine` — `task_id`, `title`, `kind`, `nodes`, `reason`
 - `task.quarantine_release` — `task_id`, `kind`, `nodes`, `marked_at`, `via`
@@ -118,7 +118,7 @@ Payload keys:
 - `task.upsert` — `id`, `title`, `status`, `priority`, `role`, `description`
 
 - `task.attachment_delete` — Attaching is not audited: a run's files are recorded in the project's event journal, which names the run. A file deleted with its task is covered by that task's `task.delete`.
-- `task.dispatch` — This and task.finish are what make "where did this task run, and what credentials did it hold" answerable from audit_events alone, without joining the executor tables.
+- `task.dispatch` — This and task.finish are what make "where did this task run, and what credentials did it hold" answerable from audit_events alone, without joining the executor tables. image_digest is the digest pinned_image names. A run carried out as a seed — on a Kubernetes Pod or a device — writes its own rows into a copy of the project that never comes back, so the hub writes them when it merges the run's outcome, recorded_by "hub" (Task 20457).
 - `task.finish` — `outcome` carries the terminal status; `reason` carries why, when there is one.
 - `task.quarantine` — `nodes` lists each executor that went down under the task with when it went unreachable. A marked task runs again only after an explicit reset, recorded as task.quarantine_release.
 - `task.quarantine_release` — `via` names the reset — the dashboard, `cloop task reset`, `cloop task bulk reset`; the actor is who pressed it.

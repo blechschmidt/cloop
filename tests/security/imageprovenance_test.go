@@ -88,16 +88,21 @@ func cloopImageDispatches(t *testing.T, status imagepolicy.ProvenanceStatus) []d
 		out = append(out, dispatch{name, ref, prov, err})
 	}
 
-	// The Kubernetes executor, which has no store to resolve a tag in.
+	// The Kubernetes executor, as the hub configures it: no store of its own
+	// to resolve a tag in, so it asks the registry (Task 20457) — a stand-in
+	// for ghcr.io here, as for the device below.
+	ghcr := deviceTagResolver{tag: cloopDigest, "ghcr.io/acme/base:1": allowedDigest}
 	for name, c := range map[string]struct {
 		opts kubernetes.Options
 		spec executor.Spec
 	}{
 		"kubernetes: the default":          {kubernetes.Options{VerifyOwnImages: true}, executor.Spec{Argv: []string{"cloop", "run"}}},
+		"kubernetes: configured by tag":    {kubernetes.Options{VerifyOwnImages: true, Image: tag}, executor.Spec{Argv: []string{"cloop", "run"}}},
 		"kubernetes: configured by digest": {kubernetes.Options{VerifyOwnImages: true, Image: pinned}, executor.Spec{Argv: []string{"cloop", "run"}}},
 		"kubernetes: named by a project": {kubernetes.Options{VerifyOwnImages: true, Image: "ghcr.io/acme/base:1"},
 			executor.Spec{Argv: []string{"cloop", "run"}, Image: tag}},
 	} {
+		c.opts.ResolveTags, c.opts.ImageResolver = true, ghcr
 		ref, prov, err := kubernetes.AuditPodProvenance(context.Background(), c.opts, c.spec, verifier)
 		out = append(out, dispatch{name, ref, prov, err})
 	}
@@ -120,8 +125,8 @@ func cloopImageDispatches(t *testing.T, status imagepolicy.ProvenanceStatus) []d
 
 // TestNoSandboxRunsACloopImageByTag is the guarantee: under required, every
 // executor either runs one of cloop's images as the verified digest or refuses.
-// A Kubernetes tag cannot be verified and is refused; everything resolvable
-// runs pinned.
+// Every executor resolves a tag — from its store, or at the registry for a
+// device and, since Task 20457, a Kubernetes Pod — so every one runs pinned.
 func TestNoSandboxRunsACloopImageByTag(t *testing.T) {
 	prev := executor.SetImageProvenanceRequired(true)
 	t.Cleanup(func() { executor.SetImageProvenanceRequired(prev) })
@@ -151,8 +156,8 @@ func TestNoSandboxRunsACloopImageByTag(t *testing.T) {
 			t.Errorf("no %s dispatch started, so the guarantee was not asked of it", kind)
 		}
 	}
-	if started["container"] != 4 || started["device"] != 3 || started["kubernetes"] != 1 {
-		t.Errorf("started %v; want every container and device dispatch, and the Kubernetes digest alone", started)
+	if started["container"] != 4 || started["device"] != 3 || started["kubernetes"] != 4 {
+		t.Errorf("started %v; want every container, device and Kubernetes dispatch", started)
 	}
 }
 

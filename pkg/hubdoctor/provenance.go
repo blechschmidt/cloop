@@ -243,20 +243,8 @@ func checkImageProvenance(dir string, cfg *config.Config, opts Options, add addF
 		k := use.executor + "\x00" + use.image
 		reported[k] = true
 		if r, ok := latest[k]; ok {
-			add(provenanceFinding(r, use.field, use.kind == executor.KindKubernetes, unverifiedSeverity))
+			add(provenanceFinding(r, use.field, unverifiedSeverity))
 			continue
-		}
-		if use.kind == executor.KindKubernetes {
-			if parsed, err := imagepolicy.ParseReference(use.image); err == nil && !parsed.Pinned() {
-				add(Finding{Check: check, Title: title, Severity: unverifiedSeverity,
-					Message: fmt.Sprintf("%s is %s, a tag: on Kubernetes the hub verifies one of cloop's own "+
-						"images only by digest, so a Pod runs it unverified%s", use.field, use.image,
-						refusedSuffix(required)),
-					Remediation: imagepolicy.OwnImageCheck{Image: use.image, Field: use.field}.Remedy(
-						imagepolicy.ProvenanceUnverifiable),
-					Details: map[string]any{"executor": use.executor, "image": use.image}})
-				continue
-			}
 		}
 		msg := fmt.Sprintf("%s on %s is %s, one of cloop's own; no dispatch from this process has checked it "+
 			"yet, and the first one will", use.field, use.executor, use.image)
@@ -278,23 +266,25 @@ func checkImageProvenance(dir string, cfg *config.Config, opts Options, add addF
 	sort.Strings(keys)
 	for _, k := range keys {
 		r := latest[k]
-		add(provenanceFinding(r, "the image a project named", false, unverifiedSeverity))
+		add(provenanceFinding(r, "the image a project named", unverifiedSeverity))
 	}
 }
 
 // provenanceFinding reports one recorded verdict.
-func provenanceFinding(r imagepolicy.ProvenanceRecord, field string, kubernetes bool, unverified Severity) Finding {
+//
+// Every executor resolves a tag of cloop's own images to the digest it checks —
+// from its own store, or at the registry for a device and, since Task 20457, a
+// Kubernetes Pod — so the remedy for one that was not verified is the same
+// everywhere.
+func provenanceFinding(r imagepolicy.ProvenanceRecord, field string, unverified Severity) Finding {
 	f := Finding{Check: "images.provenance", Title: "Image provenance",
 		Details: map[string]any{"executor": r.Executor, "image": r.Image, "ref": r.Ref, "status": string(r.Status),
 			"identity": r.Identity, "checked_at": r.CheckedAt}}
 	if r.Digest != "" {
 		f.Details["digest"] = r.Digest
 	}
-	check := imagepolicy.OwnImageCheck{Image: r.Image, Field: field}
-	if !kubernetes {
-		// Any resolver: the remedy differs only for an executor that has none.
-		check.Resolver = imagepolicy.NewRegistryResolver()
-	}
+	// Any resolver: the remedy differs only for an executor that has none.
+	check := imagepolicy.OwnImageCheck{Image: r.Image, Field: field, Resolver: imagepolicy.NewRegistryResolver()}
 	switch r.Status {
 	case imagepolicy.ProvenanceVerified:
 		f.Severity = SeverityPass

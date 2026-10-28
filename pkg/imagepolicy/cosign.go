@@ -25,7 +25,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -94,12 +96,21 @@ func (v *CosignVerifier) Verify(ctx context.Context, ref string, p Policy) error
 		bin = found
 	}
 
+	// The registry login the caller resolved the tag with, when it carries one
+	// for this image's registry: cosign fetches the signature from the same
+	// registry, and must do so as the same identity (Task 20457).
+	env, cleanup, err := cosignLoginEnv(ctx, ref)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	// Any one accepted key or identity is enough: they are alternatives, not a
 	// quorum. An operator listing two keys is describing a rotation or two
 	// trusted publishers, not a requirement that both signed.
 	var failures []string
 	for _, keyPath := range n.CosignPublicKeys {
-		err := v.run(ctx, bin, ref, "--key", keyPath)
+		err := v.run(ctx, bin, ref, env, "--key", keyPath)
 		if err == nil {
 			v.remember(key)
 			return nil
@@ -111,7 +122,7 @@ func (v *CosignVerifier) Verify(ctx context.Context, ref string, p Policy) error
 			failures = append(failures, fmt.Sprintf("identity %s: %v", id.Issuer, err))
 			continue
 		}
-		err := v.run(ctx, bin, ref,
+		err := v.run(ctx, bin, ref, env,
 			"--certificate-oidc-issuer", id.Issuer,
 			"--certificate-identity-regexp", id.SubjectRegexp)
 		if err == nil {
@@ -123,8 +134,9 @@ func (v *CosignVerifier) Verify(ctx context.Context, ref string, p Policy) error
 	return fmt.Errorf("no configured key or identity verified %s (%s)", ref, strings.Join(failures, "; "))
 }
 
-// run executes one cosign verify invocation.
-func (v *CosignVerifier) run(ctx context.Context, bin, ref string, args ...string) error {
+// run executes one cosign verify invocation. env, when not nil, is the
+// environment to run it with instead of this process's.
+func (v *CosignVerifier) run(ctx context.Context, bin, ref string, env []string, args ...string) error {
 	runCtx, cancel := context.WithTimeout(ctx, cosignTimeout)
 	defer cancel()
 
@@ -138,7 +150,9 @@ func (v *CosignVerifier) run(ctx context.Context, bin, ref string, args ...strin
 	cmd := exec.CommandContext(runCtx, bin, argv...)
 	// cosign reads $HOME and registry credentials from the ambient
 	// environment; it is the hub's own identity that pulls the signature, not
-	// the project's, so the environment is inherited rather than scrubbed.
+	// the project's, so the environment is inherited rather than scrubbed —
+	// with DOCKER_CONFIG pointed at the caller's login when it has one.
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
@@ -147,6 +161,60 @@ func (v *CosignVerifier) run(ctx context.Context, bin, ref string, args ...strin
 		return fmt.Errorf("cosign timed out after %s", cosignTimeout)
 	}
 	return errors.New(lastLine(string(out), err))
+}
+
+// cosignLoginEnv returns the environment a cosign run for ref takes the login
+// ctx carries for ref's registry from (WithRegistryLogins), with the cleanup
+// that removes it. With none, it returns a nil environment — this process's,
+// as before — and a cleanup that does nothing.
+//
+// cosign has no way to take a password but a file or an argument, and an
+// argument is readable by every user on the host in /proc. So the one login is
+// written, alone, to a config.json in a private directory (0700, the file
+// 0600) that DOCKER_CONFIG names for this run and that is removed when the
+// verification ends. Nothing but the login for this registry is in it, so the
+// cosign run cannot present any other.
+func cosignLoginEnv(ctx context.Context, ref string) ([]string, func(), error) {
+	nothing := func() {}
+	logins, ok := registryLoginsFrom(ctx)
+	if !ok || logins.Empty() {
+		return nil, nothing, nil
+	}
+	parsed, err := ParseReference(ref)
+	if err != nil {
+		return nil, nothing, nil
+	}
+	cfg, ok := logins.dockerConfigFor(parsed.Registry)
+	if !ok {
+		return nil, nothing, nil
+	}
+	dir, err := os.MkdirTemp("", "cloop-cosign-login-")
+	if err != nil {
+		return nil, nothing, fmt.Errorf("imagepolicy: stage the registry login for cosign: %w", err)
+	}
+	cleanup := func() {
+		// Overwritten before it is removed, so the bytes do not outlive the
+		// file in a filesystem that keeps freed blocks around.
+		path := filepath.Join(dir, "config.json")
+		if fi, err := os.Stat(path); err == nil {
+			_ = os.WriteFile(path, make([]byte, fi.Size()), 0o600)
+		}
+		_ = os.RemoveAll(dir)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfg, 0o600); err != nil {
+		cleanup()
+		return nil, nothing, fmt.Errorf("imagepolicy: stage the registry login for cosign: %w", err)
+	}
+	for i := range cfg {
+		cfg[i] = 0
+	}
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "DOCKER_CONFIG=") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "DOCKER_CONFIG="+dir), cleanup, nil
 }
 
 // cached reports a still-valid successful verification.

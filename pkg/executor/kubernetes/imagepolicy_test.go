@@ -9,7 +9,9 @@ package kubernetes
 // to an API server, and some kubelet resolves it later, on a node, when it
 // schedules. Nothing between the policy check and that pull is under the
 // control plane's control. So the only thing that closes the gap is the digest
-// being in the Pod spec, and that is what these tests assert.
+// being in the Pod spec, and that is what these tests assert — for a reference
+// that arrives pinned. The hub's driver also pins one that does not, at its
+// registry (Task 20457): imageresolve_test.go.
 
 import (
 	"context"
@@ -167,9 +169,10 @@ func TestMalformedImageStaysAnInvalidSpec(t *testing.T) {
 	}
 }
 
-// TestNoPolicyLeavesTheOverrideAlone: the feature must not change what an
-// unconfigured hub does. Kubernetes cannot resolve a tag, so with no policy the
-// Pod keeps exactly the reference the project wrote.
+// TestNoPolicyLeavesTheOverrideAlone: with no policy and no resolution — a
+// driver that is not the hub's — the Pod keeps exactly the reference the
+// project wrote. The hub's driver pins it even with no policy
+// (TestAPodCarriesTheDigestItsTagResolvedTo), as the container driver does.
 func TestNoPolicyLeavesTheOverrideAlone(t *testing.T) {
 	ex := policyExecutor(t, imagepolicy.Policy{})
 
@@ -191,9 +194,10 @@ func TestNoPolicyLeavesTheOverrideAlone(t *testing.T) {
 // the same file, and is governed by it only under govern_operator_images (Task
 // 20453; TestAnOperatorPodImageIsLeftAloneUnlessGoverned) — cloop's own images
 // are checked against their publishing workflow instead. Running it through the allowlist would be a lint rather than a
-// control — and with the shipped chart default of require_digest it would
-// refuse the hub's own tagged image at boot, which is how a safe default
-// becomes one nobody can adopt.
+// control — and under require_digest it would refuse the hub's own tagged
+// image at boot, which is how a safe default becomes one nobody can adopt. Its
+// tag is still resolved to a digest by the hub's driver
+// (TestTheOperatorsTagIsPinnedNotGoverned).
 func TestOperatorImageIsNotGovernedByThePolicy(t *testing.T) {
 	ex := policyExecutor(t, imagepolicy.Policy{
 		AllowedRegistries: []string{"quay.io"}, // hubDefaultImage is on ghcr.io

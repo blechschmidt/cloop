@@ -12,6 +12,38 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A Kubernetes Pod runs the digest its image's tag resolved to, so it runs
+  what the image policy evaluated.** The Kubernetes executor applied the image
+  policy with no resolver: a tag a project named reached the kubelet as a tag
+  and was resolved whenever some node pulled it, so the image that ran need not
+  be the one anything checked. The only protection was refusing tags outright
+  (`require_digest`, which the chart set) or under `require_signature`. Now the
+  hub resolves every tag a Pod would carry at its registry before building the
+  Pod: a project's image, `executors.kubernetes.image`, and cloop's own images,
+  which it then verifies against their publishing workflow. The Pod carries
+  `repo@sha256:…`. Under `require_signature` the signature is verified on that
+  digest. If the hub cannot resolve a tag, `require_digest` or
+  `require_signature` refuse the run, naming the registry and the remedy, before
+  anything is leased. Under any other policy the tag runs as before, with a
+  warning on the run's log. A private registry is asked with the new
+  `executors.kubernetes.registry_secret`: a shared registry secret in the
+  Docker-configuration form, opened as the hub's own credential (never granted,
+  so no workload holds it). Each login goes to its own registry only, and
+  cosign gets the same login, in a private temporary `DOCKER_CONFIG`. The
+  namespace's `imagePullSecrets` are never read. The digest is on the handle and
+  its persisted row, and on the run's log. A run carried out as a seed, on a Pod
+  or a device, now gets hub-side `task.dispatch` rows (`recorded_by: hub`)
+  carrying the new `image_digest`; before, those rows stayed in the executor's
+  copy of the project. Registry requests now follow redirects over https only
+  and refuse a token service on the hub's own loopback, since a project can name
+  any registry. The Helm chart's `sandbox.imagePolicy.requireDigest` now
+  defaults to off (see values.yaml for why), and the chart gains
+  `executor.kubernetes.registrySecret` and `imagePullPolicy`. The chart also
+  sets `TUF_ROOT`. Its hub runs on a read-only root filesystem, so cosign could
+  not create `$HOME/.sigstore` and verified no keyless signature at all: on
+  every chart install, cloop's own images were unverifiable and a
+  `cosign_identities` policy refused every image (Task 20457).
+
 - **A run adopted after a hub restart keeps full push-scan and output-redaction
   coverage.** The process that adopts a run another one dispatched scrubbed its
   output and scanned its pushes only for env secrets' values and personal

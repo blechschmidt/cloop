@@ -125,6 +125,14 @@ spec:
             # /var/lib/cloop so one volume holds all persistent state.
             - name: HOME
               value: /var/lib/cloop
+            # cosign keeps Sigstore's trusted root under $HOME/.sigstore, and
+            # $HOME is on the read-only root filesystem: without a writable
+            # cache it cannot verify a keyless signature at all — cloop's own
+            # images, or a cosign_identities policy — and every image would be
+            # unverifiable (Task 20457). The /tmp emptyDir, per Pod: the
+            # metadata is a few kilobytes, fetched again after a restart.
+            - name: TUF_ROOT
+              value: /tmp/sigstore
             # Where the other replicas reach this one: a member forwards a
             # request only one member can answer — a Stop for a run it
             # streams, a login callback for a login it began — to that

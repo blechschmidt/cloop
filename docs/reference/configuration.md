@@ -671,11 +671,15 @@ of it is refused as malformed. An accepted tag is resolved to a digest and the
 digest is what runs. An absent section constrains nothing, which keeps existing
 single-machine installs working across an upgrade.
 
-`require_digest` matters most on Kubernetes: the control plane cannot read a
-cluster's image store, so an unpinned reference is resolved by a kubelet, on a
-node, when it schedules. The [Helm chart](../../deploy/helm/cloop-hub) sets it,
-and defaults `allowed_registries` to the registry the hub's own image comes
-from.
+On Kubernetes the tag is resolved at the registry the kubelet pulls from, by
+the hub, before the Pod is built, and the Pod carries the digest (Task 20457) —
+see [`registry_secret`](#resolving-image-tags-for-kubernetes-pods) for the login
+it asks a private registry with. There `require_digest` and `require_signature`
+also refuse a tag the hub *cannot* resolve, the executor's own image included,
+where other policies run it as a tag with a warning. The
+[Helm chart](../../deploy/helm/cloop-hub) leaves `require_digest` off since the
+hub pins tags itself, and defaults `allowed_registries` to the registry the
+hub's own image comes from.
 
 The policy governs the images a *project* names. An operator's own image —
 `executors.container.image`, `executors.kubernetes.image`, a device's or a
@@ -687,6 +691,60 @@ them instead — see [Image provenance](#image-provenance).
 
 Rules, denial codes, the cosign contract and the audit record:
 **[Image trust policy](sandbox.md#image-trust-policy)**.
+
+#### Resolving image tags for Kubernetes Pods
+
+A Pod spec is acted on later, by a kubelet, on whatever node the Pod lands on —
+and a tag in it would be resolved then, by that node. So before it builds a Pod
+the hub resolves every tag the Pod would carry — the image a project names,
+`executors.kubernetes.image`, one of cloop's own — to the digest the registry
+serves for it now, verifies that digest's signature when the policy asks, and
+writes `repo@sha256:…` into the spec (Task 20457). The run's log starts with what
+was resolved to what; the handle, its persisted row and the task's
+`task.dispatch` audit row name the digest (`pinned_image`, `image_digest`).
+
+A private registry needs a login, and it is the hub's, not the workload's:
+
+```yaml
+executors:
+  kubernetes:
+    registry_secret: ghcr-robot   # a shared registry secret, by name or ID
+```
+
+```bash
+cloop secret mint ghcr-robot --kind registry --file config.json
+```
+
+The secret is the `config.json` `docker login` writes — the Docker
+configuration whose `"auths"` name the registry each login is for. Each login is
+presented to its own registry and to no other; a project naming an image
+somewhere else gets an anonymous request there. The hub opens the secret as a
+credential it presents as itself, at every dispatch, so a rotation takes effect
+on the next Pod. It is **not** granted to the executor: a grant to
+`executor:<id>` is leased to every run on it, and would put the login in every
+Pod. Only the shared Docker-configuration form is accepted — a personal secret is
+its owner's to spend, and a bare `user:password` names no registry the hub could
+bound it to — and a secret that cannot be read fails resolution, naming it,
+rather than letting the hub try anonymously. The same login is handed to cosign
+when it fetches the signature from that registry: in a `DOCKER_CONFIG`
+directory private to the hub (0700), holding that one login, removed when the
+verification ends.
+
+It is never the namespace's `image_pull_secrets`. Those are the kubelet's, for
+pulling, and the executor's Role grants nothing on Secrets.
+
+| The hub could not resolve a tag — its registry unreachable from the hub, refusing, or not knowing the tag | |
+| --- | --- |
+| `require_digest` or `require_signature` | refused, naming the registry and the remedy: pin it by digest, or let the hub reach the registry — with a login in `registry_secret` if it is private |
+| any other policy | the tag goes into the Pod as written, with a warning on the run's log and the hub's; the kubelet resolves it when it pulls |
+
+`cloop executor test kubernetes` and `cloop hub doctor` report `registry-login`
+— which registries the secret covers, or why it cannot be read — and
+`image-resolution`: what `executors.kubernetes.image` resolves to now.
+
+With `image_pull_policy: Never` a node must hold the image *by the digest* the
+tag resolved to — pulled from the registry, not loaded from a tarball, which
+records none — whenever the hub could resolve the tag.
 
 ### Remote executors (edge devices)
 
@@ -1308,20 +1366,22 @@ keyless, every digest it pushes. Since Task 20453 the hub checks one of them
 before a sandbox runs it, however it was chosen: the default image, an executor
 configured with it, a device's or a virtual executor's sandbox image, a project
 naming it. The tag is resolved to a digest — from the local image store after
-the pull on the container executor, at the registry for a device — cosign
-verifies the digest against that workflow's identity on `main` or a release tag,
-and the dispatch names the digest.
+the pull on the container executor, at the registry for a device and, since
+Task 20457, for a Kubernetes Pod — cosign verifies the digest against that
+workflow's identity on `main` or a release tag, and the dispatch names the
+digest.
 
 | cosign finds | `warn` (default) | `required` |
 | --- | --- | --- |
 | the workflow's signature | runs the verified digest | runs the verified digest |
 | a signature from anyone else, or bytes that do not match | **refused** | **refused** |
 | no signature — an image published before signing began, or pushed unsigned | runs, with a warning on the run and in `cloop hub doctor` | refused |
-| nothing could check: no cosign on the hub, the registry or Sigstore out of reach, an image built locally, a tag on Kubernetes | runs, with the warning | refused |
+| nothing could check: no cosign on the hub, the registry or Sigstore out of reach, an image built locally | runs, with the warning | refused |
 
-On Kubernetes only an image configured by digest can be checked — the hub has no
-image store to resolve a tag in — so `executors.kubernetes.image` by tag gets the
-warning saying so, and `required` refuses it until it is pinned by digest. On a
+On Kubernetes the Pod carries the digest that was checked, verified or not — a
+kubelet pulling later pulls those bytes. A tag the hub could not resolve there
+runs as the tag, with the warning, unless `required` refuses it — or
+`require_digest` or `require_signature`, which send no tag to a Pod. On a
 device the verified digest is what the start frame names, and the device's
 engine never pulls: a device holding an older copy of the tag refuses the start
 naming `docker pull <digest>`. An image that could not be verified is left to the

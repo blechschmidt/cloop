@@ -542,6 +542,12 @@ type TaskDispatchInput struct {
 
 	// Actor is who asked for the run.
 	Actor string
+
+	// RecordedBy is "hub" for a row the hub wrote when it merged the outcome
+	// of a run carried out as a seed — on a Kubernetes Pod or a device, whose
+	// own orchestrator writes its rows into a copy of the project that never
+	// comes back (Task 20457). Empty for the orchestrator's own row.
+	RecordedBy string
 }
 
 // AuditTaskDispatch records one task entering execution.
@@ -567,6 +573,8 @@ func AuditTaskDispatch(d *DB, in TaskDispatchInput) {
 		"verified_digest":  in.VerifiedDigest,
 		"spec_sha256":      in.SpecHash,
 		"setup_sha256":     in.SetupHash,
+		"image_digest":     pinnedDigest(in.PinnedImage),
+		"recorded_by":      in.RecordedBy,
 	} {
 		if v != "" {
 			payload[k] = v
@@ -589,6 +597,17 @@ func AuditTaskDispatch(d *DB, in TaskDispatchInput) {
 		EntityID:   fmt.Sprintf("%d", in.TaskID),
 		Payload:    MarshalAuditPayload(payload),
 	})
+}
+
+// pinnedDigest is the digest a digest-pinned image reference names, empty for a
+// tag (Task 20457): the content address of what ran, on its own, so "which
+// tasks ran this digest" is one equality on the payload.
+func pinnedDigest(ref string) string {
+	_, digest, ok := strings.Cut(ref, "@")
+	if !ok || !strings.HasPrefix(digest, "sha256:") {
+		return ""
+	}
+	return digest
 }
 
 // auditTaskLifecycle emits the terminal rows for one SaveState.

@@ -81,9 +81,13 @@ func TestAuthorizeRecheckesThePinnedReference(t *testing.T) {
 
 // TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo.
 //
-// The Kubernetes backend has no local image store. A hub that does not require
-// digests still runs there, but the run is not reproducible and the operator
-// must be told rather than left to infer it.
+// An enforcer given no resolver cannot pin a tag, and must say so rather than
+// leave the operator to infer it. Who passes none: the hub checking a project's
+// image for a device that pins tags in its own store (pkg/executor/remote, off
+// require_signature), and any driver built without one. Not the hub's
+// Kubernetes driver, which resolved nothing here until Task 20457 and now
+// resolves every tag at its registry
+// (pkg/executor/kubernetes TestAPodCarriesTheDigestItsTagResolvedTo).
 func TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo(t *testing.T) {
 	e := Enforcer{Policy: Policy{AllowedRegistries: []string{"ghcr.io"}}}
 
@@ -97,16 +101,25 @@ func TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo(t *testing.T) {
 	if got.Ref != "ghcr.io/acme/tools:1" {
 		t.Fatalf("Authorize().Ref = %q, want the original reference", got.Ref)
 	}
-	if len(got.Warnings) == 0 {
-		t.Error("an unpinnable image produced no warning; the operator has no way to know")
+	if len(got.Warnings) == 0 || !strings.Contains(got.Warnings[0], "cannot resolve it to a digest") {
+		t.Errorf("an unpinnable image produced warnings %q; the operator has no way to know why", got.Warnings)
+	}
+
+	// With a resolver the same tag is pinned and nothing is said: the warning
+	// is about the missing resolver, not about tags.
+	pinned, err := Enforcer{Policy: e.Policy, Resolver: &fakeResolver{digest: goodDigest}}.Authorize(
+		context.Background(), "ghcr.io/acme/tools:1")
+	if err != nil || !pinned.Pinned() || len(pinned.Warnings) != 0 {
+		t.Fatalf("with a resolver: %+v, %v; want the tag pinned without a warning", pinned, err)
 	}
 }
 
-// TestATagCannotBeSignatureVerifiedWithoutAResolver is the Kubernetes residual
-// under require_signature: the control plane has no image store to resolve a
-// tag in, so there is no digest to check a signature on, and the tag is refused
-// — never verified as a tag, never passed to a kubelet to resolve later. The
-// day the Kubernetes driver resolves tags, this is the test that changes.
+// TestATagCannotBeSignatureVerifiedWithoutAResolver: under require_signature an
+// enforcer with no resolver has no digest to check a signature on, so the tag is
+// refused — never verified as a tag, never passed on to be resolved later. It
+// was the Kubernetes residual until Task 20457 gave that driver a resolver
+// (pkg/executor/kubernetes TestASignatureIsVerifiedOnTheDigestTheTagResolvedTo);
+// it remains the guarantee that a caller without one fails closed.
 func TestATagCannotBeSignatureVerifiedWithoutAResolver(t *testing.T) {
 	e := Enforcer{
 		Policy: Policy{

@@ -3,6 +3,7 @@ package secretbroker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,50 @@ func TestHubCredential(t *testing.T) {
 	} {
 		if _, err := b.HubCredential(ref); !errors.Is(err, want) {
 			t.Errorf("HubCredential(%q) = %v, want %v", ref, err, want)
+		}
+	}
+}
+
+// TestHubRegistryConfig: the registry login a Kubernetes executor resolves
+// image tags with (Task 20457) is opened only from a shared registry secret in
+// the Docker configuration form — the form that names the registry each login
+// is for — by name or ID, and the bare user:password form is refused without
+// echoing it.
+func TestHubRegistryConfig(t *testing.T) {
+	b, _, _, _ := newTestBroker(t)
+	ctx := context.Background()
+	config := `{"auths":{"ghcr.io":{"username":"robot","password":"ghcr-robot-pw"}}}`
+	sec, err := b.Mint(ctx, MintRequest{Name: "ghcr-robot", Kind: KindRegistry, Payload: []byte(config), Actor: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, req := range []MintRequest{
+		{Name: "bare", Kind: KindRegistry, Payload: []byte("robot:bare-registry-pw"), Actor: "admin"},
+		{Name: "mine", Kind: KindRegistry, Payload: []byte(config), Actor: "alice@corp", Owner: "alice@corp", Personal: true},
+		{Name: "env", Kind: KindEnv, Payload: []byte(config), Actor: "admin"},
+	} {
+		if _, err := b.Mint(ctx, req); err != nil {
+			t.Fatalf("mint %s: %v", req.Name, err)
+		}
+	}
+
+	for _, ref := range []string{"ghcr-robot", sec.ID, " ghcr-robot "} {
+		if got, err := b.HubRegistryConfig(ref); err != nil || string(got) != config {
+			t.Errorf("HubRegistryConfig(%q) = %q, %v", ref, got, err)
+		}
+	}
+	for ref, want := range map[string]error{
+		"bare":         ErrInvalidSecret, // names no registry
+		"mine":         ErrNotOwner,      // a person's, not the organisation's
+		"env":          ErrInvalidKind,   // not a registry secret
+		"no-such-name": ErrSecretNotFound,
+	} {
+		_, err := b.HubRegistryConfig(ref)
+		if !errors.Is(err, want) {
+			t.Errorf("HubRegistryConfig(%q) = %v, want %v", ref, err, want)
+		}
+		if err != nil && (strings.Contains(err.Error(), "bare-registry-pw") || strings.Contains(err.Error(), "ghcr-robot-pw")) {
+			t.Errorf("HubRegistryConfig(%q) quotes the secret: %v", ref, err)
 		}
 	}
 }

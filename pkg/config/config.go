@@ -1571,7 +1571,25 @@ type KubernetesExecutorConfig struct {
 	ImagePullPolicy string `yaml:"image_pull_policy,omitempty"`
 
 	// ImagePullSecrets names Secrets in Namespace holding registry auth.
+	//
+	// They are the kubelet's: it pulls with them. The hub never reads them —
+	// the executor Role grants no access to Secrets — so they cannot be how it
+	// resolves a tag; RegistrySecret is.
 	ImagePullSecrets []string `yaml:"image_pull_secrets,omitempty"`
+
+	// RegistrySecret names a shared registry secret in the hub's secret store,
+	// by name or ID, holding the logins the hub resolves image tags with — and
+	// fetches their signatures with — before it builds a Pod (Task 20457):
+	// every tag a Pod would carry is resolved at its registry and the Pod
+	// carries the digest. It is the Docker configuration `docker login`
+	// writes (cloop secret mint <name> --kind registry --file config.json),
+	// whose "auths" name the registry each login is presented to and no other.
+	//
+	// The hub opens it as its own credential, never through a grant — a grant
+	// to this executor would be leased to every run on it — so no workload
+	// ever holds it. Empty resolves anonymously, which a public registry
+	// needs and a private one refuses.
+	RegistrySecret string `yaml:"registry_secret,omitempty"`
 
 	// ServiceAccount runs Pods under a named ServiceAccount. Its token is
 	// still never mounted — automountServiceAccountToken is forced false —

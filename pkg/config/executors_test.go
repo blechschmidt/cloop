@@ -516,16 +516,17 @@ func TestExecutorWarnings_InClusterWithoutANamespace(t *testing.T) {
 
 func TestValidateKubernetesExecutor(t *testing.T) {
 	valid := map[string]KubernetesExecutorConfig{
-		"empty":       {},
-		"namespace":   {Namespace: "cloop-jobs"},
-		"quantities":  {CPURequest: "250m", CPULimit: "2", MemoryRequest: "512Mi", MemoryLimit: "4Gi"},
-		"scheduling":  {NodeSelector: map[string]string{"pool": "untrusted"}, Tolerations: []kubernetes.Toleration{{Key: "k", Operator: "Exists"}}},
-		"deadlines":   {ActiveDeadlineSeconds: 3600, TerminationGracePeriodSeconds: 45, KillGracePeriodSeconds: 5},
-		"pull config": {ImagePullPolicy: "IfNotPresent", ImagePullSecrets: []string{"ghcr-auth"}},
-		"identity":    {ServiceAccount: "cloop-runner", RunAsUser: 1000, RunAsGroup: 1000},
-		"concurrency": {MaxConcurrent: 8},
-		"secret ref":  {KubeconfigSecret: "prod-kubeconfig", Context: "prod"},
-		"in cluster":  {InCluster: true, Namespace: "cloop-workloads"},
+		"empty":           {},
+		"namespace":       {Namespace: "cloop-jobs"},
+		"quantities":      {CPURequest: "250m", CPULimit: "2", MemoryRequest: "512Mi", MemoryLimit: "4Gi"},
+		"scheduling":      {NodeSelector: map[string]string{"pool": "untrusted"}, Tolerations: []kubernetes.Toleration{{Key: "k", Operator: "Exists"}}},
+		"deadlines":       {ActiveDeadlineSeconds: 3600, TerminationGracePeriodSeconds: 45, KillGracePeriodSeconds: 5},
+		"pull config":     {ImagePullPolicy: "IfNotPresent", ImagePullSecrets: []string{"ghcr-auth"}},
+		"registry secret": {RegistrySecret: "ghcr-robot.ci_1"},
+		"identity":        {ServiceAccount: "cloop-runner", RunAsUser: 1000, RunAsGroup: 1000},
+		"concurrency":     {MaxConcurrent: 8},
+		"secret ref":      {KubeconfigSecret: "prod-kubeconfig", Context: "prod"},
+		"in cluster":      {InCluster: true, Namespace: "cloop-workloads"},
 	}
 	for name, cfg := range valid {
 		t.Run(name, func(t *testing.T) {
@@ -553,6 +554,8 @@ func TestValidateKubernetesExecutor(t *testing.T) {
 		"negative concurrency": {KubernetesExecutorConfig{MaxConcurrent: -1}, "max_concurrent"},
 		"bad toleration":       {KubernetesExecutorConfig{Tolerations: []kubernetes.Toleration{{Operator: "Matches"}}}, "tolerations[0]"},
 		"bad pull secret":      {KubernetesExecutorConfig{ImagePullSecrets: []string{"Bad Name"}}, "image_pull_secrets"},
+		// A name the secret store could never hold (Task 20457).
+		"bad registry secret": {KubernetesExecutorConfig{RegistrySecret: "ghcr robot/2"}, "registry_secret"},
 		// Two credential sources is an ambiguity about which identity ran a
 		// workload, and that question has to have one answer in an audit log.
 		"two credential sources": {

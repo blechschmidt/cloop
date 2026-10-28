@@ -223,6 +223,17 @@ it into a Pod and printing it. The namespace has always been the boundary, and
 the lease Secret does not move it: whoever may read Secrets there, or create Pods
 there, can read a run's credentials. Run workloads in a namespace of their own.
 
+The image a Pod runs is a digest, decided on the hub. A tag in a Pod spec would be
+resolved by whichever kubelet pulls it, whenever the Pod is scheduled — after
+anything evaluated it. So the hub resolves every tag a Pod would carry at its
+registry first, checks the digest against the image trust policy and, under
+`require_signature`, its signature, and writes `repo@sha256:…` into the spec
+(Task 20457). A private registry is asked with the login in
+`executors.kubernetes.registry_secret` — a registry secret the hub opens as its
+own credential, never through a grant, so no workload is leased it — and never
+with the namespace's `imagePullSecrets`, which the Role above cannot read. See
+[Container image trust](#container-image-trust--imagepolicy_testgo).
+
 **A cluster a developer shares** (Task 20416) is the other direction across this
 boundary: a cluster the *workload* is granted, not the one it runs in. Its
 kubeconfig signs people in through an exec credential plugin, which the hub
@@ -4306,6 +4317,11 @@ an image the operator's policy admits, or does not start.
 | Under `require_digest`, a tag-only or truncated-digest reference is refused, and every refusal carries a rule and a remediation | `TestProjectSpecCannotEscapeTheImageAllowlist` |
 | An accepted tag is resolved to a digest and pinned, so a tag repointed between check and pull cannot change what runs (TOCTOU) | `TestAuthorizePinsAnAcceptedTag`, `TestSandboxImage_PinsTheOverride` |
 | The pinned digest lands in the Kubernetes container spec, where a kubelet would otherwise resolve the tag itself | `TestPinnedDigestLandsInTheContainerSpec`, `TestPolicyReachesTheExecutorThatRunsTheImage` |
+| A Kubernetes Pod carries the digest every tag it would carry resolved to at its registry — the project's image, the operator's, one of cloop's own — so a tag repointed before a kubelet pulls changes nothing; every manifest media type resolves to its own digest, an index to the index's (Task 20457) | `TestATagReachesAPodOnlyAsItsDigest`, `TestAPodCarriesTheDigestItsTagResolvedTo`, `TestARepointedTagDoesNotMoveARunningPod`, `TestEveryManifestMediaTypeResolvesToItsOwnDigest`, `TestTheOperatorsTagIsPinnedNotGoverned` |
+| Under `require_signature` a Kubernetes tag is resolved and the signature is verified on that digest, fetched as the login that resolved it; under `require_digest` or `require_signature` a tag the hub cannot resolve reaches no Pod, and the refusal names the registry and the remedy — before anything is leased | `TestASignatureIsVerifiedOnTheDigestTheTagResolvedTo`, `TestAnUnreachableRegistryInEachMode`, `TestStartResolvesBeforeAnythingIsLeased` |
+| The registry login is the one the hub holds in `registry_secret` — a shared registry secret in the Docker-configuration form, opened as the hub's own credential — presented to its own registry alone; an unreadable or unusable one fails resolution rather than falling back to anonymous; the namespace's `imagePullSecrets` are never read | `TestTheRegistrySecretSignsInAtItsOwnRegistryOnly`, `TestAPersonalOrMalformedRegistrySecretIsRefusedNotIgnored`, `TestHubRegistryConfig`, `TestRegistryLoginSourceNeverFallsBackToAnonymous`, `TestExecutorRoleNeverReadsSecretsOrMutatesWhatItCreated` |
+| A registry a project names cannot redirect the hub to plain HTTP or name a token service on the hub's own loopback | `TestRegistryRedirectsAreFollowedOverHTTPSOnly`, `TestATokenServiceOnThisHostIsForARegistryOnThisHost` |
+| A run carried out as a seed — on a Pod or a device — has its `task.dispatch` rows written on the hub at the merge, with the digest that ran (`image_digest`), since the executor's own rows stay in its copy of the project | `TestASeededRunsDispatchesAreRecordedOnTheHub` |
 | `require_signature` with no `cosign` installed **refuses** rather than skipping verification | `TestSignatureRequirementNeverDegradesToASkip`, `TestCosignMissingFailsClosed` |
 | A device or virtual executor whose sandbox runs a container runs a project's image only once the hub has verified its signature, and is sent the digest it verified; an unsigned image, an unresolvable tag or a missing `cosign` refuses with nothing sent (Task 20424) | `TestADeviceRunsOnlyASignatureVerifiedImage`, `TestLoopbackDeviceRunsOnlyTheDigestTheHubVerified`, `TestDeviceRefusesATagTheHubCannotResolve`, `TestDeviceRefusesWithoutCosign`, `TestVirtualExecutorVerifiesTheProjectImage` |
 | A hub whose configuration will not load refuses a project's image — at the early check and on the device path — rather than checking it against the zero policy | `TestAnUnreadableHubConfigRefusesAProjectImage`, `TestDeviceRefusesWhenTheHubCannotReadItsPolicy` |
@@ -4325,9 +4341,9 @@ release tag, which signs every digest it pushes (Task 20453).
 
 | Guarantee | Test |
 | --- | --- |
-| Under `executors.image_provenance: required` no sandbox runs one of cloop's images by tag: the container executor, a device and a virtual executor run the digest cosign verified — from the local store, and from the registry for a device — and Kubernetes, which can verify only a digest, refuses a tag | `TestNoSandboxRunsACloopImageByTag`, `TestADeviceRunsTheDigestTheHubVerified`, `TestAVirtualExecutorsCloopImageIsVerified`, `TestADigestOfCloopsImageIsVerifiedBeforeAPodRunsIt` |
+| Under `executors.image_provenance: required` no sandbox runs one of cloop's images by tag: the container executor, a device, a virtual executor and a Kubernetes Pod run the digest cosign verified — from the local store, and from the registry for a device and a Pod (Task 20457) | `TestNoSandboxRunsACloopImageByTag`, `TestADeviceRunsTheDigestTheHubVerified`, `TestAVirtualExecutorsCloopImageIsVerified`, `TestADigestOfCloopsImageIsVerifiedBeforeAPodRunsIt`, `TestATagOfCloopsImageIsResolvedAndVerifiedBeforeAPodRunsIt` |
 | A signature present and not the publishing workflow's refuses the dispatch whatever the setting, with cosign's diagnosis | `TestAWronglySignedCloopImageNeverRuns`, `TestAWrongSignatureRefusesTheStartInEveryMode`, `TestAWrongSignatureNeverReachesAPod`, `TestADeviceIsNeverSentAWronglySignedImage` |
-| An unsigned image, one nothing could check, and a Kubernetes tag run with a warning on the run under `warn` and are refused under `required` | `TestOwnImageCheckWarnsOrRefusesWhatIsNotVerified`, `TestAnUnsignedImageWarnsOrIsRefused`, `TestAnUnsignedDigestWarnsOrIsRefused`, `TestAnUnsignedDeviceImageWarnsOrIsRefused`, `TestATagOfCloopsImageOnKubernetesIsSaidToBeUnverifiable` |
+| An unsigned image, and one nothing could check — a registry out of reach, a driver that resolves nothing — run with a warning on the run under `warn` and are refused under `required` | `TestOwnImageCheckWarnsOrRefusesWhatIsNotVerified`, `TestAnUnsignedImageWarnsOrIsRefused`, `TestAnUnsignedDigestWarnsOrIsRefused`, `TestAnUnsignedDeviceImageWarnsOrIsRefused`, `TestATagOfCloopsImageIsUnverifiableWithoutResolution` |
 | cosign's answers are read as cosign means them, and nothing but exit status 0 is a pass; a tag is never verified | `TestCosignProvenanceVerifierReadsCosignsAnswers`, `TestCosignProvenanceVerifierNeverVerifiesATag`, `TestCosignProvenanceVerifierWithoutCosign` |
 | A repository that merely begins with one of cloop's names, the same path on another registry, and an unqualified name are not cloop's | `TestIsOwnImage` |
 | An operator's image that is not cloop's is left alone unless `govern_operator_images` holds it to the project rules | `TestAnOperatorImageIsLeftAloneUnlessGoverned`, `TestAnOperatorPodImageIsLeftAloneUnlessGoverned`, `TestADevicesOwnImageIsGovernedOnlyWhenAsked` |
@@ -5097,14 +5113,20 @@ deleted, so only `required` refuses it (`TestAnUnsignedImageWarnsOrIsRefused`,
 `TestAnUnsignedDeviceImageWarnsOrIsRefused`). The pin vouches for "built by this
 repository's publishing workflow from `main` or a release tag", and anyone who
 can push to `main` can change what that builds
-(`TestImagesWorkflowPublishesOnlyFromThePinnedRefs`). Kubernetes verifies only a
-digest: the hub has no image store to resolve a tag in, so cloop's image named
-by tag reaches the kubelet unverified, with the warning, unless `required`
-refuses it (`TestATagOfCloopsImageOnKubernetesIsSaidToBeUnverifiable`) — and a
-project's own tag there is resolved whenever a node pulls it, unless
-`require_digest` or `require_signature` refuses it
-(`TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo`,
-`TestATagCannotBeSignatureVerifiedWithoutAResolver`). The project policy is off
+(`TestImagesWorkflowPublishesOnlyFromThePinnedRefs`). A Kubernetes Pod carries
+the digest a tag resolved to at its registry — cloop's image verified on it, a
+project's tag pinned to it (Task 20457:
+`TestATagOfCloopsImageIsResolvedAndVerifiedBeforeAPodRunsIt`,
+`TestAPodCarriesTheDigestItsTagResolvedTo`) — but a tag the hub *cannot* resolve
+there, its registry unreachable from the hub or private with no login in
+`executors.kubernetes.registry_secret`, still reaches the kubelet as a tag, with
+the warning, resolved whenever a node pulls it, unless `require_digest`,
+`require_signature` or `required` refuses it
+(`TestAnUnreachableRegistryInEachMode`); so does every tag on a driver built
+without resolution, which only the hub's own reconciliation gives one
+(`TestATagOfCloopsImageIsUnverifiableWithoutResolution`,
+`TestAuthorizeWithoutAResolverKeepsTheTagAndSaysSo`, under `require_signature`
+refused: `TestATagCannotBeSignatureVerifiedWithoutAResolver`). The project policy is off
 unless configured (`TestNoPolicyIsNotSilentlyAPolicy`), and an operator's image
 that is not cloop's — `executors.*.image`, a device's or a virtual executor's
 sandbox image — is chosen beside it and exempt from it unless
@@ -5116,6 +5138,27 @@ the registry serves now: one holding an older copy of the tag refuses the start
 until it pulls that digest, and one whose image could not be verified runs its
 own copy of the tag, which the hub has not seen
 (`TestADeviceRunsTheDigestTheHubVerified`).
+
+**A project can have the hub ask a registry of its choosing, and without
+`require_signature` the registry's answer is believed.** A Kubernetes executor
+resolves every tag a Pod would carry at the registry its reference names (Task
+20457), as the hub already did for a device under `require_signature`; on a hub
+whose policy names no registries, a project's `.cloop/sandbox.yaml` can point
+that request at any host the hub can reach. It is bounded — https only, a
+redirect followed over https only, no token service on the hub's own loopback
+unless the registry is there too, a login offered only to the registry it was
+stored for (`TestRegistryRedirectsAreFollowedOverHTTPSOnly`,
+`TestATokenServiceOnThisHostIsForARegistryOnThisHost`,
+`TestTheRegistrySecretSignsInAtItsOwnRegistryOnly`) — and what comes back is no
+more than whether the host answered and how. Two things remain: a host on a
+private network the hub reaches over https is asked a `HEAD` and `GET` for a
+manifest path, and a token service there that answers an unauthenticated `GET`
+with a `token` field has that value presented to the registry that named it.
+`allowed_registries` confines both to the registries the operator chose. And the
+digest the registry names is the one the Pod runs: over TLS, but on the
+registry's word unless `require_signature` checks the signature on it — which is
+what the kubelet would have trusted in the hub's place
+(`TestAPodCarriesTheDigestItsTagResolvedTo`).
 
 **The container runtime socket is trusted implicitly.** Anyone who can reach the
 Docker/Podman socket the hub uses is root-equivalent on that host

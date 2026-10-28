@@ -96,6 +96,22 @@ type Provenance struct {
 	RunID string
 	// Identity is who the run's spend is billed to.
 	Identity string
+
+	// The image the run's sandbox ran, as the hub dispatched it (Task 20457):
+	// RequestedImage what the project's sandbox spec named, PinnedImage the
+	// reference the executor started — the digest a tag resolved to —
+	// ImageProvenance and VerifiedDigest the check of one of cloop's own
+	// images. With SpecHash, SetupHash and LeaseIDs they are what the hub
+	// writes on the task.dispatch row of every task the run dispatched: the
+	// executor's own row is written into its copy of the project, which never
+	// comes back.
+	RequestedImage  string   `json:",omitempty"`
+	PinnedImage     string   `json:",omitempty"`
+	ImageProvenance string   `json:",omitempty"`
+	VerifiedDigest  string   `json:",omitempty"`
+	SpecHash        string   `json:",omitempty"`
+	SetupHash       string   `json:",omitempty"`
+	LeaseIDs        []string `json:",omitempty"`
 }
 
 // MergeReport says what folding a Result into the hub's project did.
@@ -128,6 +144,12 @@ type MergeReport struct {
 	Attached    int
 	LeftBehind  []string
 	NotRecorded []string
+
+	// Dispatched are the tasks the run started, by the hub's numbering: the
+	// ones it took out of the state the seed sent them in, and those it
+	// created and began. The hub records a task.dispatch row for each (Task
+	// 20457).
+	Dispatched []int
 
 	// runTasks are the hub's ids of the tasks the run worked on: those it
 	// changed that the hub still holds under the title they were sent with,
@@ -304,6 +326,7 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 		appendAnnotations(h, tc.Before, after, scrub)
 		if startedByRun {
 			stamp(h, prov)
+			rep.Dispatched = append(rep.Dispatched, id)
 		}
 		// A project with the review gate on expects every task that finished
 		// to carry a verdict. A device whose cloop predates the gate ignores
@@ -360,6 +383,7 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 		t := created(tc.After, newID, assigned, byID, scrub)
 		if t.StartedAt != nil || t.Status != pm.TaskPending {
 			stamp(t, prov)
+			rep.Dispatched = append(rep.Dispatched, newID)
 		}
 		st.Plan.Tasks = append(st.Plan.Tasks, t)
 		byID[newID] = t
@@ -475,6 +499,9 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 			workDir, st.WorkDir)
 	}
 	rep, rec := Merge(st, r, prov, scrub, time.Now())
+	// Before the plan is saved, so the trail reads dispatch, then outcome:
+	// the tasks were dispatched whatever becomes of the save.
+	auditDispatches(workDir, st, rep.Dispatched, prov)
 	if !rep.Changed() && len(r.Attachments) == 0 {
 		return rep, nil
 	}
@@ -598,6 +625,57 @@ func applyAttachments(workDir string, in []Attachment, renumbered map[int]int, p
 		rep.LeftBehind = append(rep.LeftBehind, fmt.Sprintf("%s (task #%d) — %s", name, taskID, left))
 	}
 	return nil
+}
+
+// auditDispatches records a task.dispatch row in the hub's copy of the project
+// for every task a run carried out as a seed dispatched (Task 20457).
+//
+// The run's own orchestrator writes these rows as it starts each task — into the
+// copy of the project the executor holds, which nothing brings back. Without
+// these the hub's trail had a terminal row for every task a Pod or a device ran
+// and no dispatch: nothing saying where it ran or which image it ran in. The
+// facts are the hub's own, from its dispatch record, as the placement the merge
+// stamps on the tasks is; the executor gets no say in them.
+//
+// Best-effort, as every audit emitter is: the merge is not failed for a trail
+// that could not be written, and the chain's own checks find the gap.
+func auditDispatches(workDir string, st *state.ProjectState, ids []int, prov Provenance) {
+	if len(ids) == 0 {
+		return
+	}
+	titles := map[int]string{}
+	if st != nil && st.Plan != nil {
+		for _, t := range st.Plan.Tasks {
+			if t != nil {
+				titles[t.ID] = t.Title
+			}
+		}
+	}
+	db, err := statedb.Open(state.DBPath(workDir))
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	for _, id := range ids {
+		statedb.AuditTaskDispatch(db, statedb.TaskDispatchInput{
+			TaskID:          id,
+			TaskTitle:       titles[id],
+			ProjectPath:     workDir,
+			RunID:           prov.RunID,
+			ExecutorID:      prov.ExecutorID,
+			ExecutorKind:    prov.ExecutorKind,
+			Isolation:       prov.Isolation,
+			RequestedImage:  prov.RequestedImage,
+			PinnedImage:     prov.PinnedImage,
+			ImageProvenance: prov.ImageProvenance,
+			VerifiedDigest:  prov.VerifiedDigest,
+			SpecHash:        prov.SpecHash,
+			SetupHash:       prov.SetupHash,
+			LeaseIDs:        prov.LeaseIDs,
+			Actor:           prov.Identity,
+			RecordedBy:      "hub",
+		})
+	}
 }
 
 // recordEvents writes the run's journal rows through one database handle.

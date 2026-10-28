@@ -612,6 +612,10 @@ type podRequest struct {
 	// (Task 20453), carried to the handle. buildPod does not read it: the Pod
 	// carries Image, and Image is the reference the check decided on.
 	ImageProvenance *imagepolicy.Provenance
+	// ImageLog is what resolving the image found, as lines for the top of the
+	// run's log: which tag resolved to which digest, and what ran weaker than
+	// it should have (Task 20457). buildPod does not read it either.
+	ImageLog []string
 	// ImagePullPolicy is "" (cluster default), "Always", "IfNotPresent" or
 	// "Never".
 	ImagePullPolicy    string

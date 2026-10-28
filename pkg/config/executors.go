@@ -35,6 +35,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
+	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
@@ -720,6 +721,13 @@ func ValidateKubernetesExecutor(k KubernetesExecutorConfig) error {
 		return fmt.Errorf("executors.kubernetes: in_cluster and kubeconfig_secret are mutually exclusive — " +
 			"in_cluster authenticates as the hub Pod's ServiceAccount, kubeconfig_secret leases a " +
 			"credential from the secret broker; pick one")
+	}
+	// A name the secret store could never hold is a login the hub would look
+	// for at every dispatch and never find; said here, where it was written.
+	if ref := strings.TrimSpace(k.RegistrySecret); ref != "" {
+		if err := secretbroker.ValidateName(ref); err != nil {
+			return fmt.Errorf("executors.kubernetes.registry_secret: %w", err)
+		}
 	}
 
 	// The egress filter is compiled, not pattern-matched. netfilter.Compile is

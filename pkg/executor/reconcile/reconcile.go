@@ -338,6 +338,12 @@ type Identity struct {
 	// no sealing key can still schedule Pods, and the driver's preflight says
 	// so rather than failing a deployment that never needed it.
 	Workspace executor.WorkspaceCredentialSource
+	// Registry is the login the hub resolves image tags with (Task 20457):
+	// executors.kubernetes.registry_secret, opened from the same secret store
+	// as a credential the hub presents as itself. nil resolves anonymously,
+	// which is what no registry_secret means; a configured one that cannot be
+	// read is a source that says so at every dispatch, never nil.
+	Registry kubernetes.RegistryLoginSource
 }
 
 // CredentialsFunc builds the identity the Kubernetes driver authenticates
@@ -807,6 +813,10 @@ func reconcileKubernetes(ctx context.Context, dir string, cfg *config.Config, st
 	driverOpts.ImagePolicy = cfg.Sandbox.ImagePolicy.Policy()
 	// And the same check of cloop's own images (Task 20453).
 	driverOpts.VerifyOwnImages = true
+	// Every tag a Pod would carry is resolved at its registry first, and the
+	// Pod carries the digest (Task 20457); the registry login comes with the
+	// identity below.
+	driverOpts.ResolveTags = true
 	// Before Ensure, so New rehydrates from it; see reconcileContainer.
 	driverOpts.HandleStore = store
 	d.ID = driverOpts.ID
@@ -889,6 +899,7 @@ func ensureKubernetes(
 	}
 	driverOpts.Credentials = identity.Cluster
 	driverOpts.Workspace = routeWorkspaceSource(cfg, opts, driverOpts.ID, identity.Workspace)
+	driverOpts.RegistryLogins = identity.Registry
 
 	// The operator's assertion arrived with driverOpts, from the config file.
 	// The other half of the evidence — what a probe actually observed against
@@ -973,8 +984,15 @@ func brokerCredentials(dir string, cfg *config.Config, execID string, wsOpts []s
 		// configured yet. Attempting it and accepting nil keeps that hub
 		// schedulable — public repositories still clone, and the driver's
 		// preflight reports the gap rather than the chart failing to come up.
-		ws, closeWS := optionalWorkspaceSource(dir, cfg, execID, wsOpts)
-		return Identity{Cluster: src, Workspace: ws}, closeWS, nil
+		ws, broker, closeWS := optionalWorkspaceSource(dir, cfg, execID, wsOpts)
+		// Over the same broker, so one executor holds one state database.
+		registry, closeRegistry := registryLoginSource(dir, cfg, broker)
+		if ws == nil && registry == nil && closeWS != nil {
+			// Nothing reads the database it opened.
+			closeWS()
+			closeWS = nil
+		}
+		return Identity{Cluster: src, Workspace: ws, Registry: registry}, joinCleanups(closeWS, closeRegistry), nil
 	}
 
 	db, err := statedb.Open(state.DBPath(dir))
@@ -1023,7 +1041,59 @@ func brokerCredentials(dir string, cfg *config.Config, execID string, wsOpts []s
 		return Identity{}, nil, err
 	}
 	ws.Records = records
-	return Identity{Cluster: src, Workspace: ws}, closeDB, nil
+	registry, _ := registryLoginSource(dir, cfg, broker)
+	return Identity{Cluster: src, Workspace: ws, Registry: registry}, closeDB, nil
+}
+
+// registryLoginSource builds the login the Kubernetes driver resolves image
+// tags with from executors.kubernetes.registry_secret (Task 20457), over
+// broker when the caller has one and over a broker of its own otherwise, whose
+// state database the returned cleanup closes.
+//
+// No registry_secret is nil: tags are resolved anonymously. A configured one
+// with no secret store to read it from — an in-cluster hub without a sealing
+// key — is a source that refuses with that reason, so the hub never resolves
+// anonymously beside a login the operator meant it to use.
+func registryLoginSource(dir string, cfg *config.Config, broker *secretbroker.Broker) (kubernetes.RegistryLoginSource, func()) {
+	ref := strings.TrimSpace(cfg.Executors.Kubernetes.RegistrySecret)
+	if ref == "" {
+		return nil, nil
+	}
+	if broker != nil {
+		return kubernetes.BrokerRegistryLogins{Broker: broker, Secret: ref}, nil
+	}
+	unavailable := func(err error) (kubernetes.RegistryLoginSource, func()) {
+		return kubernetes.UnavailableRegistryLogins{Secret: ref, Reason: fmt.Sprintf(
+			"the hub's secret store is not available to this process (%v) — set CLOOP_SECRET_KEY, or the "+
+				"chart's secrets, so the hub can open it", err)}, nil
+	}
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		return unavailable(err)
+	}
+	closeDB := func() { _ = db.Close() }
+	store, err := secretstore.New(db)
+	if err != nil {
+		closeDB()
+		return unavailable(err)
+	}
+	b, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
+	if err != nil {
+		closeDB()
+		return unavailable(err)
+	}
+	return kubernetes.BrokerRegistryLogins{Broker: b, Secret: ref}, closeDB
+}
+
+// joinCleanups runs every non-nil cleanup, as one.
+func joinCleanups(fns ...func()) func() {
+	return func() {
+		for _, fn := range fns {
+			if fn != nil {
+				fn()
+			}
+		}
+	}
 }
 
 // routeWorkspaceSource decides what a driver's workspace fetches go through.
@@ -1065,16 +1135,21 @@ func routeWorkspaceSource(cfg *config.Config, opts Options, execID string,
 // has minted a GitHub secret yet. Preflight reports it as a warning.
 //
 // wsOpts are added to the broker's options (Options.WorkspaceBrokerOptions).
-func optionalWorkspaceSource(dir string, cfg *config.Config, execID string, wsOpts []secretbroker.Option) (executor.WorkspaceCredentialSource, func()) {
+//
+// The broker it built is returned too, nil when it built none, for the
+// registry login the same executor resolves image tags with (Task 20457): one
+// state database for both.
+func optionalWorkspaceSource(dir string, cfg *config.Config, execID string,
+	wsOpts []secretbroker.Option) (executor.WorkspaceCredentialSource, *secretbroker.Broker, func()) {
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	closeDB := func() { _ = db.Close() }
 	store, err := secretstore.New(db)
 	if err != nil {
 		closeDB()
-		return nil, nil
+		return nil, nil, nil
 	}
 	broker, err := secretbroker.New(store, append([]secretbroker.Option{
 		secretbroker.WithAuditor(secretstore.NewAuditor(db))}, wsOpts...)...)
@@ -1082,15 +1157,15 @@ func optionalWorkspaceSource(dir string, cfg *config.Config, execID string, wsOp
 		// Almost always a missing CLOOP_SECRET_KEY, which is exactly the
 		// in-cluster case this function exists for.
 		closeDB()
-		return nil, nil
+		return nil, nil, nil
 	}
 	src, err := gitcreds.New(broker, execID, "reconcile")
 	if err != nil {
-		closeDB()
-		return nil, nil
+		// The broker is still good for a registry login.
+		return nil, broker, closeDB
 	}
 	src.Records = executorRecords(db, cfg)
-	return src, closeDB
+	return src, broker, closeDB
 }
 
 // executorRecords is the hub's record of its executors for a broker source

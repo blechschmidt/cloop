@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
 // Preflight check levels, matching the container driver's vocabulary so
@@ -79,6 +81,63 @@ func (r PreflightReport) Err() error {
 	return fmt.Errorf("kubernetes executor preflight failed: %s", strings.Join(msgs, "; "))
 }
 
+// preflightResolution reports how this executor turns tags into digests (Task
+// 20457): whether the registry secret it signs in with can be read, and whether
+// its own image's tag resolves — before a run finds out.
+func (e *Executor) preflightResolution(ctx context.Context, add func(name, level, msg, fix string)) {
+	if !e.opts.ResolveTags && e.opts.ImageResolver == nil {
+		return
+	}
+	const secretFix = "set executors.kubernetes.registry_secret to a shared registry secret in the Docker " +
+		"configuration form: cloop secret mint <name> --kind registry --file config.json"
+	if src := e.opts.RegistryLogins; src != nil {
+		logins, err := src.RegistryLogins(ctx)
+		if err != nil {
+			add("registry-login", LevelFail, err.Error()+" — every tag a Pod would carry is then left "+
+				"unresolved: refused under require_digest or require_signature, run as a tag otherwise", secretFix)
+			return
+		}
+		add("registry-login", LevelOK, fmt.Sprintf("the %s holds logins for %s; image tags at those registries "+
+			"are resolved with them, and anywhere else anonymously", src.Describe(),
+			strings.Join(logins.Registries(), ", ")), "")
+	} else {
+		add("registry-login", LevelOK, "image tags are resolved at their registries anonymously — no "+
+			"executors.kubernetes.registry_secret is set, which a private registry needs", "")
+	}
+
+	parsed, err := imagepolicy.ParseReference(e.opts.Image)
+	if err != nil || parsed.Pinned() {
+		return
+	}
+	r, rctx := e.newImageResolution(ctx)
+	if !parsed.Qualified {
+		add("image-resolution", e.unresolvedLevel(r), fmt.Sprintf("executors.kubernetes.image %s names no "+
+			"registry, so the hub cannot resolve it to a digest", e.opts.Image),
+			"qualify the image with its registry, or pin it by digest")
+		return
+	}
+	digest, err := r.resolver.ResolveDigest(rctx, parsed.String())
+	if err != nil {
+		add("image-resolution", e.unresolvedLevel(r), fmt.Sprintf("executors.kubernetes.image %s could not be "+
+			"resolved at %s: %s", e.opts.Image, parsed.Registry, trimRegistryErr(err)),
+			r.remedy(parsed.Registry, "pin executors.kubernetes.image by digest"))
+		return
+	}
+	add("image-resolution", LevelOK, fmt.Sprintf("executors.kubernetes.image %s resolves at %s to %s%s; each "+
+		"Pod carries the digest its tag names at dispatch", e.opts.Image, parsed.Registry, digest,
+		r.signedIn(parsed.Registry)), "")
+}
+
+// unresolvedLevel is how serious an unresolvable executor image is: every run
+// refused under require_digest or require_signature, a tag in the Pod
+// otherwise.
+func (e *Executor) unresolvedLevel(r *imageResolution) string {
+	if r.strict {
+		return LevelFail
+	}
+	return LevelWarn
+}
+
 // Preflight checks everything between this control plane and a running Pod.
 func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 	if ctx == nil {
@@ -98,9 +157,15 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 			add("image", LevelWarn, w,
 				"set executors.kubernetes.image to a digest-pinned image containing the cloop binary")
 		}
-	} else {
+	} else if strings.Contains(e.opts.Image, "@sha256:") {
 		add("image", LevelOK, fmt.Sprintf("image %s is digest-pinned", e.opts.Image), "")
+	} else {
+		// A fixed tag. It used to be reported as digest-pinned, which it is
+		// not; what a Pod runs is the digest it resolves to at dispatch,
+		// reported under image-resolution (Task 20457).
+		add("image", LevelOK, fmt.Sprintf("image %s is a fixed tag", e.opts.Image), "")
 	}
+	e.preflightResolution(ctx, add)
 
 	// --- 2. credentials ---------------------------------------------------
 	if e.opts.Credentials == nil {

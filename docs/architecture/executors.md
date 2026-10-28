@@ -585,6 +585,21 @@ arrives by way of a `workspace` init container — see
 container status by name must therefore keep selecting `harness` rather than
 "the only one".
 
+The image the Pod runs is a digest the hub chose. A tag in a Pod spec would be
+resolved by whichever kubelet pulls it, whenever the Pod is scheduled — after
+the image trust policy evaluated it — so before the Pod is built the hub
+resolves every tag it would carry (the project's image, `executors.kubernetes.image`,
+one of cloop's own) at its registry, verifies the digest's signature when the
+policy requires one, and writes `repo@sha256:…` into the spec; the run's log
+opens with what resolved to what, and the handle names the digest (Task 20457,
+`kubernetes/imageresolve.go`). The resolution happens before anything is leased
+for the run. A private registry is asked with the login in
+`executors.kubernetes.registry_secret` — a registry secret the hub opens as its
+own credential — never the namespace's `imagePullSecrets`, which are the
+kubelet's. A tag the hub cannot resolve is refused under `require_digest` or
+`require_signature` and otherwise runs as a tag with a warning; see
+[Resolving image tags for Kubernetes Pods](../reference/configuration.md#resolving-image-tags-for-kubernetes-pods).
+
 The project itself — `.cloop/`, which a clone of the source repository does not
 contain — comes with the run, and its outcome goes back: the hub's seed rides
 the run's lease Secret into the init container, and what the run recorded comes

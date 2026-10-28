@@ -197,14 +197,26 @@ sandbox:
     allowedRepos: []
     #  - ghcr.io/acme/*
 
-    # Refuse an image pinned only to a tag.
+    # Refuse an image a project's .cloop/sandbox.yaml names by tag, and send
+    # no tag to a workload Pod — refusing any tag the hub cannot resolve to a
+    # digest, executor.kubernetes.image included.
     #
-    # On by default, and it matters most here: a tag in a Pod spec is resolved
-    # by a kubelet, on a node, whenever it schedules — the control plane has no
-    # cluster image store to resolve it against first. So on Kubernetes an
-    # unpinned reference means the artifact that runs is whatever the tag
-    # pointed at by then, which may not be what anything evaluated.
-    requireDigest: true
+    # OFF by default since Task 20457, and that is a decision, not a
+    # loosening of what runs. It used to be on because a tag in a Pod spec was
+    # resolved by a kubelet, on a node, whenever it scheduled, and the artifact
+    # that ran was whatever the tag pointed at by then. Now the hub resolves
+    # every tag at its registry before it builds the Pod and the Pod carries
+    # the digest, so a project's tag runs as exactly the image the policy
+    # evaluated — and refusing it would only make every project pin by hand
+    # what the hub pins for it.
+    #
+    # What turning it on still buys: a repository that names an exact artifact,
+    # so a run next month runs the same image; and a refusal, instead of a
+    # warning and the tag, when the hub cannot resolve a tag — its registry
+    # unreachable from the hub, or private with no registrySecret above. Turn
+    # it on if a tag reaching a node unresolved is not acceptable to you; then
+    # executor.kubernetes.image must be a digest, or a tag the hub can resolve.
+    requireDigest: false
 
     # Refuse an image whose signature cosign cannot verify.
     #
@@ -239,8 +251,9 @@ sandbox:
     # device's or a virtual executor's sandbox image — to the rules above too,
     # not only the images a project names (Task 20453). cloop's own images are
     # not affected: they have the pin of their own publishing workflow. Off by
-    # default because, with requireDigest on, a tagged executor image would be
-    # refused at the first run.
+    # default: they are chosen in this file, beside the rules, and with
+    # requireDigest on a tagged executor image would be refused at the first
+    # run. Its tag is resolved to a digest either way.
     governOperatorImages: false
 
 oidc:
@@ -512,12 +525,39 @@ executor:
     # that, with cloop on PATH.
     image: ""
 
+    # The workload Pods' pull policy. Empty takes image.pullPolicy, the hub's
+    # own. The hub resolves every tag a Pod would carry to a digest before it
+    # builds the Pod (Task 20457), so a node that already holds that digest
+    # need not ask again; "Never" needs the node to hold the image *by that
+    # digest* — pulled from the registry, not loaded from a tarball — whenever
+    # the hub could resolve the tag.
+    imagePullPolicy: ""
+
     # Secrets in the WORKLOAD namespace holding registry auth for the image
     # above. Separate from image.pullSecrets because imagePullSecrets are
     # namespaced and the two namespaces differ. Bare strings here, which is
     # what cloop's config schema takes.
+    #
+    # They are the kubelet's, for pulling. The hub never reads them — its Role
+    # grants nothing on Secrets — so they are not how it resolves a tag;
+    # registrySecret below is.
     imagePullSecrets: []
     #  - ghcr-auth
+
+    # The registry login the HUB resolves image tags with — and fetches their
+    # signatures with — before it builds a Pod (Task 20457): the name of a
+    # shared registry secret in the hub's secret store, holding the
+    # config.json `docker login` writes:
+    #
+    #   cloop secret mint ghcr-robot --kind registry --file config.json
+    #
+    # Each login in it is presented to the registry it names and to no other,
+    # and no workload ever holds it: the hub opens it as its own credential,
+    # not through a grant. Empty resolves anonymously — enough for a public
+    # registry; a private one answers 401, and the tag then runs unresolved
+    # with a warning, or is refused under sandbox.imagePolicy.requireDigest or
+    # requireSignature. Needs the secret store, so secrets.secretKey.
+    registrySecret: ""
 
     # Bound every workload. Without limits a run is constrained only by the
     # namespace's LimitRange, if one exists.

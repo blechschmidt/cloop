@@ -67,7 +67,13 @@ data:
         in_cluster: true
         namespace: {{ include "cloop-hub.workloadNamespace" . | quote }}
         image: {{ default (include "cloop-hub.image" .) .Values.executor.kubernetes.image | quote }}
-        image_pull_policy: {{ .Values.image.pullPolicy | quote }}
+        image_pull_policy: {{ default .Values.image.pullPolicy .Values.executor.kubernetes.imagePullPolicy | quote }}
+        {{- with .Values.executor.kubernetes.registrySecret }}
+        # The login the hub resolves image tags with, opened from its secret
+        # store as its own credential — never the imagePullSecrets below, which
+        # are the kubelet's and which the hub's Role cannot read (Task 20457).
+        registry_secret: {{ . | quote }}
+        {{- end }}
         {{- with .Values.executor.kubernetes.imagePullSecrets }}
         # Resolved in the WORKLOAD namespace, not this one. ImagePullSecrets
         # are namespaced, so image.pullSecrets (which pulls the hub's own
@@ -188,9 +194,10 @@ data:
     # It governs project-supplied images, and the executor's own image above
     # only under govern_operator_images: that is the operator's choice made in
     # this same file — running it through an allowlist the same person wrote
-    # would be a lint, not a control, and with require_digest on it would
-    # refuse the hub's own tagged image at boot. cloop's own images are checked
-    # against their publishing workflow instead (executors.image_provenance).
+    # would be a lint, not a control. cloop's own images are checked against
+    # their publishing workflow instead (executors.image_provenance). Every tag
+    # a workload Pod would carry, the executor's included, is resolved to a
+    # digest at its registry before the Pod is built (Task 20457).
     sandbox:
       image_policy:
         allowed_registries: {{ toJson (default (list (include "cloop-hub.imageRegistry" .)) .Values.sandbox.imagePolicy.allowedRegistries) }}

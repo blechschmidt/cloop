@@ -66,14 +66,17 @@ var registry = []Entry{
 		Trigger: "A task is handed to an executor, recording where it will run and what it was given.",
 		Payload: []string{
 			"task_id", "title", "project", "run_id", "executor_id", "executor_kind",
-			"isolation", "requested_image", "pinned_image", "image_provenance",
-			"verified_digest", "spec_sha256", "setup_sha256", "lease_ids",
+			"isolation", "requested_image", "pinned_image", "image_digest", "image_provenance",
+			"verified_digest", "spec_sha256", "setup_sha256", "lease_ids", "recorded_by",
 		},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "This and task.finish are what make \"where did this task run, and what " +
 			"credentials did it hold\" answerable from audit_events alone, without " +
-			"joining the executor tables.",
+			"joining the executor tables. image_digest is the digest pinned_image names. " +
+			"A run carried out as a seed — on a Kubernetes Pod or a device — writes its own " +
+			"rows into a copy of the project that never comes back, so the hub writes them " +
+			"when it merges the run's outcome, recorded_by \"hub\" (Task 20457).",
 	},
 	{
 		Action:  ActionTaskFinish,

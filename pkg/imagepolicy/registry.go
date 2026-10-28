@@ -22,10 +22,19 @@ package imagepolicy
 // Scope: the distribution API's manifest endpoint — HEAD, then GET when a
 // registry leaves out the digest header — with the two authentication schemes
 // registries use, a Bearer token service and Basic. Credentials come from the
-// Docker-format files cosign's own keychain reads (registryauth.go). A
+// Docker-format files cosign's own keychain reads (registryauth.go), or — for a
+// Kubernetes executor, which resolves every tag a Pod would carry (Task 20457)
+// — from the registry secret the hub holds for it and nowhere else. A
 // credential helper is not run: a repository whose login lives only in one is
 // resolved anonymously and refused if that is not enough. A reference pinned by
 // digest is never resolved at all.
+//
+// The registry is named by whoever wrote the reference, which on a hub with no
+// image policy is any project. So what it can make this host do is bounded: a
+// redirect is followed over https only (checkRegistryRedirect), a token service
+// over plain HTTP or on this host's loopback is refused unless the registry is
+// itself on this host (realmAllowed), and a login is offered only to the
+// registry it is stored for.
 
 import (
 	"context"
@@ -98,6 +107,39 @@ func NewRegistryResolver() *RegistryResolver { return &RegistryResolver{} }
 
 // defaultRegistryClient is the client a resolver without one uses.
 var defaultRegistryClient = &http.Client{Timeout: registryRequestTimeout}
+
+// maxRegistryRedirects bounds the redirects one registry request follows. A
+// manifest or a token is served where it is asked for; a registry that bounces
+// a request around is not one worth following far.
+const maxRegistryRedirects = 3
+
+// checkRegistryRedirect is the redirect policy of every registry request,
+// whichever client makes it (Task 20457).
+//
+// The reference a resolution follows is named by a project, so the registry at
+// the other end may be anybody's, and a redirect is that registry choosing a
+// URL for this host to fetch. Followed to anything, it is a request from the
+// hub's own network position to an address of a stranger's choosing — a
+// plain-HTTP service on the hub's loopback, a cloud metadata endpoint — whose
+// answer the resolution then acts on: a token service's "token" is presented
+// back to the registry that asked for it. So a redirect is followed over https
+// only, a few hops at most; plain HTTP only where the request began on this
+// host's loopback over plain HTTP, which is a registry on this host.
+func checkRegistryRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRegistryRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRegistryRedirects)
+	}
+	if req.URL.Scheme == "https" {
+		return nil
+	}
+	if len(via) > 0 {
+		first := via[0].URL
+		if first.Scheme == "http" && isLoopbackHost(first.Hostname()) && isLoopbackHost(req.URL.Hostname()) {
+			return nil
+		}
+	}
+	return fmt.Errorf("refused a redirect to %s: a registry is followed over https only", req.URL.Redacted())
+}
 
 // ResolveDigest implements Resolver: the digest ref's registry serves for its
 // tag now. A reference already pinned resolves to its own digest without a
@@ -207,6 +249,32 @@ func (r *RegistryResolver) do(ctx context.Context, method, target, auth string) 
 	return r.client().Do(req)
 }
 
+// isLoopbackHost reports whether host names this machine's loopback interface:
+// "localhost", or a loopback address literal.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// realmAllowed refuses a token service a registry has no business naming.
+//
+// The realm is the registry's choice, and the hub fetches it and presents what
+// it answers back to the registry as a bearer token. A registry elsewhere that
+// names a service on the hub's own loopback is asking the hub to read one of its
+// own local services and hand the answer to a stranger, so the realm may be on
+// this host's loopback only when the registry is too — a registry this host
+// serves itself, as a test's is.
+func realmAllowed(manifestURL string, realm *url.URL) bool {
+	if !isLoopbackHost(realm.Hostname()) {
+		return true
+	}
+	u, err := url.Parse(manifestURL)
+	return err == nil && isLoopbackHost(u.Hostname())
+}
+
 // authorize answers a registry's 401 with the Authorization header to retry
 // with: a token from its token service when it offers one, else Basic.
 func (r *RegistryResolver) authorize(ctx context.Context, ref Reference, manifestURL string, challenges []string) (string, error) {
@@ -214,7 +282,7 @@ func (r *RegistryResolver) authorize(ctx context.Context, ref Reference, manifes
 	for _, c := range challenges {
 		scheme, params := parseChallenge(c)
 		if strings.EqualFold(scheme, "bearer") {
-			token, err := r.fetchToken(ctx, ref, params["realm"], params["service"], cred, haveCred)
+			token, err := r.fetchToken(ctx, ref, manifestURL, params["realm"], params["service"], cred, haveCred)
 			if err != nil {
 				return "", err
 			}
@@ -246,7 +314,7 @@ func (r *RegistryResolver) authorize(ctx context.Context, ref Reference, manifes
 // The scope is always this repository's pull, whatever the challenge asked
 // for: a resolution reads one manifest, and a token able to do more is a token
 // that could be spent on more.
-func (r *RegistryResolver) fetchToken(ctx context.Context, ref Reference, realm, service string,
+func (r *RegistryResolver) fetchToken(ctx context.Context, ref Reference, manifestURL, realm, service string,
 	cred RegistryCredential, haveCred bool) (string, error) {
 	u, err := url.Parse(realm)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
@@ -255,6 +323,10 @@ func (r *RegistryResolver) fetchToken(ctx context.Context, ref Reference, realm,
 	if !protectsCredentials(u) {
 		return "", fmt.Errorf("%w: %s named a token service over plain HTTP (%s), which this host does not use",
 			ErrRegistry, ref.Registry, u.Redacted())
+	}
+	if !realmAllowed(manifestURL, u) {
+		return "", fmt.Errorf("%w: %s named a token service on this host's own loopback interface (%s), which "+
+			"only a registry on this host may", ErrRegistry, ref.Registry, u.Redacted())
 	}
 	q := u.Query()
 	if service != "" {
@@ -330,11 +402,17 @@ func (r *RegistryResolver) endpoint(registry string) string {
 	return "https://" + registry
 }
 
+// client returns the client requests go through: the configured one, or the
+// default, with the registry redirect policy in force either way — a caller's
+// client is trusted for its transport and its roots, not for where it follows a
+// stranger's registry to.
 func (r *RegistryResolver) client() *http.Client {
+	c := *defaultRegistryClient
 	if r.Client != nil {
-		return r.Client
+		c = *r.Client
 	}
-	return defaultRegistryClient
+	c.CheckRedirect = checkRegistryRedirect
+	return &c
 }
 
 // protectsCredentials reports whether u is a place a password may be sent:
@@ -346,12 +424,7 @@ func protectsCredentials(u *url.URL) bool {
 	if u.Scheme != "http" {
 		return false
 	}
-	host := u.Hostname()
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return isLoopbackHost(u.Hostname())
 }
 
 // basicAuth renders a credential as the Basic scheme's token.

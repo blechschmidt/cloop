@@ -35,7 +35,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
-	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -771,13 +770,8 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		if payer == "" {
 			payer = cost.IdentityLocal
 		}
-		rememberSeededDispatch(ex, handle.ID, projectseed.Provenance{
-			ExecutorID:   ex.ID(),
-			ExecutorKind: ex.Kind(),
-			Isolation:    string(ex.Capabilities().Isolation),
-			RunID:        runID,
-			Identity:     payer,
-		})
+		rememberSeededDispatch(ex, handle.ID, seededProvenance(ex, handle, sandboxSpec, runID, payer,
+			lease.LeaseIDs()))
 		// And for a feature, where its work is landed when it comes back.
 		rememberFeatureReturn(ex, handle.ID, featureReturnFor(spec))
 	}
