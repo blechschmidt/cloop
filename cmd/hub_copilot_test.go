@@ -311,15 +311,24 @@ func TestHubCopilotActsForThePersonEndToEnd(t *testing.T) {
 	}
 	capPauseWithWork(t, hub.Dir, 3)
 	before := len(copilotCalls(t, log))
-	for i := 0; i < 3; i++ {
+	// The sweep skips a project it still sees executing, and the run that
+	// finished task 2 may not have been let go of yet — under -race on a busy
+	// machine it was not: sweep until the resume is decided, as resumeOnce
+	// does.
+	var st *state.ProjectState
+	for deadline := time.Now().Add(60 * time.Second); ; {
 		hub.Server.SweepAutoResume(context.Background())
+		var err error
+		if st, err = state.LoadLite(hub.Dir); err != nil {
+			t.Fatal(err)
+		}
+		if (st.PauseReason != nil && st.PauseReason.Code == pausereason.CodeStarterUnavailable) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	if after := len(copilotCalls(t, log)); after != before {
 		t.Fatalf("a resume of alice's run with no credential of hers ran the Copilot CLI %d time(s)", after-before)
-	}
-	st, err := state.LoadLite(hub.Dir)
-	if err != nil {
-		t.Fatal(err)
 	}
 	if st.Status != "paused" || st.PauseReason == nil || st.PauseReason.Code != pausereason.CodeStarterUnavailable ||
 		!strings.Contains(st.PauseReason.Detail, alice) {
