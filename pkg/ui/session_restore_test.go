@@ -169,6 +169,16 @@ func newRestoreRigWith(t *testing.T, appOnForge bool) *restoreRig {
 				liveLeases.removeIf(sl)
 			}
 		}
+		// What the rig's runs were scanned for goes with its proxy: a
+		// workload the test never finished would otherwise keep its entry
+		// for every test after it.
+		pushScans.Lock()
+		for id, e := range pushScans.runs {
+			if e.workDir == dir {
+				delete(pushScans.runs, id)
+			}
+		}
+		pushScans.Unlock()
 	})
 
 	// The proxies' listeners outlive any one process's registry: a restarted

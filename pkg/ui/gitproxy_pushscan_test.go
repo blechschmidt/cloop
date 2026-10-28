@@ -124,11 +124,13 @@ func TestNothingIsHeldWithoutAProxy(t *testing.T) {
 	prev := gitProxySingleton.Load()
 	gitProxySingleton.Store(nil)
 	t.Cleanup(func() { gitProxySingleton.Store(prev) })
-	registerRunPushScan("run_x", t.TempDir(), nil, executor.Spec{Env: []string{"K=v-12345678", redact.EnvKey + "=K"}})()
+	end := registerRunPushScan("run_x", t.TempDir(), nil, executor.Spec{Env: []string{"K=v-12345678", redact.EnvKey + "=K"}})
 	pushScans.Lock()
-	defer pushScans.Unlock()
-	if len(pushScans.runs) != 0 {
-		t.Fatalf("held %d runs' values with no proxy", len(pushScans.runs))
+	_, held := pushScans.runs["run_x"]
+	pushScans.Unlock()
+	end()
+	if held {
+		t.Fatal("held the run's values with no proxy")
 	}
 }
 
