@@ -61,6 +61,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,7 +77,11 @@ var realHome string
 
 func TestMain(m *testing.M) {
 	realHome = os.Getenv("HOME")
-	os.Exit(hometest.Isolate(m))
+	code := hometest.Isolate(m)
+	if builtCloop != "" {
+		_ = os.RemoveAll(filepath.Dir(builtCloop))
+	}
+	os.Exit(code)
 }
 
 // Environment the test reads. Only the first is required; it opts the test in.
@@ -469,28 +474,11 @@ func TestGitProxyAndKubeGuardOnKubernetes(t *testing.T) {
 func buildImages(ctx context.Context, t *testing.T, x tool) {
 	t.Helper()
 	root := repoRoot(t)
-	kubectlBin, err := exec.LookPath("kubectl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cloopBin := os.Getenv(binEnv)
-	if cloopBin == "" {
-		cloopBin = filepath.Join(t.TempDir(), "cloop")
-		goBuild(ctx, t, root, cloopBin, ".")
-	}
-
 	forgeCtx := t.TempDir()
 	goBuild(ctx, t, root, filepath.Join(forgeCtx, "forge"), "./tests/kube/forge")
 	copyFile(t, filepath.Join(root, "tests/kube/forge.Dockerfile"), filepath.Join(forgeCtx, "Dockerfile"))
 	dockerBuild(ctx, t, x, forgeCtx, forgeImage)
-
-	harnessCtx := t.TempDir()
-	copyFile(t, cloopBin, filepath.Join(harnessCtx, "cloop"))
-	copyFile(t, filepath.Join(root, "tests/kube/cloop-hold.sh"), filepath.Join(harnessCtx, "cloop-hold"))
-	copyFile(t, kubectlBin, filepath.Join(harnessCtx, "kubectl"))
-	copyFile(t, filepath.Join(root, "scripts/e2e/gitproxy/claude"), filepath.Join(harnessCtx, "claude"))
-	copyFile(t, filepath.Join(root, "tests/kube/harness.Dockerfile"), filepath.Join(harnessCtx, "Dockerfile"))
-	dockerBuild(ctx, t, x, harnessCtx, harnessImage)
+	dockerBuild(ctx, t, x, harnessContext(ctx, t), harnessImage)
 
 	cluster, importCmd := os.Getenv(kindEnv), os.Getenv(importEnv)
 	for _, img := range []string{forgeImage, harnessImage} {
@@ -510,6 +498,44 @@ func buildImages(ctx context.Context, t *testing.T, x tool) {
 		x.run(ctx, nil, true, "docker", "rmi", img)
 	}
 }
+
+// harnessContext is the harness image's build context: cloop under test,
+// cloop-hold, kubectl and the stand-in claude, beside tests/kube/harness.Dockerfile.
+// The cloop it holds is built once per test binary.
+func harnessContext(ctx context.Context, t *testing.T) string {
+	t.Helper()
+	root := repoRoot(t)
+	kubectlBin, err := exec.LookPath("kubectl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloopBin := os.Getenv(binEnv)
+	if cloopBin == "" {
+		builtCloopOnce.Do(func() {
+			dir, err := os.MkdirTemp("", "cloop-kube-e2e-bin-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			builtCloop = filepath.Join(dir, "cloop")
+			goBuild(ctx, t, root, builtCloop, ".")
+		})
+		cloopBin = builtCloop
+	}
+	harnessCtx := t.TempDir()
+	copyFile(t, cloopBin, filepath.Join(harnessCtx, "cloop"))
+	copyFile(t, filepath.Join(root, "tests/kube/cloop-hold.sh"), filepath.Join(harnessCtx, "cloop-hold"))
+	copyFile(t, kubectlBin, filepath.Join(harnessCtx, "kubectl"))
+	copyFile(t, filepath.Join(root, "scripts/e2e/gitproxy/claude"), filepath.Join(harnessCtx, "claude"))
+	copyFile(t, filepath.Join(root, "tests/kube/harness.Dockerfile"), filepath.Join(harnessCtx, "Dockerfile"))
+	return harnessCtx
+}
+
+// builtCloop is the cloop harnessContext built, when CLOOP_KUBE_E2E_CLOOP_BIN
+// named none.
+var (
+	builtCloopOnce sync.Once
+	builtCloop     string
+)
 
 func goBuild(ctx context.Context, t *testing.T, root, out, pkg string) {
 	t.Helper()

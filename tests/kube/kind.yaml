@@ -1,0 +1,14 @@
+# The kind cluster CI's deploy-artifacts job runs tests/kube on.
+#
+# One change from kind's defaults: containerd reads registry hosts from
+# /etc/containerd/certs.d (its CRI config_path), which kind leaves unset. With
+# it, TestAPodRunsTheDigestItsTagResolvedTo (Task 20457) points a node at the
+# registry it serves inside the cluster by writing one hosts.toml, without
+# restarting containerd. A directory with no hosts.toml in it changes nothing
+# for any other image.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"

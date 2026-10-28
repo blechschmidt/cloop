@@ -2646,9 +2646,14 @@ jobs:
       - name: Create a kind cluster
         # kubectl needs a cluster even for --dry-run=client: it resolves REST
         # mappings from the discovery API before it can validate anything.
+        #
+        # tests/kube/kind.yaml points containerd at a registry hosts directory,
+        # which the image-resolution end-to-end test below writes a hosts.toml
+        # into (Task 20457).
         uses: helm/kind-action@v1
         with:
           cluster_name: cloop-ci
+          config: tests/kube/kind.yaml
 
       - name: helm template | kubectl apply --dry-run
         run: |
@@ -2996,6 +3001,34 @@ jobs:
           }
           grep -q -- '--- PASS: TestGitProxyAndKubeGuardOnKubernetes' "$RUNNER_TEMP/kube-e2e-cluster.log" || {
             echo "::error::the Kubernetes end-to-end test did not pass on the hub cluster (see the log above)"
+            exit 1
+          }
+
+      - name: A Pod runs the digest its image's tag resolved to, on kind
+        id: kube-image-pin
+        # Task 20457: the hub resolves every tag a Pod would carry at its
+        # registry before it builds the Pod. tests/kube serves a registry in
+        # the cluster, dispatches a run whose executor image is a tag while no
+        # node can take the Pod, repoints the tag, lets the Pod schedule, and
+        # checks that it pulled and ran the digest the tag named at dispatch —
+        # then, under require_signature, that cloop's own published image,
+        # copied with its signature, is admitted and an unsigned one refused,
+        # by the cosign in the hub image. Needs ghcr.io and Sigstore's TUF
+        # mirror. Last, because it repoints the release's executor image and
+        # policy. See tests/kube/README.md.
+        #
+        # Advisory until it has passed on main twice, as the steps above were.
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          CLOOP_KUBE_E2E_KIND_CLUSTER: cloop-ci
+        run: |
+          set -euo pipefail
+          CLOOP_KUBE_E2E_KUBECONFIG="$RUNNER_TEMP/kubeconfig" CLOOP_KUBE_E2E_CLOOP_BIN="$RUNNER_TEMP/cloop" \
+            go test ./tests/kube/ -run TestAPodRunsTheDigestItsTagResolvedTo -count=1 -v -timeout 28m 2>&1 |
+            tee "$RUNNER_TEMP/kube-image-pin.log"
+          grep -q -- '--- PASS: TestAPodRunsTheDigestItsTagResolvedTo' "$RUNNER_TEMP/kube-image-pin.log" || {
+            echo "::error::the image resolution end-to-end test did not pass (see the log above)"
             exit 1
           }
 

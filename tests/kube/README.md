@@ -10,8 +10,12 @@ Three tests, on a real cluster:
   hub process serves the fetch (Task 20455);
 - [`TestKubeShareWithAnExecPlugin`](#sharing-a-cluster-whose-kubeconfig-runs-a-plugin)
   shares the cluster with a hub running on the test host, through a kubeconfig
-  that signs in only with an exec credential plugin (Task 20416) — the last
-  section.
+  that signs in only with an exec credential plugin (Task 20416);
+- [`TestAPodRunsTheDigestItsTagResolvedTo`](#a-pod-runs-the-digest-its-tag-resolved-to)
+  serves a registry in the cluster and shows a Pod running the digest its
+  image's tag named at dispatch, after the tag has moved, and a signed image
+  admitted and an unsigned one refused under `require_signature` (Task 20457) —
+  the last section.
 
 `kube_test.go` runs a workload Pod through the git interception proxy and the
 Kubernetes access monitor on a hub that `deploy/helm/cloop-hub` installed, and
@@ -226,3 +230,74 @@ About thirteen minutes, nearly all of it waiting: ten minutes is the shortest
 token the TokenRequest API issues, and the API server accepts one for a minute
 past its expiry. `CLOOP_KUBE_E2E_CLOOP_BIN` supplies the binary; unset, one is
 built. CI runs it in the `kube-share` job on a kind cluster of its own.
+
+## A Pod runs the digest its tag resolved to
+
+[`imageresolve_test.go`](imageresolve_test.go) (Task 20457). The hub resolves
+every tag a Pod would carry at its registry before it builds the Pod, and the
+Pod carries `repo@sha256:…`. This shows it on a real kubelet.
+
+1. Builds the forge and harness images, and two more harness images, A and B,
+   that differ only in `/etc/cloop-e2e-marker`.
+2. Serves `registry:2` over TLS (a throwaway CA) in
+   `cloop-e2e-registry-<stamp>`, known as `registry.cloop-e2e.test:5000`. The hub
+   reaches it through a `hostAlias` and trusts the CA through `extraCACerts`. Each
+   node's containerd reaches it through a `hosts.toml` naming the Service's
+   address, written into the node's registry hosts directory: containerd's CRI
+   `config_path`. kind leaves that unset, so CI creates its cluster with
+   [`kind.yaml`](kind.yaml); a node that cannot pull through it fails the test at
+   once, saying so. The node hop does not check the certificate: the node pulls
+   by digest, which is checked.
+3. Pushes A as `e2e/harness:pin-<stamp>` through a port-forward, and upgrades the
+   release: the executor's image is that tag, pulled `Always`, with the forge as
+   github.com and the git proxy on.
+4. **Pinning.** Cordons every node, starts a run, and waits for its Pod to be
+   created and left unscheduled. The Pod already names A's digest. Then it
+   pushes B under the same tag, checks the registry says so, and uncordons. The
+   kubelet pulls only now, with the tag naming B, so a Pod that carried the tag
+   would run B.
+   - `M1` passes when the probe finds A's marker, and every container's
+     `imageID` is A's digest.
+   - The run's log says `[cloop] image …:pin-<stamp> resolved at
+     registry.cloop-e2e.test:5000 to …@<A>`.
+   - The task is done on the hub, and its `task.dispatch` row names A as
+     `pinned_image` and `image_digest`, `recorded_by: hub`.
+   - A second task, dispatched afterwards, runs B: the tag is resolved again at
+     each dispatch.
+5. **Signatures.** Copies one platform of `ghcr.io/blechschmidt/cloop:edge` into
+   the registry as `e2e/signed:s-<stamp>`, together with the Sigstore bundle its
+   publishing workflow signed it with. The bundle sits under the referrers
+   fallback tag `sha256-<hex>`. The copy is done over the registry API, because
+   neither `cosign copy` v2 nor v3 carries a v3 bundle. Nothing is signed or
+   uploaded anywhere. The test then turns on `require_signature` with the
+   publishing workflow's identity, and `govern_operator_images`, so the
+   executor's own image is held to it. A project could name the image in
+   `.cloop/sandbox.yaml` instead, but a spec without an egress grant gets no
+   network for its git fetch.
+   - with the signed copy as the executor image, by tag, a run is admitted and
+     its Pod carries the verified digest. The run then fails, since the hub
+     image is no harness, which is beside the point;
+   - with the unsigned `e2e/harness:pin-<stamp>`, a run is refused with a
+     `sandbox.image_denied` row, rule `signature-required`, naming cosign's
+     `no signatures found`, and no Pod runs it.
+
+   The hub image's cosign checks the signature, so the hub needs Sigstore's TUF
+   mirror (`tuf-repo-cdn.sigstore.dev`), and the test host needs ghcr.io. The
+   chart now sets `TUF_ROOT=/tmp/sigstore`: under a read-only root filesystem,
+   cosign could not create `$HOME/.sigstore` and verified no keyless signature
+   at all.
+
+| variable | meaning |
+| --- | --- |
+| `CLOOP_KUBE_E2E_NODE_CERTS_D` | the node's containerd registry hosts directory: `/etc/containerd/certs.d` by default (kind with `kind.yaml`), `/var/lib/rancher/k3s/agent/etc/containerd/certs.d` for k3s |
+| `CLOOP_KUBE_E2E_NODE_EXEC` | as above: how to run a command on a node, to write the `hosts.toml` and `crictl pull` through it |
+
+```bash
+kind create cluster --name cloop-ci --config tests/kube/kind.yaml
+# … install the chart as CI does …
+CLOOP_KUBE_E2E_KUBECONFIG=/tmp/kubeconfig CLOOP_KUBE_E2E_KIND_CLUSTER=cloop-ci \
+  go test ./tests/kube/ -run TestAPodRunsTheDigestItsTagResolvedTo -count=1 -v -timeout 28m
+```
+
+It cordons every node for the seconds between dispatch and the repoint, so run
+it only on a throwaway cluster, as every test here.
