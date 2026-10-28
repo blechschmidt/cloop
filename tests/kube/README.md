@@ -248,12 +248,16 @@ Pod carries `repo@sha256:…`. This shows it on a real kubelet.
    [`kind.yaml`](kind.yaml); a node that cannot pull through it fails the test at
    once, saying so. The node hop does not check the certificate: the node pulls
    by digest, which is checked.
-3. Pushes A as `e2e/harness:pin-<stamp>` through a port-forward, and upgrades the
-   release: the executor's image is that tag, pulled `Always`, with the forge as
-   github.com and the git proxy on.
+3. Uploads A and B through a port-forward, over the registry API: config and
+   layers from `docker save`, and an OCI manifest naming them. `docker push`
+   handles a localhost registry whose certificate names another host differently
+   from one Docker installation to the next, and failed on GitHub's runners. The
+   test tags A as `e2e/harness:pin-<stamp>` and upgrades the release: the
+   executor's image is that tag, pulled `Always`, with the forge as github.com and
+   the git proxy on.
 4. **Pinning.** Cordons every node, starts a run, and waits for its Pod to be
    created and left unscheduled. The Pod already names A's digest. Then it
-   pushes B under the same tag, checks the registry says so, and uncordons. The
+   points the same tag at B, checks the registry says so, and uncordons. The
    kubelet pulls only now, with the tag naming B, so a Pod that carried the tag
    would run B.
    - `M1` passes when the probe finds A's marker, and every container's

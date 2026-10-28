@@ -3035,8 +3035,11 @@ jobs:
           if grep -q -- '--- PASS: TestAPodRunsTheDigestItsTagResolvedTo' "$log"; then
             exit 0
           fi
-          why=$(grep -E '^\s+[a-z_]+_test\.go:[0-9]+: |^--- FAIL|^panic:' "$log" |
-            grep -vE ': (run|workspace init|second run) \|' | tail -n 30 || true)
+          # The test's messages, with the lines a message continues on (a
+          # failed command's own output, indented under it).
+          why=$(grep -vE '_test\.go:[0-9]+: (run|workspace init|second run) \|' "$log" |
+            grep -E -A12 '^\s+[a-z_]+_test\.go:[0-9]+: ' |
+            grep -E '^\s+[a-z_]+_test\.go:[0-9]+: |^ {8}|^--- FAIL|^panic:' | tail -n 40 || true)
           [ -n "$why" ] || why=$(tail -n 40 "$log" || true)
           why=$(printf '%s' "$why" | sed -e 's/%/%25/g' |
             awk 'BEGIN { ORS = "" } { gsub(/\r/, "%0D"); if (NR > 1) print "%0A"; print }')

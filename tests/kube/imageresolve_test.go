@@ -6,6 +6,7 @@ package kube_test
 // README.md, "A Pod runs the digest its tag resolved to".
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -19,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -118,18 +120,17 @@ func TestAPodRunsTheDigestItsTagResolvedTo(t *testing.T) {
 	configureNodes(ctx, t, x, regIP)
 	reg := newRegistryClient(t, x.portForward(regNS, "registry", 5000), ca.CertPEM)
 
-	pushTag := func(local, repoTag string) {
-		t.Helper()
-		pushed := strings.Replace(reg.local, "https://", "", 1) + "/" + repoTag
-		x.run(ctx, nil, false, "docker", "tag", local, pushed)
-		x.run(ctx, nil, false, "docker", "push", "-q", pushed)
-		x.run(ctx, nil, true, "docker", "rmi", pushed)
-	}
+	// Uploaded over the registry API rather than with `docker push`, which
+	// treats a localhost registry with a certificate for another name
+	// differently from one Docker installation to the next.
+	pushedA := pushImage(ctx, t, x, reg, imageA, "e2e/harness")
+	pushedB := pushImage(ctx, t, x, reg, imageB, "e2e/harness")
 	pinTag := "e2e/harness:pin-" + stamp
-	pushTag(imageA, pinTag)
-	pushTag(imageB, "e2e/harness:b-"+stamp)
-	digestA := reg.digest(t, "e2e/harness", "pin-"+stamp)
-	digestB := reg.digest(t, "e2e/harness", "b-"+stamp)
+	reg.tag(t, "e2e/harness", "pin-"+stamp, pushedA)
+	digestA, digestB := pushedA.digest, pushedB.digest
+	if got := reg.digest(t, "e2e/harness", "pin-"+stamp); got != digestA {
+		t.Fatalf("the registry says %s names %s, want A's %s", pinTag, got, digestA)
+	}
 	if digestA == digestB {
 		t.Fatalf("the two images share a digest (%s); the test proves nothing", digestA)
 	}
@@ -188,7 +189,7 @@ func TestAPodRunsTheDigestItsTagResolvedTo(t *testing.T) {
 		t.Fatalf("the Pod was created with %q, want the digest the tag named at dispatch, %q", podImage, want)
 	}
 	t.Logf("pod %s is unschedulable with image %s; repointing %s to B", podName, podImage, pinTag)
-	pushTag(imageB, pinTag)
+	reg.tag(t, "e2e/harness", "pin-"+stamp, pushedB)
 	if got := reg.digest(t, "e2e/harness", "pin-"+stamp); got != digestB {
 		uncordon()
 		t.Fatalf("the tag names %s after the repoint, want B's %s", got, digestB)
@@ -768,19 +769,129 @@ func copyManifest(ctx context.Context, t *testing.T, src *ghcr, dst registryClie
 	}
 	sum := sha256.Sum256(body)
 	for _, name := range []string{"sha256:" + hex.EncodeToString(sum[:]), tag} {
-		if name == "" {
-			continue
+		if name != "" {
+			dst.putManifest(t, repo, name, mediaType, body)
 		}
-		req, _ := http.NewRequest(http.MethodPut, dst.local+"/v2/"+repo+"/manifests/"+name, bytes.NewReader(body))
-		req.Header.Set("Content-Type", mediaType)
-		resp, err := dst.http.Do(req)
+	}
+}
+
+// putManifest stores body in repo under ref, a tag or its digest.
+func (r registryClient) putManifest(t *testing.T, repo, ref, mediaType string, body []byte) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, r.local+"/v2/"+repo+"/manifests/"+ref, bytes.NewReader(body))
+	req.Header.Set("Content-Type", mediaType)
+	resp, err := r.http.Do(req)
+	if err != nil {
+		t.Fatalf("PUT manifest %s:%s: %v", repo, ref, err)
+	}
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT manifest %s:%s: HTTP %d %s", repo, ref, resp.StatusCode, msg)
+	}
+}
+
+// pushedImage is an image uploaded to the registry: its manifest, which tag
+// points at it, and its digest.
+type pushedImage struct {
+	manifest []byte
+	digest   string
+}
+
+// tag points repo:tag at img — the first time, or again after it named
+// something else.
+func (r registryClient) tag(t *testing.T, repo, tag string, img pushedImage) {
+	t.Helper()
+	r.putManifest(t, repo, tag, ociManifest, img.manifest)
+}
+
+const ociManifest = "application/vnd.oci.image.manifest.v1+json"
+
+// pushImage uploads the local image to repo — its config and layers as blobs,
+// from `docker save`, and an OCI manifest naming them — by digest alone, and
+// returns what was stored. Every image store `docker save` reads from writes a
+// manifest.json naming the config and the layers in the archive, compressed
+// or not, so the layers go up exactly as Docker holds them.
+func pushImage(ctx context.Context, t *testing.T, x tool, reg registryClient, local, repo string) pushedImage {
+	t.Helper()
+	archive := filepath.Join(t.TempDir(), "image.tar")
+	x.run(ctx, nil, false, "docker", "save", "-o", archive, local)
+	var index []struct {
+		Config string   `json:"Config"`
+		Layers []string `json:"Layers"`
+	}
+	if err := json.Unmarshal(readFromTar(t, archive, "manifest.json"), &index); err != nil || len(index) != 1 {
+		t.Fatalf("docker save %s: manifest.json is not one image (%v)", local, err)
+	}
+	type descriptor struct {
+		MediaType string `json:"mediaType"`
+		Digest    string `json:"digest"`
+		Size      int    `json:"size"`
+	}
+	upload := func(path, mediaType string) descriptor {
+		body := readFromTar(t, archive, path)
+		if mediaType == "" {
+			mediaType = layerMediaType(body)
+		}
+		sum := sha256.Sum256(body)
+		d := descriptor{MediaType: mediaType, Digest: "sha256:" + hex.EncodeToString(sum[:]), Size: len(body)}
+		reg.putBlob(t, repo, d.Digest, body)
+		return d
+	}
+	manifest := map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     ociManifest,
+		"config":        upload(index[0].Config, "application/vnd.oci.image.config.v1+json"),
+	}
+	layers := make([]descriptor, 0, len(index[0].Layers))
+	for _, l := range index[0].Layers {
+		layers = append(layers, upload(l, ""))
+	}
+	manifest["layers"] = layers
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	img := pushedImage{manifest: body, digest: "sha256:" + hex.EncodeToString(sum[:])}
+	reg.putManifest(t, repo, img.digest, ociManifest, body)
+	return img
+}
+
+// layerMediaType names a layer by its compression, as stored.
+func layerMediaType(b []byte) string {
+	switch {
+	case len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b:
+		return "application/vnd.oci.image.layer.v1.tar+gzip"
+	case len(b) >= 4 && b[0] == 0x28 && b[1] == 0xb5 && b[2] == 0x2f && b[3] == 0xfd:
+		return "application/vnd.oci.image.layer.v1.tar+zstd"
+	}
+	return "application/vnd.oci.image.layer.v1.tar"
+}
+
+// readFromTar returns one file of a tar archive.
+func readFromTar(t *testing.T, archive, name string) []byte {
+	t.Helper()
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			t.Fatalf("%s holds no %s", archive, name)
+		}
 		if err != nil {
-			t.Fatalf("PUT manifest %s: %v", name, err)
+			t.Fatalf("read %s: %v", archive, err)
 		}
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusCreated {
-			t.Fatalf("PUT manifest %s: HTTP %d %s", name, resp.StatusCode, msg)
+		if path.Clean(h.Name) == path.Clean(name) {
+			b, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read %s from %s: %v", name, archive, err)
+			}
+			return b
 		}
 	}
 }
