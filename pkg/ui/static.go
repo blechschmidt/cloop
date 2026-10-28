@@ -69,31 +69,22 @@ var bundleFiles = []string{
 	"assets/js/00-overlay.js",
 	"assets/js/01-overview.js",
 	"assets/js/02-tasks.js",
-	"assets/js/03-kanban.js",
 	"assets/js/04-realtime.js",
 	"assets/js/05-projects.js",
-	"assets/js/06-kb.js",
-	"assets/js/07-queue.js",
-	"assets/js/08-provider-calls.js",
-	"assets/js/09-deps.js",
-	"assets/js/10-risk-matrix.js",
 	"assets/js/11-timeline.js",
 	"assets/js/12-task-crud.js",
 	"assets/js/13-suggest.js",
 	"assets/js/15-voice.js",
-	"assets/js/16-chat.js",
-	"assets/js/17-assistant.js",
 	"assets/js/18-shortcuts.js",
-	"assets/js/19-analytics.js",
-	// The executor list and cards, the Overview's executor and caps cards; the
-	// executor dialogs are deferred/execadmin.js (Task 20386).
+	// The Overview's executor card, its picker and the caps card. The
+	// Executors tab is deferred/executors.js (Task 20456), its dialogs
+	// deferred/execadmin.js (Task 20386).
 	"assets/js/23-executors.js",
 	// A project's firewall card on the Overview (Task 20363), after the
 	// executors fragment whose helpers it uses. A device's firewall dialog is
 	// deferred/execadmin.js.
 	"assets/js/23-firewall.js",
 	"assets/js/24-mobile-nav.js",
-	"assets/js/25-replay.js",
 	// The header's sign-out buttons (Task 20176). The sessions table they used
 	// to sit beside moved with the Secrets tab to deferred/secrets.js.
 	"assets/js/26-sessions.js",
@@ -192,6 +183,23 @@ var deferredScripts = []struct{ token, path string }{
 	// The "Confirm it's you" dialog a privileged action on a session signed
 	// in too long ago opens (Task 20448).
 	{"reauth.js", "assets/js/deferred/reauth.js"},
+	// Every other tab but Overview, Tasks and Projects, markup and code, each
+	// fetched on its first open like the Settings and admin tabs (Task 20456):
+	// a session that never leaves those three fetches none of them.
+	{"queue.js", "assets/js/deferred/queue.js"},
+	{"kanban.js", "assets/js/deferred/kanban.js"},
+	{"kb.js", "assets/js/deferred/kb.js"},
+	{"deps.js", "assets/js/deferred/deps.js"},
+	{"risk-matrix.js", "assets/js/deferred/risk-matrix.js"},
+	{"analytics.js", "assets/js/deferred/analytics.js"},
+	{"chat.js", "assets/js/deferred/chat.js"},
+	{"assistant.js", "assets/js/deferred/assistant.js"},
+	{"replay.js", "assets/js/deferred/replay.js"},
+	{"provider-calls.js", "assets/js/deferred/provider-calls.js"},
+	{"executors.js", "assets/js/deferred/executors.js"},
+	// The Overview's execution-target picker, fetched on the first press of
+	// the executor card (Task 20456).
+	{"execpicker.js", "assets/js/deferred/execpicker.js"},
 }
 
 // pageScripts are scripts a page loads with a script element of its own

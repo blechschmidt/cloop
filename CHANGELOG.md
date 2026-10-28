@@ -297,6 +297,20 @@ schema and the hub's HTTP API may change in any release.
   why). New metrics:
   `cloop_hub_health_reports_total{trigger}` and
   `cloop_oidc_idp_fetches_total{document,client,outcome}` (Task 20446).
+- **Every tab but Overview, Tasks and Projects loads the first time it is
+  opened.** Activity, Kanban, Knowledge Base, Dependencies, Risk Matrix,
+  Analytics, Chat, Assistant, Replay, Provider Calls and the Executors tab,
+  markup and code, and the Overview's execution-target picker, came with every
+  first paint, though most sessions never open them, and first paint had 642 B
+  left under its ceiling. Each is now a script fetched on first open, with
+  Retry if the fetch fails. A live update for a tab whose code has not arrived
+  is not lost: the tab reads its data afresh when it opens. First paint falls
+  from 143 KB to 113 KB on the wire (`app.js` from 101 KB to 77 KB), and its
+  ceiling (`eagerWireBudgetBytes`) from 144,000 B to 114,800 B; a session that
+  keeps to Projects and Tasks fetches no deferred script at all. A dashboard
+  link can now name a tab: `/?project=<path>&tab=<name>` opens the project on
+  that tab rather than its Overview, and `/?tab=<name>` works alone
+  (Task 20456).
 
 ## [0.0.7] - 2026-10-27
 

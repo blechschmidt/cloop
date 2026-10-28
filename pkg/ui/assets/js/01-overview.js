@@ -1,12 +1,13 @@
 // ── Render overview ─────────────────────────────────────────────────────────
 
-// ── Deferred panels (Tasks 20366, 20379, 20386) ─────────────────────────────
+// ── Deferred panels (Tasks 20366, 20379, 20386, 20456) ──────────────────────
 // Fetched the first time the page needs them rather than bundled: first paint
 // has no room for panels most sessions never open (static.go,
 // deferredScripts). Each runs outside this IIFE, so it is handed the helpers
 // it calls — panelHelpers() unless the caller passes its own — and the one
-// global it defines is its factory, window.cloop<Name>Panel. A fetch or a
-// factory that fails is retried by the next call, not replayed forever.
+// global it defines is its factory, window.cloop<Name>Panel, the name
+// camel-cased across hyphens (risk-matrix → cloopRiskMatrixPanel). A fetch or
+// a factory that fails is retried by the next call, not replayed forever.
 const _deferred = {};
 function deferredPanel(name, helpers) {
   if (!_deferred[name]) {
@@ -15,7 +16,7 @@ function deferredPanel(name, helpers) {
       const el = document.createElement('script');
       el.src = m ? m.getAttribute('content') : '';
       el.onload = () => {
-        const f = window['cloop' + name[0].toUpperCase() + name.slice(1) + 'Panel'];
+        const f = window['cloop' + name.replace(/(?:^|-)(.)/g, (_, c) => c.toUpperCase()) + 'Panel'];
         try { f ? ok(f(helpers || panelHelpers())) : no(new Error(name + ' defined no panel')); } catch (e) { no(e); }
       };
       el.onerror = () => no(new Error(name + ' could not be fetched'));
@@ -26,18 +27,21 @@ function deferredPanel(name, helpers) {
   return _deferred[name];
 }
 
-// What the Settings and admin panels are handed (Task 20386): their whole view
-// of this IIFE, built on first use. fleet reads the executor list's cached
-// auto-update policy, or stores and draws a new one; oidc says whether the hub
-// has sign-on.
+// What the deferred panels are handed (Tasks 20386, 20456): their whole view
+// of this IIFE, built on first use. fleet reads the fleet's cached auto-update
+// policy, or stores a new one for the Executors tab to draw; oidc says whether
+// the hub has sign-on; tab is the tab on screen, which a panel's broadcast
+// handlers ask before redrawing; pidx is the project the Overview shows, null
+// on a multi-project hub with none selected.
 let _ph;
 function panelHelpers() {
   return _ph || (_ph = {
     api, apiMethod, authHeaders, parse: parseAPIResponse, esc, toast, canGlobal, pUrl, relTime, refreshState, applyPermissionGating, harnessRefused,
-    mount: mountPanel, panel: deferredPanel, fmtBytes: _duFmtBytes, signIn: () => signInAgain(true, 1),
+    mount: mountPanel, panel: deferredPanel, panelAct, fmtBytes: _duFmtBytes, signIn: () => signInAgain(true, 1),
     execAt: _execAt, execKind: _execKindLabel, execErr: _execDetailErrText,
-    fleet: d => d ? _renderAutoUpdateBar(fleetAutoUpdate = d) : fleetAutoUpdate, oidc: () => myOIDC,
-    known: () => !!myGlobalPerms,
+    fleet: d => d ? panelIf('executors', 'fleetBar', fleetAutoUpdate = d) : fleetAutoUpdate, oidc: () => myOIDC,
+    known: () => !!myGlobalPerms, tab: () => activeTab, unauthorized: handleUnauthorized, filesChip: fmtFilesChip,
+    pidx: () => isMultiProject && selectedProjectIdx === null ? null : _overviewIdx(),
     fw: {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal, meta: _fwMeta},
     quota: {label: _quotaLabel, labels: _quotaLabels, fmt: _quotaFmt, saturation: _quotaSaturation},
     tl: {state: () => appState, active: _filterActive, apply: applyFilters, badge: updateFilterBadge},
@@ -73,7 +77,9 @@ function mountPanel(fns, tab, html, dialogs) {
     if (type === 'click' && e.target === root && root.dataset.dismiss) return fn(root.dataset.dismiss)();
     const key = type === 'click' ? 'act' : type === 'keydown' ? 'enter' : type;
     const el = e.target.closest && e.target.closest('[data-' + key + ']');
-    if (!el || (type === 'keydown' && e.key !== 'Enter')) return;
+    // Enter as the bundle's data-action-enter takes it: Shift+Enter is a new
+    // line in a textarea, and Enter that ends an IME composition is not a send.
+    if (!el || (type === 'keydown' && (e.key !== 'Enter' || e.shiftKey || e.isComposing))) return;
     if (type === 'keydown') e.preventDefault();
     fn(el.dataset[key]).call(el, el.dataset.arg);
   })));
@@ -83,8 +89,11 @@ function mountPanel(fns, tab, html, dialogs) {
 
 // The tabs whose markup and code arrive on their first open (Task 20386). The
 // panel's open() runs on every visit, as their bundled loaders used to.
-// Timeline joined them in Task 20427, to pay for the approvals badge.
-const DEFERRED_TABS = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'timeline'];
+// Timeline joined them in Task 20427, to pay for the approvals badge, and every
+// other tab but Overview, Tasks and Projects in Task 20456: a session that
+// never leaves those three fetches none of them.
+const DEFERRED_TABS = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'timeline',
+  'queue', 'kanban', 'kb', 'deps', 'risk-matrix', 'analytics', 'chat', 'assistant', 'replay', 'provider-calls', 'executors'];
 function openDeferredTab(name) {
   const box = document.getElementById('tab-' + name);
   if (!_deferred[name]) box.innerHTML = '<p class="deferred-note">Loading…</p>';
@@ -119,9 +128,13 @@ window.panelAct = panelAct;
 
 // panelIf calls fn of a panel that has been loaded, and does nothing for one
 // that has not: a broadcast refreshes what is on screen, it never fetches code.
-function panelIf(name, fn) {
+// Nothing is lost by the no-op — a panel's open() reads its data afresh — and
+// a call made while the panel is still in flight waits for it, after the
+// open() that fetched it. A throw is reported, not raised: the realtime
+// handler that calls this goes on to the next frame.
+function panelIf(name, fn, ...a) {
   const p = _deferred[name];
-  if (p) p.then(x => x[fn] && x[fn](), () => {});
+  if (p) p.then(x => { if (x[fn]) x[fn](...a); }, () => {}).catch(e => console.warn('cloop: ' + name + '.' + fn, e));
 }
 // No project on screen: none selected, or in single-project mode none loaded.
 const _noProject = () => isMultiProject ? selectedProjectIdx === null : !appState;
@@ -353,8 +366,8 @@ function render(s) {
 
   // Tasks tab
   if (activeTab === 'tasks')  renderTasks(s);
-  // Kanban tab
-  if (activeTab === 'kanban') renderKanban(s);
+  // Kanban tab: drawn from the plan held here, where its code has loaded.
+  if (activeTab === 'kanban') panelIf('kanban', 'render');
 
   // Timeline tab: refresh on state change so the 'now' cursor and bar colors stay current.
   if (activeTab === 'timeline') loadTimeline();

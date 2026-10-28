@@ -240,6 +240,13 @@ act('signInAgain', function() { signInAgain(true); });
 // last, so it also marks the point from which there is a view worth keeping.
 function resumeView(projects) {
   renewState.booted = true;
+  // A link that names a tab alone, /?tab=<name> (Task 20456); with project=
+  // it is applyProjects' to open, and gone from the address by now.
+  const tab = new URLSearchParams(location.search).get('tab');
+  if (tab) {
+    history.replaceState(null, '', location.pathname);
+    if (document.getElementById('tab-' + tab)) switchTab(tab);
+  }
   let saved = null;
   try {
     saved = JSON.parse(sessionStorage.getItem('cloop_resume'));

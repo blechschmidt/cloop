@@ -14,7 +14,20 @@
 // deferred scripts (CDP Fetch), and the page has to say so with a Retry that
 // works once the network does — for a tab, and for a dialog opened from a card.
 //
-// Usage: node deferred_panels_browser.js <chrome> <base-url> <device-id> [fail]
+// `tabs:<way>` opens every tab Task 20456 moved off first paint — Activity,
+// Kanban, Knowledge Base, Dependencies, Risk Matrix, Analytics, Chat,
+// Assistant, Replay, Provider Calls, Executors — one way for the whole run:
+// `cold` from its tab button, `link` from /?tab=<name>, `resume` as the tab a
+// sign-in round trip restores, `reconnect` after the hub has dropped the
+// page's stream (the control server's /sever, the close a hub restart sends),
+// and `fast3g` with the network throttled to Fast 3G. Each waits for the tab
+// to draw its content, presses a control of the moved markup, and reports
+// every error the page logged. `session` is the multi-project hub of the
+// other run: a session that keeps to Projects and Tasks must fetch no
+// deferred script at all, and a moved tab follows a project switch.
+//
+// Usage: node deferred_panels_browser.js <chrome> <base-url> <device-id>
+//   [fail | tabs:<way> | session] [control-url] [project paths, comma-separated]
 // Prints one JSON document on stdout: {scenario: {...}, ...}.
 
 'use strict';
@@ -28,6 +41,8 @@ const CHROME = process.argv[2];
 const BASE = process.argv[3];
 const DEVICE = process.argv[4];
 const MODE = process.argv[5] || 'cold';
+const CONTROL = process.argv[6] || '';
+const PROJECTS = (process.argv[7] || '').split(',').filter(Boolean);
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -39,9 +54,23 @@ const CHROME_START_POLLS = 1800;
 // sits out. Under -race a control-plane round trip takes seconds.
 const WAIT_MS = 30000;
 
-// The deferred scripts this task added, by the stem of their asset URL.
-const DEFERRED = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'execadmin'];
+// The deferred scripts Tasks 20386 and 20456 added, by the stem of their
+// asset URL. A single-project page fetches the Overview's own cards (harness,
+// devices) at boot; none of these.
+const MOVED_TABS = ['queue', 'kanban', 'kb', 'deps', 'risk-matrix', 'analytics', 'chat', 'assistant',
+  'replay', 'provider-calls', 'executors'];
+const DEFERRED = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'execadmin', 'execpicker']
+  .concat(MOVED_TABS);
 const DEFERRED_RE = new RegExp('/assets/(' + DEFERRED.join('|') + ')\\.[0-9a-f]{16}\\.js$');
+// Any script the page fetches beyond the four it names in its head — every
+// deferred panel, and chart.js: what the Projects-and-Tasks session must not
+// fetch.
+const SCRIPT_RE = /\/assets\/([a-z-]+)\.[0-9a-f]{16}\.js$/;
+const EAGER = new Set(['app', 'errboundary', 'theme']);
+
+// Fast 3G as Chrome's DevTools defines it: 562.5 ms round trip, 180 KB/s down,
+// 84 KB/s up.
+const FAST3G = {offline: false, latency: 562.5, downloadThroughput: 180000, uploadThroughput: 84375};
 
 class CDP {
   constructor(ws) {
@@ -204,17 +233,39 @@ const getJSON = url => `(async () => (await fetch(${q(url)})).json())()`;
 // ── the run ─────────────────────────────────────────────────────────────────
 
 const fetched = [];   // deferred scripts requested since the last navigation
+const scripts = [];   // every script but the page's four, likewise (SCRIPT_RE)
 const apiCalls = [];  // API paths requested since the last navigation
+const streams = [];   // event streams opened (WebSocket or EventSource), likewise
+const problems = [];  // what the page logged as an error since the last navigation
 const dialogs = [];   // JavaScript dialogs seen, with how they were answered
 let answers = [];     // the answers queued for the next ones: {accept, text}
 
 function track(cdp) {
   cdp.on(msg => {
+    const p = msg.params || {};
     if (msg.method === 'Network.requestWillBeSent') {
-      const u = new URL(msg.params.request.url);
+      const u = new URL(p.request.url);
       const m = DEFERRED_RE.exec(u.pathname);
       if (m) fetched.push(m[1]);
+      const sm = SCRIPT_RE.exec(u.pathname);
+      if (sm && !EAGER.has(sm[1])) scripts.push(sm[1]);
       if (u.pathname.startsWith('/api/')) apiCalls.push(u.pathname + u.search);
+      if (p.type === 'EventSource') streams.push('sse');
+    }
+    if (msg.method === 'Network.webSocketCreated') streams.push('ws');
+    // An error the page reports: thrown, logged with console.error, or the
+    // warning panelIf gives a panel function that threw ("cloop: …"); and
+    // the browser's own (a blocked script, a failed load).
+    if (msg.method === 'Runtime.exceptionThrown') {
+      const d = p.exceptionDetails || {};
+      problems.push('uncaught: ' + ((d.exception && d.exception.description) || d.text || '').split('\n')[0]);
+    }
+    if (msg.method === 'Runtime.consoleAPICalled' && (p.type === 'error' || p.type === 'warning')) {
+      const line = (p.args || []).map(a => a.value !== undefined ? String(a.value) : (a.description || '')).join(' ');
+      if (p.type === 'error' || /^cloop:/.test(line)) problems.push('console.' + p.type + ': ' + line.split('\n')[0]);
+    }
+    if (msg.method === 'Log.entryAdded' && p.entry && p.entry.level === 'error') {
+      problems.push('browser (' + p.entry.source + '): ' + p.entry.text + (p.entry.url ? ' ' + p.entry.url : ''));
     }
     // alert, confirm and prompt block the page until answered, which a driver
     // waiting on the page would never see; answered here as queued.
@@ -229,10 +280,13 @@ function track(cdp) {
 // cold navigates afresh, the cache off, and waits for boot to be done with the
 // tabs: resumeView, its last step, removes the stale cloop_resume marker seeded
 // below (telemetry_panel_browser.js). Reports what had been fetched by then.
-async function cold(cdp) {
+async function cold(cdp, url) {
   fetched.length = 0;
+  scripts.length = 0;
   apiCalls.length = 0;
-  await cdp.send('Page.navigate', {url: BASE + '/'});
+  streams.length = 0;
+  problems.length = 0;
+  await cdp.send('Page.navigate', {url: url || BASE + '/'});
   await waitFor(cdp, `typeof window.panelAct === 'function' && sessionStorage.getItem('cloop_resume') === null`,
     'the dashboard to boot');
   return fetched.slice();
@@ -247,11 +301,13 @@ async function openTab(cdp, tab, sel) {
 // card finds the device's card and returns its index, from its buttons.
 async function cardIndex(cdp) {
   return waitFor(cdp, `(() => {
-    const b = document.querySelector('#execList button[data-action="openExecutorSandbox"]');
+    const b = document.querySelector('#execList button[data-act="sandbox"]');
     return b ? String(b.dataset.arg) : ''; })()`, 'the device card').then(Number);
 }
 
-const cardButton = (fn, i) => `#execList button[data-action="${fn}"][data-arg="${i}"]`;
+// A card's button, by the action it names in the Executors tab's panel
+// (deferred/executors.js, Task 20456), which forwards it to execadmin.
+const cardButton = (act, i) => `#execList button[data-act="${act}"][data-arg="${i}"]`;
 
 // scenario runs one check from a cold page and records what it found, or why
 // it could not finish — a later scenario still runs.
@@ -365,7 +421,7 @@ async function runCold(cdp) {
 
   await scenario(out, 'detail', cdp, async () => {
     const i = await executors();
-    await click(cdp, cardButton('openExecutorDetail', i));
+    await click(cdp, cardButton('detail', i));
     const verdict = await waitFor(cdp, `(() => { const v = document.querySelector('#execDetailBody .exec-detail-verdict');
       return v && v.getClientRects().length ? v.textContent : ''; })()`, 'the host verdict');
     return {rendered: true, verdict};
@@ -373,7 +429,7 @@ async function runCold(cdp) {
 
   await scenario(out, 'sandbox', cdp, async () => {
     const i = await executors();
-    await click(cdp, cardButton('openExecutorSandbox', i));
+    await click(cdp, cardButton('sandbox', i));
     await waitFor(cdp, `(document.getElementById('execSandboxEngine') || {options: []}).options.length > 1`,
       'the sandbox form to fill');
     await type(cdp, '#execSandboxMode', 'container');
@@ -388,7 +444,7 @@ async function runCold(cdp) {
 
   await scenario(out, 'virtual', cdp, async () => {
     const i = await executors();
-    await click(cdp, cardButton('openExecutorVirtual', i));
+    await click(cdp, cardButton('virtual', i));
     await waitFor(cdp, visible('#evxNetNone'), 'the virtual-executor form');
     await type(cdp, '#evxName', 'dp-virtual');
     await click(cdp, '#evxBody .modal-footer .btn.primary');
@@ -400,7 +456,7 @@ async function runCold(cdp) {
 
   await scenario(out, 'firewall', cdp, async () => {
     const i = await executors();
-    await click(cdp, cardButton('openExecutorFirewall', i));
+    await click(cdp, cardButton('firewall', i));
     await waitFor(cdp, visible('#efwAllow'), 'the firewall form');
     await type(cdp, '#efwPorts', '443');
     await click(cdp, '#efwBody .modal-footer .btn.primary');
@@ -412,7 +468,7 @@ async function runCold(cdp) {
 
   await scenario(out, 'limits', cdp, async () => {
     const i = await executors();
-    await click(cdp, cardButton('openExecutorLimits', i));
+    await click(cdp, cardButton('limits', i));
     await waitFor(cdp, visible('#execLimitsMemory'), 'the limits form');
     await type(cdp, '#execLimitsMemory', '2g');
     await click(cdp, '#executor-limits-overlay [data-act="saveExecutorLimits"]');
@@ -424,7 +480,7 @@ async function runCold(cdp) {
 
   await scenario(out, 'audience', cdp, async () => {
     const i = await executors();
-    await click(cdp, cardButton('openExecutorAudience', i));
+    await click(cdp, cardButton('audience', i));
     await waitFor(cdp, visible('#execAudienceValue'), 'the access list');
     // The first principal turns the gate on, and the hub refuses one that
     // would lock out whoever is adding it. This hub has no sign-on, so its
@@ -442,7 +498,7 @@ async function runCold(cdp) {
     const i = await executors();
     const seen = dialogs.length;
     answers = [{accept: true}];
-    await click(cdp, cardButton('upgradeExecutor', i));
+    await click(cdp, cardButton('upgrade', i));
     // A device with no release it could move to is told why, in an alert; one
     // with a release is asked which, in a prompt. Either is the dialog.
     const d = await waitUntil(() => dialogs[seen], 'the upgrade dialog');
@@ -560,6 +616,34 @@ async function runCold(cdp) {
     return {rendered: true};
   });
 
+  // ── the moved tabs from the keyboard and the palette (Task 20456) ──
+
+  await scenario(out, 'shortcut', cdp, async () => {
+    await cdp.key('3', 'Digit3', 51, 0);
+    await waitFor(cdp, `${text('#kb-body-pending')}.includes('dp-task-alpha')`, 'Kanban, from its number key');
+    // j focuses the first card and l moves it a column on — the board's
+    // status buckets, which 18-shortcuts.js spells out itself now that the
+    // board's code is not always there.
+    await cdp.key('j', 'KeyJ', 74, 0);
+    await waitFor(cdp, `!!document.querySelector('#tab-kanban .kb-card.kb-focus')`, 'a focused card');
+    const id = await cdp.eval(`document.querySelector('#tab-kanban .kb-card.kb-focus').dataset.taskId`);
+    await cdp.key('l', 'KeyL', 76, 0);
+    const stored = await waitFor(cdp, `(async () => { const s = await (await fetch('/api/state')).json();
+      const t = ((s.plan || {}).tasks || []).find(t => String(t.id) === ${q(id)});
+      return t && t.status === 'in_progress' ? t.status : ''; })()`, 'the card to move a column');
+    await hub('PATCH', '/api/tasks/' + id, {status: 'pending'});
+    return {rendered: true, stored};
+  });
+
+  await scenario(out, 'palette_moved', cdp, async () => {
+    await cdp.key('k', 'KeyK', 75, 2);
+    await waitFor(cdp, `window.isOverlayOpen('cmd-backdrop')`, 'the command palette');
+    await cdp.send('Input.insertText', {text: 'Analytics'});
+    await cdp.key('Enter', 'Enter', 13, 0);
+    await waitFor(cdp, TAB.analytics.ready, 'Analytics, from the palette');
+    return {rendered: true};
+  });
+
   return out;
 }
 
@@ -604,7 +688,7 @@ async function runFail(cdp) {
     // A dialog: the card's button, and the banner with Retry and Dismiss.
     await click(cdp, '#tbtn-executors');
     const i = await cardIndex(cdp);
-    await click(cdp, cardButton('openExecutorLimits', i));
+    await click(cdp, cardButton('limits', i));
     const banner = await waitFor(cdp, `(() => { const b = document.getElementById('deferredFail');
       return b && b.getClientRects().length ? b.textContent : ''; })()`, 'the banner');
     out.dialog = {
@@ -626,6 +710,309 @@ async function runFail(cdp) {
   return out;
 }
 
+// ── the tabs Task 20456 moved ───────────────────────────────────────────────
+
+// hub calls the hub from here rather than from the page, the way another
+// user's dashboard or the CLI changes a project: the page hears of it only
+// through its event stream.
+async function hub(method, p, body) {
+  const r = await fetch(BASE + p, {method, headers: {'Content-Type': 'application/json'},
+    body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20000)});
+  const t = await r.text();
+  if (!r.ok) throw new Error(method + ' ' + p + ' = ' + r.status + ': ' + t);
+  return t ? JSON.parse(t) : null;
+}
+
+// sever has the test's control server close every WebSocket the hub holds,
+// with the close a hub that is going down sends.
+async function sever() {
+  const r = await fetch(CONTROL + '/sever', {method: 'POST', signal: AbortSignal.timeout(20000)});
+  if (!r.ok) throw new Error('sever = ' + r.status);
+}
+
+// requested waits for a request whose path starts with prefix, made since mark.
+const requested = (mark, prefix, what) =>
+  waitUntil(() => apiCalls.slice(mark).some(p => p.startsWith(prefix)), what);
+
+// TAB is, for each moved tab, what it shows once its script has arrived and
+// its open() has drawn (ready), and a control of its moved markup pressed
+// with what that press does (press). before runs after the page has booted
+// and before the tab is opened: what it changes reaches the page as an event
+// for a tab whose code is not there yet, and the tab has to show it once it
+// is. during runs while the tab's script is in flight, on Fast 3G.
+const TAB = {
+  queue: {
+    ready: `!!document.querySelector('#queueStatsBar .stat-card') && (${visible('#queueTable')} || ${visible('#queueEmpty')})`,
+    press: async cdp => {
+      const mark = apiCalls.length;
+      await type(cdp, '#queueFilterKind', 'task');
+      await requested(mark, '/api/queue?kind=task', 'the kind filter to re-read the log');
+      return 'filtered';
+    },
+  },
+  kanban: {
+    // The task posted by before, which arrived while the board's code had not.
+    before: async way => { await hub('POST', '/api/tasks', {title: 'dp-task-late-' + way, priority: 3}); },
+    during: async way => { await hub('POST', '/api/tasks', {title: 'dp-task-inflight-' + way, priority: 3}); },
+    ready: way => `${text('#kb-body-pending')}.includes('dp-task-alpha') && ${text('#kanbanBoard')}.includes('dp-task-late-' + ${q(way)})`
+      + (way === 'fast3g' ? ` && ${text('#kanbanBoard')}.includes('dp-task-inflight-fast3g')` : ''),
+    press: async cdp => {
+      await click(cdp, '#kanbanCompactBtn');
+      await waitFor(cdp, `${text('#kanbanCompactBtn')} === 'Expanded' && !!document.querySelector('#kanbanBoard .kb-card.kb-compact')`,
+        'the compact board');
+      // A card dragged to another column, by the events a drag fires, which
+      // the board hears from its own tab: the task's new status is stored.
+      const to = await cdp.eval(`(() => {
+        const card = [...document.querySelectorAll('#kanbanBoard .kb-card')].find(c => c.textContent.includes('dp-task-beta'));
+        if (!card) return '';
+        const to = card.closest('#kb-body-done') ? 'pending' : 'done';
+        const dt = new DataTransfer(), body = document.getElementById('kb-body-' + to);
+        card.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: dt}));
+        body.dispatchEvent(new DragEvent('dragover', {bubbles: true, cancelable: true, dataTransfer: dt}));
+        body.dispatchEvent(new DragEvent('drop', {bubbles: true, cancelable: true, dataTransfer: dt}));
+        card.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+        return to; })()`);
+      if (!to) throw new Error('no card for dp-task-beta on the board');
+      await waitFor(cdp, `(async () => { const s = await (await fetch('/api/state')).json();
+        const t = ((s.plan || {}).tasks || []).find(t => t.title === 'dp-task-beta');
+        return !!t && t.status === ${q(to)}; })()`, 'the dropped card\'s status to be stored');
+      return 'compacted, dropped on ' + to;
+    },
+    // after a reconnect: a change made elsewhere reaches the open board.
+    after: async (cdp, way) => {
+      const s = await hub('GET', '/api/state');
+      const t = ((s.plan || {}).tasks || []).find(t => t.title.startsWith('dp-task-alpha'));
+      await hub('PATCH', '/api/tasks/' + t.id, {title: 'dp-task-alpha-' + way});
+      await waitFor(cdp, `${text('#kanbanBoard')}.includes('dp-task-alpha-' + ${q(way)})`, 'the renamed card');
+      return true;
+    },
+  },
+  kb: {
+    before: async way => { await hub('POST', '/api/kb', {title: 'dp-kb-late-' + way, body: 'added before the tab opened', tags: []}); },
+    ready: way => `${text('#kbGrid')}.includes('dp-kb-seeded') && ${text('#kbGrid')}.includes('dp-kb-late-' + ${q(way)})`,
+    press: async (cdp, way) => {
+      const title = 'dp-kb-added-' + way;
+      await click(cdp, '#tab-kb [data-act="toggleAdd"]');
+      await waitFor(cdp, visible('#kbNewTitle'), 'the add form');
+      await type(cdp, '#kbNewTitle', title);
+      await type(cdp, '#kbNewBody', 'added from the deferred panel');
+      await click(cdp, '#tab-kb [data-act="add"]');
+      await waitFor(cdp, `(async () => { const d = await (await fetch('/api/kb')).json();
+        return (d.entries || []).some(e => e.title === ${q(title)}); })()`, 'the entry to be stored');
+      await waitFor(cdp, `${text('#kbGrid')}.includes(${q(title)})`, 'the entry on the page');
+      return 'added';
+    },
+  },
+  deps: {
+    ready: `!!document.querySelector('#depsSvg .deps-node') && !!document.querySelector('#depsSvg line, #depsSvg path')`,
+    press: async cdp => {
+      const mark = apiCalls.length;
+      await click(cdp, '#depsShowAll');
+      await requested(mark, '/api/deps', 'Show all to re-read the graph');
+      return 'shown all';
+    },
+  },
+  'risk-matrix': {
+    ready: `${text('#rmStatus')} === '' && (${visible('#rmEmpty')} || ${visible('#rmNoTasks')} || ${visible('#rmChartWrap')})`,
+    press: async cdp => {
+      const mark = apiCalls.length;
+      await click(cdp, '#tab-risk-matrix [data-act="load"]');
+      await requested(mark, '/api/risk-matrix', 'Refresh to re-read the scores');
+      return 'refreshed';
+    },
+  },
+  analytics: {
+    ready: `!!window.Chart && document.getElementById('analyticsCharts').style.display !== 'none'
+      && !!document.querySelector('#chartVelocity') && !!window.Chart.getChart(document.querySelector('#chartVelocity'))`,
+    press: async cdp => {
+      const mark = apiCalls.length;
+      await click(cdp, '#tab-analytics [data-act="resetRange"]');
+      await requested(mark, '/api/analytics', 'Last 30d to re-read the figures');
+      return 'reset the range';
+    },
+    // after a reconnect: a change pushed over the new stream refreshes the
+    // charts on screen (the debounced schedule()).
+    after: async (cdp, way) => {
+      const mark = apiCalls.length;
+      await hub('POST', '/api/tasks', {title: 'dp-task-analytics-' + way, priority: 4});
+      await requested(mark, '/api/analytics', 'a pushed change to refresh the charts');
+      return true;
+    },
+  },
+  chat: {
+    ready: `${visible('#chatMessages .chat-welcome')} || !!document.querySelector('#chatMessages .chat-bubble-row')`,
+    press: async cdp => {
+      await click(cdp, '#chatTtsToggle');
+      await waitFor(cdp, `localStorage.getItem('cloop_chat_tts') === 'true'`, 'read-aloud to be switched on');
+      await click(cdp, '#chatTtsToggle');
+      await waitFor(cdp, `localStorage.getItem('cloop_chat_tts') === 'false'`, 'read-aloud to be switched off');
+      await click(cdp, '#tab-chat [data-act="clear"]');
+      await waitFor(cdp, visible('#chatMessages .chat-welcome'), 'the cleared chat');
+      return 'toggled read-aloud, cleared';
+    },
+  },
+  assistant: {
+    ready: visible('#assistantMessages .chat-welcome'),
+    press: async cdp => {
+      await type(cdp, '#assistantInput', 'one\ntwo\nthree\nfour');
+      await waitFor(cdp, `document.getElementById('assistantInput').style.height !== ''`, 'the box to grow');
+      await click(cdp, '#tab-assistant [data-act="clear"]');
+      await waitFor(cdp, visible('#assistantMessages .chat-welcome'), 'the cleared conversation');
+      return 'grew, cleared';
+    },
+  },
+  replay: {
+    ready: `${text('#replayRuns')}.includes('No replay runs yet') && document.querySelectorAll('#replayTaskSel option').length > 0`,
+    press: async cdp => {
+      await click(cdp, '#tab-replay [data-act="submit"]');
+      await waitFor(cdp, `${text('#replayStatus')} === 'Pick a task to replay.'`, 'the form to ask for a task');
+      return 'asked for a task';
+    },
+  },
+  'provider-calls': {
+    ready: `${text('#pcEmpty')}.includes('No provider calls')`,
+    press: async cdp => {
+      const mark = apiCalls.length;
+      await click(cdp, '#tab-provider-calls [data-act="load"]');
+      await requested(mark, '/api/provider-calls', 'Refresh to re-read the calls');
+      return 'refreshed';
+    },
+  },
+  executors: {
+    ready: `!!document.querySelector('#execList button[data-act="limits"]') && !!document.getElementById('fwdList')`,
+    press: async cdp => {
+      // A card's button, which the tab's panel forwards to execadmin's dialog.
+      await click(cdp, '#execList button[data-act="limits"]');
+      await waitFor(cdp, `window.isOverlayOpen('executor-limits-overlay')`, 'the limits dialog');
+      await cdp.eval(`window.closeOverlay('executor-limits-overlay')`);
+      return 'opened a card\'s dialog';
+    },
+  },
+};
+
+// runTabs opens every moved tab one way, each from a page of its own.
+async function runTabs(cdp, way) {
+  const out = {};
+  let resumeScript = null;
+  if (way === 'fast3g') await cdp.send('Network.emulateNetworkConditions', FAST3G);
+  try {
+    for (const tab of MOVED_TABS) {
+      const spec = TAB[tab];
+      await scenario(out, tab, cdp, async () => {
+        const ready = typeof spec.ready === 'function' ? spec.ready(way) : spec.ready;
+        let r = {};
+        const t0 = Date.now();
+        // A link or a restored tab opens while the page boots, so what before
+        // changes has to be there first; the other ways change it once the
+        // page is up, with the tab's code not yet fetched.
+        const booting = way === 'link' || way === 'resume';
+        if (booting && spec.before) await spec.before(way);
+        if (way === 'link') {
+          // cold() navigated to the plain page; the link is a page of its own.
+          await cold(cdp, BASE + '/?tab=' + encodeURIComponent(tab));
+          r.link_dropped = await cdp.eval(`location.search === ''`);
+        } else if (way === 'resume') {
+          // The marker signInAgain leaves for the page it comes back to.
+          resumeScript = (await cdp.send('Page.addScriptToEvaluateOnNewDocument', {source: `try {
+            sessionStorage.setItem('cloop_resume', JSON.stringify({path: '', tab: ${q(tab)}, at: Date.now()})); } catch (e) {}`})).identifier;
+          await cold(cdp);
+          await cdp.send('Page.removeScriptToEvaluateOnNewDocument', {identifier: resumeScript});
+          resumeScript = null;
+        }
+        if (way === 'reconnect') {
+          const n = streams.length;
+          await sever();
+          await waitUntil(() => streams.length > n, 'the page to open a new event stream');
+          await waitFor(cdp, `document.getElementById('liveDot').classList.contains('connected')`, 'the stream to reconnect');
+          r.reconnected = streams.slice(n);
+        }
+        if (!booting && spec.before) await spec.before(way);
+        const before = fetched.slice();
+        // What the page logged before the tab was opened — the reconnect's own
+        // close, say — is reported apart from what opening it logged. A link
+        // or a restored tab opens during boot, so all of it is the tab's.
+        const p0 = booting ? 0 : problems.length;
+        r.boot_problems = problems.slice(0, p0);
+        if (!booting) {
+          await click(cdp, '#tbtn-' + tab);
+          if (way === 'fast3g' && spec.during) await spec.during(way);
+        }
+        await waitFor(cdp, ready, 'the ' + tab + ' tab to draw', `JSON.stringify((document.getElementById('tab-' + ${q(tab)}) || {}).innerText || '').slice(0, 300)`);
+        r.ms = Date.now() - t0;
+        r.active = await cdp.eval(`document.getElementById('tab-' + ${q(tab)}).classList.contains('active')`);
+        r.pressed = await spec.press(cdp, way);
+        if (way === 'reconnect' && spec.after) r.after_event = await spec.after(cdp, way);
+        return Object.assign(r, {rendered: true, opened_before: before, problems: problems.slice(p0)});
+      });
+      // What the scenario logged, even where it failed.
+      if (out[tab] && !out[tab].problems) out[tab].problems = problems.slice();
+    }
+  } finally {
+    if (resumeScript) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', {identifier: resumeScript}).catch(() => {});
+    if (way === 'fast3g') await cdp.send('Network.emulateNetworkConditions', {offline: false, latency: 0,
+      downloadThroughput: -1, uploadThroughput: -1}).catch(() => {});
+  }
+  return out;
+}
+
+// runSession is the multi-project hub: PROJECTS[0] and [1], each with one task
+// and one knowledge-base entry of its own.
+async function runSession(cdp) {
+  const out = {};
+  const [a, b] = PROJECTS;
+  const all = [];   // every script fetched by the session, across its pages
+
+  // ── Projects and Tasks only ──
+  await scenario(out, 'projects_and_tasks', cdp, async () => {
+    await waitFor(cdp, `document.getElementById('tab-projects').classList.contains('active')
+      && ${text('#projList')}.includes('dp-session-a')`, 'the Projects grid');
+    all.push(...scripts);
+    // A project's Tasks, by the link that names them: straight there, so the
+    // Overview's own loaders never run.
+    await cold(cdp, BASE + '/?project=' + encodeURIComponent(a) + '&tab=tasks');
+    await waitFor(cdp, `document.getElementById('tab-tasks').classList.contains('active')
+      && ${text('#taskListFull')}.includes('dp-task-a')`, 'project A\'s tasks');
+    const overviewSkipped = !apiCalls.some(p => p.startsWith('/api/executors'));
+    // What a person does there: show completed tasks, open one, filter, and
+    // go to Projects and back.
+    await click(cdp, '#toggleCompletedBtn');
+    await cdp.eval(`(() => { const r = [...document.querySelectorAll('#taskListFull .task-item')].find(x => x.textContent.includes('dp-task-a'));
+      r.querySelector('[data-action="taskRowClick"]') ? r.querySelector('[data-action="taskRowClick"]').click() : r.click(); })()`);
+    await waitFor(cdp, `window.isOverlayOpen('td-overlay')`, 'the task\'s details');
+    await cdp.eval(`window.dismissTopOverlay()`);
+    await type(cdp, '#filterQ', 'dp-task');
+    await waitFor(cdp, `${text('#taskListFull')}.includes('dp-task-a')`, 'the filtered list');
+    await type(cdp, '#filterQ', '');
+    await click(cdp, '#tbtn-projects');
+    await waitFor(cdp, `${text('#projList')}.includes('dp-session-b')`, 'the Projects grid again');
+    await click(cdp, '#tbtn-tasks');
+    await waitFor(cdp, `${text('#taskListFull')}.includes('dp-task-a')`, 'project A\'s tasks again');
+    all.push(...scripts);
+    return {rendered: true, scripts: all.slice(), overview_skipped: overviewSkipped, problems: problems.slice()};
+  });
+
+  // ── A moved tab follows a project switch ──
+  await scenario(out, 'project_switch', cdp, async () => {
+    await cold(cdp, BASE + '/?project=' + encodeURIComponent(a) + '&tab=kanban');
+    await waitFor(cdp, `${text('#kanbanBoard')}.includes('dp-task-a')`, 'project A\'s board');
+    await click(cdp, '#tbtn-kb');
+    await waitFor(cdp, `${text('#kbGrid')}.includes('dp-kb-a')`, 'project A\'s knowledge base');
+    // The header's project selector, as a person switches.
+    await click(cdp, '#projSelectorBtn');
+    await cdp.eval(`(() => { const e = [...document.querySelectorAll('#projSelectorDropdown [data-action="selectProjectFromDropdown"]')]
+      .find(x => x.textContent.includes('dp-session-b')); e.click(); })()`);
+    await waitFor(cdp, `${text('#breadcrumbName')}.includes('dp-session-b')`, 'project B to open');
+    await click(cdp, '#tbtn-kanban');
+    await waitFor(cdp, `${text('#kanbanBoard')}.includes('dp-task-b')`, 'project B\'s board');
+    const boardLeak = await cdp.eval(`${text('#kanbanBoard')}.includes('dp-task-a')`);
+    await click(cdp, '#tbtn-kb');
+    await waitFor(cdp, `${text('#kbGrid')}.includes('dp-kb-b')`, 'project B\'s knowledge base');
+    const kbLeak = await cdp.eval(`${text('#kbGrid')}.includes('dp-kb-a')`);
+    return {rendered: true, board_leak: boardLeak, kb_leak: kbLeak, problems: problems.slice()};
+  });
+  return out;
+}
+
 async function main() {
   const {cdp, proc, dir} = await launchChrome();
   let out;
@@ -634,12 +1021,15 @@ async function main() {
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Network.enable');
+    await cdp.send('Log.enable');
     // Cold means cold: every navigation fetches every script again.
     await cdp.send('Network.setCacheDisabled', {cacheDisabled: true});
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `try { sessionStorage.setItem('cloop_resume', '{"at":0}'); } catch (e) {}`,
     });
-    out = MODE === 'fail' ? await runFail(cdp) : await runCold(cdp);
+    out = MODE === 'fail' ? await runFail(cdp)
+      : MODE.startsWith('tabs:') ? await runTabs(cdp, MODE.slice(5))
+        : MODE === 'session' ? await runSession(cdp) : await runCold(cdp);
   } catch (e) {
     out = {error: String(e && e.stack || e)};
   } finally {

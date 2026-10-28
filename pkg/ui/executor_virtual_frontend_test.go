@@ -58,8 +58,8 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 
 	cards := res["cards"].HTML
 	// Through panelAct: the dialog is deferred (Task 20386).
-	for _, want := range []string{`data-action="openExecutorVirtual" data-arg="0"`, "Virtual (1)", "devices: 1",
-		"Virtual executor on sgx", `data-action="openExecutorVirtual" data-arg="1"`,
+	for _, want := range []string{`data-act="virtual" data-arg="0"`, "Virtual (1)", "devices: 1",
+		"Virtual executor on sgx", `data-act="virtual" data-arg="1"`,
 		// The network chip speaks the dialog's three words, and only an
 		// unfiltered network is the negative one: no network at all is the
 		// tightest access there is, not a missing firewall.
@@ -73,7 +73,7 @@ func TestDashboard_VirtualExecutorDialog(t *testing.T) {
 	if strings.Contains(cards, "firewall: off") {
 		t.Error(`a card still says "firewall: off", which reads as a weakness on an executor with no network at all`)
 	}
-	if strings.Contains(cards, `data-action="revokeExecutor" data-arg="1"`) {
+	if strings.Contains(cards, `data-act="revoke" data-arg="1"`) {
 		t.Error("the virtual executor's card offers Revoke")
 	}
 

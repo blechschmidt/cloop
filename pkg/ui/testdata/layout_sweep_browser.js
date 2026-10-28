@@ -476,6 +476,13 @@ let blocking = false;       // refuse the page's writes (Fetch.requestPaused)
 let blocked = 0;            // writes refused
 let navigations = 0;        // main-frame navigations, to notice a click that left the page
 const cspIssues = [];       // what the browser says its policy blocked, by scenario
+// The scripts fetched beyond the page's own four — the deferred panels and
+// chart.js — and what the page logged as an error, each by the scenario that
+// was running (Task 20456): every tab of DEFERRED_TABS has to arrive with the
+// first open of its own tab, and draw with nothing logged.
+const scriptsFetched = [];
+const consoleErrors = [];
+const EAGER_SCRIPTS = new Set(['app', 'errboundary', 'theme']);
 
 function track() {
   cdp.on(msg => {
@@ -490,11 +497,24 @@ function track() {
       if (p.type !== 'EventSource' && !(p.request.method === 'POST' && /\/api\/telemetry(\?|$)/.test(p.request.url))) {
         inflight.set(p.requestId, p.request.url);
       }
+      {
+        const m = /\/assets\/([a-z-]+)\.[0-9a-f]{16}\.js$/.exec(new URL(p.request.url).pathname);
+        if (m && !EAGER_SCRIPTS.has(m[1])) scriptsFetched.push({scenario: current, script: m[1]});
+      }
       break;
     case 'Network.loadingFinished':
     case 'Network.loadingFailed':
       inflight.delete(p.requestId);
       break;
+    case 'Runtime.consoleAPICalled': {
+      // console.error, and the warning panelIf gives a panel function that
+      // threw ("cloop: …").
+      const line = (p.args || []).map(a => a.value !== undefined ? String(a.value) : (a.description || '')).join(' ');
+      if (p.type === 'error' || (p.type === 'warning' && /^cloop:/.test(line))) {
+        consoleErrors.push({scenario: current, message: p.type + ': ' + line.split('\n')[0]});
+      }
+      break;
+    }
     case 'Runtime.exceptionThrown': {
       const d = p.exceptionDetails || {};
       exceptions.push({scenario: current, message: (d.exception && d.exception.description || d.text || '').split('\n')[0]});
@@ -724,12 +744,14 @@ const TAB_READY = {
 //
 // widths narrows a dialog to the viewports where it exists at all.
 
-const execCard = fn => `#execList button[data-action="${fn}"]`;
+// A card's button, by the action it names in the Executors tab's panel
+// (deferred/executors.js, Task 20456), which forwards it to execadmin.
+const execCard = act => `#execList button[data-act="${act}"]`;
 
-async function onExecutors(fn) {
+async function onExecutors(act) {
   await openTab('executors');
-  await waitFor(visible(execCard(fn)), 'the device card\'s ' + fn + ' button');
-  await click(execCard(fn));
+  await waitFor(visible(execCard(act)), 'the device card\'s ' + act + ' button');
+  await click(execCard(act));
 }
 
 async function onSecrets(act) {
@@ -776,8 +798,8 @@ const OPENERS = {
   'pcModal': {
     open: async () => {
       await openTab('provider-calls');
-      await waitFor(visible('#pcTbody [data-action="openProviderCallModal"]'), 'a provider call');
-      await click('#pcTbody [data-action="openProviderCallModal"]');
+      await waitFor(visible('#pcTbody [data-act="show"]'), 'a provider call');
+      await click('#pcTbody [data-act="show"]');
     },
     ready: hasText('#pcModal', F.promptMarker),
   },
@@ -946,31 +968,31 @@ const OPENERS = {
     ready: `(document.getElementById('fwdBindProject') || {options: []}).options.length > 0`,
   },
   'executor-detail-overlay': {
-    open: async () => { await onExecutors('openExecutorDetail'); },
+    open: async () => { await onExecutors('detail'); },
     ready: `!!document.querySelector('#execDetailBody .exec-detail-verdict')`,
   },
   'executor-sandbox-overlay': {
-    open: async () => { await onExecutors('openExecutorSandbox'); },
+    open: async () => { await onExecutors('sandbox'); },
     ready: `(document.getElementById('execSandboxImage') || {}).value === ${q(F.image)}`,
   },
   'executor-virtual-overlay': {
-    open: async () => { await onExecutors('openExecutorVirtual'); },
+    open: async () => { await onExecutors('virtual'); },
     ready: hasText('#executor-virtual-overlay', F.virtualName),
   },
   'executor-firewall-overlay': {
-    open: async () => { await onExecutors('openExecutorFirewall'); },
+    open: async () => { await onExecutors('firewall'); },
     ready: visible('#efwAllow'),
   },
   'executor-limits-overlay': {
-    open: async () => { await onExecutors('openExecutorLimits'); },
+    open: async () => { await onExecutors('limits'); },
     ready: visible('#execLimitsMemory'),
   },
   'executor-audience-overlay': {
-    open: async () => { await onExecutors('openExecutorAudience'); },
+    open: async () => { await onExecutors('audience'); },
     ready: visible('#execAudienceValue'),
   },
   'executor-labels-overlay': {
-    open: async () => { await onExecutors('openExecutorLabels'); },
+    open: async () => { await onExecutors('labels'); },
     ready: visible('#execLabelsInput'),
   },
   'secret-overlay': {
@@ -1312,6 +1334,8 @@ async function main() {
     }
     out.allow_seen = [...allowSeen];
     out.exceptions = exceptions;
+    out.scripts = scriptsFetched;
+    out.console = consoleErrors;
 
     // ── The gate's own fixture ──
     // A page broken on purpose, once in each way the gate exists to catch,

@@ -1,12 +1,13 @@
 # ./pkg/ui/: seconds per top-level test under go test -race -cover -covermode=atomic -count=1
 # measured 2026-10-11 at 73de7f62 on 4 CPUs in 1084 s; 1456 tests, 1152 s in all. Regenerate with:
 #   scripts/test-durations.py ./pkg/ui/
+106.13 TestDeferredTabs_EachWayInBrowser
 45.21 TestLayoutSweep_EveryTabAndDialogFits
+31.01 TestDeferredPanels_ColdOpenInBrowser
 24.65 TestSilentRenewalInBrowser
 19.98 TestPreflightJudgesADeviceByTheProviderItsSeedCarries
 19.16 TestStreamCredentials_EveryEndingClosesEveryChannel
 16.76 TestChartLibrary_DeferredLoadInBrowser
-16.22 TestDeferredPanels_ColdOpenInBrowser
 13.45 TestMobileLongProjectList_DoesNotOverflow
 11.06 TestGlassesSidewaysTouchWalksTheRingInBrowser
 10.85 TestDashboard_EventHistoryStaysLiveWithoutRefetching
@@ -19,6 +20,7 @@
 9.45 TestGlassesSidewaysTouchIsConsumed
 7.84 TestHarnessCredentialCardAndDialog_InBrowser
 7.60 TestGlassesTapIsNotASwipe
+7.33 TestDeferredTabs_ProjectsAndTasksFetchNothing
 6.89 TestPreflightJudgesTheProviderTheSandboxRuns
 6.84 TestFeatures_InBrowser
 6.32 TestCI_RestoredSessionIsHeldToItsRuleAsItStandsNow

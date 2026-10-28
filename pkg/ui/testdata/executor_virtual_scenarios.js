@@ -79,6 +79,8 @@ async function boot(opts) {
   h.routes['/api/executors'] = {executors: [DEVICE, VIRTUAL, VX_OPEN, VX_NONE], policy: {}, ready: true};
   require(bundlePath);
   await globalThis.__settle(5);
+  // The cards are the Executors tab's, deferred since Task 20456.
+  await window.panelAct('executors');
   await window.loadExecutors();
   await globalThis.__settle(3);
   // The dialog is deferred (Task 20386): fetched through the loader the

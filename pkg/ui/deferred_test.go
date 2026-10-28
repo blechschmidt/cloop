@@ -158,14 +158,17 @@ func TestDeferredTabsAndShimsResolve(t *testing.T) {
 
 	shims := regexp.MustCompile(`panelAct\(\\?'([a-z]+)\\?',\s*\\?'([A-Za-z_$][\w$]*)\\?'`)
 	calls := shims.FindAllStringSubmatch(set.renderedPage+set.bundle+deferredSource(), -1)
-	// The executor cards' actions (23-executors.js) are each execAct('fn'),
-	// which is panelAct('execadmin', 'fn', <the card's index>) (Task 20408).
-	for _, m := range regexp.MustCompile(`\bexecAct\('([A-Za-z_$][\w$]*)'\)`).FindAllStringSubmatch(set.bundle, -1) {
+	// The executor cards' actions are each fwd('fn') in deferred/executors.js
+	// since Task 20456 (execAct in 23-executors.js before it), which is
+	// panelAct('execadmin', 'fn', <the card's index>) (Task 20408).
+	cards := 0
+	for _, m := range regexp.MustCompile(`\bfwd\('([A-Za-z_$][\w$]*)'\)`).FindAllStringSubmatch(set.deferred["executors.js"].raw, -1) {
 		calls = append(calls, []string{m[0], "execadmin", m[1]})
+		cards++
 	}
-	if len(calls) < 8 {
-		t.Fatalf("found %d panelAct calls; the executor cards alone make seven, so this gate has gone vacuous",
-			len(calls))
+	if cards < 7 || len(calls) < 8 {
+		t.Fatalf("found %d panelAct calls, %d of them the executor cards'; the cards alone make seven, so "+
+			"this gate has gone vacuous", len(calls), cards)
 	}
 	for _, c := range calls {
 		d, ok := set.deferred[c[1]+".js"]

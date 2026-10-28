@@ -92,8 +92,8 @@ act('onFilterChange', function() {
   // Re-render active panel.
   if (appState) {
     if (activeTab === 'tasks')    renderTasks(appState);
-    if (activeTab === 'kanban')   renderKanban(appState);
-    if (activeTab === 'deps' && _depsData)   renderDepsGraph(_depsData);
+    if (activeTab === 'kanban')   panelIf('kanban', 'render');
+    if (activeTab === 'deps')     panelIf('deps', 'redraw');
   }
   if (activeTab === 'timeline') loadTimeline();
 });
@@ -108,8 +108,8 @@ act('clearFilters', function() {
   if (tagCnt) tagCnt.textContent = '';
   if (appState) {
     if (activeTab === 'tasks')    renderTasks(appState);
-    if (activeTab === 'kanban')   renderKanban(appState);
-    if (activeTab === 'deps' && _depsData)   renderDepsGraph(_depsData);
+    if (activeTab === 'kanban')   panelIf('kanban', 'render');
+    if (activeTab === 'deps')     panelIf('deps', 'redraw');
   }
   if (activeTab === 'timeline') loadTimeline();
 });

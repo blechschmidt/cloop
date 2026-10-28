@@ -160,7 +160,8 @@ function kbMoveFocusedKanbanCard(direction) {
   const task = appState && appState.plan && appState.plan.tasks
     ? appState.plan.tasks.find(t => t.id === id) : null;
   if (!task) return;
-  const currentCol = (typeof kbColFor === 'function') ? kbColFor(task.status) : task.status;
+  // The board's column for a status: failed, skipped and timed out share one.
+  const currentCol = KANBAN_COLS.includes(task.status) ? task.status : task.status ? 'failed' : 'pending';
   const ci = KANBAN_COLS.indexOf(currentCol);
   if (ci < 0) return;
   const ni = ci + direction;

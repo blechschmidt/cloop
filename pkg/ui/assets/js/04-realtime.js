@@ -200,7 +200,8 @@ function handleRealtimeMsg(type, data, scope) {
 
   // Task 20126: any push that could change a chart triggers a debounced
   // analytics refresh; if the analytics tab is hidden, the scheduler is a
-  // cheap no-op. Replaces the old 30s self-poll inside loadAnalytics.
+  // cheap no-op, and where its code has not loaded so is panelIf (Task 20456).
+  // Replaces the old 30s self-poll inside loadAnalytics.
   switch (type) {
     case 'task_update':
     case 'state_diff':
@@ -210,7 +211,7 @@ function handleRealtimeMsg(type, data, scope) {
     case 'run_state':
     case 'step_output':
     case 'provider_call':
-      try { _scheduleAnalyticsRefresh(); } catch(_) {}
+      panelIf('analytics', 'schedule');
       break;
   }
 
@@ -331,8 +332,9 @@ function handleRealtimeMsg(type, data, scope) {
     case 'provider_call':
       // pkg/provideraudit pushes one envelope per Provider.Complete with the
       // summary fields (no prompt/response — those come from the detail
-      // endpoint when the user opens the modal). Append to the live list.
-      try { _pcAppendLive(data); } catch(_) {}
+      // endpoint when the user opens the modal). Append to the live list —
+      // where the tab's code has loaded; its open() reads the list afresh.
+      panelIf('provider-calls', 'live', data);
       break;
     case 'executor_update':
       // A device enrolled, went online/offline, was revoked, or a project

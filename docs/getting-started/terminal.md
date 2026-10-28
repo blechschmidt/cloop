@@ -239,7 +239,9 @@ What it does, in order:
    executor that isolates, your one complete personal credential is granted for
    you, or name it with `--claude-secret`.
 7. **Prints the project's dashboard link** — `/?project=<path>` opens it, after
-   signing in if the browser is not — and with `--run` starts its first run.
+   signing in if the browser is not; add `&tab=kanban` (or any tab's name) to
+   land on that tab rather than the Overview — and with `--run` starts its
+   first run.
 
 `--grant` gives the project any other stored credential, narrowed as its kind
 needs: `--grant staging-cluster,namespace=payments,namespace=staging`,

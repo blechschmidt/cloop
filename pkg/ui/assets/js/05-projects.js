@@ -95,10 +95,11 @@ function applyProjects(d) {
   }
   // The link `cloop remote init` prints, /?project=<path> (Task 20417): open
   // that project once the list that indexes it is here, then drop the query
-  // so a reload lands on the list again.
-  const dl = new URLSearchParams(location.search).get('project'), di = projects.findIndex(p => p.path === dl);
+  // so a reload lands on the list again. With &tab=<name> the project opens
+  // on that tab rather than its Overview (Task 20456).
+  const qs = new URLSearchParams(location.search), dl = qs.get('project'), di = projects.findIndex(p => p.path === dl);
   if (dl) history.replaceState(null, '', location.pathname);
-  if (di >= 0) openProject(di, projects[di].name);
+  if (di >= 0) openProject(di, projects[di].name, qs.get('tab'));
 }
 
 function loadProjects() {
@@ -499,13 +500,15 @@ act('submitDeleteProject', function() {
   });
 });
 
-// Opens a project in scoped-tabs mode: sets selectedProjectIdx and drills into Overview.
+// Opens a project in scoped-tabs mode: sets selectedProjectIdx and drills into
+// Overview, or into tab where a link names one (Task 20456) — straight there,
+// so the Overview's loaders never run for a view nobody asked for.
 //
 // Task 20134: the WebSocket is reconnected with the new project_idx so the
 // server-side hub registers this client under the new project's workDir and
 // pushes its initial task_update + future state_diff events automatically —
 // removing the per-switch /api/state polling cost.
-act('openProject', function(idx, name) {
+act('openProject', function(idx, name, tab) {
   selectedProjectIdx  = idx;
   selectedProjectName = name;
   const sel = projList()[idx];
@@ -530,7 +533,7 @@ act('openProject', function(idx, name) {
   if (window._lastProjectsData) {
     renderProjects(window._lastProjectsData.projects, window._lastProjectsData.stats);
   }
-  switchTab('overview');
+  switchTab(tab && document.getElementById('tab-' + tab) ? tab : 'overview');
   // Roles are per-project, so the permission set must be re-resolved for the
   // project just opened before its controls render.
   refreshPermissions();

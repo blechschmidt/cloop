@@ -133,7 +133,10 @@ func TestStripHTMLComments_MatchesChrome(t *testing.T) {
 		t.Fatal("the oracle cannot tell a comment in <pre> replaced by a newline from one removed, so it " +
 			"cannot tell a stripper that changed the page from one that did not")
 	}
-	if res.Comments < 100 || res.Elements < 1000 {
+	// The floor is the page's own size, less a margin: since Task 20456 the
+	// tabs other than Overview, Tasks and Projects carry their markup in their
+	// deferred scripts, and the page holds ~90 comments and ~900 elements.
+	if res.Comments < 75 || res.Elements < 750 {
 		t.Fatalf("Chrome found %d comments and %d elements; the comparison would pass vacuously",
 			res.Comments, res.Elements)
 	}

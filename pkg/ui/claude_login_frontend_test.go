@@ -45,8 +45,13 @@ var knownRawJSONFetches = map[string]int{
 	"assets/js/12-task-crud.js": 5,
 	"assets/js/15-voice.js":     2, // multipart audio upload
 	"assets/js/18-shortcuts.js": 2,
-	"assets/js/25-replay.js":    1,
 	"assets/js/26-sessions.js":  1,
+	// Deferred with their tabs by Task 20456, budgets and all. chat.js was
+	// 16-chat.js, which this gate exempted wholesale for the assistant's
+	// stream; it is counted now: the chat POST, its history, and the
+	// multipart voice upload.
+	"assets/js/deferred/chat.js":   3,
+	"assets/js/deferred/replay.js": 1,
 }
 
 // No panel may decode an API response itself.
@@ -64,12 +69,11 @@ var knownRawJSONFetches = map[string]int{
 // did not have in front of them.
 func TestDashboard_APIResponsesGoThroughParseAPIResponse(t *testing.T) {
 	// 00-core.js is where parseAPIResponse lives, and it also holds the login
-	// gate's deliberate bare-token probe. 16/17-*.js read SSE token streams with
-	// getReader(), which is not a JSON body at all.
+	// gate's deliberate bare-token probe. The plan assistant reads an SSE token
+	// stream with getReader(), which is not a JSON body at all.
 	exempt := map[string]bool{
-		"assets/js/00-core.js":      true,
-		"assets/js/16-chat.js":      true,
-		"assets/js/17-assistant.js": true,
+		"assets/js/00-core.js":            true,
+		"assets/js/deferred/assistant.js": true,
 	}
 	counts := map[string][]string{}
 	// The deferred scripts too (Task 20386): moving a fragment out of the

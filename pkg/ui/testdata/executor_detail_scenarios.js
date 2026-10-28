@@ -106,6 +106,8 @@ async function boot(detailBody, status) {
   if (ws) ws.open();
   await globalThis.__settle(3);
 
+  // The cards are the Executors tab's, deferred since Task 20456.
+  await window.panelAct('executors');
   await window.loadExecutors();
   await globalThis.__settle(3);
   // A deferred dialog (Task 20386): reached the way the card's button reaches it.

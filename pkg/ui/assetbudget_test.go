@@ -391,7 +391,33 @@ import (
 // case and the reconnect refresh) and 69 B of index.html (the badge and the
 // panel's <meta>). The set measured 142,920 B at HEAD; 143,370 B after. The
 // ceiling stays: 630 B of slack.
-const eagerWireBudgetBytes = 144_000
+//
+// Lowered to 114_800 B by Task 20456, which did for the tabs what Task 20386
+// did for Settings: every tab but Overview, Tasks and Projects loads on its
+// first open. At HEAD the set measured 143,358 B, 642 B under the ceiling, and
+// app.js carried the code of eleven tabs most sessions never open.
+//
+// What moved. Activity, Kanban, Knowledge Base, Dependencies, Risk Matrix,
+// Analytics, Chat, Assistant, Replay and Provider Calls — markup and code, ten
+// bundle fragments — and the Executors tab's list, its auto-upgrade bar and
+// its card actions out of 23-executors.js are eleven deferred scripts on
+// DEFERRED_TABS; the Overview's execution-target picker is a twelfth
+// (execpicker.js), fetched on the first press of its card. What first paint
+// renders stayed: the Overview's executor and caps cards, loadExecutors (which
+// draws the Executors list through panelIf where that tab has loaded), and
+// 11-timeline.js, whose run controls the Overview and the Tasks run bar use. A
+// broadcast reaches a tab through panelIf, which never fetches, and every
+// tab's open() reads its data afresh, so an event that came before the tab's
+// code did is not lost.
+//
+// Measured after: 112,524 B — app.js 100,687 → 76,909 B and index.html
+// 22,413 → 15,357 B wire; 612,140 → 471,903 B decoded. The twelve scripts add
+// up to 41,143 B wire, each paid once by the sessions that open its tab.
+//
+// The ceiling follows the measurement down, plus 2,276 B (~2%) of slack, the
+// margin the notes above settled on: room for gzip jitter and a label or two,
+// not for a tab. A new tab or panel belongs in a deferred script.
+const eagerWireBudgetBytes = 114_800
 
 // eagerAsset is one member of the first-paint set.
 type eagerAsset struct {

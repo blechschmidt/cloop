@@ -52,7 +52,10 @@ async function boot() {
   h.routes['/api/kb'] = {entries: [{id: 7, title: 'Deploy runbook', content: 'x', tags: []}]};
   require(bundlePath);
   await globalThis.__settle(5);
-  window.loadKB();
+  // The Knowledge Base tab is a deferred panel since Task 20456: fetched the
+  // way opening the tab fetches it, and opened.
+  globalThis.KB = await window.panelAct('kb');
+  await globalThis.KB.open();
   await window.loadProjectRepositories();
   await globalThis.__settle(5);
   return h;
@@ -68,7 +71,11 @@ const scenarios = {
       globalThis.confirm = msg => { asked.push(String(msg)); return answer; };
       let error = '';
       try {
-        document.dispatchEvent({type: 'click', target: elementFrom(attrs, inPanel)});
+        // The entry's delete button is the KB panel's (data-act="del"), which
+        // mountPanel routes from the tab to the panel's own del(); anything
+        // else is a click the document's dispatcher answers.
+        if (attrs['data-act'] === 'del') globalThis.KB.del.call(elementFrom(attrs, inPanel), attrs['data-arg']);
+        else document.dispatchEvent({type: 'click', target: elementFrom(attrs, inPanel)});
       } catch (e) {
         error = String((e && e.message) || e);
       }
@@ -76,11 +83,11 @@ const scenarios = {
       tried.push({label, asked, error,
         sent: h.requests.filter(r => r.method === 'DELETE').map(r => r.method + ' ' + r.url)});
     };
-    const kb = {'data-action': 'deleteKBEntry', 'data-arg': '7'};
+    const kb = {'data-act': 'del', 'data-arg': '7'};
     const revoke = {'data-action': 'ghRevoke', 'data-arg': 'grant-api'};
     await attempt('kb declined', kb, false, false);
     await attempt('kb accepted', kb, false, true);
-    await attempt('kb unknown entry', {'data-action': 'deleteKBEntry', 'data-arg': '99'}, false, true);
+    await attempt('kb unknown entry', {'data-act': 'del', 'data-arg': '99'}, false, true);
     await attempt('revoke outside the panel', revoke, false, true);
     // The attribute the panel's own document-wide router used to answer.
     await attempt('old revoke attribute outside the panel', {'data-gh-revoke': 'grant-api'}, false, true);

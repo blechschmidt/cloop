@@ -113,11 +113,11 @@ func TestDashboard_ExecutorDetailIsAuditable(t *testing.T) {
 	if tag, ok := openingTag(list, "exec-card-main"); !ok {
 		t.Errorf("no exec-card-main region on the card, so there is no clickable "+
 			"surface to drill in from:\n%s", list)
-	} else if !strings.Contains(tag, `data-action="openExecutorDetail"`) {
+	} else if !strings.Contains(tag, `data-act="detail"`) {
 		t.Errorf("the executor card's main region carries no drill-in handler, so "+
 			"clicking the card does nothing:\n%s", tag)
 	}
-	if !strings.Contains(list, `data-action="openExecutorDetail" data-arg="0"`) {
+	if !strings.Contains(list, `data-act="detail" data-arg="0"`) {
 		t.Errorf("no index-dispatched drill-in on the card, so the detail "+
 			"endpoint stays unreachable from the dashboard:\n%s", list)
 	}

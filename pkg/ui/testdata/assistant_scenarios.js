@@ -42,8 +42,11 @@ function lastBubble() {
 }
 
 async function ask(h) {
+  // The tab is a deferred panel (Task 20456): fetched the way opening it
+  // fetches it, then sent the way its Send button sends.
+  const P = await window.panelAct('assistant');
   document.getElementById('assistantInput').value = 'What is next?';
-  await window.submitAssistantChat();
+  await P.submit();
   await globalThis.__settle(5);
   return {
     bubble: lastBubble(),

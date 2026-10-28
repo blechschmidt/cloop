@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/multiui"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -89,54 +91,8 @@ type deferredFailRun struct {
 }
 
 func TestDeferredPanels_ColdOpenInBrowser(t *testing.T) {
-	chrome := findChrome()
-	if chrome == "" {
-		t.Skip("no Chrome/Chromium installed; cannot open a panel a user would")
-	}
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; cannot drive the browser")
-	}
-
-	// One project, so the landing tab is its Overview and boot never moves
-	// the page under the driver; and a secret store, so the Secrets dialogs
-	// have something to act on (set here rather than inherited, so this runs
-	// the same in CI as on a hub's own box).
-	t.Setenv(multiui.EnvRoot, t.TempDir())
-	t.Setenv(secretbroker.EnvPassphraseKey, "deferred-panels-browser-passphrase")
-	dir := setupProjectDir(t, "deferred panels", nil)
-	device := seedDevice(t, dir, "dp-device-1")
-	t.Cleanup(func() {
-		db, err := statedb.Open(state.DBPath(dir))
-		if err != nil {
-			return
-		}
-		defer db.Close()
-		rows, _ := db.ListVirtualExecutors()
-		for _, v := range rows {
-			executor.DefaultRegistry.Unregister(v.ID)
-		}
-	})
-
-	// Configured before the listener starts: requests from Chrome carry no
-	// happens-before edge the race detector can see. The driver polls the hub
-	// for what a save stored, which the default limiter would answer with 429.
-	srv := New(dir, 0, "")
-	srv.RPS, srv.Burst = 100000, 100000
-	installQuotas(t, srv, quota.Config{Defaults: quota.Limits{quota.ResProjects: 1}})
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
-	// What the panels show: a secret, a quota override, a telemetry event, and
-	// an access request filed by somebody else — the only kind this hub's
-	// anonymous admin may decide.
-	seedHub(t, ts, http.MethodPost, "/api/secrets",
-		`{"name":"dp-seeded","kind":"env","payload":"{\"FOO\":\"bar\"}","personal":false}`)
-	seedHub(t, ts, http.MethodPut, "/api/quotas/bob@example.com", `{"limits":{"max_projects":3}}`)
-	seedHub(t, ts, http.MethodPut, "/api/config/telemetry", `{"enabled":true}`)
-	seedHub(t, ts, http.MethodPost, "/api/telemetry",
-		`{"source":"dashboard","session":"dp0000000000000000","events":[{"kind":"error","seq":1,"message":"deferred-panels-seed"}]}`)
-	fileRequestAs(t, dir, "dana@example.com")
+	chrome, node := browserTools(t)
+	ts, _, device := deferredPanelsHub(t)
 
 	t.Run("each panel from a cold page", func(t *testing.T) {
 		var got map[string]deferredScenario
@@ -153,6 +109,8 @@ func TestDeferredPanels_ColdOpenInBrowser(t *testing.T) {
 			"secret_dialog": "secrets", "grant_dialog": "secrets", "token_dialog": "secrets",
 			"request_dialog": "secrets", "decide_dialog": "secrets",
 			"palette": "settings",
+			// Moved tabs (Task 20456) from a number key and from the palette.
+			"shortcut": "kanban", "palette_moved": "analytics",
 		}
 		for name, script := range want {
 			s, ok := got[name]
@@ -218,6 +176,8 @@ func TestDeferredPanels_ColdOpenInBrowser(t *testing.T) {
 		check("token_dialog", got["token_dialog"].Minted, "no token was minted")
 		check("request_dialog", got["request_dialog"].Filed, "the request was not filed")
 		check("decide_dialog", got["decide_dialog"].Approved, "the request was not approved")
+		check("shortcut", strings.Contains(string(got["shortcut"].Stored), "in_progress"),
+			"l did not move the focused card to the next column")
 	})
 
 	t.Run("a deferred script that does not arrive", func(t *testing.T) {
@@ -252,16 +212,302 @@ func TestDeferredPanels_ColdOpenInBrowser(t *testing.T) {
 	})
 }
 
+// browserTools returns the Chrome and node the browser gates drive, or skips.
+func browserTools(t *testing.T) (chrome, node string) {
+	t.Helper()
+	chrome = findChrome()
+	if chrome == "" {
+		t.Skip("no Chrome/Chromium installed; cannot open a panel a user would")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; cannot drive the browser")
+	}
+	return chrome, node
+}
+
+// deferredPanelsHub is the hub both gates drive, with everything its panels
+// show seeded, and the device enrolled for the Executors tab's card.
+func deferredPanelsHub(t *testing.T) (ts *httptest.Server, srv *Server, device string) {
+	t.Helper()
+	// One project, so the landing tab is its Overview and boot never moves
+	// the page under the driver; and a secret store, so the Secrets dialogs
+	// have something to act on (set here rather than inherited, so this runs
+	// the same in CI as on a hub's own box).
+	t.Setenv(multiui.EnvRoot, t.TempDir())
+	t.Setenv(secretbroker.EnvPassphraseKey, "deferred-panels-browser-passphrase")
+	// Two tasks, the second waiting on the first: the moved tabs (Task 20456)
+	// draw them — a board, a graph with an edge, the replay picker.
+	dir := setupProjectDir(t, "deferred panels", []*pm.Task{
+		{ID: 1, Title: "dp-task-alpha", Status: pm.TaskPending, Priority: 1},
+		{ID: 2, Title: "dp-task-beta", Status: pm.TaskPending, Priority: 2, DependsOn: []int{1}},
+	})
+	device = seedDevice(t, dir, "dp-device-1")
+	t.Cleanup(func() {
+		db, err := statedb.Open(state.DBPath(dir))
+		if err != nil {
+			return
+		}
+		defer db.Close()
+		rows, _ := db.ListVirtualExecutors()
+		for _, v := range rows {
+			executor.DefaultRegistry.Unregister(v.ID)
+		}
+	})
+
+	// Configured before the listener starts: requests from Chrome carry no
+	// happens-before edge the race detector can see. The driver polls the hub
+	// for what a save stored, which the default limiter would answer with 429.
+	srv = New(dir, 0, "")
+	srv.RPS, srv.Burst = 100000, 100000
+	installQuotas(t, srv, quota.Config{Defaults: quota.Limits{quota.ResProjects: 1}})
+	ts = httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// What the panels show: a secret, a quota override, a telemetry event, and
+	// an access request filed by somebody else — the only kind this hub's
+	// anonymous admin may decide; and a knowledge-base entry (Task 20456).
+	seedHub(t, ts, http.MethodPost, "/api/secrets",
+		`{"name":"dp-seeded","kind":"env","payload":"{\"FOO\":\"bar\"}","personal":false}`)
+	seedHub(t, ts, http.MethodPut, "/api/quotas/bob@example.com", `{"limits":{"max_projects":3}}`)
+	seedHub(t, ts, http.MethodPut, "/api/config/telemetry", `{"enabled":true}`)
+	seedHub(t, ts, http.MethodPost, "/api/telemetry",
+		`{"source":"dashboard","session":"dp0000000000000000","events":[{"kind":"error","seq":1,"message":"deferred-panels-seed"}]}`)
+	fileRequestAs(t, dir, "dana@example.com")
+	seedHub(t, ts, http.MethodPost, "/api/kb", `{"title":"dp-kb-seeded","body":"seeded","tags":[]}`)
+	return ts, srv, device
+}
+
+// TestDeferredTabs_EachWayInBrowser opens every tab Task 20456 moved off
+// first paint, each from a page of its own, one way per run: its tab button,
+// a link that names it, the tab a sign-in round trip restores, after the hub
+// dropped the page's stream, and on Fast 3G. Each has to draw from a script
+// fetched for it alone, answer a control of its moved markup, and log no
+// error doing so; a change made before its code arrived has to be on it, and
+// after a reconnect a change pushed over the new stream has to reach it.
+func TestDeferredTabs_EachWayInBrowser(t *testing.T) {
+	chrome, node := browserTools(t)
+	ts, srv, device := deferredPanelsHub(t)
+	control := severControl(t, srv)
+	for _, way := range []string{"cold", "link", "resume", "reconnect", "fast3g"} {
+		t.Run(way, func(t *testing.T) {
+			var got map[string]movedTabScenario
+			runDeferredDriver(t, node, chrome, ts.URL, device, "tabs:"+way, &got, control)
+			checkMovedTabs(t, way, got)
+		})
+	}
+}
+
+// movedTabScenario is what the driver reports for one tab Task 20456 moved.
+type movedTabScenario struct {
+	Error        string   `json:"error"`
+	Fetched      []string `json:"fetched"`
+	OpenedBefore []string `json:"opened_before"`
+	Rendered     bool     `json:"rendered"`
+	Active       bool     `json:"active"`
+	Pressed      string   `json:"pressed"`
+	Problems     []string `json:"problems"`
+	BootProblems []string `json:"boot_problems"`
+	MS           int      `json:"ms"`
+	LinkDropped  bool     `json:"link_dropped"`
+	Reconnected  []string `json:"reconnected"`
+	AfterEvent   bool     `json:"after_event"`
+}
+
+// movedTabs is DEFERRED_TABS less the tabs Task 20386 had already moved:
+// each is a deferred script of its own name.
+var movedTabs = []string{"queue", "kanban", "kb", "deps", "risk-matrix", "analytics", "chat", "assistant",
+	"replay", "provider-calls", "executors"}
+
+// checkMovedTabs holds one way's run to what opening a moved tab must do: draw
+// the tab from a script fetched for it alone, answer a control of its moved
+// markup, and log no error doing so.
+func checkMovedTabs(t *testing.T, way string, got map[string]movedTabScenario) {
+	t.Helper()
+	moved := map[string]bool{}
+	for _, tab := range movedTabs {
+		moved[tab] = true
+	}
+	for _, tab := range movedTabs {
+		s, ok := got[tab]
+		if !ok {
+			t.Errorf("%s: the driver reported nothing", tab)
+			continue
+		}
+		if s.Error != "" {
+			t.Errorf("%s: %s\n  logged: %v", tab, s.Error, s.Problems)
+			continue
+		}
+		if !s.Rendered || !s.Active || s.Pressed == "" {
+			t.Errorf("%s: rendered %v, on screen %v, pressed %q", tab, s.Rendered, s.Active, s.Pressed)
+		}
+		if !fetchedScript(s.Fetched, tab) {
+			t.Errorf("%s: opening it never fetched %s.js (fetched %v)", tab, tab, s.Fetched)
+		}
+		// Its own script and nothing else moved — the Executors tab's dialogs
+		// are execadmin's, fetched beside it.
+		for _, f := range s.Fetched {
+			if moved[f] && f != tab {
+				t.Errorf("%s: opening it also fetched %s.js, another tab's", tab, f)
+			}
+		}
+		if tab == "executors" && !fetchedScript(s.Fetched, "execadmin") {
+			t.Errorf("executors: the tab's forwarders and card dialogs never fetched execadmin.js (fetched %v)", s.Fetched)
+		}
+		if way != "link" && way != "resume" && len(s.OpenedBefore) != 0 {
+			t.Errorf("%s: the page had fetched %v before the tab was opened", tab, s.OpenedBefore)
+		}
+		if len(s.Problems) != 0 {
+			t.Errorf("%s: opening it logged errors:\n  %s", tab, strings.Join(s.Problems, "\n  "))
+		}
+		switch way {
+		case "link":
+			if !s.LinkDropped {
+				t.Errorf("%s: the link's query is still in the address, so a reload opens the tab again", tab)
+			}
+		case "reconnect":
+			if len(s.Reconnected) == 0 {
+				t.Errorf("%s: the page never opened a new event stream after the hub dropped its own", tab)
+			}
+			if (tab == "kanban" || tab == "analytics") && !s.AfterEvent {
+				t.Errorf("%s: a change pushed over the new stream did not reach the open tab", tab)
+			}
+		case "fast3g":
+			t.Logf("%s on Fast 3G: drawn %d ms after its tab was pressed", tab, s.MS)
+		}
+	}
+}
+
+// severControl is a server of the test's own whose POST /sever closes every
+// WebSocket the hub holds, as a hub going down does: the lever the driver
+// pulls to make a page reconnect (Task 20456).
+func severControl(t *testing.T, srv *Server) string {
+	t.Helper()
+	ctl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/sever" {
+			http.NotFound(w, r)
+			return
+		}
+		srv.closeAllWebSocketsForShutdown(5 * time.Second)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(ctl.Close)
+	return ctl.URL
+}
+
+// TestDeferredTabs_ProjectsAndTasksFetchNothing is the other half of Task
+// 20456's claim, on a hub with two projects: a session that keeps to Projects
+// and Tasks fetches no deferred script at all, and a moved tab shows the
+// project switched to rather than the one before it (Task 20197's bug class).
+func TestDeferredTabs_ProjectsAndTasksFetchNothing(t *testing.T) {
+	chrome, node := browserTools(t)
+	t.Setenv(multiui.EnvRoot, t.TempDir())
+	// A secret store, so the Overview a project switch lands on answers its
+	// repository card rather than logging a 503 for it.
+	t.Setenv(secretbroker.EnvPassphraseKey, "deferred-tabs-session-passphrase")
+	a := sessionProject(t, "dp-session-a", "dp-task-a")
+	b := sessionProject(t, "dp-session-b", "dp-task-b")
+	srv := New(a, 0, "")
+	srv.Projects = []string{b}
+	srv.RPS, srv.Burst = 100000, 100000
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	// A knowledge-base entry of each project's own, by its index in the list.
+	var list struct {
+		Projects []struct {
+			Path string `json:"path"`
+		} `json:"projects"`
+	}
+	resp, err := http.Get(ts.URL + "/api/projects")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	for i, p := range list.Projects {
+		name := map[string]string{a: "dp-kb-a", b: "dp-kb-b"}[p.Path]
+		if name == "" {
+			continue
+		}
+		seedHub(t, ts, http.MethodPost, fmt.Sprintf("/api/kb?project_idx=%d", i),
+			`{"title":"`+name+`","body":"seeded","tags":[]}`)
+	}
+
+	var got map[string]struct {
+		Error           string   `json:"error"`
+		Rendered        bool     `json:"rendered"`
+		Scripts         []string `json:"scripts"`
+		OverviewSkipped bool     `json:"overview_skipped"`
+		BoardLeak       bool     `json:"board_leak"`
+		KBLeak          bool     `json:"kb_leak"`
+		Problems        []string `json:"problems"`
+	}
+	runDeferredDriver(t, node, chrome, ts.URL, "", "session", &got, "", a+","+b)
+	s := got["projects_and_tasks"]
+	switch {
+	case s.Error != "":
+		t.Errorf("projects and tasks: %s", s.Error)
+	case !s.Rendered:
+		t.Error("projects and tasks: never rendered")
+	default:
+		if len(s.Scripts) != 0 {
+			t.Errorf("a session that kept to Projects and Tasks fetched %v — first paint's savings are spent "+
+				"by the tabs it shows after all", s.Scripts)
+		}
+		if !s.OverviewSkipped {
+			t.Error("the link to a project's Tasks ran the Overview's loaders on the way there")
+		}
+		if len(s.Problems) != 0 {
+			t.Errorf("projects and tasks logged errors:\n  %s", strings.Join(s.Problems, "\n  "))
+		}
+	}
+	sw := got["project_switch"]
+	switch {
+	case sw.Error != "":
+		t.Errorf("project switch: %s", sw.Error)
+	case !sw.Rendered:
+		t.Error("project switch: never rendered")
+	default:
+		if sw.BoardLeak || sw.KBLeak {
+			t.Errorf("after switching projects the moved tabs still show the first one's content "+
+				"(board %v, knowledge base %v)", sw.BoardLeak, sw.KBLeak)
+		}
+		if len(sw.Problems) != 0 {
+			t.Errorf("the project switch logged errors:\n  %s", strings.Join(sw.Problems, "\n  "))
+		}
+	}
+}
+
+// sessionProject is a project the dashboard names name (it shows a project by
+// its directory), with one pending task.
+func sessionProject(t *testing.T, name, task string) string {
+	t.Helper()
+	dir := namedProjectDir(t, name, "deferred tabs: "+name)
+	ps, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("load %s: %v", dir, err)
+	}
+	ps.PMMode = true
+	ps.Plan = &pm.Plan{Goal: ps.Goal, Tasks: []*pm.Task{{ID: 1, Title: task, Status: pm.TaskPending, Priority: 1}}}
+	if err := ps.Save(); err != nil {
+		t.Fatalf("state.Save(%s): %v", dir, err)
+	}
+	return dir
+}
+
 // runDeferredDriver runs testdata/deferred_panels_browser.js in mode and
-// decodes what it printed into out.
-func runDeferredDriver(t *testing.T, node, chrome, base, device, mode string, out any) {
+// decodes what it printed into out. extra is the control server's URL and the
+// session's project paths, where the mode takes them.
+func runDeferredDriver(t *testing.T, node, chrome, base, device, mode string, out any, extra ...string) {
 	t.Helper()
 	// Bounded, so a stalled Chrome cannot hold the package to its timeout
 	// (Task 20340).
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
-	raw, err := exec.CommandContext(ctx, node, mustAbs(t, "testdata/deferred_panels_browser.js"),
-		chrome, base, device, mode).Output()
+	args := append([]string{mustAbs(t, "testdata/deferred_panels_browser.js"), chrome, base, device, mode}, extra...)
+	raw, err := exec.CommandContext(ctx, node, args...).Output()
 	if os.Getenv("DEFERRED_PANELS_DEBUG") != "" {
 		t.Logf("driver output (%s):\n%s", mode, raw)
 	}

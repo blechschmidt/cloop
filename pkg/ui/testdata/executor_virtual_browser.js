@@ -181,13 +181,15 @@ async function boot(cdp) {
 // click, which fetches the deferred dialog through panelAct (Task 20386) —
 // and waits for the form its GET fills.
 async function openDialog(cdp) {
-  await cdp.eval(`window.loadExecutors && window.loadExecutors()`);
+  // The cards are the Executors tab's, fetched when it opens (Task 20456);
+  // every open reads the fleet afresh.
+  await cdp.eval(`window.switchTab('executors')`);
   // The card index is whatever the page's own list says, once it has one.
   const idx = await (async () => {
     const deadline = Date.now() + WAIT_MS;
     for (;;) {
       const i = await cdp.eval(`(() => {
-        const b = document.querySelector('#execList button[data-action="openExecutorVirtual"]');
+        const b = document.querySelector('#execList button[data-act="virtual"]');
         return b ? Number(b.dataset.arg) : -1; })()`);
       if (i >= 0) return i;
       if (Date.now() >= deadline) return -1;
@@ -195,7 +197,7 @@ async function openDialog(cdp) {
     }
   })();
   if (idx < 0) throw new Error('the device card never offered its Virtual button');
-  await cdp.eval(`document.querySelector('#execList button[data-action="openExecutorVirtual"][data-arg="${idx}"]').click()`);
+  await cdp.eval(`document.querySelector('#execList button[data-act="virtual"][data-arg="${idx}"]').click()`);
   if (!await waitFor(cdp, `!!document.getElementById('evxNetNone')`)) {
     throw new Error('the dialog never rendered its network choice: ' + await cdp.eval(textExpr('evxBody')));
   }

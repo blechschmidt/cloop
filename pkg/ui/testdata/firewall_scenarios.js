@@ -59,6 +59,8 @@ async function boot(opts) {
   h.routes['/api/firewall'] = (opts && opts.projectView) || PROJECT_VIEW;
   require(bundlePath);
   await globalThis.__settle(5);
+  // The cards are the Executors tab's, deferred since Task 20456.
+  await window.panelAct('executors');
   await window.loadExecutors();
   await globalThis.__settle(3);
   // A device's dialog is deferred (Task 20386): fetched through the loader its

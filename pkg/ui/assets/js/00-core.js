@@ -210,7 +210,7 @@ function clearProjectScopedPanels() {
   const badge = document.getElementById('taskCountBadge');
   if (badge) badge.textContent = '';
 
-  // Column by column: renderKanban fills the columns by id, so a board
+  // Column by column: the Kanban panel fills the columns by id, so a board
   // replaced wholesale stayed "Loading…" until the page was reloaded — after
   // every project switch (Task 20407).
   ['pending', 'in_progress', 'done', 'failed'].forEach(col => {
@@ -332,58 +332,31 @@ act('switchTab', function(name) {
   const fab = document.getElementById('fab-add-task');
   if (fab) fab.style.display = (name === 'tasks') ? 'flex' : 'none';
 
-  // The Settings and admin tabs fetch their markup and code on first open
-  // (Task 20386); every open runs the panel's own loader, as below.
+  // Every tab but Overview, Tasks and Projects fetches its markup and code on
+  // first open (Tasks 20386, 20456), and every open runs the panel's own
+  // loader — open() — which reads its data afresh, as the bundled loaders
+  // here used to. The Executors tab's dialogs and forwarders are execadmin's,
+  // fetched beside it rather than after it.
   if (DEFERRED_TABS.includes(name)) openDeferredTab(name);
+  if (name === 'executors') deferredPanel('execadmin');
 
-  // In multi-project mode, re-fetch state for the selected project when
-  // switching to any project-scoped tab so the data is always current.
-  const projectScopedTabs = ['overview','tasks','queue','kanban','timeline','kb','deps','risk-matrix','analytics','chat','assistant','replay','provider-calls'];
   if (isMultiProject && selectedProjectIdx === null && name === 'overview') {
     // No project selected: show the all-projects summary panel.
     // Always reload so the cards reflect the latest project statuses.
     loadProjects();
-  } else if (isMultiProject && selectedProjectIdx !== null && projectScopedTabs.includes(name)) {
+  } else {
     // Task 20134: no /api/state refetch — appState is hydrated by the WS
     // task_update on initial subscribe (openProject -> connectWS) and kept
     // fresh by state_diff events. Re-render the affected panel directly from
     // the cached state.
-    if (appState) {
-      if (name === 'tasks')  renderTasks(appState);
-      if (name === 'kanban') renderKanban(appState);
-    }
-    if (name === 'kb') loadKB();
-    if (name === 'deps') loadDeps();
-    if (name === 'risk-matrix') loadRiskMatrix();
-    if (name === 'analytics') loadAnalytics();
-    if (name === 'queue') loadQueue();
-    // The Overview's Executor card needs the same payload; it is the only
+    if (name === 'tasks' && appState) renderTasks(appState);
+    // The Overview's Executor card needs the fleet payload; it is the only
     // per-project field on that page the state diff does not carry, because
     // bindings live in the control plane's database rather than in project
     // state.
     if (name === 'overview') loadExecutors();
     if (name === 'overview') { loadProjectRepositories(); loadProjectMembers(); }
-    if (name === 'chat') loadChatHistory();
-    if (name === 'assistant') loadAssistantHistory();
-    if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
-    if (name === 'provider-calls') loadProviderCalls();
-  } else {
-    if (name === 'overview') loadExecutors();
-    if (name === 'overview') { loadProjectRepositories(); loadProjectMembers(); }
-    if (name === 'tasks'  && appState) renderTasks(appState);
-    if (name === 'kanban' && appState) renderKanban(appState);
     if (name === 'projects') loadProjects();
-    if (name === 'chat') loadChatHistory();
-    if (name === 'assistant') loadAssistantHistory();
-    if (name === 'kb') loadKB();
-    if (name === 'deps') loadDeps();
-    if (name === 'risk-matrix') loadRiskMatrix();
-    if (name === 'analytics') loadAnalytics();
-    if (name === 'queue') loadQueue();
-    if (name === 'executors') loadExecutors();
-    if (name === 'executors') panelAct('execadmin', 'loadForwarders');
-    if (name === 'replay') { loadReplayRuns(); try { window._populateReplayTaskSelector && window._populateReplayTaskSelector(); } catch(_) {} }
-    if (name === 'provider-calls') loadProviderCalls();
   }
 
   // In multi-project mode, show/hide breadcrumb and project selector.

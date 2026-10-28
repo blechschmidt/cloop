@@ -28,8 +28,25 @@ const CHROME = process.argv[2];
 const BASE = process.argv[3];
 
 const CHART_URL_RE = /\/assets\/chart\.[0-9a-f]+\.js$/;
+// The Analytics tab's own script (Task 20456): its markup — the canvases, the
+// banner, Retry — arrives with it, the first time the tab opens.
+const PANEL_URL_RE = /\/assets\/analytics\.[0-9a-f]{16}\.js$/;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// waitFor polls a page expression until it is truthy, for at most 30 s: what
+// the tab is waited on, rather than a pause a fast machine sits out and a slow
+// one overruns.
+async function waitFor(cdp, expr, what) {
+  const deadline = Date.now() + 30000;
+  for (;;) {
+    let v = false;
+    try { v = await cdp.eval(expr); } catch (e) { /* navigating */ }
+    if (v) return v;
+    if (Date.now() >= deadline) throw new Error('timed out waiting for ' + what);
+    await sleep(25);
+  }
+}
 
 // How long Chrome gets to report its DevTools port, in 50 ms polls: 90 s.
 // A cold start on a CI runner that is also running three race-instrumented
@@ -196,8 +213,11 @@ const DRAWN = `(() => {
     const cdp = await connect(chrome.port);
 
     let chartRequests = [];
+    let panelRequests = [];
     cdp.on('Network.requestWillBeSent', p => {
-      if (CHART_URL_RE.test(new URL(p.request.url).pathname)) chartRequests.push(p.request.url);
+      const path = new URL(p.request.url).pathname;
+      if (CHART_URL_RE.test(path)) chartRequests.push(p.request.url);
+      if (PANEL_URL_RE.test(path)) panelRequests.push(p.request.url);
     });
 
     await cdp.send('Network.enable');
@@ -216,19 +236,22 @@ const DRAWN = `(() => {
         const m = document.querySelector('meta[name="cloop-chart-src"]');
         return m ? m.getAttribute('content') : '';
       })()`),
-      // The retry handler must survive the IIFE the whole bundle is wrapped in;
-      // a bare `function` here would be unreachable from the inline onclick.
-      retry_exposed: await cdp.eval('typeof window.retryAnalyticsCharts === "function"'),
+      // Nor the tab's own script, whose markup — the banner and its Retry —
+      // is therefore not on the page yet.
+      panel_requests: panelRequests.length,
+      panel_absent: await cdp.eval('!document.getElementById("analyticsChartRetry")'),
       banner: await cdp.eval(BANNER),
     };
 
     // ── 2. Opening Analytics fetches it and draws ────────────────────────────
     chartRequests = [];
+    panelRequests = [];
     await cdp.eval(`switchTab('analytics')`);
-    await sleep(3000);
+    await waitFor(cdp, DRAWN + ' >= 3', 'the charts to draw');
 
     out.on_demand = {
       chart_requests: chartRequests.length,
+      panel_requests: panelRequests.length,
       chart_global: await cdp.eval('typeof window.Chart !== "undefined"'),
       charts_drawn: await cdp.eval(DRAWN),
       banner: await cdp.eval(BANNER),
@@ -239,7 +262,7 @@ const DRAWN = `(() => {
     await cdp.eval(`switchTab('overview')`);
     await sleep(200);
     await cdp.eval(`switchTab('analytics')`);
-    await sleep(1500);
+    await waitFor(cdp, DRAWN + ' >= 3', 'the charts to draw again');
     out.second_visit = {
       chart_requests: chartRequests.length,
       charts_drawn: await cdp.eval(DRAWN),
@@ -252,22 +275,23 @@ const DRAWN = `(() => {
     await sleep(2500);
     chartRequests = [];
     await cdp.eval(`switchTab('analytics')`);
-    await sleep(3000);
+    await waitFor(cdp, '(' + BANNER + ').retryVisible', 'the failure banner');
 
     out.blocked = {
       chart_requests: chartRequests.length,
       chart_global: await cdp.eval('typeof window.Chart !== "undefined"'),
       charts_drawn: await cdp.eval(DRAWN),
       banner: await cdp.eval(BANNER),
-      // The epics panel is plain DOM and must survive a dead chart library.
-      epics_reachable: await cdp.eval('typeof window.loadAnalytics === "function"'),
+      // The epics panel is plain DOM and must survive a dead chart library:
+      // the tab's own script, which draws it, did arrive.
+      epics_reachable: await cdp.eval('!!document.getElementById("epicsCard")'),
     };
 
     await cdp.send('Network.setBlockedURLs', {urls: []});
     chartRequests = [];
-    // Click the real button, so the inline onclick is what drives the retry.
+    // Click the real button, so the panel's own routing drives the retry.
     await cdp.eval(`document.getElementById('analyticsChartRetry').click()`);
-    await sleep(3500);
+    await waitFor(cdp, DRAWN + ' >= 3', 'the charts to draw after Retry');
 
     out.after_retry = {
       chart_requests: chartRequests.length,

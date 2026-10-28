@@ -154,8 +154,11 @@ async function boot(executors) {
   if (ws) ws.open();
   await globalThis.__settle(3);
 
-  // The panel loads lazily when its tab is shown; call it directly so the test
-  // does not depend on tab-switching mechanics it is not checking.
+  // The cards are the Executors tab's, deferred since Task 20456: its panel is
+  // fetched the way opening the tab fetches it, and the bundle's loader then
+  // draws them, so the test does not depend on tab-switching mechanics it is
+  // not checking.
+  await window.panelAct('executors');
   await window.loadExecutors();
   await globalThis.__settle(3);
   return h;

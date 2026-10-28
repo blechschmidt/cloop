@@ -620,6 +620,16 @@ type layoutResults struct {
 		Scenario string `json:"scenario"`
 		Message  string `json:"message"`
 	} `json:"exceptions"`
+	// Scripts beyond the page's own four, and errors the page logged, each by
+	// the scenario running when they happened (Task 20456).
+	Scripts []struct {
+		Scenario string `json:"scenario"`
+		Script   string `json:"script"`
+	} `json:"scripts"`
+	Console []struct {
+		Scenario string `json:"scenario"`
+		Message  string `json:"message"`
+	} `json:"console"`
 	BootMS    int `json:"boot_ms"`
 	ElapsedMS int `json:"elapsed_ms"`
 }
@@ -803,6 +813,45 @@ func TestLayoutSweep_EveryTabAndDialogFits(t *testing.T) {
 	t.Run("nothing threw", func(t *testing.T) {
 		for _, e := range got.Exceptions {
 			t.Errorf("%s: uncaught %s", e.Scenario, e.Message)
+		}
+	})
+
+	// Every tab whose code and markup arrive on first open (DEFERRED_TABS,
+	// Tasks 20386 and 20456) is measured here as it is the first time a person
+	// opens it: its script is fetched by that open and no earlier — not by
+	// boot, nor by opening the project, nor by another tab — and drawing it
+	// logs no error.
+	t.Run("each deferred tab arrived with its first open and logged nothing", func(t *testing.T) {
+		if len(only) > 0 {
+			t.Skip("LAYOUT_SWEEP_ONLY narrows the run")
+		}
+		first := map[string]string{}
+		for _, f := range got.Scripts {
+			if _, ok := first[f.Script]; !ok {
+				first[f.Script] = f.Scenario
+			}
+		}
+		swept := map[string]bool{}
+		for _, tab := range layoutTabs {
+			swept[tab] = true
+		}
+		deferred := map[string]bool{}
+		for _, tab := range deferredTabNames(t) {
+			if !swept[tab] {
+				continue
+			}
+			deferred["tab:"+tab] = true
+			if at := first[tab]; at != "tab:"+tab {
+				t.Errorf("%s.js was first fetched during %q, want the first open of its own tab (tab:%s)", tab, at, tab)
+			}
+		}
+		if len(deferred) < 15 {
+			t.Fatalf("only %d deferred tabs were swept; DEFERRED_TABS names 18, so this check has gone vacuous", len(deferred))
+		}
+		for _, c := range got.Console {
+			if deferred[c.Scenario] {
+				t.Errorf("%s logged an error: %s", c.Scenario, c.Message)
+			}
 		}
 	})
 
@@ -1029,5 +1078,20 @@ func sortedSet(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// deferredTabNames is DEFERRED_TABS as 01-overview.js declares it: the tabs
+// whose markup and code are fetched on their first open.
+func deferredTabNames(t *testing.T) []string {
+	t.Helper()
+	m := regexp.MustCompile(`const DEFERRED_TABS = \[([^\]]*)\]`).FindStringSubmatch(loadAssets().bundle)
+	if m == nil {
+		t.Fatal("01-overview.js no longer declares DEFERRED_TABS; this check reads it")
+	}
+	var out []string
+	for _, n := range regexp.MustCompile(`'([a-z-]+)'`).FindAllStringSubmatch(m[1], -1) {
+		out = append(out, n[1])
+	}
 	return out
 }

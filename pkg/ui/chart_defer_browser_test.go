@@ -26,7 +26,7 @@ import (
 // against a project with no tasks and no recorded provider calls: velocity,
 // burn-down and cost trend. The status donut hides itself when every slice is
 // zero and the latency histogram when there are no samples, so both are
-// legitimately absent here — see _renderAnalytics in assets/js/19-analytics.js.
+// legitimately absent here — see _renderAnalytics in assets/js/deferred/analytics.js.
 const chartsExpectedForBareProject = 3
 
 // chartBanner mirrors the visible state of the Analytics status banner.
@@ -47,12 +47,14 @@ type chartDeferResults struct {
 		ChartGlobal   bool        `json:"chart_global"`
 		LoaderPresent bool        `json:"loader_present"`
 		MetaSrc       string      `json:"meta_src"`
-		RetryExposed  bool        `json:"retry_exposed"`
+		PanelRequests int         `json:"panel_requests"`
+		PanelAbsent   bool        `json:"panel_absent"`
 		Banner        chartBanner `json:"banner"`
 	} `json:"first_paint"`
 
 	OnDemand struct {
 		ChartRequests int         `json:"chart_requests"`
+		PanelRequests int         `json:"panel_requests"`
 		ChartGlobal   bool        `json:"chart_global"`
 		ChartsDrawn   int         `json:"charts_drawn"`
 		Banner        chartBanner `json:"banner"`
@@ -150,9 +152,14 @@ func TestChartLibrary_DeferredLoadInBrowser(t *testing.T) {
 			t.Error("window.Chart is defined at first paint — the library was " +
 				"evaluated on the way to painting, which is the cost this change removed")
 		}
-		if !got.FirstPaint.RetryExposed {
-			t.Error("window.retryAnalyticsCharts is not exposed; the banner's inline " +
-				"onclick would be a silent no-op, so a failed load could never be retried")
+		// Nor the tab's own script (Task 20456), which carries the canvases,
+		// the banner and its Retry: they are not on the page until it opens.
+		if n := got.FirstPaint.PanelRequests; n != 0 {
+			t.Errorf("the page requested the Analytics tab's script %d time(s) before the tab was opened", n)
+		}
+		if !got.FirstPaint.PanelAbsent {
+			t.Error("the Analytics banner's Retry is on the page before the tab was opened — its " +
+				"markup is back in index.html, which first paint pays for")
 		}
 	})
 
@@ -160,6 +167,9 @@ func TestChartLibrary_DeferredLoadInBrowser(t *testing.T) {
 		if n := got.OnDemand.ChartRequests; n != 1 {
 			t.Errorf("opening Analytics made %d request(s) for chart.js, want exactly 1 "+
 				"(0 = never loaded, >1 = the memo in ensureChartLib is not holding)", n)
+		}
+		if n := got.OnDemand.PanelRequests; n != 1 {
+			t.Errorf("opening Analytics made %d request(s) for its own script, want exactly 1", n)
 		}
 		if !got.OnDemand.ChartGlobal {
 			t.Fatal("window.Chart is still undefined after opening Analytics — the " +

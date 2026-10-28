@@ -1514,7 +1514,12 @@ func TestDashboard_ExecutorsPanelWired(t *testing.T) {
 		{`id="execPolicyBanner"`, "the effective-mode banner is missing — the whole point " +
 			"of the tab is that the host-execution mode is visible"},
 		{`act('loadExecutors', function`, "the panel loader is not a registered action"},
-		{`if (name === 'executors') loadExecutors();`, "switchTab never loads the Executors panel"},
+		// The tab is deferred since Task 20456: its open(), which every visit
+		// runs, reads the fleet through the bundle's loader.
+		{`'risk-matrix', 'analytics', 'chat', 'assistant', 'replay', 'provider-calls', 'executors']`,
+			"the Executors tab is not on DEFERRED_TABS, so opening it never fetches its panel"},
+		{`function open() {
+      window.loadExecutors();`, "the Executors panel's open() never loads the fleet"},
 		{`case 'executor_update':`, "the WS event that keeps the panel live is not handled"},
 		{`'/api/executors'`, "the panel never calls its list endpoint"},
 		{`'/api/executors/enroll'`, "the enroll action never calls its endpoint"},
@@ -1570,7 +1575,9 @@ func TestDashboard_ExecutorSelectorWired(t *testing.T) {
 		{`id="statExecutor"`, "the executor card has no value element to render into"},
 		{`data-action="openExecutorPickerModal"`, "the executor card is not clickable"},
 		{`act('openExecutorPickerModal', function`, "the picker opener is not a registered action"},
-		{`act('submitExecutorBind', function`, "the picker has no save handler"},
+		// The dialog is deferred/execpicker.js since Task 20456.
+		{`panelAct('execpicker', 'open')`, "the picker opener never fetches the dialog"},
+		{`h.mount({open, close, save}`, "the picker has no save handler"},
 		{`id="executor-picker-overlay"`, "the picker modal is missing"},
 		{`id="epExecutor"`, "the picker has no executor <select>"},
 		{`'/api/projects/' + idx + '/executor'`, "saving the picker never calls the bind endpoint"},
