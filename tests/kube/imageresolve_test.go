@@ -140,6 +140,13 @@ func TestAPodRunsTheDigestItsTagResolvedTo(t *testing.T) {
 	nodePull(ctx, t, x, registryHost+"/e2e/harness@"+digestA)
 
 	// ── The release: the executor's image is the tag ──────────────────────
+	// What this test changes that a test run after it would trip over is put
+	// back when it ends: a harness loaded onto the nodes, pulled Always, is a
+	// Pod that never starts, and a signature rule left on refuses it.
+	if !keep {
+		restore := restoredPolicy(values)
+		t.Cleanup(func() { restoreRelease(t, x, release, ns, restore) })
+	}
 	tagRef := registryHost + "/" + pinTag
 	x.apply(ctx, configMap("cloop-e2e-pin-ca", ns, map[string]string{"ca.crt": string(ca.CertPEM)}))
 	upgradeRelease(ctx, t, x, release, ns, fullname, []string{
@@ -289,6 +296,58 @@ func TestAPodRunsTheDigestItsTagResolvedTo(t *testing.T) {
 	if pods := x.out(ctx, "get", "pods", "-n", workloadNS, "-l", "cloop.dev/managed=true", "-o",
 		"jsonpath={.items[*].spec.containers[*].image}"); strings.Contains(pods, "/e2e/harness") {
 		t.Errorf("a Pod runs the unsigned image: %s", pods)
+	}
+}
+
+// restoredPolicy is the --set arguments that put back the release values this
+// test changes and other tests rely on: the workload pull policy and the image
+// policy's rules, as values had them before it started.
+func restoredPolicy(values map[string]any) []string {
+	str := func(keys ...string) string {
+		v, _ := dig(values, keys...).(string)
+		return v
+	}
+	boolean := func(keys ...string) string {
+		v, _ := dig(values, keys...).(bool)
+		return fmt.Sprint(v)
+	}
+	out := []string{
+		"executor.kubernetes.imagePullPolicy=" + str("executor", "kubernetes", "imagePullPolicy"),
+		"sandbox.imagePolicy.requireDigest=" + boolean("sandbox", "imagePolicy", "requireDigest"),
+		"sandbox.imagePolicy.requireSignature=" + boolean("sandbox", "imagePolicy", "requireSignature"),
+		"sandbox.imagePolicy.governOperatorImages=" + boolean("sandbox", "imagePolicy", "governOperatorImages"),
+	}
+	// A list this test set an element of goes back whole: null when it was
+	// empty, which leaves the chart's default.
+	for _, key := range []string{"allowedRegistries", "cosignIdentities"} {
+		list, _ := dig(values, "sandbox", "imagePolicy", key).([]any)
+		if len(list) == 0 {
+			out = append(out, "sandbox.imagePolicy."+key+"=null")
+			continue
+		}
+		b, _ := json.Marshal(list)
+		out = append(out, "sandbox.imagePolicy."+key+"="+string(b))
+	}
+	return out
+}
+
+// restoreRelease applies sets to the release, saying so rather than failing
+// the test if it cannot: the test's own verdict is already in.
+func restoreRelease(t *testing.T, x tool, release, ns string, sets []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	args := []string{"upgrade", release, filepath.Join(repoRoot(t), "deploy/helm/cloop-hub"),
+		"--namespace", ns, "--reuse-values", "--wait", "--timeout", "5m"}
+	for _, s := range sets {
+		if strings.HasSuffix(s, "]") || strings.HasSuffix(s, "}") {
+			args = append(args, "--set-json", s)
+		} else {
+			args = append(args, "--set", s)
+		}
+	}
+	if out, err := x.run(ctx, nil, true, "helm", args...); err != nil {
+		t.Logf("could not put the release's image policy back (%v); later tests on this release may "+
+			"trip over it:\n%s", err, tail(out, 20))
 	}
 }
 

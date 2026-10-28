@@ -304,4 +304,12 @@ CLOOP_KUBE_E2E_KUBECONFIG=/tmp/kubeconfig CLOOP_KUBE_E2E_KIND_CLUSTER=cloop-ci \
 ```
 
 It cordons every node for the seconds between dispatch and the repoint, so run
-it only on a throwaway cluster, as every test here.
+it only on a throwaway cluster, as every test here. When it ends it puts back the
+workload pull policy and the image policy's rules it changed, as they were when
+it started: a harness loaded onto the nodes and pulled `Always` is a Pod that
+never starts, and a signature rule left on would refuse the next test's image.
+
+Each test's state helper Pod has a name of its own and a one-second grace
+period. One shared name let a test adopt the previous test's helper while it was
+still terminating, since `sleep` as PID 1 ignores SIGTERM. The test then lost the
+helper half-way through, which is how this test's second CI run failed.

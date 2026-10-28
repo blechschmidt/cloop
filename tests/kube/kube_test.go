@@ -738,17 +738,23 @@ func upgradeRelease(ctx context.Context, t *testing.T, x tool, release, ns, full
 // does — the state directory, and its projects/ at the projects root — which is
 // how a project directory and the registry entry naming it get into a hub whose
 // image has no shell. ReadWriteOnce admits it: it shares the hub's node.
+//
+// Named per test, and quick to go. CI runs these tests one after another, and
+// one name for all of them let a test adopt the previous test's helper while
+// it was still terminating — `sleep` as PID 1 ignores the SIGTERM, so that
+// takes the whole grace period — and lose it half-way through (Task 20457).
 func startStateHelper(ctx context.Context, t *testing.T, x tool, ns, fullname string, keep bool) string {
 	t.Helper()
-	name := "kube-e2e-state-helper"
+	name := "kube-e2e-state-helper-" + strings.ToLower(randomAlnum(t, 6))
 	hubNode := x.out(ctx, "get", "pods", "-n", ns,
 		"-l", "app.kubernetes.io/name=cloop-hub", "-o", "jsonpath={.items[0].spec.nodeName}")
 	x.apply(ctx, map[string]any{"apiVersion": "v1", "kind": "Pod",
 		"metadata": map[string]any{"name": name, "namespace": ns},
 		"spec": map[string]any{
-			"nodeName":                     hubNode,
-			"automountServiceAccountToken": false,
-			"restartPolicy":                "Never",
+			"nodeName":                      hubNode,
+			"automountServiceAccountToken":  false,
+			"restartPolicy":                 "Never",
+			"terminationGracePeriodSeconds": 1,
 			"securityContext": map[string]any{"runAsNonRoot": true, "runAsUser": 65532,
 				"runAsGroup": 65532, "fsGroup": 65532},
 			"containers": []any{map[string]any{
