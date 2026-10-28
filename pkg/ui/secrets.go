@@ -987,7 +987,15 @@ var testBrokerOptions []secretbroker.Option
 // A process outside any cluster has no name to hold a lease under, and keeps
 // its leases in memory as before.
 func brokerOptions(auditor secretbroker.Auditor) []secretbroker.Option {
-	opts := []secretbroker.Option{secretbroker.WithAuditor(auditor)}
+	return append([]secretbroker.Option{secretbroker.WithAuditor(auditor)}, leaseRecordOptions()...)
+}
+
+// leaseRecordOptions is brokerOptions without the auditor: what makes a broker
+// record its leases as held by this process, and what a test adds. It is also
+// what the Kubernetes driver's workspace credential source is built with
+// (Task 20455), over a broker reconciliation opens.
+func leaseRecordOptions() []secretbroker.Option {
+	var opts []secretbroker.Option
 	if holder := leaseHolderID(); holder != "" {
 		opts = append(opts, secretbroker.WithLeaseRecords(holder))
 	}

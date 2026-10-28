@@ -24,6 +24,16 @@ package ui
 // re-minted at the slot's recorded scope. A push that arrives before the agent
 // has reconnected waits for that, as any other session's request does
 // (session_hold.go).
+//
+// A Kubernetes Pod's workspace is the same, a little earlier (Task 20455): its
+// init container fetches through the pinned session after the dispatch
+// returned, so the session matters from the start, not only for a write-back.
+// The driver's source is built over a broker that records its leases
+// (reconcile.Options.WorkspaceBrokerOptions) and kept here like a device's
+// (keepWorkspaceLeases); the driver names what it holds until the fetch is
+// confirmed; and the process that adopts the Pod hands the driver the release
+// of what it took over, which the driver runs once the fetch is confirmed or,
+// for a push write-back, with the workload (handWorkspaceToDriver).
 
 import (
 	"context"
@@ -98,6 +108,11 @@ func (k keptWorkspaceSource) ForProxiedWorkspace(ctx context.Context, projectID 
 	return access, func() {
 		if !sl.isClosing() && !sl.isHandedOver() {
 			sl.Close()
+			// A Pod's ends with its fetch, while its run goes on (Task
+			// 20455): its owner row stops naming it.
+			if exID, handleID := sl.boundHandle(); handleID != "" {
+				go forgetEndedWorkspace(exID, handleID)
+			}
 		}
 	}, nil
 }
@@ -111,6 +126,25 @@ func (k keptWorkspaceSource) RefreshWorkspaceCredential(ctx context.Context, cre
 func (k keptWorkspaceSource) LeasesRecorded() bool { return k.inner.LeasesRecorded() }
 
 var _ executor.WorkspaceCredentialSource = keptWorkspaceSource{}
+
+// keepWorkspaceLeases is keptWorkspaceSource for a source reconciliation built:
+// the Kubernetes driver's (Task 20455). A Pod's init container fetches its
+// workspace after the dispatch returned, through the pinned session the git
+// proxy mints over this source's lease, so that lease has to live as long as
+// the session and be the run's to take over, exactly as a device's does.
+//
+// Only a broker source whose leases are recorded is decorated: one that keeps
+// none could not be taken over by anyone, and keeping it alive would only
+// outlast its run in this process. The lease.refresh rows its keepalive could
+// write need no handle here — a proxied workspace lease delivers no file to
+// refresh.
+func keepWorkspaceLeases(src executor.WorkspaceCredentialSource) executor.WorkspaceCredentialSource {
+	bs, ok := src.(*gitcreds.BrokerSource)
+	if !ok || !bs.LeasesRecorded() {
+		return src
+	}
+	return keptWorkspaceSource{inner: bs}
+}
 
 // bindWorkspaceLease records which workload the workspace lease a driver kept
 // for handleID's push write-back belongs to, so the run's owner row names it.
@@ -276,7 +310,66 @@ func (s *Server) takeOverWorkspace(workDir string, ex executor.Executor, handleI
 		map[string]interface{}{"project": workDir, "lease": ws.Lease, "session": ws.Session,
 			"executor": ex.ID(), "handle": handleID})
 	restoreLeaseSessions(sl)
+	handWorkspaceToDriver(ex, handleID, ws, sl)
 	return takeoverResult{outcome: hubmetrics.TakeoverTakenOver}
+}
+
+// handWorkspaceToDriver gives the driver of an adopted workload that may still
+// fetch its workspace — a Pod's init container — the release of the workspace
+// lease taken over for it (Task 20455). The driver runs it where the process
+// that dispatched the run would have run its own: once the fetch is confirmed,
+// or with the workload for a push write-back — at once when that already
+// happened while no process held the lease. A driver that does not take it, or
+// does not hold the workload, leaves the lease to end with the workload
+// (wipeLeaseOnExit), as a device's does.
+func handWorkspaceToDriver(ex executor.Executor, handleID string, ws *runWorkspaceMeta, sl *secretLease) {
+	ad, ok := ex.(executor.WorkspaceCredentialAdopter)
+	if !ok {
+		return
+	}
+	held := executor.HeldWorkspaceCredential{LeaseID: ws.Lease, SessionID: ws.Session}
+	if sl.lease != nil && len(sl.lease.Materials) > 0 {
+		held.GrantID = sl.lease.Materials[0].GrantID
+	}
+	// Close releases the lease at the broker and ends the session standing on
+	// it. Not once another process took the lease over, nor a second time.
+	ad.AdoptWorkspaceCredential(handleID, held, func() {
+		if !sl.isClosing() && !sl.isHandedOver() {
+			sl.Close()
+			go forgetEndedWorkspace(ex.ID(), handleID)
+		}
+	})
+}
+
+// forgetEndedWorkspace rewrites the credentials the owner row of the run on
+// executorID's handleID names, once its workspace lease ended while the run
+// goes on — a Pod's, whose fetch was confirmed (Task 20455) — so the process
+// that adopts the run after this one does not try to take over a lease that is
+// gone. Only a row this process owns, naming that workload and a workspace, is
+// rewritten.
+func forgetEndedWorkspace(executorID, handleID string) {
+	defer recoverGoroutine("forget an ended workspace lease")
+	n := currentCluster()
+	if n == nil || executorID == "" || handleID == "" {
+		return
+	}
+	ex, err := executor.Get(executorID)
+	if err != nil {
+		return
+	}
+	owned, err := n.Owned(ownerRun)
+	if err != nil {
+		return
+	}
+	for _, o := range owned {
+		var meta runOwnerMeta
+		if !o.Self || o.Meta(&meta) != nil || meta.Executor != executorID || meta.Handle != handleID ||
+			meta.Workspace == nil {
+			continue
+		}
+		(&Server{Cluster: n, WorkDir: o.Key}).refreshRunCredentials(o.Key, ex, handleID)
+		return
+	}
 }
 
 // workspaceLeaseMismatch reports why leaseID's record is not a workspace lease

@@ -155,7 +155,11 @@ func (s *BrokerSource) forWorkspace(ctx context.Context, projectID string, w exe
 	// issued to label:region=eu reaches the fetch on an executor carrying it
 	// (Task 20432) — a virtual executor through its device's labels.
 	requester, err := secretbroker.RequesterFor(s.Records, executorID, secretbroker.RequestScope{
-		ProjectID:     executor.PolicyProjectPath(projectID),
+		ProjectID: executor.PolicyProjectPath(projectID),
+		// The run the dispatch is for, when the driver said: a recorded
+		// lease names it (secret_leases.run_id), as its audit rows do, so the
+		// lease behind a workspace is joined to its run (Task 20455).
+		RunID:         executor.DispatchRun(ctx),
 		GitHubProxied: proxied,
 		// Only a GitHub token is read out of this lease; a kubeconfig the
 		// same subjects hold is discarded, never handed on (Task 20420).

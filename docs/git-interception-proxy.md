@@ -525,7 +525,10 @@ other — and, since Task 20422, no longer:
   *"the run is done with its workspace credential"*, or *"workspace credential
   released unused"* when nothing ever presented it — and releases the lease
   behind it. When the hub that dispatched the run stops first, the member that
-  adopts the run restores the session and ends it with the workload.
+  adopts the run restores the session and ends it when the dispatcher would
+  have: with the workload for a device's push write-back, and for a Pod once
+  its init container's fetch is confirmed, or with the workload under
+  `write_back: push` (Task 20455).
 - **It is renewed while the run lives.** Minted for `session_minutes`, it is
   moved another `session_minutes` forward whenever five minutes or less are left
   (half a period, for one under ten minutes): by the dispatching hub while its

@@ -674,11 +674,15 @@ readiness does not depend on leadership: every member serves.
   - A restore refuses a record whose instance has federation off.
   - An instance that keeps federation on keeps its own.
 
-  What is still forgotten: a Kubernetes Pod's workspace session, minted over a broker
-  that keeps no lease records — an init container that fetches after its member
-  died gets a 401. It is a residual risk of the
-  [security model](../security/model.md#what-is-not-mitigated), pinned by
-  `TestAPodsWorkspaceSourceKeepsNoLeaseRecords`.
+  A Kubernetes Pod's workspace session is taken over the same way (Task 20455):
+  its lease and session are recorded when the member that dispatched the Pod
+  mints them, and the member that adopts the Pod — the leader, for a dead
+  member's — restores the session, so an init container that fetches after its
+  member died is served, and closes it once the fetch is confirmed
+  (`TestAPodsWorkspaceSessionSurvivesARestart`). A fetch made before
+  the adoption waits for it, at most a minute; one that outwaits a slow leader
+  election is refused, a residual risk of the
+  [security model](../security/model.md#what-is-not-mitigated).
 - **Rate limits and connection caps are per member.** Five members admit five
   times the per-address request rate one would.
 - **`cloop serve`**, the standalone REST server, is not a member. It sweeps

@@ -3094,7 +3094,19 @@ upstream is the project's own `origin` as the hub's checkout names it now, so a
 record whose repository no longer matches is refused with *"it is pinned to …,
 and the project's origin is … now"*. The device's write-back push, whenever it
 comes, then lands, and the project's journal records it as a `write_back` row
-naming the branch. A Pod's workspace session is not restored — see
+naming the branch.
+
+**A Pod's workspace session comes back too** (Task 20455), whether or not the run
+pushes its work back: a Pod's init container fetches its workspace after the
+dispatch, so its session matters from the start. The run's owner row names the
+Pod's workspace lease and session; the adopting process logs the same `took over
+the workspace lease of an adopted run` and `restored git session …` lines, and
+an init container that fetches after the restart is served. Once the Pod's fetch
+is confirmed the session is closed — *"the run is done with its workspace
+credential"* — and the lease released; under `write_back: push` both last until
+the workload ends. A fetch made before the adoption waits for it, at most a
+minute: on a hub whose leader is being replaced it can outwait it, and the Pod
+then fails its provisioning — start the run again. See
 [limits that remain](../architecture/git-proxy.md#limits-that-remain).
 
 **A CI relay session is restored by the next call that presents it** (Task

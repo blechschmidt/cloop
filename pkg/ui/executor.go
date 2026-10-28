@@ -238,7 +238,7 @@ func reconcileConfiguredExecutors(dir string, cfg *config.Config) {
 		return
 	}
 	node := currentCluster()
-	reconcile.Bootstrap(dir, cfg, reconcile.Options{
+	reconcile.Bootstrap(dir, cfg, withPodWorkspaceSource(reconcile.Options{
 		// This is a process a control plane restarts as, so it is worth
 		// paying for the sweep that cleans up Pods a previous instance left
 		// running when it died mid-run.
@@ -255,19 +255,31 @@ func reconcileConfiguredExecutors(dir string, cfg *config.Config) {
 		// And keeps paying for it: a hub that stays up for weeks loses Pods to
 		// node evictions, which the startup sweep by definition never sees.
 		SweepInterval: cfg.Executors.OrphanSweepInterval(),
-		// Route the Kubernetes driver's workspace fetches and write-back
-		// pushes through the git interception proxy when one is configured.
-		// Nil-safe: with no proxy the source is returned unchanged.
-		WrapWorkspaceSource: func(execID string, src executor.WorkspaceCredentialSource) executor.WorkspaceCredentialSource {
-			return activeGitProxy().Wrap(execID, src)
-		},
 		// Verify what each configured runtime claims (Task 20439), in the
 		// background: a probe starts a sandbox.
 		IsolationProbe: func(ex executor.IsolationProber) { probeIsolation(ex, executor.ProbePointReconcile) },
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "ui: "+format+"\n", args...)
 		},
-	})
+	}))
+}
+
+// withPodWorkspaceSource sets what the Kubernetes driver's workspace
+// credential source is built with in this process.
+//
+// Its fetches and write-back pushes route through the git interception proxy
+// when one is configured (nil-safe: with no proxy the source is returned
+// unchanged). And its leases are recorded as held by this process, a proxied
+// one kept alive and named in the run's owner row with its session (Task
+// 20455): a Pod's init container fetches after the dispatch, so the process
+// that adopts the Pod if this one stops first has to be able to take the lease
+// over and restore the session, as it does a device's (keptWorkspaceSource).
+func withPodWorkspaceSource(o reconcile.Options) reconcile.Options {
+	o.WorkspaceBrokerOptions = leaseRecordOptions()
+	o.WrapWorkspaceSource = func(execID string, src executor.WorkspaceCredentialSource) executor.WorkspaceCredentialSource {
+		return activeGitProxy().Wrap(execID, keepWorkspaceLeases(src))
+	}
+	return o
 }
 
 // restoreEnrolledExecutors registers an offline executor for every agent that

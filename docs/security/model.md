@@ -1445,9 +1445,9 @@ driver:    lease from the broker at dispatch, for one fetch
    ┌────────────┴─────────────┐
    │ kubernetes               │ remote
    │ → Secret cloop-ws-<h>    │ → one start frame
-   │ → lease released         │ → lease released when the agent answers
-   │ → secretKeyRef in the Pod│
-   │ → Secret deleted when the│
+   │ → secretKeyRef in the Pod│ → lease released when the agent answers
+   │ → Secret deleted, lease  │
+   │   released, when the     │
    │   init container ends    │
    └────────────┬─────────────┘
                 │
@@ -1460,12 +1460,14 @@ executor:  kubernetes → read out of CLOOP_WORKSPACE_TOKEN and unset
 ```
 
 The lease is deliberately short-lived at each hop rather than held for the run.
-On Kubernetes it is released as soon as the Secret exists, not when the fetch
-finishes: by then the cluster holds the material and the broker's lease controls
-nothing, so releasing later would only keep the broker believing a credential is
-out on loan for hours. The Secret itself is dropped the moment the init
-container terminates — the exposure is the length of a `git fetch`, not the
-length of a run.
+On Kubernetes it lives exactly as long as the Secret, and the Secret is dropped
+the moment the init container terminates — the exposure is the length of a `git
+fetch`, not the length of a run. It is not released sooner because releasing a
+GitHub App lease destroys its installation token at GitHub, which the init
+container has not presented yet (Task 20349); and a push write-back keeps both
+until the workload ends. With the git proxy on, a hub process that adopts the
+Pod after the one that dispatched it stopped takes that lease over and ends it
+when the fetch ends (Task 20455).
 
 ### With the git interception proxy on, the forge token never leaves the hub
 
@@ -4436,6 +4438,7 @@ not installed.
 | In a Pod the proxy's CA is trusted for the proxy's URL only, in the provisioner and the harness alike, joining any `GIT_CONFIG_COUNT` block already there — never `GIT_SSL_CAINFO`, which would replace the trust store for every other host; a closed-environment fetch trusts a CA scoped to its own remote and not one scoped elsewhere, and imports nothing else from that block | `pkg/executor/kubernetes: TestBuildPod_GitCABundleReachesBothContainers`, `TestBuildPod_GitCABundleJoinsAnExistingConfigBlock`; `pkg/executor/gitprovision: TestProvisionTrustsACertificateScopedToTheRemote`, `TestTransportConfigImportsOnlyURLScopedCertificateKeys` |
 | git is trusted in a work tree root owns — a Pod's emptyDir — by its exact path and in no other directory, so git's ownership check still refuses one another user owns | `pkg/executor/gitprovision: TestRootOwnedTrust`; `pkg/executor/kubernetes: TestBuildPod_HarnessGitTrustsTheWorkspace` |
 | Live, on CI's kind cluster, against the hub the Helm chart installs — on one replica and on a hub cluster of three: a Pod's workspace is provisioned through the proxy, its own git is held to the grant's repository and branches and the refusals are audited, no forge or cluster token is readable in the Pod or its object, and the run's Pod, Secrets and NetworkPolicy are deleted | `tests/kube: TestGitProxyAndKubeGuardOnKubernetes` |
+| A Pod's workspace lease and pinned session are recorded when the driver leases them and taken over with the run by the hub process that adopts it — the session restored under the same id and token hash, closed once the Pod's fetch is confirmed or, under `write_back: push`, with the workload; a revoked lease is never restored, an undecided takeover is retried | `pkg/executor/reconcile: TestAPodsWorkspaceSourceRecordsItsLeaseAndSession`, `pkg/ui: TestAPodsWorkspaceSessionSurvivesARestart`, `TestAPodsWriteBackSessionLivesUntilTheRunEnds`, `TestARevokedPodWorkspaceLeaseIsNeverRestored`, `TestAnUndecidedPodWorkspaceTakeoverIsRetried`, `pkg/executor/kubernetes: TestAdoptedPod_EndsTheTakenOverCredentialWhenTheFetchEnds`, `TestClose_LeavesTheCredentialOfAFetchInProgress` |
 
 ### Push scanning — `pushscan_test.go` and the package suites
 
@@ -5027,19 +5030,28 @@ the Pod is deleted: by the hub that adopts the run, by the orphan sweep, or by
 an operator. The material inside is short-lived on the broker's own TTL
 regardless.
 
-**A Pod's workspace session does not survive the hub process that minted it.**
-A Pod's init container fetches its workspace through a pinned git proxy
-session, minted over the workspace credential source the Kubernetes driver is
-built with — and that source's broker keeps no lease records
-(`TestAPodsWorkspaceSourceKeepsNoLeaseRecords`). Nothing names the lease in
-`secret_leases`, so the session is never recorded as durable and no owner row
-names it: a hub process adopting the Pod after the one that minted the session
-stopped has nothing to take over or restore, and an init container that fetches
-after that gets a 401, failing the Pod's provisioning until the run is started
-again. It fails closed — no process serves a session it cannot account for. A
-device workspace's lease, by contrast, is recorded, kept alive and restored
-with its run (`TestAWorkspaceSessionSurvivesARestart`), and every lease-path
-session a Pod's own git uses is restored on every executor.
+**A Pod's workspace fetch is served across a hub restart only once the run is
+adopted.** Since Task 20455 the lease behind a Pod's workspace and the pinned git
+proxy session its init container fetches through are recorded when the
+Kubernetes driver leases them — the lease in `secret_leases` with its holder and
+run, the session in `proxy_sessions` by token hash and scope
+(`TestAPodsWorkspaceSourceRecordsItsLeaseAndSession`) — and named in the run's
+owner row. The hub process that adopts the Pod takes the lease over, restores
+the session under the same id and token hash, keeps it alive while the Pod
+provisions and closes it once the fetch is confirmed, or with the workload under
+`write_back: push` (`TestAPodsWorkspaceSessionSurvivesARestart`,
+`TestAPodsWriteBackSessionLivesUntilTheRunEnds`). What remains is the gap
+before the adoption. A fetch that arrives while no hub process holds the session
+waits for it, at most 60 seconds, and is refused once the wait is over
+(`TestHeldRequestIsRefusedWithoutAdoption`); a Pod a dead member left is adopted
+by the cluster's leader, so a fetch made while a leader is being replaced can
+outwait it, and the Pod then fails its provisioning until the run is started
+again. So does one whose takeover the store cannot decide for as long — retried
+until it can (`TestAnUndecidedPodWorkspaceTakeoverIsRetried`) — and one whose
+lease was revoked while no process held it, which is never restored
+(`TestARevokedPodWorkspaceLeaseIsNeverRestored`). All three fail closed: no
+process serves a session it cannot account for. A Pod dispatched by a hub from
+before Task 20455 has nothing recorded to restore.
 
 **A workspace credential is scoped by the grant, not by GitHub, and a push
 write-back keeps it for the whole run.** The broker refuses to lease a PAT whose

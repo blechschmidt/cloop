@@ -241,6 +241,25 @@ type Options struct {
 	// nothing to route when no credential is leased in the first place.
 	WrapWorkspaceSource func(execID string, src executor.WorkspaceCredentialSource) executor.WorkspaceCredentialSource
 
+	// WorkspaceBrokerOptions are added to the secret broker a Kubernetes
+	// driver's workspace credential source leases from, when the identity is
+	// built by BrokerCredentials (KubernetesCredentials nil).
+	//
+	// `cloop ui` passes secretbroker.WithLeaseRecords with its cluster member
+	// id (Task 20455): the lease behind a Pod's workspace is then recorded in
+	// secret_leases, the git proxy session standing on it in proxy_sessions,
+	// and the hub process that adopts the Pod after this one stops takes the
+	// lease over and restores the session, so an init container that fetches
+	// after a restart is served rather than refused. The source is then built
+	// over a broker of its own, on the same store and audit trail, so the
+	// kubeconfig the driver leases for itself is not recorded: no other
+	// process adopts that lease — each leases its own.
+	//
+	// Empty builds the source over the broker that leases the cluster
+	// credential and records nothing, which is right for every other entry
+	// point: none runs the git proxy whose session there would be to restore.
+	WorkspaceBrokerOptions []secretbroker.Option
+
 	// Logf receives one line per diagnostic. nil logs to stderr; supply a
 	// no-op to silence a pass entirely.
 	Logf func(format string, args ...any)
@@ -860,7 +879,9 @@ func ensureKubernetes(
 
 	source := opts.KubernetesCredentials
 	if source == nil {
-		source = BrokerCredentials
+		source = func(dir string, cfg *config.Config, execID string) (Identity, func(), error) {
+			return brokerCredentials(dir, cfg, execID, opts.WorkspaceBrokerOptions)
+		}
 	}
 	identity, cleanup, err := source(dir, cfg, driverOpts.ID)
 	if err != nil {
@@ -929,7 +950,16 @@ func kubernetesRemediation(cfg *config.Config, execID string) string {
 // which for both a CLI invocation and a long-running hub is exactly the
 // intended lifetime. The cleanup exists for the one path where the source was
 // built and registration then failed.
+//
+// The workspace source it builds records nothing; see
+// Options.WorkspaceBrokerOptions for the one that does.
 func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity, func(), error) {
+	return brokerCredentials(dir, cfg, execID, nil)
+}
+
+// brokerCredentials is BrokerCredentials with wsOpts added to the broker the
+// workspace source leases from (Options.WorkspaceBrokerOptions).
+func brokerCredentials(dir string, cfg *config.Config, execID string, wsOpts []secretbroker.Option) (Identity, func(), error) {
 	k := cfg.Executors.Kubernetes
 	if k.InCluster {
 		src, err := kubernetes.NewInClusterSource(k.Namespace)
@@ -943,7 +973,7 @@ func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity,
 		// configured yet. Attempting it and accepting nil keeps that hub
 		// schedulable — public repositories still clone, and the driver's
 		// preflight reports the gap rather than the chart failing to come up.
-		ws, closeWS := optionalWorkspaceSource(dir, cfg, execID)
+		ws, closeWS := optionalWorkspaceSource(dir, cfg, execID, wsOpts)
 		return Identity{Cluster: src, Workspace: ws}, closeWS, nil
 	}
 
@@ -958,7 +988,8 @@ func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity,
 		closeDB()
 		return Identity{}, nil, fmt.Errorf("needs a secret broker for its kubeconfig: %w", err)
 	}
-	broker, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
+	auditor := secretstore.NewAuditor(db)
+	broker, err := secretbroker.New(store, secretbroker.WithAuditor(auditor))
 	if err != nil {
 		closeDB()
 		return Identity{}, nil, fmt.Errorf("needs a secret broker for its kubeconfig: %w", err)
@@ -972,9 +1003,21 @@ func BrokerCredentials(dir string, cfg *config.Config, execID string) (Identity,
 	// ones this configuration gives it, the configuration it is built from.
 	records := executorRecords(db, cfg)
 	src.Records = records
-	// The same broker, so a private-repository fetch and the cluster
-	// credential are governed by one grant store and one audit trail.
-	ws, err := gitcreds.New(broker, execID, "reconcile")
+	// The same store and audit trail, so a private-repository fetch and the
+	// cluster credential are governed by one grant store and one trail. The
+	// same broker too, unless the caller asked for the workspace leases to be
+	// recorded (Task 20455): a broker records every lease it issues, and the
+	// kubeconfig leases the driver takes for itself are no other process's
+	// to take over.
+	wsBroker := broker
+	if len(wsOpts) > 0 {
+		wsBroker, err = secretbroker.New(store, append([]secretbroker.Option{secretbroker.WithAuditor(auditor)}, wsOpts...)...)
+		if err != nil {
+			closeDB()
+			return Identity{}, nil, fmt.Errorf("needs a secret broker for its workspace credentials: %w", err)
+		}
+	}
+	ws, err := gitcreds.New(wsBroker, execID, "reconcile")
 	if err != nil {
 		closeDB()
 		return Identity{}, nil, err
@@ -1020,7 +1063,9 @@ func routeWorkspaceSource(cfg *config.Config, opts Options, execID string,
 // ones by name (see *executor.WorkspaceGrantError), which is a far better
 // deployment story than an in-cluster hub that will not start because nobody
 // has minted a GitHub secret yet. Preflight reports it as a warning.
-func optionalWorkspaceSource(dir string, cfg *config.Config, execID string) (executor.WorkspaceCredentialSource, func()) {
+//
+// wsOpts are added to the broker's options (Options.WorkspaceBrokerOptions).
+func optionalWorkspaceSource(dir string, cfg *config.Config, execID string, wsOpts []secretbroker.Option) (executor.WorkspaceCredentialSource, func()) {
 	db, err := statedb.Open(state.DBPath(dir))
 	if err != nil {
 		return nil, nil
@@ -1031,7 +1076,8 @@ func optionalWorkspaceSource(dir string, cfg *config.Config, execID string) (exe
 		closeDB()
 		return nil, nil
 	}
-	broker, err := secretbroker.New(store, secretbroker.WithAuditor(secretstore.NewAuditor(db)))
+	broker, err := secretbroker.New(store, append([]secretbroker.Option{
+		secretbroker.WithAuditor(secretstore.NewAuditor(db))}, wsOpts...)...)
 	if err != nil {
 		// Almost always a missing CLOOP_SECRET_KEY, which is exactly the
 		// in-cluster case this function exists for.

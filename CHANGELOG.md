@@ -192,6 +192,23 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A Kubernetes Pod's workspace fetch survives the hub process that started
+  it.** A Pod's init container fetches its workspace through a git proxy
+  session after the dispatch has returned. That session lived only in the
+  memory of the hub process that minted it, on a lease nothing recorded. A
+  process that stopped before the fetch — a restart, a cluster member's death,
+  a rolling upgrade of the Helm chart — took the session with it, so the fetch
+  got a 401 and the Pod failed provisioning until the run was started again.
+  Now the Kubernetes driver's workspace lease is recorded in `secret_leases`
+  with its holder and run, and its session in `proxy_sessions` with its token
+  hash and scope, and the run's owner row names both. The process that adopts
+  the Pod takes the lease over and restores the session under the same id,
+  retrying a takeover the store cannot decide. A revoked lease is never
+  restored. The session stays alive while the Pod provisions and is closed once
+  the fetch is confirmed, or when the run ends under `write_back: push`. A hub
+  that stops following a live Pod no longer ends a credential the Pod may still
+  present — a fetch in progress, or a push write-back's harness — and leaves it
+  to the process that adopts the run (Task 20455).
 - **A device's card lists a harness it installed on request without waiting
   for the agent to reconnect, and a device without the project's harness is a
   409, not a 500.** The Fleet panel read the device's hello, so after an

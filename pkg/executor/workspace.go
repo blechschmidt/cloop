@@ -535,7 +535,9 @@ type GitCredential struct {
 
 // HeldWorkspaceCredential names, without its secret, a workspace credential a
 // driver keeps on a handle past dispatch — for a push write-back, which
-// presents it when the workload finishes (Task 20390).
+// presents it when the workload finishes (Task 20390), or for a fetch the
+// workload makes after Start returned, as a Pod's init container does (Task
+// 20455).
 type HeldWorkspaceCredential struct {
 	// LeaseID is the secret lease the credential stands on.
 	LeaseID string
@@ -549,9 +551,27 @@ type HeldWorkspaceCredential struct {
 // workspace credential on its handle past dispatch. The hub names what it
 // holds in the run's owner row, so the hub process that adopts the run after
 // this one stops takes the lease over and restores the session, and the
-// workload's write-back push is served rather than refused (Task 20390).
+// workload's fetch or write-back push is served rather than refused (Tasks
+// 20390, 20455).
 type WorkspaceCredentialHolder interface {
 	HeldWorkspaceCredential(handleID string) (HeldWorkspaceCredential, bool)
+}
+
+// WorkspaceCredentialAdopter is implemented by a driver whose workloads can
+// still need their workspace credential after the hub process that dispatched
+// them stopped — a Pod's init container fetches the workspace after Start
+// returned (Task 20455).
+//
+// The hub process that adopts such a workload, takes over the lease its
+// credential stands on and restores the git proxy session, hands the driver
+// release, which ends both. The driver runs it when the dispatching process
+// would have run its own: once the workload's fetch is confirmed, or — for a
+// workload that presents the credential again for a push write-back — once the
+// workload is over; at once when either already happened. It reports false
+// when it holds handleID as no adopted workload with a workspace to provision,
+// and the caller then ends the credential with the workload.
+type WorkspaceCredentialAdopter interface {
+	AdoptWorkspaceCredential(handleID string, held HeldWorkspaceCredential, release func()) bool
 }
 
 // Empty reports whether there is no credential to deliver.

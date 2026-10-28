@@ -57,17 +57,21 @@ package kubernetes
 //     re-reads the log from the start. Whether the run was sent the project is
 //     the one fact about the Spec a row does keep (metaProjectSeed): without it
 //     an adopted seeded run's project result would be left in its log.
-//   - The workspace provisioning state and the lease Secret's. Their only job
-//     is to delete the per-run Secrets at the right moment, and the previous
-//     process already did whatever was safe on its way down: it deleted a
-//     Secret whose readers had all started and left one whose reader had not
+//   - The provisioning credential itself. The previous process already did
+//     whatever was safe with the per-run Secrets on its way down: it deleted
+//     one whose readers had all started and left one whose reader had not
 //     (finish, Task 20401) — a harness behind a workspace fetch reads its whole
 //     environment from the lease Secret when the kubelet creates it, so a
-//     Secret deleted then strands it. What it left is reaped with the Pod, by
-//     the ownerReference, when this process deletes the Pod at the end of the
-//     run. A harness that is stranded anyway — its Secret deleted by an
-//     operator, or by a hub from before that fix — fails on the first look
-//     instead of reading as pending forever (configerror.go).
+//     Secret deleted then strands it. The row says which containers read the
+//     workspace Secret (Task 20455), so the adopted record drops it when the
+//     fetch ends, as its dispatcher would have, and ends the credential in it
+//     once the hub process adopting the run hands over the release of the
+//     lease it took over (AdoptWorkspaceCredential, workspace_adopt.go). What
+//     is left is reaped with the Pod, by the ownerReference, when this process
+//     deletes the Pod at the end of the run. A harness that is stranded anyway
+//     — its Secret deleted by an operator, or by a hub from before that fix —
+//     fails on the first look instead of reading as pending forever
+//     (configerror.go).
 
 import (
 	"context"
@@ -221,6 +225,11 @@ func (e *Executor) adopt(persisted executor.HandleRecord) {
 		// The lease Secret, as the dispatcher kept it (Task 20419): its keys
 		// are on the row, so a file is refreshed or emptied in place.
 		leaseSecret: restoreLeaseSecret(persisted.Meta, namespace, persisted.HandleID),
+		// And the workspace Secret (Task 20455), dropped when the fetch it
+		// serves ends, and the credential in it with it once the hub process
+		// adopting the run hands over the lease's release.
+		ws: adoptedWorkspace(persisted.Meta, namespace, persisted.HandleID, persisted.ProjectPath,
+			persisted.StartedAt),
 		// Running rather than pending, and the distinction is a claim about
 		// what we know: a row only exists because Start created a Pod, so the
 		// workload is at least dispatched. The first status update the watcher

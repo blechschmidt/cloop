@@ -1283,9 +1283,11 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		StartedAt:   rec.startedAt,
 		// With the run id, and the lease Secret's file keys, so an adopter
 		// finds the workload and refreshes and revokes its files in place
-		// (Task 20419).
-		Meta: withLeaseKeysMeta(executor.WithRunID(handleMeta(rec.networkPolicyName, rec.result != nil), spec),
-			leaseSecret),
+		// (Task 20419); and which containers read the workspace Secret, so
+		// it drops that Secret and ends the credential when this process
+		// would have (Task 20455).
+		Meta: withWorkspaceMeta(withLeaseKeysMeta(executor.WithRunID(handleMeta(rec.networkPolicyName,
+			rec.result != nil), spec), leaseSecret), ws),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this Pod. Names and paths only — the credential values
@@ -2857,12 +2859,19 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// Secret is left for the Pod — the ownerReference reaps it with the Pod,
 	// and a hub that adopts the run after the restart finds the Pod able to
 	// start.
-	keepWorkspace := ws != nil && !state.Terminal() &&
-		(!initStarted || (ws.harnessNeedsSecret() && !harnessStarted))
-	if keepWorkspace {
-		e.leaveWorkspaceSecret(ws, rec.podName)
-	} else {
+	//
+	// The workspace credential itself is ended only with a workload that is
+	// over (Task 20455): one the hub walks away from may still present it —
+	// the provisioner fetching through its git proxy session, a push
+	// write-back's harness pushing through it at the end — and the process
+	// that adopts the run takes it over. See leaveWorkspace.
+	switch {
+	case ws == nil:
+	case state.Terminal():
 		e.discardWorkspaceSecret(ws, cli, "")
+	default:
+		e.leaveWorkspace(ws, cli, rec.podName,
+			initStarted && (!ws.harnessNeedsSecret() || harnessStarted))
 	}
 	// Not gated on a terminal state the way the egress policy is, and the
 	// asymmetry is deliberate. Removing a policy from a Pod that is still

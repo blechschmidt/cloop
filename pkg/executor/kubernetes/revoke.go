@@ -410,7 +410,9 @@ func (e *Executor) deletePodMaterial(ctx context.Context, rec *record, handleID 
 	}
 	if st := rec.workspace(); st != nil {
 		st.mu.Lock()
-		existed[workspaceSecretName(handleID)] = st.secretName != "" && !st.deleted
+		// An adopted record knows the Secret by name only (Task 20455):
+		// whether its dispatcher already deleted it is not on the row.
+		existed[workspaceSecretName(handleID)] = st.secretName != "" && !st.deleted && !st.adopted
 		st.mu.Unlock()
 	}
 

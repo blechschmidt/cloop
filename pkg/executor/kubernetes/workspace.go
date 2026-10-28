@@ -43,7 +43,9 @@ package kubernetes
 // A hub that stops following a run that is still alive (Close) deletes it only
 // once every container that reads it has started. Before that, deleting it
 // would hold the next reader in CreateContainerConfigError for good, so it is
-// left for the Pod — see finish and leaveWorkspaceSecret.
+// left for the Pod. It never ends the lease then: the Pod may still present the
+// credential, and the hub process that adopts the run takes the lease over —
+// see finish, leaveWorkspace and workspace_adopt.go (Task 20455).
 //
 // # Who deletes it when this process does not
 //
@@ -117,11 +119,26 @@ type workspaceState struct {
 	// upstream so the audit rows name the repository an operator recognises.
 	routed      executor.Workspace
 	projectPath string
-	grantID     string
-	leaseID     string
 	startedAt   time.Time
 
 	mu sync.Mutex
+	// grantID and leaseID name the grant and the lease the credential stands
+	// on, and sessionID the git proxy session it is when one was minted (Task
+	// 20455). Set before the state is shared, by provisionWorkspace — or, for
+	// an adopted record, by AdoptWorkspaceCredential, which is why they are
+	// read under mu.
+	grantID   string
+	leaseID   string
+	sessionID string
+	// adopted marks the state of a Pod this process adopted from one that
+	// stopped (Task 20455), rebuilt from its handle row: it knows the Secret
+	// by name, not whether its dispatcher already deleted it, so a revocation
+	// does not count it as removed.
+	adopted bool
+	// fetched records that the init container's termination was seen, and
+	// fetchFailed that it failed: the fetch the credential served is over.
+	fetched     bool
+	fetchFailed bool
 	// deleted and ended make the two terminal actions idempotent. Both can be
 	// reached from the watcher goroutine and from the pump at the same moment,
 	// and a second delete is a spurious API call while a second audit row is a
@@ -334,7 +351,7 @@ func (e *Executor) provisionWorkspace(ctx context.Context, spec executor.Spec, c
 			executor.ErrWorkspaceUnavailable, strings.TrimSpace(spec.Workspace.CredentialGrant)))
 	}
 
-	st.grantID, st.leaseID = cred.GrantID, cred.LeaseID
+	st.grantID, st.leaseID, st.sessionID = cred.GrantID, cred.LeaseID, cred.SessionID
 	if cred.Empty() {
 		// Nothing to deliver. The init container still runs — the tree still
 		// has to be fetched — it just has no token env var. Nothing was leased
@@ -483,15 +500,16 @@ func (e *Executor) auditWorkspace(st *workspaceState, phase executor.WorkspaceEv
 	if st == nil {
 		return
 	}
+	st.mu.Lock()
 	if phase == executor.WorkspaceProvisionEnd {
-		st.mu.Lock()
 		if st.ended {
 			st.mu.Unlock()
 			return
 		}
 		st.ended = true
-		st.mu.Unlock()
 	}
+	grantID, leaseID := st.grantID, st.leaseID
+	st.mu.Unlock()
 	ev := executor.WorkspaceEvent{
 		Phase:        phase,
 		ExecutorID:   e.id,
@@ -499,8 +517,8 @@ func (e *Executor) auditWorkspace(st *workspaceState, phase executor.WorkspaceEv
 		HandleID:     st.handleID,
 		ProjectPath:  st.projectPath,
 		Workspace:    st.workspace,
-		GrantID:      st.grantID,
-		LeaseID:      st.leaseID,
+		GrantID:      grantID,
+		LeaseID:      leaseID,
 		Err:          errMsg,
 	}
 	if phase == executor.WorkspaceProvisionEnd {
@@ -553,35 +571,60 @@ func (e *Executor) discardWorkspaceSecret(st *workspaceState, cli *client, errMs
 	}
 }
 
-// leaveWorkspaceSecret is what finish does instead of discardWorkspaceSecret
-// when the hub stops following a run whose workspace Secret has not been read
-// yet — the provisioner has not started, or a push write-back's harness has
-// not. Deleting it would hold that container in CreateContainerConfigError for
-// good; see finish.
+// leaveWorkspace is what finish does instead of discardWorkspaceSecret when the
+// hub stops following a run that is still alive (Close): the credential is
+// left to the Pod, and to the hub process that adopts the run.
 //
-// The lease is not released either. Releasing a GitHub App lease destroys its
-// installation token at GitHub, which is the token the Secret holds for the
-// container that has not read it yet. It lapses on the broker's own TTL, and
-// the ownerReference reaps the Secret with its Pod.
+// The Secret goes only once every container that reads it has started
+// (readersStarted): deleting it before then would hold the one that has not —
+// the provisioner, or a push write-back's harness — in
+// CreateContainerConfigError for good, and after it takes nothing, the kubelet
+// having resolved the containers' environment when it created them.
 //
-// The provisioning span is closed here, saying so, because nothing in this
-// process will see the fetch end.
-func (e *Executor) leaveWorkspaceSecret(st *workspaceState, podName string) {
+// The credential itself is never ended here (Task 20455). The provisioner may
+// be fetching through its git proxy session at this moment, and a push
+// write-back's harness presents the same session when it finishes: ending it
+// would turn the restart into a 401 for either. Releasing a GitHub App lease
+// would also destroy its installation token at GitHub while the Secret still
+// holds it for a container that has not read it. A lease the broker records
+// — `cloop ui` records them — is taken over with its session by the hub
+// process that adopts the run, which ends both when this one would have; one
+// it does not lapses on the broker's own TTL, and the ownerReference reaps the
+// Secret with its Pod.
+//
+// The provisioning span is closed here, saying so, unless the fetch it covers
+// was already seen to end: nothing in this process will see it end now.
+func (e *Executor) leaveWorkspace(st *workspaceState, cli *client, podName string, readersStarted bool) {
 	if st == nil {
 		return
 	}
 	e.auditWorkspace(st, executor.WorkspaceProvisionEnd,
-		"the control plane stopped following the Pod before every container that reads the "+
-			"workspace credential had started; the credential is left for the Pod")
+		"the control plane stopped following the Pod before its workspace fetch was seen to finish; "+
+			"the credential is left for the Pod and the hub process that adopts its run")
 	st.mu.Lock()
 	name, namespace, deleted := st.secretName, st.namespace, st.deleted
+	drop := name != "" && !deleted && readersStarted && cli != nil
+	if drop {
+		st.deleted = true
+	}
 	st.mu.Unlock()
-	if name == "" || deleted {
+	switch {
+	case name == "" || deleted:
+		return
+	case !readersStarted:
+		fmt.Fprintf(os.Stderr, "kubernetes: leaving workspace secret %s/%s in place: pod %s has not "+
+			"started every container that reads it, and deleting it would strand the Pod; it is "+
+			"deleted with the Pod\n", namespace, name, podName)
+		return
+	case !drop:
 		return
 	}
-	fmt.Fprintf(os.Stderr, "kubernetes: leaving workspace secret %s/%s in place: pod %s has not "+
-		"started every container that reads it, and deleting it would strand the Pod; it is "+
-		"deleted with the Pod\n", namespace, name, podName)
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := cli.deleteSecret(ctx, namespace, name); err != nil {
+		fmt.Fprintf(os.Stderr, "kubernetes: could not delete workspace secret %s/%s: %v — "+
+			"it is deleted with the Pod\n", namespace, name, err)
+	}
 }
 
 // observeWorkspace reacts to a Pod status update by dropping the credential as
@@ -606,7 +649,11 @@ func (e *Executor) observeWorkspace(rec *record, p *pod) {
 	var errMsg string
 	if t.ExitCode != 0 || t.Signal != 0 {
 		errMsg = workspaceFailureMessage(t)
-		rec.bus.Emit(fmt.Sprintf("[cloop] workspace provisioning failed: %s\n", errMsg))
+		if st.noteFetched(true) {
+			rec.bus.Emit(fmt.Sprintf("[cloop] workspace provisioning failed: %s\n", errMsg))
+		}
+	} else {
+		st.noteFetched(false)
 	}
 	if errMsg == "" && st.harnessNeedsSecret() {
 		// A push write-back reads the same Secret from the harness container,
