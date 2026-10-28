@@ -493,6 +493,16 @@ func TestRollingUpgradeFromTheLatestRelease(t *testing.T) {
 	st := s.waitCluster(s.lb.url(), "two live release members and a leader", func(c clusterStatus) bool {
 		return c.live() == 2 && c.Leader != ""
 	})
+	// And in each member's own view, which the load balancer's answer — one
+	// member's — does not show. A sign-in's callback reaches whichever member
+	// the balancer picks, and one that has not yet seen the member that began
+	// the login cannot forward it there: it answers 400, as for a login whose
+	// member is gone.
+	for _, m := range []*member{a, b} {
+		s.waitCluster(m.url(), m.String()+" to see both release members", func(c clusterStatus) bool {
+			return c.live() == 2 && c.Leader != ""
+		})
+	}
 	s.identify(st, a, b)
 	t.Logf("release members %s (%s) and %s (%s), leader %s", a, short(a.id), b, short(b.id), short(st.Leader))
 
