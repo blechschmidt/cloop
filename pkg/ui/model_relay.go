@@ -51,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/quota"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/sessionrecord"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -64,7 +65,7 @@ const (
 
 	// modelRelayTokenPrefix starts every session token, so a secret scanner
 	// recognises one (pkg/redact) and tells it from a CI pipeline's.
-	modelRelayTokenPrefix = "cloop_relay_"
+	modelRelayTokenPrefix = redact.RelayTokenPrefix
 
 	// ownerModelRelay is the cluster ownership kind for relay sessions.
 	ownerModelRelay = "modelrelay"

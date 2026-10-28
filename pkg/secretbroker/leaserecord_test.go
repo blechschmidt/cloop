@@ -6,10 +6,13 @@ package secretbroker
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // ── memStore's LeaseStore half ───────────────────────────────────────────────
@@ -355,34 +358,148 @@ func TestRetireRecordEndsALeaseNobodyHolds(t *testing.T) {
 }
 
 // TestRedactionValuesAreWhatTheLeaseDelivered: the process that took a lease
-// over scrubs its workload's output with the credentials the lease carries —
-// the env keys its grant delivers, not the ones it withholds.
+// over re-derives, for every credential-bearing kind, exactly what the lease
+// delivered — less what only a delivery could produce, a minted App token and
+// the tokens of the sessions a guard minted, which it finds by their recorded
+// hashes instead (Task 20454). Each value is named by the grant and secret
+// that delivered it, and nothing a grant withheld is among them: the env key
+// it did not deliver, the kubeconfig context and the registry its narrowing
+// dropped. Run with no guards, and with a git proxy and a Kubernetes monitor
+// taking custody of what they can.
 func TestRedactionValuesAreWhatTheLeaseDelivered(t *testing.T) {
-	setup, store, _, clock := newTestBroker(t)
-	env := mintEnv(t, setup, "claude", `{"CLAUDE_CODE_OAUTH_TOKEN":"sk-delivered-value-0005","OTHER_KEY":"withheld-by-the-grant-0005"}`)
-	grantTo(t, setup, env.ID, "project:/srv/app", Constraints{EnvKeys: []string{"CLAUDE_CODE_OAUTH_TOKEN"}}, 2*time.Hour)
-	pat := mintGitHub(t, setup, "pat", "ghp_takenoverpat0123456789")
-	grantTo(t, setup, pat.ID, "project:/srv/app", Constraints{Repos: []string{"org/*"}}, 2*time.Hour)
+	const (
+		project      = "project:/srv/app"
+		gitSession   = "session-token-only-good-here"
+		kubeSession  = "session-token"
+		kubeToken    = "kube-bearer-token-0005"
+		droppedToken = "kube-token-of-a-dropped-context-0005"
+	)
+	clientKey := "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ0005\n-----END PRIVATE KEY-----\n"
+	kube := "apiVersion: v1\nkind: Config\ncurrent-context: ci\n" +
+		"clusters:\n- name: c\n  cluster:\n    server: https://k8s.example.invalid\n" +
+		"- name: d\n  cluster:\n    server: https://other.example.invalid\n" +
+		"contexts:\n- name: ci\n  context:\n    cluster: c\n    user: ci-user\n" +
+		"- name: other\n  context:\n    cluster: d\n    user: other-user\n" +
+		"users:\n- name: ci-user\n  user:\n    token: " + kubeToken + "\n" +
+		"    client-key-data: " + base64.StdEncoding.EncodeToString([]byte(clientKey)) + "\n" +
+		"- name: other-user\n  user:\n    token: " + droppedToken + "\n"
+	keptAuth := base64.StdEncoding.EncodeToString([]byte("robot:registry-password-0005"))
+	droppedAuth := base64.StdEncoding.EncodeToString([]byte("robot:dropped-registry-password-0005"))
 
-	a, _ := holderBroker(t, store, clock, "hub_a")
-	lease, err := a.LeaseFor(context.Background(), Requester{ExecutorID: "dev1", ProjectID: "/srv/app"}, "ui")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := holderBroker(t, store, clock, "hub_b")
-	if got := b.RedactionValues(lease.ID); got != nil {
-		t.Fatalf("a broker that does not hold the lease returned %v", got)
-	}
-	if _, err := b.Restore(context.Background(), lease.ID); err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(b.RedactionValues(lease.ID), "\n")
-	for _, want := range []string{"sk-delivered-value-0005", "ghp_takenoverpat0123456789"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("redaction values lack %q: %q", want, got)
+	for _, guarded := range []bool{false, true} {
+		name := "unguarded"
+		if guarded {
+			name = "guarded"
 		}
-	}
-	if strings.Contains(got, "withheld-by-the-grant-0005") {
-		t.Errorf("redaction values include a key the grant does not deliver: %q", got)
+		t.Run(name, func(t *testing.T) {
+			setup, store, _, clock := newTestBroker(t)
+			gh := newFakeGitHub(InstallationRepo{ID: 1, FullName: "org/api"})
+			gh.clock = clock.Now
+			setup.appMinter = newGitHubAppMinter(gh, clock.Now)
+
+			env := mintEnv(t, setup, "claude", `{"CLAUDE_CODE_OAUTH_TOKEN":"sk-delivered-value-0005","OTHER_KEY":"withheld-by-the-grant-0005"}`)
+			grantTo(t, setup, env.ID, project, Constraints{EnvKeys: []string{"CLAUDE_CODE_OAUTH_TOKEN"}}, 2*time.Hour)
+			pat := mintGitHub(t, setup, "pat", "ghp_takenoverpat0123456789")
+			grantTo(t, setup, pat.ID, project, Constraints{Repos: []string{"org/*"}}, 2*time.Hour)
+			app, err := setup.Mint(context.Background(), MintRequest{Name: "app", Kind: KindGitHubApp,
+				Payload: appPayloadJSON(t), Actor: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			grantTo(t, setup, app.ID, project, Constraints{Repos: []string{"org/api"}}, 2*time.Hour)
+			kc := mintKind(t, setup, "kube", KindKubeconfig, kube)
+			grantTo(t, setup, kc.ID, project, Constraints{Contexts: []string{"ci"},
+				Verbs: append([]string(nil), kubeVerbOrder...)}, 2*time.Hour)
+			reg := mintKind(t, setup, "registry", KindRegistry,
+				`{"auths":{"ghcr.io":{"auth":"`+keptAuth+`"},"quay.io":{"auth":"`+droppedAuth+`"}}}`)
+			grantTo(t, setup, reg.ID, project, Constraints{Registries: []string{"ghcr.io"}}, 2*time.Hour)
+			eg := mintKind(t, setup, "egress", KindEgressProxy, "http://proxyuser:egress-pass-0005@proxy.example.invalid:3128")
+			grantTo(t, setup, eg.ID, project, Constraints{Hosts: []string{"example.com"}}, 2*time.Hour)
+
+			a, _ := holderBroker(t, store, clock, "hub_a")
+			a.appMinter = newGitHubAppMinter(gh, clock.Now)
+			if guarded {
+				a.GitGuard = guardedTestGuard{base: "https://hub.example.invalid:9443"}
+				a.KubeGuard = acceptAll{}
+			}
+			lease, err := a.LeaseFor(context.Background(), Requester{ExecutorID: "dev1", ProjectID: "/srv/app", RunID: "run_5"}, "ui")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(lease.Refused) != 0 || len(lease.Materials) != 6 {
+				t.Fatalf("the lease refused %+v and carries %d materials", lease.Refused, len(lease.Materials))
+			}
+			// What only a delivery could produce.
+			minted := map[string]bool{}
+			for _, m := range lease.Materials {
+				if tok, ok := m.GitHubToken(); ok && m.Kind == KindGitHubApp {
+					minted[tok] = true
+				}
+			}
+			if guarded {
+				minted[gitSession], minted[kubeSession] = true, true
+			}
+
+			b, _ := holderBroker(t, store, clock, "hub_b")
+			if got := b.RedactionValues(lease.ID); got != nil {
+				t.Fatalf("a broker that does not hold the lease returned %v", got)
+			}
+			if _, err := b.Restore(context.Background(), lease.ID); err != nil {
+				t.Fatal(err)
+			}
+			rederived := map[string]CredentialValue{}
+			for _, c := range b.RedactionCredentials(lease.ID) {
+				rederived[c.Value] = c
+			}
+			delivered := map[string]CredentialValue{}
+			for _, c := range lease.CredentialValues() {
+				delivered[c.Value] = c
+			}
+			for v, c := range delivered {
+				r, ok := rederived[v]
+				switch {
+				case minted[v] && ok:
+					t.Errorf("a value only the delivery could produce was re-derived: %s", c.Field)
+				case minted[v]:
+				case !ok:
+					t.Errorf("not re-derived: %s of secret %s", c.Field, c.SecretName)
+				case r.GrantID != c.GrantID || r.SecretName != c.SecretName || r.Kind != c.Kind:
+					t.Errorf("re-derived %s as %+v, delivered as %+v", c.Field, r, c)
+				}
+			}
+			for v, r := range rederived {
+				if _, ok := delivered[v]; !ok {
+					t.Errorf("re-derived something the lease did not deliver: %s of secret %s", r.Field, r.SecretName)
+				}
+			}
+			for v := range minted {
+				if _, ok := delivered[v]; !ok {
+					t.Errorf("the lease delivered no %q, so the test proves nothing about it", v[:min(len(v), 12)])
+				}
+			}
+			for _, want := range []string{"sk-delivered-value-0005", "ghp_takenoverpat0123456789", kubeToken,
+				strings.TrimSpace(clientKey), keptAuth, "registry-password-0005", "egress-pass-0005",
+				"http://proxyuser:egress-pass-0005@proxy.example.invalid:3128"} {
+				if _, ok := rederived[want]; !ok {
+					t.Errorf("redaction values lack %q", want[:min(len(want), 24)])
+				}
+			}
+			for _, withheld := range []string{"withheld-by-the-grant-0005", droppedToken, droppedAuth,
+				"dropped-registry-password-0005"} {
+				if _, ok := rederived[withheld]; ok {
+					t.Errorf("redaction values include %q, which the grant's narrowing withheld", withheld)
+				}
+			}
+			// The minted App token is found by its recorded hash instead.
+			var hashes []redact.TokenHash
+			for _, r := range store.appSlotsOf(lease.ID) {
+				hashes = append(hashes, r.TokenHashes...)
+			}
+			for _, m := range lease.Materials {
+				if tok, _ := m.GitHubToken(); m.Kind == KindGitHubApp && len(redact.NewTokens(hashes...).Find(tok)) != 1 {
+					t.Error("the minted App token is not confirmable from its slot's record")
+				}
+			}
+		})
 	}
 }

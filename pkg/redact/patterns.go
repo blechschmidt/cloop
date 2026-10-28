@@ -535,6 +535,32 @@ var specs = []spec{
 		keywords: []string{"cloop_relay_"},
 	},
 	{
+		name:  "cloop-git-proxy-session",
+		label: "cloop git proxy session password",
+		recognises: "`cloop_git1_<43 base64url>`, the password a sandbox's git presents to the hub's git proxy " +
+			"in place of a GitHub credential (Task 20454). Passwords minted before that task carry no prefix and " +
+			"no shape.",
+		pattern:  `(?P<kind>cloop_git1_)[0-9A-Za-z_\-]{16,}`,
+		keywords: []string{"cloop_git1_"},
+	},
+	{
+		name:  "cloop-kube-guard-session",
+		label: "cloop Kubernetes monitor session token",
+		recognises: "`cloop_kube1_<id>.<secret>`, the bearer token a sandbox's kubectl presents to the hub's " +
+			"Kubernetes access monitor (Task 20454). Tokens minted before that task are a bare `<id>.<secret>`, " +
+			"which has no shape.",
+		pattern:  `(?P<kind>cloop_kube1_)[0-9A-Za-z_\-]{4,}\.[0-9A-Za-z_\-]{8,}`,
+		keywords: []string{"cloop_kube1_"},
+	},
+	{
+		name:  "cloop-egress-session",
+		label: "cloop egress proxy session password",
+		recognises: "`cloop_egress1_<64 hex>`, the password in the HTTPS_PROXY a sandbox reaches the Internet " +
+			"through (Task 20454). Passwords minted before that task are bare hex, which has no shape.",
+		pattern:  `(?P<kind>cloop_egress1_)[0-9a-f]{16,}`,
+		keywords: []string{"cloop_egress1_"},
+	},
+	{
 		name:       "cloop-enrollment-token",
 		label:      "cloop executor enrollment token",
 		recognises: "`clet1.<id>.<secret>.<mac>`, the single-use token an edge device enrolls with.",

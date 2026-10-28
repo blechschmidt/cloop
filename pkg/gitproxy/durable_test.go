@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // memSessionStore is a SessionStore that remembers what it was told.
@@ -386,5 +388,44 @@ func TestReapRecordsTheExpiry(t *testing.T) {
 	}
 	if reason, ok := store.closeReason(m.Session.ID); !ok || reason != "expired" {
 		t.Fatalf("reap recorded %q, %v", reason, ok)
+	}
+}
+
+// TestASessionPasswordCarriesItsPrefixAndAnOlderOneStillAuthenticates: a
+// password is minted as redact.GitProxyTokenPrefix and 43 characters of
+// base64url (Task 20454), so a hub process holding only its hash can find it in
+// a stream; and a session minted before then, whose password has no prefix,
+// still authenticates once restored from its record — the hash is of whatever
+// was minted.
+func TestASessionPasswordCarriesItsPrefixAndAnOlderOneStillAuthenticates(t *testing.T) {
+	now := time.Now()
+	first := newTestRegistry(t, now)
+	store := newMemSessionStore()
+	first.Store = store
+	m := durableMint(t, first)
+	if !strings.HasPrefix(m.Token, redact.GitProxyTokenPrefix) || len(m.Token) != TokenLen {
+		t.Fatalf("minted password is %d characters, prefixed %t; want %s and %d characters",
+			len(m.Token), strings.HasPrefix(m.Token, redact.GitProxyTokenPrefix), redact.GitProxyTokenPrefix, TokenLen)
+	}
+	if h := redact.HashToken(m.Token); hex.EncodeToString(h.Sum[:]) != store.record(t, m.Session.ID).TokenSHA256 {
+		t.Fatal("the record's hash is not the hash an adopting hub confirms the password with")
+	}
+
+	// The same record, as a hub before Task 20454 would have written it.
+	legacy := strings.TrimPrefix(m.Token, redact.GitProxyTokenPrefix)
+	rec := store.record(t, m.Session.ID)
+	sum := sha256.Sum256([]byte(legacy))
+	rec.TokenSHA256 = hex.EncodeToString(sum[:])
+	second := newTestRegistry(t, now.Add(time.Minute))
+	second.Store = newMemSessionStore()
+	if _, err := second.Restore(RestoreRequest{Record: rec, Credential: Credential{Username: "x-access-token",
+		Password: "ghp_rederived"}, From: "hub_old"}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if _, err := second.Authenticate(m.Session.ID, legacy); err != nil {
+		t.Fatalf("an unprefixed password of a session minted before the change: %v", err)
+	}
+	if _, err := second.Authenticate(m.Session.ID, m.Token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("the prefixed form of a password that was minted without one: %v", err)
 	}
 }

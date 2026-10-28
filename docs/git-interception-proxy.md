@@ -653,7 +653,7 @@ A project's own `.cloop/config.yaml` may set a stricter `push_scan` for its
 pushes, never a weaker one. The design, the reader, the numbers on a 100 MiB
 pack, and what the scan cannot see — a value split across a delta's copy and
 insert, one transformed in any way it does not decode, and after a hub restart
-everything `Broker.RedactionCredentials` does not re-derive — are in
+a session token minted before its kind carried a prefix — are in
 [git proxy architecture](architecture/git-proxy.md#the-push-scan).
 
 ---

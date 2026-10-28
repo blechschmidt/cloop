@@ -47,6 +47,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // This driver is a Revoker. The assertion is load-bearing: placement refuses
@@ -319,6 +320,24 @@ func (e *Executor) AddHandleRedactions(handleID string, values ...string) bool {
 	}
 	if rec.bus != nil && len(values) > 0 {
 		rec.bus.AddRedactions(values...)
+	}
+	return true
+}
+
+// Compile-time proof that a workload's output can be scrubbed of tokens known
+// only by their recorded hashes.
+var _ executor.HandleTokenRedactor = (*Executor)(nil)
+
+// AddHandleTokens implements executor.HandleTokenRedactor: the tokens an
+// adopted run's dispatcher minted, which the process that adopted it knows
+// only by hash (Task 20454).
+func (e *Executor) AddHandleTokens(handleID string, tokens ...redact.TokenHash) bool {
+	rec, err := e.lookup(handleID)
+	if err != nil {
+		return false
+	}
+	if rec.bus != nil {
+		rec.bus.AddTokens(tokens...)
 	}
 	return true
 }

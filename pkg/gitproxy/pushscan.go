@@ -48,6 +48,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // ScanMode says what a push is scanned for.
@@ -207,7 +209,25 @@ type PushScan struct {
 	// Secrets are the values the session's run holds. The session's own
 	// upstream credential is added to them by the proxy.
 	Secrets []ScanSecret
-	Limits  ScanLimits
+	// Tokens are tokens the run holds whose plaintext this hub process never
+	// had: the tokens another process minted for a run this one adopted
+	// (Task 20454). A push carrying one is refused like one carrying a value.
+	// Empty for a run this process dispatched, whose Secrets are complete, so
+	// its pushes cost nothing extra.
+	Tokens []ScanToken
+	Limits ScanLimits
+}
+
+// ScanToken is one token a push must not carry that the proxy knows only by
+// its recorded hash: found by its minted prefix, cut to its recorded length
+// and confirmed by its SHA-256 (redact.Tokens). A token of the same shape
+// that does not hash to it is not refused. Grant, Secret and Field name it as
+// ScanSecret's do.
+type ScanToken struct {
+	Hash   redact.TokenHash
+	Grant  string
+	Secret string
+	Field  string
 }
 
 // PushScanFunc decides how a push through sess is scanned. The proxy calls it

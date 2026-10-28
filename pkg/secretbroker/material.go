@@ -38,44 +38,15 @@ func (m *mints) add(slot *appTokenSlot) {
 // mints a new credential from it, so rec collects what was minted and ctx is
 // the lease request's own deadline.
 func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Requester, actor, leaseID string, rec *mints) (Material, error) {
-	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
+	plaintext, err := b.openPayload(s)
 	if err != nil {
-		// Both sentinels are chained. Callers that only know about
-		// ErrSealFailed keep matching, while an operator-facing path can ask
-		// specifically whether the key was *retired* — which is the
-		// difference between "re-mint this credential" and "fix your
-		// passphrase". The keyring's message names no credential material,
-		// only key IDs, so it is safe to carry through verbatim.
-		return Material{}, fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, s.Name, err)
+		return Material{}, err
 	}
 	// The plaintext is copied into the returned Material's fields; wipe the
 	// buffer once we are done building from it.
 	defer zero(plaintext)
 
-	mat := Material{
-		GrantID:     g.ID,
-		SecretID:    s.ID,
-		SecretName:  s.Name,
-		Kind:        s.Kind,
-		Constraints: g.Constraints,
-		Env:         map[string]string{},
-		// Who this delivery is for. Only a GitGuard reads these today, to
-		// label the proxy session it mints; they are carried on the Material
-		// rather than passed down every deliver* function because every one of
-		// them would have to grow the parameter to reach the one that uses it.
-		projectID:   req.ProjectID,
-		executorID:  req.ExecutorID,
-		actor:       actor,
-		owner:       s.Owner,
-		leaseID:     leaseID,
-		heldByProxy: req.GitHubProxied,
-		requester:   req,
-		// Read from the stored metadata, so it holds for every delivery of the
-		// secret whoever minted it.
-		kubeSelfRenewing: SelfRenewingKubeconfig(s),
-		kubeUnguardedAck: g.UnguardedAck,
-	}
-
+	mat := baseMaterial(s, g, req, actor, leaseID)
 	switch s.Kind {
 	case KindEnv:
 		return b.envMaterial(mat, plaintext)
@@ -97,6 +68,96 @@ func (b *Broker) materialFor(ctx context.Context, s Secret, g Grant, req Request
 		return b.hostInterfaceMaterial(mat, plaintext)
 	default:
 		return Material{}, wrapf(ErrInvalidKind, "no delivery rule for kind %q", s.Kind)
+	}
+}
+
+// rederiveMaterial rebuilds what grant g of secret s delivered, for a hub
+// process that took the lease over with its run and has to scrub the run's
+// output and scan its pushes for what the workload holds (Task 20454).
+//
+// It goes through the delivery's own narrowing: the same env key filter, the
+// same MinimizeKubeconfig, the same registry filter, the same proxy URL. The
+// values credentialValues then takes out of it are the ones the workload was
+// given, read by the parsers that wrote them, so there is no second parser to
+// drift from the first. It does nothing else a delivery does. No guard is
+// asked for a session, no App token is minted, and nothing is recorded or
+// audited.
+//
+// What only a delivery's side effects produced is therefore missing: a GitHub
+// App installation token, and the tokens of the git proxy and Kubernetes
+// monitor sessions a guard minted. Their plaintext was never stored, so the
+// adopting process finds them by the hashes recorded when they were minted
+// (redact.Tokens). The host-path kinds deliver no credential at all. Both get
+// an empty Material and no error.
+func (b *Broker) rederiveMaterial(s Secret, g Grant, req Requester, actor, leaseID string) (Material, error) {
+	switch s.Kind {
+	case KindEnv, KindGitHubPAT, KindKubeconfig, KindRegistry, KindEgressProxy:
+	default:
+		return Material{}, nil
+	}
+	plaintext, err := b.openPayload(s)
+	if err != nil {
+		return Material{}, err
+	}
+	defer zero(plaintext)
+
+	mat := baseMaterial(s, g, req, actor, leaseID)
+	mat.rederive = true
+	ctx := context.Background()
+	switch s.Kind {
+	case KindEnv:
+		return b.envMaterial(mat, plaintext)
+	case KindGitHubPAT:
+		return b.githubMaterial(ctx, mat, plaintext)
+	case KindKubeconfig:
+		return b.kubeMaterial(ctx, mat, plaintext)
+	case KindRegistry:
+		return b.registryMaterial(mat, plaintext)
+	default:
+		return b.egressMaterial(mat, plaintext)
+	}
+}
+
+// openPayload opens a secret's sealed payload.
+func (b *Broker) openPayload(s Secret) ([]byte, error) {
+	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
+	if err != nil {
+		// Both sentinels are chained. Callers that only know about
+		// ErrSealFailed keep matching, while an operator-facing path can ask
+		// specifically whether the key was *retired* — which is the
+		// difference between "re-mint this credential" and "fix your
+		// passphrase". The keyring's message names no credential material,
+		// only key IDs, so it is safe to carry through verbatim.
+		return nil, fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, s.Name, err)
+	}
+	return plaintext, nil
+}
+
+// baseMaterial is what every delivery of grant g of secret s starts from,
+// before its kind's rule narrows the payload into it.
+func baseMaterial(s Secret, g Grant, req Requester, actor, leaseID string) Material {
+	return Material{
+		GrantID:     g.ID,
+		SecretID:    s.ID,
+		SecretName:  s.Name,
+		Kind:        s.Kind,
+		Constraints: g.Constraints,
+		Env:         map[string]string{},
+		// Who this delivery is for. Only a GitGuard reads these today, to
+		// label the proxy session it mints; they are carried on the Material
+		// rather than passed down every deliver* function because every one of
+		// them would have to grow the parameter to reach the one that uses it.
+		projectID:   req.ProjectID,
+		executorID:  req.ExecutorID,
+		actor:       actor,
+		owner:       s.Owner,
+		leaseID:     leaseID,
+		heldByProxy: req.GitHubProxied,
+		requester:   req,
+		// Read from the stored metadata, so it holds for every delivery of the
+		// secret whoever minted it.
+		kubeSelfRenewing: SelfRenewingKubeconfig(s),
+		kubeUnguardedAck: g.UnguardedAck,
 	}
 }
 
@@ -154,7 +215,7 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 	mat.githubToken = token
 	mat.githubHost = host
 
-	if b != nil && b.GitGuard != nil {
+	if b != nil && b.GitGuard != nil && !mat.rederive {
 		if len(mat.Constraints.Repos) == 0 {
 			return Material{}, wrapf(ErrRepoDenied,
 				"github grant %s carries no repository allowlist", mat.GrantID)
@@ -211,7 +272,7 @@ func (b *Broker) githubMaterial(ctx context.Context, mat Material, plaintext []b
 	// never says which ref a push is for, and nothing in the sandbox can hold
 	// the line. The App kind can fall back to a read-only token; this one has
 	// no such token to fall back to.
-	if mat.Constraints.RestrictsBranches() && !mat.heldByProxy {
+	if mat.Constraints.RestrictsBranches() && !mat.heldByProxy && !mat.rederive {
 		return Material{}, wrapf(ErrBranchesUnenforced,
 			"grant %s limits pushes to branches %s, which only cloop's git proxy can enforce, and "+
 				"this hub runs none; a github_pat cannot be narrowed to read-only instead, so it is "+
@@ -335,6 +396,10 @@ func (b *Broker) githubAppMaterial(ctx context.Context, mat Material, plaintext 
 		token:      res.token.Token,
 		expiresAt:  res.token.ExpiresAt,
 	}
+	// What a hub process adopting the run confirms this token by, since it
+	// will never hold the token itself (Task 20454). Recorded with the lease,
+	// before the material leaves LeaseFor.
+	slot.addHash(res.token.Token)
 	slot.delivered = true
 	rec.add(slot)
 	abandon := func() {
@@ -606,7 +671,7 @@ func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byt
 
 	delivered := minimized
 	guarded := KubeGuardResult{}
-	if b != nil && b.KubeGuard != nil {
+	if b != nil && b.KubeGuard != nil && !mat.rederive {
 		guarded, err = b.KubeGuard.GuardKubeconfig(ctx, KubeGuardRequest{
 			Kubeconfig: minimized,
 			Verbs:      mat.Constraints.KubeVerbs(),
@@ -627,9 +692,13 @@ func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byt
 		}
 		if guarded.Guarded() {
 			delivered = guarded.Kubeconfig
+			// The cluster credential stays on the hub, which presents it
+			// upstream: matched anyway, as the GitHub token behind a git
+			// proxy session is (credentialvalues.go).
+			mat.kubeUpstream = minimized
 		}
 	}
-	if mat.kubeSelfRenewing && !guarded.Guarded() {
+	if mat.kubeSelfRenewing && !guarded.Guarded() && !mat.rederive {
 		// The cluster credential would reach the workload as a file, and this
 		// one can extend itself: its ServiceAccount may create its own
 		// tokens. Only the monitor, which refuses that subresource to every
@@ -642,7 +711,7 @@ func (b *Broker) kubeMaterial(ctx context.Context, mat Material, plaintext []byt
 	}
 
 	unguarded := ""
-	if !guarded.Guarded() && !mat.requester.KubeInProcess {
+	if !guarded.Guarded() && !mat.requester.KubeInProcess && !mat.rederive {
 		if claims := mat.Constraints.KubeMonitorOnly(); len(claims) > 0 {
 			ack := mat.kubeUnguardedAck
 			if !ack.Recorded() {

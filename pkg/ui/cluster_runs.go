@@ -642,6 +642,13 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		}
 	}
 
+	// The tokens its dispatcher minted, which this member knows only by their
+	// recorded hashes (Task 20454): read before anything else is taken over,
+	// since a takeover can retire a record, and handed to the driver before
+	// its output is streamed or merged here — after the driver has learned the
+	// handle just above, or a container's or Pod's driver would not know it.
+	s.adoptRunTokens(workDir, ex, meta)
+
 	// The previous owner, if it still heartbeats, must stop streaming it — a
 	// member adopted from because it stopped answering may still read the
 	// bus (Task 20419).
@@ -702,21 +709,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 
 // adoptRunDenials routes an adopted run's refusals to it.
 func (s *Server) adoptRunDenials(workDir string, ex executor.Executor, meta runOwnerMeta) {
-	runID := ""
-	if meta.Provenance != nil {
-		runID = meta.Provenance.RunID
-	}
-	if runID == "" {
-		if store := s.clusterHandleStoreFor(); store != nil {
-			if recs, err := store.ListHandles(ex.ID()); err == nil {
-				for _, rec := range recs {
-					if rec.HandleID == meta.Handle {
-						runID = rec.Meta[executor.MetaRunID]
-					}
-				}
-			}
-		}
-	}
+	runID := s.adoptedRunID(ex, meta)
 	spec := executor.Spec{WorkDir: workDir}
 	installFirewallSource()
 	res, err := fwpolicy.Resolve(&spec, ex, workDir)

@@ -417,7 +417,7 @@ and no shape registry can:
 | Delivered as | Matched |
 | --- | --- |
 | An env secret | every value the grant delivers |
-| A kubeconfig | each user's bearer token, client key (as `client-key-data` and as its PEM, line by line), basic-auth password, auth-provider tokens, and an exec plugin's env values whose names say token, secret, password, key or credential — under the Kubernetes monitor, the monitor session's token the delivered kubeconfig carries |
+| A kubeconfig | each user's bearer token, client key (as `client-key-data` and as its PEM, line by line), basic-auth password, auth-provider tokens, and an exec plugin's env values whose names say token, secret, password, key or credential — under the Kubernetes monitor, the monitor session's token the delivered kubeconfig carries, and, defence in depth, the cluster credential the monitor presents upstream (Task 20454) |
 | A registry secret | each registry's `auth`, the password inside it, `password`, `identitytoken`, `registrytoken` |
 | An egress proxy secret | the proxy URL and its password |
 | The run's egress proxy session, its model relay session | the proxy URL and its password; the relay token |
@@ -546,14 +546,41 @@ run and every session naming it are over: a workspace's write-back push can
 come after the run's own lease is released.
 
 **After a restart** the process that adopts the run has no spec and no
-materials. It scans with what `Broker.RedactionCredentials` re-derives from the
-run's grants: the values of its env secrets and the token of each personal
-access token — the same values it scrubs the run's output with. What that does
-not cover, until the run ends: a GitHub App installation token the previous
-process minted (the session's own upstream token is still matched — the proxy
-holds it), a kubeconfig's or a registry secret's contents, an egress proxy
-secret's URL, and the tokens of the run's git proxy, Kubernetes monitor, egress
-and model relay sessions. A run dispatched after the restart is covered in full.
+materials. It scans with two things, the same two it scrubs the run's output
+with (Task 20454):
+
+- **What the grants delivered, re-derived.** `Broker.RedactionCredentials`
+  rebuilds each grant's material through the delivery's own narrowing —
+  `MinimizeKubeconfig`, the registry filter, the env key filter — and takes it
+  apart with the code that takes a delivered lease apart, so the set equals
+  what the lease delivered: env values, a personal access token, a kubeconfig's
+  tokens and client keys, a registry's auth and the password in it, an egress
+  proxy secret's URL and password
+  (`TestRedactionValuesAreWhatTheLeaseDelivered`). These are matched as exact
+  values, in every encoding above.
+- **What the previous process minted, by hash.** A GitHub App installation
+  token, and the tokens of the run's git proxy, Kubernetes monitor, egress and
+  model relay sessions, were minted by the process that dispatched the run and
+  are stored nowhere in plaintext. What is stored of each is a SHA-256:
+  `proxy_sessions.token_sha256` for a session, and `app_token_slots.token_hashes`
+  for every installation token a slot held, written before the token leaves the
+  hub. Each kind is minted with a prefix that says what it is — `cloop_git1_`,
+  `cloop_kube1_`, `cloop_egress1_`, `cloop_relay_`, GitHub's `ghs_` — so the
+  scan looks for candidates by prefix, cuts each to its recorded length and
+  refuses the push only if it hashes to one of the run's own. A token of the
+  same shape that is not the run's — a test fixture, another run's — passes
+  (`TestScanRefusesATokenKnownOnlyByItsHash`,
+  `TestScanLeavesATokenOfTheSameShapeAlone`). The refusal names the grant and
+  secret the token stood on, as for a value.
+
+Only an adopted run's pushes are searched for hashes. A run the process
+dispatched itself knows every value, and is scanned for exactly those
+(`TestAnAdoptedRunIsHeldToEveryCredentialItWasGiven`).
+
+What remains, until the run ends: a session token minted before its kind
+carried a prefix — a run already running when its hub was upgraded past Task
+20454 — which nothing can find, and a minted token in any encoding but the one
+it was minted in, since what is hashed is the token itself.
 
 ### Configuration
 
@@ -1398,11 +1425,14 @@ What remains is either deliberate or beyond what the hub can reach today:
    already sit at the edit point — but a workload can build such a pack on
    purpose. A workload that means to exfiltrate a credential has its network
    for that anyway; what the scan closes is the one path every proxied push
-   crosses. After a hub restart an adopted run is scanned only for what
-   `Broker.RedactionCredentials` re-derives ([which values a session
-   has](#which-values-a-session-has)), and a push through a session no run of
-   this process names — none today, but a session minted by hand — is scanned
-   for its own upstream token alone. A hub with no git proxy scans nothing.
+   crosses. After a hub restart an adopted run is scanned for what its grants
+   delivered, re-derived, and for the tokens the previous process minted,
+   confirmed by their recorded hashes; a session token minted before its kind
+   carried a prefix, and a minted token re-encoded, are not found ([which values
+   a session has](#which-values-a-session-has)). A push through a session no run
+   of this process names — none today, but a session minted by hand — is
+   scanned for its own upstream token alone. A hub with no git proxy scans
+   nothing.
 
 ---
 

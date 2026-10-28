@@ -112,6 +112,12 @@ type world struct {
 	// runToken starts runs as a scoped API token's minter, whose
 	// concurrency slot each run holds (Task 20452); empty, the static token.
 	runToken string
+	// hubEnv is added to every hub's environment: where a scene's hubs reach
+	// its fakes (Task 20454).
+	hubEnv []string
+	// overlay, when set, is a member's instance configuration, written as
+	// .cloop/config.ui-<port>.yaml before the member starts.
+	overlay func(port int) string
 }
 
 type hub struct {
@@ -464,6 +470,7 @@ func (w *world) env() []string {
 		"CLOOP_UI_TOKEN=" + token,
 		"NO_COLOR=1",
 	}
+	env = append(env, w.hubEnv...)
 	if w.rootEnv != nil {
 		return append(env, w.rootEnv...)
 	}
@@ -543,6 +550,12 @@ func (w *world) startHub() *hub {
 	w.t.Helper()
 	port := freePort(w.t)
 	h := &hub{port: port, log: filepath.Join(w.root, fmt.Sprintf("hub-%d.log", port))}
+	if w.overlay != nil {
+		path := filepath.Join(w.hubDir, ".cloop", fmt.Sprintf("config.ui-%d.yaml", port))
+		if err := os.WriteFile(path, []byte(w.overlay(port)), 0o600); err != nil {
+			w.t.Fatal(err)
+		}
+	}
 	h.cmd, h.exited = w.spawn(w.hubDir, h.log, w.env(), "ui", "--port", fmt.Sprint(port), "--no-browser", "--projects", w.projDir)
 	w.hubs = append(w.hubs, h)
 	w.waitHTTP(h.url() + "/healthz")

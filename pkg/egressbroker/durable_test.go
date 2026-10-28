@@ -9,6 +9,7 @@ package egressbroker
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
@@ -428,4 +430,49 @@ func TestEgressRestoreHoldsTheRecordToTodaysLimits(t *testing.T) {
 			t.Fatalf("the retry once the store answers = %v", err)
 		}
 	})
+}
+
+// TestAProxyPasswordCarriesItsPrefixAndAnOlderOneStillAuthenticates: a proxy
+// password is minted as redact.EgressTokenPrefix and 64 hex characters (Task
+// 20454), so a hub process holding only its hash can find it in a stream; and a
+// session minted before then, whose password is the bare hex, still
+// authenticates once restored, through the parser a Proxy-Authorization header
+// goes through.
+func TestAProxyPasswordCarriesItsPrefixAndAnOlderOneStillAuthenticates(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	store := newMemSessionStore()
+	first, second, _ := twoBrokers(t, &now, store)
+	mustGrant(t, first, GrantRequest{Subject: mustSubject(t, "project:/srv/app"), TTL: time.Hour})
+	red := redeemDurable(t, first)
+	if !strings.HasPrefix(red.Token, redact.EgressTokenPrefix) || len(red.Token) != TokenLen {
+		t.Fatalf("minted password is %d characters; want %s and %d characters", len(red.Token),
+			redact.EgressTokenPrefix, TokenLen)
+	}
+	rec := store.record(t, red.Session.ID)
+	if h := redact.HashToken(red.Token); hex.EncodeToString(h.Sum[:]) != rec.TokenSHA256 {
+		t.Fatal("the record's hash is not the hash an adopting hub confirms the password with")
+	}
+
+	legacy := strings.TrimPrefix(red.Token, redact.EgressTokenPrefix)
+	sum := sha256.Sum256([]byte(legacy))
+	rec.TokenSHA256 = hex.EncodeToString(sum[:])
+	sess, err := second.RestoreSession(context.Background(), RestoreRequest{Record: rec, From: "hub_old"})
+	if err != nil {
+		t.Fatalf("RestoreSession: %v", err)
+	}
+	header := "Basic " + base64.StdEncoding.EncodeToString([]byte(red.Session.ID+":"+legacy))
+	id, tok, err := ParseProxyCredential(header)
+	if err != nil {
+		t.Fatalf("an unprefixed password's header: %v", err)
+	}
+	if got, err := second.Authenticate(id, tok); err != nil || got != sess {
+		t.Fatalf("an unprefixed password of a session minted before the change = %v, %v", got, err)
+	}
+	if _, _, err := ParseProxyCredential("Basic " + base64.StdEncoding.EncodeToString(
+		[]byte(red.Session.ID+":"+red.Token))); err != nil {
+		t.Fatalf("a prefixed password's header: %v", err)
+	}
+	if _, err := second.Authenticate(red.Session.ID, red.Token); err == nil {
+		t.Fatal("the prefixed form of a password minted without one authenticated")
+	}
 }

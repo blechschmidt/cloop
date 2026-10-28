@@ -57,6 +57,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // AppTokenRefreshWindow is how much of an installation token's life may remain
@@ -144,6 +146,29 @@ type appTokenSlot struct {
 	// refresh a file token now rather than near its end, for the same reason.
 	confirmedFor string
 	reconfirm    bool
+	// hashes confirm every token the slot has held, newest last and at most
+	// maxSlotTokenHashes of them: recorded with the slot so that a hub process
+	// adopting the run, which never holds the tokens, can recognise one in its
+	// output or its pushes (Task 20454). A hash cannot open anything.
+	hashes []redact.TokenHash
+}
+
+// maxSlotTokenHashes bounds a slot's recorded hashes. A slot is re-minted
+// about once an hour, so this is days of a run's tokens, each of which GitHub
+// stopped honouring within the hour after the next replaced it.
+const maxSlotTokenHashes = 64
+
+// addHash records what confirms token. Callers hold Broker.mu.
+func (s *appTokenSlot) addHash(token string) {
+	h := redact.HashToken(token)
+	// A token no stream can find — no prefix GitHub uses — confirms nothing.
+	if token == "" || !h.Findable() {
+		return
+	}
+	s.hashes = append(s.hashes, h)
+	if n := len(s.hashes); n > maxSlotTokenHashes {
+		s.hashes = append([]redact.TokenHash(nil), s.hashes[n-maxSlotTokenHashes:]...)
+	}
 }
 
 // retiringToken is a superseded token awaiting destruction.
@@ -343,10 +368,13 @@ func (b *Broker) refreshSlot(ctx context.Context, slot *appTokenSlot, held strin
 		return AppTokenRefresh{}, b.denyf(ev, ErrRefreshRefused,
 			"github app token for grant %s: the lease holding it was released during the refresh", slot.grantID)
 	}
+	// What the workload's file holds until this token reaches it.
+	heldBefore := slot.heldExpiry()
 	if previous.token != "" {
 		slot.retiring = append(slot.retiring, retiringToken{appToken: previous})
 	}
 	slot.current = fresh
+	slot.addHash(fresh.token)
 	slot.delivered = slot.guarded
 	sessionID := slot.sessionID
 	takenOver := slot.restored && previous.token == ""
@@ -354,9 +382,14 @@ func (b *Broker) refreshSlot(ctx context.Context, slot *appTokenSlot, held strin
 	b.mu.Unlock()
 	if guarded {
 		// A session presents it from now on, so its expiry is what the
-		// record's successor needs; a file token's is recorded once the file
-		// reaches the workload (LeaseFileRefresh.Delivered).
+		// record's successor needs.
 		b.recordSlotState(slot)
+	} else {
+		// A file token's expiry is recorded once the file reaches the
+		// workload (LeaseFileRefresh.Delivered). Its hash goes on record
+		// now, before the file can, beside the expiry of the token the file
+		// still holds (Task 20454).
+		b.recordSlotStateHeld(slot, heldBefore)
 	}
 
 	ev.Decision = DecisionAllow

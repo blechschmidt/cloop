@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
@@ -567,9 +568,17 @@ func newToken() (string, [sha256.Size]byte, error) {
 	if _, err := rand.Read(buf); err != nil {
 		return "", [sha256.Size]byte{}, fmt.Errorf("egressbroker: generate token: %w", err)
 	}
-	tok := hex.EncodeToString(buf)
+	// The prefix (Task 20454) lets a hub process that adopted the run, and
+	// holds only this token's hash, find it in the run's output and pushes.
+	tok := redact.EgressTokenPrefix + hex.EncodeToString(buf)
 	return tok, sha256.Sum256([]byte(tok)), nil
 }
+
+// TokenLen is the length of the proxy password a session is minted with since
+// Task 20454: redact.EgressTokenPrefix and TokenBytes of entropy, hex. One
+// minted before then is the bare hex, and keeps authenticating: only its hash
+// is kept, of whatever was minted.
+const TokenLen = len(redact.EgressTokenPrefix) + 2*TokenBytes
 
 // newSessionID returns a session identifier. Unlike the token this is not a
 // secret — it is a map key and an audit field — but it is random anyway so

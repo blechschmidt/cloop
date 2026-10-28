@@ -379,11 +379,11 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	if req.TTL <= 0 {
 		ttl = clampDuration(30*time.Minute, MinTTL, MaxTTL)
 	}
-	id, err := randomHex(12)
+	id, err := randomHex(tokenIDBytes)
 	if err != nil {
 		return nil, fmt.Errorf("claudeproxy: %w", err)
 	}
-	secret, err := randomHex(32)
+	secret, err := randomHex(tokenSecretBytes)
 	if err != nil {
 		return nil, fmt.Errorf("claudeproxy: %w", err)
 	}
@@ -807,6 +807,18 @@ func (r *Registry) emit(e Event) {
 	}
 	r.OnEvent(e)
 }
+
+// The entropy in a session token's two halves.
+const (
+	tokenIDBytes     = 12
+	tokenSecretBytes = 32
+)
+
+// TokenLen is the length of a session token a registry minting with prefix
+// issues: the prefix, the id and the secret, each hex, and the "." between
+// them. A hub process that holds only a token's recorded hash cuts a candidate
+// found by its prefix to this length before hashing it (Task 20454).
+func TokenLen(prefix string) int { return len(prefix) + 2*tokenIDBytes + 1 + 2*tokenSecretBytes }
 
 func randomHex(n int) (string, error) {
 	b := make([]byte, n)

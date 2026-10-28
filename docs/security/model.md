@@ -1367,10 +1367,12 @@ Deliberately not matched:
   table and NetworkPolicy name (`cloop_sbx_<executor>`), printed by
   `cloop egress firewall preview` and by `nft list table`. Matching it would
   redact firewall diagnostics and protect nothing.
-- **Shapeless credentials.** Git-proxy and kubeguard session tokens are opaque
-  base64url, a registry `auth` blob is plain base64, an AWS secret key has no
-  prefix outside a named field. No shape can tell these from a hash; the lease
-  that carries them is redacted by value, and nothing else can be.
+- **Shapeless credentials.** A registry `auth` blob is plain base64, an AWS
+  secret key has no prefix outside a named field. No shape can tell these from
+  a hash; the lease that carries them is redacted by value, and nothing else
+  can be. The git proxy, Kubernetes monitor and egress session tokens were
+  shapeless too until Task 20454 gave them versioned prefixes (`cloop_git1_`,
+  `cloop_kube1_`, `cloop_egress1_`); one minted before then still is.
 - **Encoded forms.** A credential base64-encoded into a Basic header is caught
   as a header value; base64 of a token in free text is not. Exact-value
   redaction adds the base64 form where a provisioner knows it will be used.
@@ -1391,7 +1393,11 @@ Deliberately not matched:
 The registry is not on the streaming path. A live log runs through a `Set` and
 nothing else: a shape scan per streamed token would cost on every chunk of
 every run, for credentials that — having been leased — are already matched by
-value.
+value. The one exception is not a shape scan. An adopted run's `Set` also
+carries the recorded hashes of the tokens its dispatcher minted (Task 20454),
+and finds them by their minted prefix and replaces only a candidate that
+hashes to one of them (`TestTokensReplaceOnlyWhatTheirHashConfirms`); every
+other run's stream pays nothing for it.
 
 Its cost is linear in its input. A candidate rejected for its value is not
 read again from inside, and the three detectors whose body can hold their own
@@ -4449,6 +4455,8 @@ scan cannot see is under [what is not mitigated](#what-is-not-mitigated).
 | A push the forge stops reading is neither allowed nor refused — the scan cannot have finished — and a transport that stops reading releases the scan instead of leaving it blocked; one session's pushes are scanned two at a time | `pkg/gitproxy: TestAPushTheForgeStoppedReadingIsNeitherAllowedNorRefused`, `TestAtMostTwoScansRunPerSession` |
 | Nothing a refusal names carries the value — not a path, a tag or a ref named after it | `pkg/gitproxy: TestScanFindsAValueInARefNameAndNeverNamesIt`, `TestScanFindsAValueInABlob` |
 | The values are every credential a lease delivered, taken out of its documents, and nothing public — no certificate, server address or constraint echo; an adopted run's are what the broker re-derives; a run's are kept while it or a session naming it lives, and held by no hub without a proxy | `pkg/secretbroker: TestCredentialValuesAreTheCredentialsALeaseDelivered`, `TestCredentialValuesUnderTheGitProxyIncludeTheSessionToken`, `TestRedactionCredentialsNameWhatRedactionValuesReturns`; `pkg/ui: TestPushScanCarriesTheRunsLeaseAndSpecValues`, `TestAnAdoptedRunScansWithWhatTheBrokerReDerives`, `TestAnAdoptedRunsPushesAreScannedForWhatItsLeaseCarries`, `TestNothingIsHeldWithoutAProxy`; a project config a sandbox replaced with a FIFO or a link stalls nothing and counts for nothing: `TestAProjectConfigTheWorkloadReplacedCannotStallTheProxy` |
+| After a hub process dispatching a run is killed, the process adopting it refuses a push carrying any credential the run holds and scrubs it from the run's stream: what every kind of grant delivered, re-derived through the delivery's narrowing so it equals what the lease delivered, and every token the dead process minted — App installation tokens, git proxy, Kubernetes monitor, egress and model relay session tokens — found by its minted prefix and confirmed against the hash recorded before the token left the hub; the refusal names grant and secret, never the value; a token of the same shape that is not the run's passes; a run dispatched after the restart is covered by its exact values and searches for no hashes (Task 20454) | `pkg/secretbroker: TestRedactionValuesAreWhatTheLeaseDelivered`, `TestEveryAppTokenASlotHeldIsConfirmableFromItsRecord`; `pkg/gitproxy: TestScanRefusesATokenKnownOnlyByItsHash`, `TestScanLeavesATokenOfTheSameShapeAlone`, `TestMatcherFindsATokenAcrossEveryChunkBoundary`; `pkg/ui: TestAnAdoptedRunIsHeldToEveryCredentialItWasGiven`, `TestAnAdoptedRunWithNothingMintedSearchesForNoTokens`; `pkg/executor/remote: TestARehydratedHandleIsScrubbedOfTokensKnownOnlyByHash`; `tests/cluster: TestAnAdoptedRunsCredentialsStayOutOfItsPushesAndItsOutput` |
+| The session tokens the hub mints carry a versioned prefix — and a session minted before them, restored from its record, still authenticates; the hashes recorded of them open nothing, and the session tables hold no credential | `pkg/gitproxy: TestASessionPasswordCarriesItsPrefixAndAnOlderOneStillAuthenticates`; `pkg/kubeguard: TestAMonitorTokenCarriesItsPrefixAndAnOlderOneStillAuthenticates`; `pkg/egressbroker: TestAProxyPasswordCarriesItsPrefixAndAnOlderOneStillAuthenticates`; `tests/security: TestSessionRecordsHoldNoCredential` |
 | A project may tighten the scan and never loosen it; an unreadable setting is repaired to the default, never to off | `pkg/ui: TestAProjectMayTightenThePushScanAndNeverLoosenIt`; `pkg/config: TestPushScanValidationAndRepair` |
 | A refusal reaches the run's history and the task's details, and neither carries the value | `pkg/ui: TestARefusedPushIsInTheRunsHistoryAndOnItsTask` |
 | The documented residual holds where the docs say: a value split across a delta's copy and insert is not found, and inserts on either side of a copy are not joined | `pkg/gitproxy: TestScanResidualAValueSplitAcrossACopyAndAnInsertIsNotFound`, `TestScanInsertsAcrossACopyAreNotJoined` |
@@ -4798,26 +4806,42 @@ variables in the running process (below), and a workload whose bindings a hub
 could not rebuild is named by neither list: the per-lease revocation reports that
 doubt rather than claiming success (`TestAHubThatCannotRebuildABindingSaysSo`).
 
-**Output redaction is a known-value match, and the hub half is only partly
-rebuilt after a restart.** It removes the material a lease actually delivered,
-so a credential the workload *derives* — a session cookie exchanged using the
-PAT, a token minted from the kubeconfig — is not covered. And the hub-side half
-is built from the dispatched `Spec`, which is stored with its leased variables
-replaced by a placeholder (`TestDispatchedSpecNeverPersistsLeasedCredentials`),
-so a workload reattached after a hub restart streams through a driver that
-cannot name its credentials. Since Task 20382 the process that adopts the run
-re-derives them from the grants of the lease it takes over and hands them to the
-driver (`executor.HandleRedactor`) — the delivered keys of env secrets and the
-token of a personal access token (`TestRedactionValuesAreWhatTheLeaseDelivered`)
-— but not a GitHub App token the stopped process minted, not a kubeconfig's
-contents, and nothing for a run whose lease could not be taken over. No shape
-matcher runs on the stream to catch them: the credential registry's detectors
-serve `cloop audit` afterwards, not the live output. The in-sandbox half still
-applies, because that process still holds its own lease, so what is exposed is
-narrowly that remainder of the output a workload produced outside the provider
-path between a restart and the task ending. Closing it entirely would mean
-persisting plaintext to survive a restart, which is the thing the store exists
-not to do.
+**Output redaction is a known-value match, and after a restart some of the
+hub's half is a confirmed-hash match.** It removes the material a lease
+actually delivered, so a credential the workload *derives* — a session cookie
+exchanged using the PAT, a token minted from the kubeconfig — is not covered.
+The hub-side half is built from the dispatched `Spec`, which is stored with its
+leased variables replaced by a placeholder
+(`TestDispatchedSpecNeverPersistsLeasedCredentials`), so a workload reattached
+after a hub restart streams through a driver that cannot name its credentials.
+The process that adopts the run rebuilds them (Task 20454). Every credential
+the run's grants delivered is re-derived through the delivery's own narrowing:
+env keys, a personal access token, a kubeconfig's tokens and client keys, a
+registry's auth and the password in it, an egress proxy's URL and password
+(`TestRedactionValuesAreWhatTheLeaseDelivered`). Every token the stopped
+process minted for the run — its GitHub App installation tokens and its git
+proxy, Kubernetes monitor, egress and model relay session tokens — is found by
+the prefix it was minted with and confirmed against the SHA-256 the hub
+recorded, so the run's own token is replaced and one of the same shape is not
+(`TestAnAdoptedRunIsHeldToEveryCredentialItWasGiven`,
+`TestARehydratedHandleIsScrubbedOfTokensKnownOnlyByHash`, and across hub
+members `TestAnAdoptedRunsCredentialsStayOutOfItsPushesAndItsOutput`). Three
+things remain. A session token minted before its kind carried a prefix — a run
+that was already running when its hub was upgraded past Task 20454 — has no
+shape anything can find. A minted token the workload re-encoded (base64, split
+across lines) does not hash to what was recorded. And a run whose lease could
+not be taken over keeps the confirmed tokens but not the re-derived values.
+Output the device resent before the adopting process handed its driver
+anything is scrubbed in the backlog, a value split across two chunks included
+(`TestRedactionsAddedLateScrubTheBacklogAcrossChunks`). A scan hashes at most a
+budget of a few dozen times the text it reads, so a token printed after more
+prefix-shaped decoys than that passes; only a workload flooding its own output
+reaches it, and it could as easily re-encode the token. The in-sandbox half
+still applies, because that process still holds its own lease. So what is
+exposed is narrowly that remainder of the output a workload produced outside
+the provider path between a restart and the task ending. Closing it entirely
+would mean persisting plaintext to survive a restart, which is the thing the
+store exists not to do.
 
 **DEKs live in process memory.** The suite asserts that a plaintext DEK never
 reaches disk or a log (`TestPlaintextDataKeysNeverReachDiskOrLogs`). It cannot
@@ -4843,9 +4867,11 @@ leak, not a workload set on publishing a value: one it transforms — reversed,
 hex-encoded, compressed into a file — passes, as does one split between a
 delta's copied and inserted bytes (`TestScanResidualAValueSplitAcrossACopyAndAnInsertIsNotFound`),
 and its network is still there to send it elsewhere. After a hub restart an
-adopted run is scanned only for its env secrets' values and its PATs — what
-`Broker.RedactionCredentials` re-derives — not for an App token, a kubeconfig,
-registry or egress secret, or a session token the previous process issued
+adopted run is scanned for every credential its grants delivered, re-derived,
+and for every token the previous process minted, confirmed against its recorded
+hash (`TestAnAdoptedRunIsHeldToEveryCredentialItWasGiven`). It is not scanned
+for a session token minted before its kind carried a prefix, or for a minted
+token in any encoding but the one it was minted in
 ([which values a session has](../architecture/git-proxy.md#which-values-a-session-has)).
 A hub without the git proxy scans nothing. Scope grants so that the blast
 radius of a disclosure is a single repo for a few hours. Behind the [model

@@ -12,6 +12,27 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A run adopted after a hub restart keeps full push-scan and output-redaction
+  coverage.** The process that adopts a run another one dispatched scrubbed its
+  output and scanned its pushes only for env secrets' values and personal
+  access tokens. Until the run ended nothing caught a GitHub App token the dead
+  process minted, a kubeconfig's or registry secret's contents, an egress proxy
+  secret's password, or the tokens of the run's git proxy, Kubernetes monitor,
+  egress and model relay sessions. :8888's nightly deploy, and every rolling
+  upgrade, puts every device run that crosses it in that state. Now every
+  grant's material is re-derived through the delivery's own narrowing, so the
+  set equals what the lease delivered. Every token the hub mints carries a
+  prefix that says what it is: git proxy passwords `cloop_git1_`, Kubernetes
+  monitor tokens `cloop_kube1_`, egress passwords `cloop_egress1_`. A hash is
+  now recorded for every App token too, before it leaves the hub. So an adopted
+  run's stream and push scan find each minted token by its prefix and redact or
+  refuse it only when it hashes to one of the run's own; a look-alike passes.
+  The new prefixes are in the credential registry for `cloop audit`, telemetry
+  and the provider-call audit. Sessions minted before the change keep
+  authenticating. A fresh run's hub-side redaction now also scrubs each
+  credential inside a delivered document on its own, not only the whole file
+  (Task 20454).
+
 - **Sudo mode: on a hub with single sign-on, privileged actions need a recent
   interactive sign-in, not just a live session cookie.** A session carried its
   owner's full authority for its whole absolute lifetime (24 h by default), and

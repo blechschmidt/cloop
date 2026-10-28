@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // memSessionStore is a SessionStore that remembers what it was told.
@@ -247,5 +249,86 @@ func TestKubeSuspendLeavesTheRecordOpen(t *testing.T) {
 	}
 	if _, err := reg.Authenticate(m.Token); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("a suspended session authenticated: %v", err)
+	}
+}
+
+// TestAMonitorTokenCarriesItsPrefixAndAnOlderOneStillAuthenticates: a bearer
+// token is minted as <id>.<secret> with an id that starts with
+// redact.KubeGuardTokenPrefix (Task 20454), so a hub process holding only its
+// hash can find it in a stream, and a hub that reads the id as what precedes
+// the "." — an older build among them — still names the session; and a session
+// minted before then, whose id and token have no prefix, still authenticates
+// once restored from its record, through the proxy that finds a session by the
+// id half.
+func TestAMonitorTokenCarriesItsPrefixAndAnOlderOneStillAuthenticates(t *testing.T) {
+	api := newFakeAPIServer(t)
+	store := newMemSessionStore()
+	first, err := NewRegistry("https://monitor.example:8444")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Store = store
+	m, err := first.Mint(MintRequest{
+		Kubeconfig: testInsecureKubeconfig(api.srv.URL),
+		Policy:     Policy{Verbs: ReadVerbs, Namespaces: []string{"app"}},
+		LeaseID:    "lease_1", GrantID: "grant_1", ProjectID: "/srv/app", Durable: true,
+	})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if !strings.HasPrefix(m.Session.ID, redact.KubeGuardTokenPrefix) || !strings.HasPrefix(m.Token, m.Session.ID+".") ||
+		len(m.Token) != TokenLen {
+		t.Fatalf("minted session %q, token of %d characters; want an id starting %s and <id>.<secret>, %d characters",
+			m.Session.ID, len(m.Token), redact.KubeGuardTokenPrefix, TokenLen)
+	}
+	if h := redact.HashToken(m.Token); hex.EncodeToString(h.Sum[:]) != store.get(t, m.Session.ID).TokenSHA256 {
+		t.Fatal("the record's hash is not the hash an adopting hub confirms the token with")
+	}
+
+	// The same session as a hub before Task 20454 would have minted and
+	// recorded it: an unprefixed id, and the hash of an unprefixed token.
+	legacy := strings.TrimPrefix(m.Token, redact.KubeGuardTokenPrefix)
+	legacyID := strings.TrimPrefix(m.Session.ID, redact.KubeGuardTokenPrefix)
+	rec := store.get(t, m.Session.ID)
+	rec.ID = legacyID
+	sum := sha256.Sum256([]byte(legacy))
+	rec.TokenSHA256 = hex.EncodeToString(sum[:])
+	second, err := NewRegistry("https://monitor.example:8444")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Store = newMemSessionStore()
+	px, err := New(second, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(px)
+	t.Cleanup(func() { srv.Close(); _ = px.Close() })
+	if _, err := second.Restore(RestoreRequest{Record: rec, Kubeconfig: testInsecureKubeconfig(api.srv.URL),
+		From: "hub_old"}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	get := func(token string) int {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/namespaces/app/pods", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := get(legacy); code != http.StatusOK {
+		t.Fatalf("an unprefixed token of a session minted before the change = %d, want 200", code)
+	}
+	if code := get(m.Token); code != http.StatusUnauthorized {
+		t.Fatalf("the prefixed form of a token minted without one = %d, want 401", code)
+	}
+	if id, ok := tokenSessionID(legacy); !ok || id != legacyID {
+		t.Fatalf("the id of an unprefixed token = %q, %t", id, ok)
+	}
+	// What a hub of the build before cut it at: the token's own session.
+	if id, _, _ := strings.Cut(m.Token, "."); id != m.Session.ID {
+		t.Fatalf("an older hub would read the id of a prefixed token as %q, not its session %q", id, m.Session.ID)
 	}
 }

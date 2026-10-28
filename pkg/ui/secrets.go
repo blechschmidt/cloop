@@ -1026,6 +1026,14 @@ func isBrokerUnconfigured(err error) bool {
 // cause. So the combination is refused here, typed as ErrUnsupported, before
 // anything starts.
 func applyLease(spec executor.Spec, ex executor.Executor, sl *secretLease) (executor.Spec, error) {
+	// The credentials inside what the lease delivered, each on its own, for
+	// the driver's redaction: the same values the run's pushes are scanned
+	// for and a process adopting the run re-derives (Task 20454).
+	if sl != nil && sl.lease != nil {
+		for _, c := range sl.lease.CredentialValues() {
+			spec.RedactValues = append(spec.RedactValues, c.Value)
+		}
+	}
 	env := sl.Env()
 	if len(env) == 0 {
 		return spec, nil

@@ -84,6 +84,10 @@ type Set struct {
 	first [256]bool
 	// max is the longest value's length, bounding the holdback window.
 	max int
+	// tokens are recorded hashes of tokens the hub minted and does not hold,
+	// found by their prefix and confirmed by hash (tokens.go). Nil for every
+	// Set but an adopted run's whose values could not all be re-derived.
+	tokens *Tokens
 }
 
 // New returns a Set over values, ignoring those shorter than MinLen and any
@@ -146,10 +150,45 @@ func (s *Set) With(values ...string) *Set {
 	if out == nil {
 		return s
 	}
-	if s != nil && out.Len() == s.Len() {
+	if s != nil && len(out.values) == len(s.values) {
 		return s
 	}
+	if s != nil {
+		out.tokens = s.tokens
+	}
 	return out
+}
+
+// WithTokens returns a Set that also replaces every token one of hs confirms
+// (tokens.go), or s itself when hs adds nothing. Like With, it leaves s alone,
+// so a stream holding s keeps a consistent view until it asks again.
+//
+// It is for a hub process that adopted a run whose dispatcher minted tokens it
+// never stored: their recorded hashes are all this process has of them.
+func (s *Set) WithTokens(hs ...TokenHash) *Set {
+	var cur *Tokens
+	if s != nil {
+		cur = s.tokens
+	}
+	next := cur.With(hs...)
+	if next == cur {
+		return s
+	}
+	out := &Set{}
+	if s != nil {
+		*out = *s
+	}
+	out.tokens = next
+	return out
+}
+
+// Tokens returns the recorded token hashes s confirms candidates against, nil
+// when it has none.
+func (s *Set) Tokens() *Tokens {
+	if s == nil {
+		return nil
+	}
+	return s.tokens
 }
 
 // IsPlaceholder reports whether v is something a redactor already left behind
@@ -174,15 +213,17 @@ func IsPlaceholder(v string) bool {
 	return strings.HasPrefix(v, "<redacted") && strings.HasSuffix(v, ">")
 }
 
-// Len reports how many values the Set will match.
+// Len reports how many values the Set will match, counting each recorded
+// token hash as one.
 func (s *Set) Len() int {
 	if s == nil {
 		return 0
 	}
-	return len(s.values)
+	return len(s.values) + s.tokens.Len()
 }
 
-// String replaces every occurrence of every value in text with Marker.
+// String replaces every occurrence of every value in text with Marker, and
+// then every token a recorded hash confirms.
 func (s *Set) String(text string) string {
 	if s == nil || text == "" {
 		return text
@@ -192,7 +233,7 @@ func (s *Set) String(text string) string {
 			text = strings.ReplaceAll(text, string(v), Marker)
 		}
 	}
-	return text
+	return s.tokens.Replace(text)
 }
 
 // Bytes is String over a byte slice. The input is not modified; a copy is
@@ -206,11 +247,20 @@ func (s *Set) Bytes(b []byte) []byte {
 			b = bytes.ReplaceAll(b, v, []byte(Marker))
 		}
 	}
+	if s.tokens != nil {
+		// Replace hands back the string it was given when it confirmed
+		// nothing, which the comparison sees at once.
+		str := string(b)
+		if out := s.tokens.Replace(str); out != str {
+			return []byte(out)
+		}
+	}
 	return b
 }
 
-// Contains reports whether text holds any value in the Set. It is the cheap
-// question a test or an audit asks; callers scrubbing output want String.
+// Contains reports whether text holds any value in the Set, or a token a
+// recorded hash confirms. It is the cheap question a test or an audit asks;
+// callers scrubbing output want String.
 func (s *Set) Contains(text string) bool {
 	if s == nil || text == "" {
 		return false
@@ -220,7 +270,7 @@ func (s *Set) Contains(text string) bool {
 			return true
 		}
 	}
-	return false
+	return len(s.tokens.Find(text)) > 0
 }
 
 // Holdback returns how many trailing bytes of text a streaming caller must
@@ -234,7 +284,7 @@ func (s *Set) Holdback(text string) int {
 	if s == nil || text == "" {
 		return 0
 	}
-	return s.holdback([]byte(text))
+	return max(s.valueHoldback([]byte(text)), s.tokens.Holdback(text))
 }
 
 // holdback returns how many trailing bytes of buf must be withheld because they
@@ -245,6 +295,17 @@ func (s *Set) Holdback(text string) int {
 // boundary, which is the overwhelmingly common case and costs one array read
 // per candidate position.
 func (s *Set) holdback(buf []byte) int {
+	if s == nil {
+		return 0
+	}
+	if s.tokens != nil {
+		return max(s.valueHoldback(buf), s.tokens.Holdback(string(buf)))
+	}
+	return s.valueHoldback(buf)
+}
+
+// valueHoldback is holdback for the Set's values alone.
+func (s *Set) valueHoldback(buf []byte) int {
 	if s == nil || s.max <= 1 {
 		return 0
 	}

@@ -275,19 +275,24 @@ func (r *restoreRig) startProcess() {
 		t.Fatal(err)
 	}
 	reg.Now = r.clock.Now
-	reg.OnEvent = withProxySessionOwnership(ownerGitProxy, gitProxySessionEvent, gitProxyAuditSink(r.db))
+	// As the hub wires it: a refused push is filed in its run's history, and
+	// every push is scanned for what its run holds (Task 20436).
+	reg.OnEvent = withProxySessionOwnership(ownerGitProxy, gitProxySessionEvent,
+		withPushScanJournal(gitProxyAuditSink(r.db)))
 	reg.Store = newGitSessionStore(r.db)
+	var gitSvc *gitProxyService
 	px, err := gitproxy.New(reg, gitproxy.Options{
 		Transport: r.forge.Transport(),
 		Fallback:  clusterProxyFallback(ownerGitProxy, clusterAPIProxyGit),
+		PushScan:  func(sess *gitproxy.Session) gitproxy.PushScan { return gitSvc.pushScanFor(sess) },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	pol := gitproxy.WriteBackPolicy()
 	pol.AllowFetch = true
-	gitSvc := &gitProxyService{reg: reg, proxy: px, baseURL: r.gitSrv.URL, policy: pol, ttl: r.gitTTL,
-		githubUpstream: r.forge.URL, auditDB: r.db}
+	gitSvc = &gitProxyService{reg: reg, proxy: px, baseURL: r.gitSrv.URL, policy: pol, ttl: r.gitTTL,
+		githubUpstream: r.forge.URL, auditDB: r.db, scanMode: gitproxy.ScanValues}
 	gitProxySingleton.Store(gitSvc)
 	gitProxyRequired.Store(true)
 	r.gitH.Store(http.Handler(px))

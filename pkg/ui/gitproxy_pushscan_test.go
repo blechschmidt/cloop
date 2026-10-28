@@ -106,14 +106,14 @@ func TestPushScanCarriesTheRunsLeaseAndSpecValues(t *testing.T) {
 	// The run ends; the entry stays while a session names it — a
 	// workspace's write-back push can come after — and goes with the last.
 	end()
-	if _, s := runPushScanFor(&gitproxy.Session{RunID: "run_1"}); len(s) == 0 {
+	if _, s, _ := runPushScanFor(&gitproxy.Session{RunID: "run_1"}); len(s) == 0 {
 		t.Fatal("the run's values went while a session still names it")
 	}
 	for _, sess := range svc.reg.Sessions() {
 		svc.reg.Close(sess.ID, "test")
 	}
 	sweepRunPushScans()
-	if _, s := runPushScanFor(&gitproxy.Session{RunID: "run_1"}); len(s) != 0 {
+	if _, s, _ := runPushScanFor(&gitproxy.Session{RunID: "run_1"}); len(s) != 0 {
 		t.Fatal("the run's values outlived the run and every session naming it")
 	}
 }
@@ -319,7 +319,7 @@ func TestAnAdoptedRunsPushesAreScannedForWhatItsLeaseCarries(t *testing.T) {
 	if taken := registeredLease(old.lease.ID); taken != nil {
 		stopKeepaliveForTest(taken)
 	}
-	_, secrets := runPushScanFor(&gitproxy.Session{RunID: "run_takeover"})
+	_, secrets, _ := runPushScanFor(&gitproxy.Session{RunID: "run_takeover"})
 	found := false
 	for _, s := range secrets {
 		if s.Value == "takeover-credential-0123456789" && s.Field == "env CLAUDE_CODE_OAUTH_TOKEN" && s.Grant != "" {

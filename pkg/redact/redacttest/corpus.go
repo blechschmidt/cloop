@@ -469,6 +469,22 @@ func positives(r *rand.Rand) []Positive {
 		Text:    "proxy log: Authorization: Bearer " + seg1 + "%2B" + seg2 + "%2F" + seg3 + "%3D (expired)",
 		Secrets: []string{seg1, seg2, seg3}, Keep: []string{"proxy log: Authorization: Bearer ", " (expired)"}})
 
+	// The session tokens the hub mints with a prefix since Task 20454, as a
+	// workload's own tools print them: git's credential helper, a kubeconfig,
+	// a proxy URL.
+	gitPass := "cloop_git1_" + generated(r, b64url, 43)
+	add(Positive{Name: "cloop-git-proxy-session/credential-fill", Detector: "cloop-git-proxy-session",
+		Text:    "$ git credential fill\nprotocol=https\nhost=hub.example.com:9443\nusername=git\npassword=" + gitPass + "\n",
+		Secrets: []string{gitPass}, Keep: []string{"protocol=https", "host=hub.example.com:9443", "username=git"}})
+	kubeTok := "cloop_kube1_" + generated(r, b64url, 16) + "." + generated(r, b64url, 43)
+	add(Positive{Name: "cloop-kube-guard-session/kubeconfig", Detector: "cloop-kube-guard-session",
+		Text:    "users:\n- name: cloop\n  user:\n    token: " + kubeTok + "\ncurrent-context: cloop\n",
+		Secrets: []string{kubeTok}, Keep: []string{"- name: cloop", "current-context: cloop"}})
+	egressPass := "cloop_egress1_" + pick(r, hexChars, 64)
+	add(Positive{Name: "cloop-egress-session/proxy-environment", Detector: "cloop-egress-session",
+		Text:    "HTTPS_PROXY=http://sess_" + pick(r, hexChars, 24) + ":" + egressPass + "@hub.example.com:3129",
+		Secrets: []string{egressPass}, Keep: []string{"HTTPS_PROXY=http://", "@hub.example.com:3129"}})
+
 	return out
 }
 
@@ -552,6 +568,9 @@ func negatives(r *rand.Rand) []Negative {
 		"sudo nft list table inet cloop_sbx_vx_abcdefghij\ncloop egress firewall preview --table cloop_sbx_preview --format nft-bridge")
 	add("Prometheus metric names",
 		"cloop_apitoken_auth_failures_total{reason=\"expired\"} 3\ncloop_secret_leases_live 2\ncloop_gitproxy_push_denials_total 0")
+	add("session token prefixes named without a token",
+		"a git proxy password starts cloop_git1_, a monitor token cloop_kube1_<id>.<secret> and an egress password "+
+			"cloop_egress1_; cloop_egress_session_bytes_total and cloop_kube_guard_requests_total count them")
 
 	// Prose about credentials, which mentions their shapes without one.
 	add("prose about token formats",

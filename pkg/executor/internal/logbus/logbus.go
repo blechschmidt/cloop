@@ -151,7 +151,66 @@ func (b *Bus) AddRedactions(values ...string) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.redact = b.redact.With(values...)
+	if next := b.redact.With(values...); next != b.redact {
+		b.redact = next
+		b.rescrubReplayLocked()
+	}
+}
+
+// AddTokens extends the redaction to the tokens hs confirm — found by their
+// minted prefix and replaced only when they hash to one of hs — from the next
+// Emit on (Task 20454).
+//
+// It is for a hub process that adopted a run whose dispatcher minted tokens it
+// never stored: their recorded hashes are all this process has of them.
+func (b *Bus) AddTokens(hs ...redact.TokenHash) {
+	if b == nil || len(hs) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if next := b.redact.WithTokens(hs...); next != b.redact {
+		b.redact = next
+		b.rescrubReplayLocked()
+	}
+}
+
+// rescrubReplayLocked scrubs the replay backlog again with the set in force
+// now. Called with b.mu held, after the set grew.
+//
+// An adopted handle's bus starts with nothing to scrub, and a device that
+// reconnects resends the output it kept before the process adopting the run
+// has handed over what to scrub: chunks emitted then sit in the backlog
+// unscrubbed, and the subscriber that adoption opens next would replay them
+// as they are.
+//
+// The backlog is scrubbed as the stream it was, the way Emit scrubs: a chunk's
+// tail that could begin a credential is withheld and scrubbed with the chunk
+// after it, so a value split across two chunks is caught too. The last
+// chunk's tail joins what the bus already withholds — the next Emit completes
+// it — unless a subscriber has been sent that chunk already, which would then
+// receive the tail twice, or the bus is closed, which flushed what it held.
+func (b *Bus) rescrubReplayLocked() {
+	if b.redact == nil || len(b.replay) == 0 {
+		return
+	}
+	last := len(b.replay) - 1
+	carry := ""
+	for i := range b.replay {
+		text := b.redact.String(carry + b.replay[i].Text)
+		carry = ""
+		if i < last || (len(b.subscribers) == 0 && !b.closed) {
+			if hold := b.redact.Holdback(text); hold > 0 {
+				carry = text[len(text)-hold:]
+				text = text[:len(text)-hold]
+			}
+		}
+		b.replayBytes += len(text) - len(b.replay[i].Text)
+		b.replay[i].Text = text
+	}
+	if carry != "" {
+		b.pending = carry + b.pending
+	}
 }
 
 // subscriber is one live consumer. The mutex guards the send/close pair; see

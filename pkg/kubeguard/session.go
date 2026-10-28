@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // Session lifetimes.
@@ -317,10 +318,17 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		return nil, fmt.Errorf("kubeguard: session ttl %s exceeds the maximum %s", ttl, MaxSessionTTL)
 	}
 
-	id, err := randomToken(12)
+	raw, err := randomToken(12)
 	if err != nil {
 		return nil, fmt.Errorf("kubeguard: session id: %w", err)
 	}
+	// The versioned prefix (Task 20454) starts the session id, and so the
+	// bearer token: a hub process holding only the token's hash finds it in a
+	// stream by it. In the id rather than in front of it, so every hub that
+	// reads a token's id as what precedes its "." — a member of an older
+	// build serving this one's session during a rolling upgrade among them —
+	// still names the session the token is for.
+	id := redact.KubeGuardTokenPrefix + raw
 	secret, err := randomToken(32)
 	if err != nil {
 		return nil, fmt.Errorf("kubeguard: session token: %w", err)
@@ -394,8 +402,8 @@ func (r *Registry) Known(id string) bool {
 
 // about either half.
 func (r *Registry) Authenticate(token string) (*Session, error) {
-	id, _, ok := strings.Cut(strings.TrimSpace(token), ".")
-	if !ok || id == "" {
+	id, ok := tokenSessionID(token)
+	if !ok {
 		return nil, ErrUnauthenticated
 	}
 
@@ -560,8 +568,22 @@ func (r *Registry) ReapExpired() int {
 }
 
 // bearerToken joins the two halves. "." separates them because base64url
-// never produces one, so the split is unambiguous.
+// never produces one — nor does a session id's prefix — so the split is
+// unambiguous.
 func bearerToken(id, secret string) string { return id + "." + secret }
+
+// tokenSessionID returns the session id a bearer token names: what comes
+// before its ".". A token minted since Task 20454 starts with the prefix its
+// session id does; one minted before then has a bare id, read the same way.
+func tokenSessionID(token string) (string, bool) {
+	id, _, ok := strings.Cut(strings.TrimSpace(token), ".")
+	return id, ok && id != ""
+}
+
+// TokenLen is the length of the bearer token a session is minted with since
+// Task 20454: its id — redact.KubeGuardTokenPrefix and 12 bytes, base64url —
+// a ".", and a 32-byte secret, base64url.
+const TokenLen = len(redact.KubeGuardTokenPrefix) + (12*8+5)/6 + 1 + (32*8+5)/6
 
 // randomToken returns n bytes of crypto/rand as unpadded base64url.
 func randomToken(n int) (string, error) {

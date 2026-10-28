@@ -369,6 +369,10 @@ type AppTokenSlotRow struct {
 	// working at GitHub.
 	TokenExpiresAt time.Time
 	UpdatedAt      time.Time
+	// TokenHashes records what confirms each token the slot has held, as
+	// redact.FormatTokenHashes writes it: prefix, length and SHA-256, never a
+	// token (migration 0084, Task 20454).
+	TokenHashes string
 }
 
 // PutAppTokenSlot records a slot, replacing any row for the same lease and
@@ -387,8 +391,9 @@ func (d *DB) PutAppTokenSlot(row AppTokenSlotRow) error {
 	defer d.mu.Unlock()
 	_, err := d.conn.Exec(
 		`INSERT INTO app_token_slots(lease_id, grant_id, holder, secret_id, secret_name, scope_json,
-		                             guarded, session_id, env_exported, file_name, token_expires_at, updated_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		                             guarded, session_id, env_exported, file_name, token_expires_at, updated_at,
+		                             token_hashes)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(lease_id, grant_id) DO UPDATE SET
 		   holder           = excluded.holder,
 		   secret_id        = excluded.secret_id,
@@ -399,10 +404,11 @@ func (d *DB) PutAppTokenSlot(row AppTokenSlotRow) error {
 		   env_exported     = excluded.env_exported,
 		   file_name        = excluded.file_name,
 		   token_expires_at = excluded.token_expires_at,
-		   updated_at       = excluded.updated_at`,
+		   updated_at       = excluded.updated_at,
+		   token_hashes     = excluded.token_hashes`,
 		row.LeaseID, row.GrantID, row.Holder, row.SecretID, row.SecretName, row.Scope,
 		boolInt(row.Guarded), row.SessionID, boolInt(row.EnvExported), row.FileName,
-		formatOptionalTime(row.TokenExpiresAt), formatOptionalTime(row.UpdatedAt),
+		formatOptionalTime(row.TokenExpiresAt), formatOptionalTime(row.UpdatedAt), strings.TrimSpace(row.TokenHashes),
 	)
 	if err != nil {
 		return fmt.Errorf("statedb: put app token slot %s/%s: %w", row.LeaseID, row.GrantID, classifyDriverErr(err))
@@ -414,7 +420,7 @@ func (d *DB) PutAppTokenSlot(row AppTokenSlotRow) error {
 // is empty.
 func (d *DB) ListAppTokenSlots(leaseID string) ([]AppTokenSlotRow, error) {
 	q := `SELECT lease_id, grant_id, holder, secret_id, secret_name, scope_json, guarded,
-	             session_id, env_exported, file_name, token_expires_at, updated_at
+	             session_id, env_exported, file_name, token_expires_at, updated_at, token_hashes
 	        FROM app_token_slots`
 	var args []any
 	if leaseID != "" {
@@ -437,7 +443,8 @@ func (d *DB) ListAppTokenSlots(leaseID string) ([]AppTokenSlotRow, error) {
 			expires, updatedAt string
 		)
 		if err := rows.Scan(&rec.LeaseID, &rec.GrantID, &rec.Holder, &rec.SecretID, &rec.SecretName,
-			&rec.Scope, &guarded, &rec.SessionID, &exported, &rec.FileName, &expires, &updatedAt); err != nil {
+			&rec.Scope, &guarded, &rec.SessionID, &exported, &rec.FileName, &expires, &updatedAt,
+			&rec.TokenHashes); err != nil {
 			return nil, fmt.Errorf("statedb: scan app token slot: %w", classifyDriverErr(err))
 		}
 		rec.Guarded, rec.EnvExported = guarded != 0, exported != 0
@@ -452,16 +459,19 @@ func (d *DB) ListAppTokenSlots(leaseID string) ([]AppTokenSlotRow, error) {
 }
 
 // UpdateAppTokenSlot rewrites a slot's mutable fields — guarded, session,
-// whether the token was exported, the held token's expiry, and its scope when
-// row.Scope is set (a restore narrows it to its grant) — provided row.Holder
-// holds it, and reports whether it did.
+// whether the token was exported, the held token's expiry, its scope when
+// row.Scope is set (a restore narrows it to its grant), and its token hashes
+// when row.TokenHashes is set (a hash is never taken back) — provided
+// row.Holder holds it, and reports whether it did.
 func (d *DB) UpdateAppTokenSlot(row AppTokenSlotRow) (bool, error) {
 	return d.execOne(`UPDATE app_token_slots SET guarded = ?, session_id = ?, env_exported = ?,
-		token_expires_at = ?, scope_json = COALESCE(NULLIF(?, ''), scope_json), updated_at = ?
+		token_expires_at = ?, scope_json = COALESCE(NULLIF(?, ''), scope_json),
+		token_hashes = COALESCE(NULLIF(?, ''), token_hashes), updated_at = ?
 		WHERE lease_id = ? AND grant_id = ? AND holder = ?`,
 		fmt.Sprintf("update app token slot %s/%s", row.LeaseID, row.GrantID),
 		boolInt(row.Guarded), row.SessionID, boolInt(row.EnvExported), formatOptionalTime(row.TokenExpiresAt),
-		strings.TrimSpace(row.Scope), formatOptionalTime(time.Now().UTC()), row.LeaseID, row.GrantID, row.Holder)
+		strings.TrimSpace(row.Scope), strings.TrimSpace(row.TokenHashes), formatOptionalTime(time.Now().UTC()),
+		row.LeaseID, row.GrantID, row.Holder)
 }
 
 // TakeAppTokenSlots moves every slot of leaseID still held by from to holder,

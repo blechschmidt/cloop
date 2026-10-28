@@ -65,6 +65,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // AttachHandleStore installs the durable handle store after construction and
@@ -288,5 +289,21 @@ func (e *Executor) AddHandleRedactions(handleID string, values ...string) bool {
 	if len(values) > 0 {
 		hs.bus.AddRedactions(values...)
 	}
+	return true
+}
+
+// Compile-time proof that a device's output can be scrubbed of tokens known
+// only by their recorded hashes.
+var _ executor.HandleTokenRedactor = (*Executor)(nil)
+
+// AddHandleTokens implements executor.HandleTokenRedactor: the tokens an
+// adopted run's dispatcher minted, which the process that adopted it knows
+// only by hash (Task 20454).
+func (e *Executor) AddHandleTokens(handleID string, tokens ...redact.TokenHash) bool {
+	hs, err := e.lookup(handleID)
+	if err != nil || hs.bus == nil {
+		return false
+	}
+	hs.bus.AddTokens(tokens...)
 	return true
 }

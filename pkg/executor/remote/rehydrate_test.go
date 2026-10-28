@@ -23,6 +23,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // newStoredExecutor builds an executor backed by a durable handle store,
@@ -634,5 +635,81 @@ func TestARehydratedHandleIsScrubbedOfWhatItsLeaseCarries(t *testing.T) {
 	}
 	if !strings.Contains(got, "token is ") {
 		t.Fatalf("the device's output did not arrive: %q", got)
+	}
+}
+
+// TestARehydratedHandleIsScrubbedOfTokensKnownOnlyByHash (Task 20454): the
+// tokens an adopted run's dispatcher minted are known to the adopting process
+// only by their recorded hashes. Handed those, the driver scrubs each token
+// from the device's output, and a token of the same shape that is not the
+// run's passes untouched. Output the device resent before the hashes arrived —
+// a reconnect can beat the adoption — is scrubbed in the backlog a stream
+// opened afterwards replays.
+func TestARehydratedHandleIsScrubbedOfTokensKnownOnlyByHash(t *testing.T) {
+	store := executor.NewMemoryHandleStore()
+	first := newStoredExecutor(t, store)
+	p, sess := connect(t, first, remote.AgentRecord{AgentID: "agent-1"}, defaultHello(), nil)
+	handle := startHandle(t, first, p)
+	sess.Close()
+
+	own := redact.GitProxyTokenPrefix + strings.Repeat("Q3eF", 10) + "x_9"
+	stranger := redact.GitProxyTokenPrefix + strings.Repeat("Zz81", 10) + "y-7"
+	revived := newStoredExecutor(t, store)
+	if revived.AddHandleTokens("no-such-handle", redact.HashToken(own)) {
+		t.Fatal("an unknown handle accepted token hashes")
+	}
+
+	// The device reconnects and resends before the adoption hands anything
+	// over.
+	p2, _ := connectWithWelcome(t, revived, remote.AgentRecord{AgentID: "agent-1"},
+		helloOffering(remote.ProtocolVersion, handle.ID, 0), nil)
+	early := "early: password=" + own + "\n"
+	// A probe stream, open only until the chunk has landed: in production
+	// nothing subscribes before the adoption hands its hashes over.
+	probeCtx, stopProbe := context.WithCancel(context.Background())
+	probeLines, err := revived.Stream(probeCtx, handle.ID)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	probe := newStreamSink(probeLines)
+	p2.sendLog(handle.ID, 0, early)
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(probe.text(), "early: ") {
+		if time.Now().After(deadline) {
+			t.Fatal("the device's resent output never reached the hub")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stopProbe()
+	if !revived.AddHandleTokens(handle.ID, redact.HashToken(own)) {
+		t.Fatal("the rehydrated handle refused its token hashes")
+	}
+
+	lines, err := revived.Stream(context.Background(), handle.ID)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	sink := newStreamSink(lines)
+	late := "late: " + own + " and a look-alike " + stranger + "\n"
+	p2.sendLog(handle.ID, int64(len(early)), late)
+	statusFrame, err := remote.NewFrame(remote.TypeStatus, "", handle.ID, remote.StatusPayload{
+		Status:      executor.Status{HandleID: handle.ID, State: executor.StateExited},
+		FinalOffset: int64(len(early) + len(late)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2.write(statusFrame)
+	sink.waitClosed(t, 3*time.Second)
+
+	got := sink.text()
+	if strings.Contains(got, own) {
+		t.Fatalf("the run's own token reached the hub's stream: %q", got)
+	}
+	if !strings.Contains(got, "early: password="+redact.Marker) || !strings.Contains(got, "late: "+redact.Marker) {
+		t.Fatalf("the device's output did not arrive scrubbed: %q", got)
+	}
+	if !strings.Contains(got, stranger) {
+		t.Fatalf("a token of the same shape that is not the run's was scrubbed: %q", got)
 	}
 }

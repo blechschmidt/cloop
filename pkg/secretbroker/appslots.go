@@ -38,6 +38,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/forgehost"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // AppSlotRecord is the durable account of one GitHub App token a lease holds.
@@ -70,6 +71,10 @@ type AppSlotRecord struct {
 	// TokenExpiresAt is when the token the workload or session holds stops
 	// working at GitHub.
 	TokenExpiresAt time.Time
+	// TokenHashes confirm each token the slot has held, newest last (Task
+	// 20454): what a hub process adopting the run recognises one by in its
+	// output and its pushes. A hash, a prefix and a length; never a token.
+	TokenHashes []redact.TokenHash
 }
 
 // AppSlotStore persists AppSlotRecords. Optional, like LeaseStore: a broker
@@ -115,6 +120,7 @@ func (b *Broker) slotRecord(slot *appTokenSlot) AppSlotRecord {
 		EnvExported:    slot.envExported,
 		FileName:       slot.fileName,
 		TokenExpiresAt: slot.heldExpiry(),
+		TokenHashes:    append([]redact.TokenHash(nil), slot.hashes...),
 	}
 }
 
@@ -165,6 +171,13 @@ func (b *Broker) recordSlots(slots []*appTokenSlot, names map[string]string) err
 // changed. Best-effort: what a failure loses is a successor's knowledge of the
 // newer expiry, and a successor that re-mints early loses nothing.
 func (b *Broker) recordSlotState(slot *appTokenSlot) {
+	b.recordSlotStateHeld(slot, time.Time{})
+}
+
+// recordSlotStateHeld is recordSlotState recording held, when it is set, as
+// the expiry of the token the workload holds: a refresh records a new token's
+// hash before its file reaches the workload, which still holds the old one.
+func (b *Broker) recordSlotStateHeld(slot *appTokenSlot, held time.Time) {
 	ss, ok := b.appSlotStore()
 	if !ok || slot == nil {
 		return
@@ -176,6 +189,9 @@ func (b *Broker) recordSlotState(slot *appTokenSlot) {
 	}
 	rec := b.slotRecord(slot)
 	b.mu.Unlock()
+	if !held.IsZero() {
+		rec.TokenExpiresAt = held
+	}
 	_, _ = ss.UpdateAppSlot(rec)
 }
 
@@ -282,6 +298,9 @@ func (b *Broker) restoreSlots(ev Event, rec LeaseRecord, from string) error {
 		// a file slot is due.
 		slot.current = appToken{grantID: r.GrantID, secretID: r.SecretID, secretName: r.SecretName,
 			baseURL: r.BaseURL, expiresAt: r.TokenExpiresAt}
+		// And what confirms each token it held, so the record this process
+		// rewrites keeps them beside the ones it mints.
+		slot.hashes = append([]redact.TokenHash(nil), r.TokenHashes...)
 		slot.delivered = true
 		slot.restored = true
 		slots = append(slots, slot)

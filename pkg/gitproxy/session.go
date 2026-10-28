@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // DefaultSessionTTL bounds one sandbox's access to the proxy.
@@ -437,10 +439,14 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	if err != nil {
 		return nil, err
 	}
-	token, err := randomToken(32)
+	secret, err := randomToken(sessionTokenBytes)
 	if err != nil {
 		return nil, err
 	}
+	// The prefix (Task 20454) is what lets a hub process that adopted the run,
+	// and holds only this token's hash, find it in the run's output and its
+	// pushes and confirm it against the hash.
+	token := redact.GitProxyTokenPrefix + secret
 
 	now := r.now()
 	s := &Session{
@@ -832,6 +838,15 @@ func UpstreamRepoPath(upstream string) (string, error) {
 	}
 	return p, nil
 }
+
+// sessionTokenBytes is the entropy in a session's password.
+const sessionTokenBytes = 32
+
+// TokenLen is the length of the password a session is minted with since Task
+// 20454: redact.GitProxyTokenPrefix and 32 bytes of entropy, base64url. A
+// session minted before then has an unprefixed 43-character password, which
+// still authenticates — only its hash is kept, of whatever was minted.
+const TokenLen = len(redact.GitProxyTokenPrefix) + (sessionTokenBytes*8+5)/6
 
 // randomToken returns n bytes of entropy as an unpadded base64url string.
 func randomToken(n int) (string, error) {

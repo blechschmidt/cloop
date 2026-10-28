@@ -141,7 +141,8 @@ type scanRun struct {
 
 // scanPack scans body as what follows a command section, the way
 // runPushScan does, recording what would have been forwarded.
-func scanPack(t testing.TB, body []byte, head *ReceivePack, secrets []ScanSecret, mode ScanMode, limits ScanLimits) scanRun {
+func scanPack(t testing.TB, body []byte, head *ReceivePack, secrets []ScanSecret, mode ScanMode, limits ScanLimits,
+	tokens ...ScanToken) scanRun {
 	t.Helper()
 	var run scanRun
 	var fwd bytes.Buffer
@@ -154,7 +155,7 @@ func scanPack(t testing.TB, body []byte, head *ReceivePack, secrets []ScanSecret
 	if head == nil {
 		head = &ReceivePack{Commands: []RefUpdate{{Old: zeroSHA, New: strings.Repeat("1", 40), Ref: "refs/heads/cloop/t"}}}
 	}
-	sc := newPackScanner(src, head.hashLen(), newMatcher(secrets), mode == ScanShapes, limits)
+	sc := newPackScanner(src, head.hashLen(), newMatcher(secrets, tokens...), mode == ScanShapes, limits)
 	sc.onRefuse = func() { run.refused = true }
 	run.err = sc.scan(head)
 	if run.err == nil && len(sc.findings) == 0 {

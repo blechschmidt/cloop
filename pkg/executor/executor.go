@@ -544,6 +544,19 @@ type Spec struct {
 	// its own; see remote.StartPayload.SecretFiles.
 	SecretFiles []SecretFile `json:"-"`
 
+	// RedactValues are further credentials a driver scrubs from the
+	// workload's output: the ones inside a delivered document that a workload
+	// can print without the rest of it — a kubeconfig's token, a registry's
+	// auth and the password inside it, a proxy URL's password, a git proxy
+	// session's password (Task 20454). SecretFiles is scrubbed as whole
+	// documents, which a token printed on its own does not match. The hub
+	// fills it from the lease (Lease.CredentialValues), the same values its
+	// push scan matches and a process adopting the run re-derives.
+	//
+	// json:"-" for the reason SecretFiles is: plaintext, never persisted,
+	// never shipped. A device scrubs with its own lease.
+	RedactValues []string `json:"-"`
+
 	// ProjectSeed carries the hub's `.cloop/` project state — goal,
 	// instructions, provider selection and plan — for a workload whose
 	// workspace had to be fetched rather than shared. Empty for a bind

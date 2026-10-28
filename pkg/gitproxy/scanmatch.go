@@ -25,6 +25,7 @@ package gitproxy
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"net/url"
 	"sort"
@@ -68,11 +69,22 @@ type matcher struct {
 	tails   map[uint64][]int32
 	filter  []uint64
 	maxLen  int
+	// tokens confirm the run's tokens this process knows only by hash
+	// (Task 20454), and tokenPat names the pattern standing for each: one
+	// with no bytes, which only carries the token's provenance and form.
+	// shapes are the prefixes they are found by, with the lengths recorded
+	// under each; maxPrefix is the longest prefix.
+	tokens    *redact.Tokens
+	tokenPat  map[[sha256.Size]byte]int32
+	shapes    []redact.TokenShape
+	prefixes  [][]byte
+	maxPrefix int
 }
 
-// newMatcher builds the patterns for secrets. It returns nil when no value is
-// long enough to match.
-func newMatcher(secrets []ScanSecret) *matcher {
+// newMatcher builds the patterns for secrets, and the confirmations for
+// tokens. It returns nil when no value is long enough to match and no token
+// can be found.
+func newMatcher(secrets []ScanSecret, tokens ...ScanToken) *matcher {
 	m := &matcher{tails: map[uint64][]int32{}, filter: make([]uint64, 1<<filterBits/64)}
 	seen := map[string]bool{}
 	for _, s := range secrets {
@@ -104,10 +116,41 @@ func newMatcher(secrets []ScanSecret) *matcher {
 			}
 		}
 	}
+	m.addTokens(tokens)
 	if len(m.pats) == 0 {
 		return nil
 	}
 	return m
+}
+
+// addTokens adds a bodiless pattern for each token a hash can confirm, so a
+// confirmed token is reported through the same path as a matched value.
+func (m *matcher) addTokens(tokens []ScanToken) {
+	var hs []redact.TokenHash
+	for _, tok := range tokens {
+		hs = append(hs, tok.Hash)
+	}
+	m.tokens = redact.NewTokens(hs...)
+	if m.tokens == nil {
+		return
+	}
+	m.tokenPat = map[[sha256.Size]byte]int32{}
+	for _, tok := range tokens {
+		if _, dup := m.tokenPat[tok.Hash.Sum]; dup {
+			continue
+		}
+		m.secrets = append(m.secrets, ScanSecret{Grant: tok.Grant, Secret: tok.Secret, Field: tok.Field})
+		m.pats = append(m.pats, scanPattern{secret: len(m.secrets) - 1, form: formRaw})
+		m.tokenPat[tok.Hash.Sum] = int32(len(m.pats) - 1)
+	}
+	if n := m.tokens.MaxLen(); n > m.maxLen {
+		m.maxLen = n
+	}
+	m.shapes = m.tokens.Shapes()
+	for _, sh := range m.shapes {
+		m.prefixes = append(m.prefixes, []byte(sh.Prefix))
+		m.maxPrefix = max(m.maxPrefix, len(sh.Prefix))
+	}
 }
 
 func tailKey(b []byte) uint64 {
@@ -128,11 +171,11 @@ func (m *matcher) redact(s string) string {
 		return s
 	}
 	for _, p := range m.pats {
-		if strings.Contains(s, string(p.b)) {
+		if len(p.b) > 0 && strings.Contains(s, string(p.b)) {
 			s = strings.ReplaceAll(s, string(p.b), redact.Marker)
 		}
 	}
-	return s
+	return m.tokens.Replace(s)
 }
 
 // contains reports whether b holds any pattern, for a short buffer read whole.
@@ -156,12 +199,27 @@ type matchStream struct {
 	buf []byte
 	w   uint64
 	n   int64
+	// prefixedTo is how far into buf token prefixes have been looked for, and
+	// pending the prefixes found whose token could still end in a later write:
+	// each write reads only what it added for prefixes, and hashes a
+	// candidate once, in the write its recorded length ends in.
+	prefixedTo int
+	pending    []tokenCandidate
+}
+
+// tokenCandidate is a token prefix found in a stream: where in buf it starts,
+// and which of the matcher's shapes it is.
+type tokenCandidate struct {
+	pos   int
+	shape int
 }
 
 func (s *matchStream) reset() {
 	s.buf = s.buf[:0]
 	s.w = 0
 	s.n = 0
+	s.prefixedTo = 0
+	s.pending = s.pending[:0]
 }
 
 // write scans p as the continuation of the segment and calls hit for every
@@ -199,7 +257,69 @@ func (s *matchStream) write(p []byte, hit func(pattern int, end int64) bool) {
 		}
 	}
 	s.w, s.n = w, n
+	if m.tokens != nil && !s.writeTokens(keep, hit) {
+		s.trim()
+		return
+	}
 	s.trim()
+}
+
+// writeTokens finds the run's hashed tokens that end in what the write just
+// added — buf[keep:] — and reports each through hit. It reports false when hit
+// asked to stop.
+//
+// The prefixes a write adds are looked for in it alone (and the few bytes
+// before it a prefix can straddle). A token is no longer than the window
+// keeps, so one ending in this write either started in it or is a prefix
+// found by an earlier write, still pending. Each candidate is hashed once per
+// recorded length, in the write that length ends in: a stream of many small
+// writes — a delta's inserts — costs what it adds, not the window per write.
+func (s *matchStream) writeTokens(keep int, hit func(pattern int, end int64) bool) bool {
+	m, buf := s.m, s.buf
+	from := max(s.prefixedTo-(m.maxPrefix-1), 0)
+	for i, prefix := range m.prefixes {
+		for at := from; at < len(buf); {
+			k := bytes.Index(buf[at:], prefix)
+			if k < 0 {
+				break
+			}
+			pos := at + k
+			// One that ended before prefixedTo was found by an earlier write.
+			if pos+len(prefix) > s.prefixedTo {
+				s.pending = append(s.pending, tokenCandidate{pos: pos, shape: i})
+			}
+			at = pos + 1
+		}
+	}
+	s.prefixedTo = len(buf)
+	kept := s.pending[:0]
+	ok := true
+	for _, c := range s.pending {
+		lens := m.shapes[c.shape].Lens
+		if ok {
+			for _, l := range lens {
+				end := c.pos + l
+				if end <= keep || end > len(buf) {
+					continue
+				}
+				idx, found := m.tokens.Confirm(buf[c.pos:end])
+				if !found {
+					continue
+				}
+				pi := m.tokenPat[m.tokens.Hash(idx).Sum]
+				if !hit(int(pi), s.n-int64(len(buf)-end)) {
+					ok = false
+				}
+				break
+			}
+		}
+		// Kept while its longest recorded length can still end later.
+		if c.pos+lens[0] > len(buf) {
+			kept = append(kept, c)
+		}
+	}
+	s.pending = kept
+	return ok
 }
 
 // trim keeps the bytes a pattern ending in the next write could start in. It
@@ -211,8 +331,19 @@ func (s *matchStream) trim() {
 		keep = 0
 	}
 	if len(s.buf) > keep+trimSlack {
-		copy(s.buf, s.buf[len(s.buf)-keep:])
+		shift := len(s.buf) - keep
+		copy(s.buf, s.buf[shift:])
 		s.buf = s.buf[:keep]
+		// Token candidates move with the bytes they name. A pending one is
+		// within the longest token of the end, which the window keeps.
+		s.prefixedTo = max(s.prefixedTo-shift, 0)
+		kept := s.pending[:0]
+		for _, c := range s.pending {
+			if c.pos -= shift; c.pos >= 0 {
+				kept = append(kept, c)
+			}
+		}
+		s.pending = kept
 	}
 }
 

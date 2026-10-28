@@ -2,13 +2,16 @@ package secretstore
 
 // appslots.go persists the broker's GitHub App token slots (Task 20383): the
 // scope each token a lease holds was minted at, so the process that takes the
-// lease over re-mints at that scope. The record type has no field a token
-// could travel in; tests/security scans the table for one regardless.
+// lease over re-mints at that scope, and the hash of every token the slot held
+// (Task 20454), so it can confirm one found in the run's output. The record
+// type has no field a token could travel in; tests/security scans the table for
+// one regardless.
 
 import (
 	"fmt"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -35,6 +38,7 @@ func (s *Store) PutAppSlot(r secretbroker.AppSlotRecord) error {
 		FileName:       r.FileName,
 		TokenExpiresAt: r.TokenExpiresAt,
 		UpdatedAt:      time.Now().UTC(),
+		TokenHashes:    redact.FormatTokenHashes(r.TokenHashes),
 	})
 }
 
@@ -62,6 +66,10 @@ func (s *Store) ListAppSlots(leaseID string) ([]secretbroker.AppSlotRecord, erro
 		if err := secretbroker.UnmarshalAppSlotScope(row.Scope, &rec); err != nil {
 			continue
 		}
+		// An entry that cannot be read costs a restarted hub its confirmation
+		// of that one token, not the slot's others, nor the slot: its scope
+		// still says how to re-mint.
+		rec.TokenHashes, _ = redact.ParseTokenHashes(row.TokenHashes)
 		out = append(out, rec)
 	}
 	return out, nil
@@ -82,6 +90,7 @@ func (s *Store) UpdateAppSlot(r secretbroker.AppSlotRecord) (bool, error) {
 		EnvExported:    r.EnvExported,
 		TokenExpiresAt: r.TokenExpiresAt,
 		Scope:          scope,
+		TokenHashes:    redact.FormatTokenHashes(r.TokenHashes),
 	})
 }
 

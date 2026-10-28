@@ -18,8 +18,10 @@ package ui
 //
 // A hub process that adopts a run after the one that dispatched it stopped
 // has no spec and no materials. It scans with what Broker.RedactionCredentials
-// re-derives from the run's grants — env secrets and personal access tokens —
-// and the docs say what that leaves out rather than claim more.
+// re-derives from the run's grants — every credential a grant delivered — and
+// with the recorded hashes of the tokens the dispatcher minted, which it never
+// held (adopted_tokens.go, Task 20454): those are found by their prefix and
+// confirmed by their hash.
 //
 // The values live in this process's memory only, for as long as the run or a
 // session naming it does. Nothing here writes them anywhere.
@@ -51,6 +53,9 @@ type runPushScan struct {
 	workDir  string
 	leaseIDs []string
 	secrets  []gitproxy.ScanSecret
+	// tokens are the run's tokens this process knows only by hash: an adopted
+	// run's, minted by the process that dispatched it (Task 20454).
+	tokens []gitproxy.ScanToken
 	// ended: the run is over; the entry goes once no session names it.
 	ended bool
 }
@@ -158,6 +163,39 @@ func adoptRunPushScan(runID, workDir, leaseID string, creds []secretbroker.Crede
 	e.secrets = append(e.secrets, scanSecrets(creds)...)
 }
 
+// adoptRunPushScanTokens records the tokens an adopted run's pushes are
+// scanned for that this process knows only by hash (Task 20454), under the
+// run's id — or, when the run's id cannot be told, under its handle, where a
+// session finds it by its lease. The entry ends with the workload.
+func adoptRunPushScanTokens(runID, workDir string, ex executor.Executor, handleID string, leaseIDs []string,
+	tokens []gitproxy.ScanToken) {
+	if len(tokens) == 0 || activeGitProxy() == nil {
+		return
+	}
+	key := strings.TrimSpace(runID)
+	if key == "" {
+		key = "handle:" + handleID
+	}
+	pushScans.Lock()
+	e := pushScans.runs[key]
+	if e == nil {
+		e = &runPushScan{workDir: workDir}
+		pushScans.runs[key] = e
+	}
+	e.ended = false
+	for _, id := range leaseIDs {
+		if id != "" && !pushScanHas(e.leaseIDs, id) {
+			e.leaseIDs = append(e.leaseIDs, id)
+		}
+	}
+	e.tokens = append(e.tokens, tokens...)
+	pushScans.Unlock()
+	go func() {
+		watchWorkloadExit(ex, handleID)
+		endRunPushScan(key)
+	}()
+}
+
 // endRunPushScan marks a run over, and forgets it once no session names it.
 func endRunPushScan(runID string) {
 	pushScans.Lock()
@@ -169,51 +207,76 @@ func endRunPushScan(runID string) {
 }
 
 // sweepRunPushScans forgets every run that is over and that no live git
-// proxy session names: a workspace's write-back push can outlive the run's own
-// lease by the time its pinned session takes to close.
+// proxy session names, by its run or by a lease it holds: a workspace's
+// write-back push can outlive the run's own lease by the time its pinned
+// session takes to close.
 func sweepRunPushScans() {
-	named := map[string]bool{}
+	named, leases := map[string]bool{}, map[string]bool{}
 	if svc := activeGitProxy(); svc != nil && svc.reg != nil {
 		for _, sess := range svc.reg.Sessions() {
-			if !sess.Closed() && sess.RunID != "" {
+			if sess.Closed() {
+				continue
+			}
+			if sess.RunID != "" {
 				named[sess.RunID] = true
+			}
+			if sess.LeaseID != "" {
+				leases[sess.LeaseID] = true
 			}
 		}
 	}
 	pushScans.Lock()
 	defer pushScans.Unlock()
 	for id, e := range pushScans.runs {
-		if e.ended && !named[id] {
+		if !e.ended || named[id] {
+			continue
+		}
+		held := false
+		for _, l := range e.leaseIDs {
+			held = held || leases[l]
+		}
+		if !held {
 			delete(pushScans.runs, id)
 		}
 	}
 }
 
-// runPushScanFor finds the entry a session's pushes are scanned with: by its
-// run, or else by the lease its credential stands on.
-func runPushScanFor(sess *gitproxy.Session) (workDir string, secrets []gitproxy.ScanSecret) {
+// runPushScanFor gathers what a session's pushes are scanned with: the entry
+// of its run, and every entry holding the lease its credential stands on. An
+// adopted run can have two — the values its lease's takeover re-derived under
+// the lease's run, and the token hashes filed under its handle when no record
+// named its run — and a push is scanned for both.
+func runPushScanFor(sess *gitproxy.Session) (workDir string, secrets []gitproxy.ScanSecret, tokens []gitproxy.ScanToken) {
 	pushScans.Lock()
 	defer pushScans.Unlock()
-	e := pushScans.runs[strings.TrimSpace(sess.RunID)]
-	if e == nil && sess.LeaseID != "" {
+	var matched []*runPushScan
+	byRun := pushScans.runs[strings.TrimSpace(sess.RunID)]
+	if byRun != nil {
+		matched = append(matched, byRun)
+	}
+	if sess.LeaseID != "" {
 		for _, cand := range pushScans.runs {
-			if pushScanHas(cand.leaseIDs, sess.LeaseID) {
-				e = cand
-				break
+			if cand != byRun && pushScanHas(cand.leaseIDs, sess.LeaseID) {
+				matched = append(matched, cand)
 			}
 		}
 	}
-	if e == nil {
-		return "", nil
+	for _, e := range matched {
+		if workDir == "" {
+			workDir = e.workDir
+		}
+		secrets = append(secrets, e.secrets...)
+		tokens = append(tokens, e.tokens...)
 	}
-	return e.workDir, append([]gitproxy.ScanSecret(nil), e.secrets...)
+	return workDir, secrets, tokens
 }
 
 // pushScanFor is the proxy's PushScan hook.
 func (s *gitProxyService) pushScanFor(sess *gitproxy.Session) gitproxy.PushScan {
 	scan := gitproxy.PushScan{Mode: s.scanMode, Limits: s.scanLimits}
-	workDir, secrets := runPushScanFor(sess)
+	workDir, secrets, tokens := runPushScanFor(sess)
 	scan.Secrets = secrets
+	scan.Tokens = tokens
 	// A project may ask for a stricter scan than the hub's, never a weaker
 	// one.
 	if m, ok := projectPushScanMode(pushScanProjectDir(workDir, sess.ProjectID)); ok {

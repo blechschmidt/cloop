@@ -41,6 +41,8 @@ import (
 //     staged tmpfs, a projected Kubernetes Secret, a remote agent's vault).
 //   - Env, for the variables the lease declared credential-bearing.
 //
+// Plus RedactValues: the credentials inside those documents, each on its own.
+//
 // A localprocess workload has neither: the hub materialised the files on the
 // shared filesystem, so Spec.SecretFiles is empty and only the paths travel.
 // That case is covered on the other side of the boundary, where the workload
@@ -52,6 +54,9 @@ func (s Spec) SecretValues() []string {
 		out = append(out, redact.Values(f.Content)...)
 	}
 	out = append(out, sensitiveEnvValues(s.Env)...)
+	// And the credentials inside those documents, which a workload can print
+	// on their own.
+	out = append(out, s.RedactValues...)
 	return out
 }
 
@@ -106,4 +111,23 @@ type HandleRedactor interface {
 	// AddHandleRedactions extends the redaction of handleID's output with
 	// values, from its next chunk on, and reports whether the handle is known.
 	AddHandleRedactions(handleID string, values ...string) bool
+}
+
+// HandleTokenRedactor is implemented by a driver that can also be handed, for
+// a handle it scrubs on the hub, the recorded hashes of tokens its workload
+// holds that the hub process asking never had (Task 20454).
+//
+// A hub process adopting a run can re-derive the values of what the run's
+// grants delivered (HandleRedactor), but not the tokens its dispatcher minted:
+// the git proxy, Kubernetes monitor, egress and model relay sessions' tokens
+// and the GitHub App installation tokens, whose plaintext is never stored.
+// What is stored of each is a SHA-256 with the prefix and length the token was
+// minted with, and that is what the driver's redaction confirms a candidate
+// against (redact.Tokens). A run the process dispatched itself never needs
+// this: its Spec named every value.
+type HandleTokenRedactor interface {
+	// AddHandleTokens extends the redaction of handleID's output to the tokens
+	// hs confirm, from its next chunk on, and reports whether the handle is
+	// known.
+	AddHandleTokens(handleID string, hs ...redact.TokenHash) bool
 }

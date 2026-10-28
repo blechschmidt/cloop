@@ -2,12 +2,14 @@ package egressbroker
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 )
 
@@ -64,8 +66,15 @@ func TestRedeemMintsACredentialThatIsNeverStored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("redeem: %v", err)
 	}
-	if len(red.Token) != TokenBytes*2 {
-		t.Fatalf("token is %d hex chars, want %d (256 bits)", len(red.Token), TokenBytes*2)
+	// The versioned prefix and 256 bits of hex (Task 20454): the prefix is
+	// what an adopting hub finds the token by, holding only its hash.
+	body, prefixed := strings.CutPrefix(red.Token, redact.EgressTokenPrefix)
+	if !prefixed || len(red.Token) != TokenLen || len(body) != TokenBytes*2 {
+		t.Fatalf("token is %d chars (prefixed %t), want %s and %d hex chars (256 bits)",
+			len(red.Token), prefixed, redact.EgressTokenPrefix, TokenBytes*2)
+	}
+	if _, err := hex.DecodeString(body); err != nil {
+		t.Fatalf("token body is not hex: %v", err)
 	}
 
 	// A marshalled session must not carry the credential — that is what lets

@@ -1942,8 +1942,13 @@ memory is taken over too:
   names the run's lease. The adopting process takes it over — the same lease id,
   extended from then on by its keepalive, listed in its Secrets panel, released
   by it when the run ends — and re-derives from the lease's grants the values it
-  scrubs from the run's output (env secrets and personal access tokens; a GitHub
-  App token is left to the pattern scrubbers, which recognise its shape). A lease
+  scrubs from the run's output and scans its pushes for: every credential a
+  grant delivered, through the delivery's own narrowing (Task 20454). The tokens
+  the dispatching process minted — App installation tokens and the git proxy,
+  Kubernetes monitor, egress and model relay session tokens — have no stored
+  plaintext; the driver and the push scan find each by its minted prefix and
+  confirm it against the hash recorded when it was minted, before anything of
+  the run is streamed or taken over. A lease
   that lapsed, or whose grants were withdrawn, while no hub held it is taken back
   from the device instead, and the leader's lease janitor sweeps one whose holder
   never came back once it lapses.

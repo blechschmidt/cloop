@@ -1855,6 +1855,37 @@ jobs:
             exit 1
           fi
 
+      # An adopted run keeps its push-scan and output-redaction coverage (Task
+      # 20454): two members run the git proxy and the Kubernetes monitor behind
+      # a TCP load balancer, a device run is granted a GitHub App, a
+      # kubeconfig and an env secret through the member holding the agent,
+      # and that member is SIGKILLed. The survivor adopts the run and must
+      # refuse every push carrying a credential the run holds — the session
+      # tokens the dead member minted, known only by their recorded hashes,
+      # among them — and stream none of them.
+      - name: Hold an adopted run to every credential it holds
+        timeout-minutes: 5
+        env:
+          CLOOP_CLUSTER_E2E: "1"
+          CLOOP_CLUSTER_BIN: /tmp/cloop-cluster-bin
+          CLOOP_CLUSTER_KEEP: "1"
+          TMPDIR: /tmp/cloop-cluster-e2e
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          go test ./tests/cluster/ -run TestAnAdoptedRunsCredentialsStayOutOfItsPushesAndItsOutput -v -count=1 -timeout 4m 2>&1 | tee /tmp/cluster-adopted.log
+          grep -qE '^--- PASS: TestAnAdoptedRunsCredentialsStayOutOfItsPushesAndItsOutput \(' /tmp/cluster-adopted.log || {
+            echo "::error::go test succeeded but TestAnAdoptedRunsCredentialsStayOutOfItsPushesAndItsOutput did not pass — it was skipped (is git-http-backend installed?)"
+            exit 1
+          }
+          if races=$(grep -rl "WARNING: DATA RACE" "$TMPDIR" --include='*.log'); then
+            echo "$races"
+            echo "::error::a hub member or the agent reported a data race (files above)"
+            # shellcheck disable=SC2086 # one word per file
+            go run ./scripts/ci-annotate $races
+            exit 1
+          fi
+
       # A revocation outlives the member holding the lease (Task 20419): the
       # member holding a container run's lease is SIGKILLed, and the lease and
       # then its grant are revoked through the survivor. The credential must

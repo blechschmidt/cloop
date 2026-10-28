@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // ── memStore's AppSlotStore half ─────────────────────────────────────────────
@@ -53,6 +55,10 @@ func (m *memStore) UpdateAppSlot(r AppSlotRecord) (bool, error) {
 	cur.Guarded, cur.SessionID, cur.EnvExported, cur.TokenExpiresAt = r.Guarded, r.SessionID, r.EnvExported, r.TokenExpiresAt
 	cur.BaseURL, cur.InstallationID, cur.RepositoryIDs = r.BaseURL, r.InstallationID, r.RepositoryIDs
 	cur.Permissions, cur.Granted, cur.Summary = r.Permissions, r.Granted, r.Summary
+	if len(r.TokenHashes) > 0 {
+		// As statedb's UPDATE: a hash is never taken back.
+		cur.TokenHashes = append([]redact.TokenHash(nil), r.TokenHashes...)
+	}
 	m.appSlots[k] = cur
 	return true, nil
 }
@@ -103,6 +109,19 @@ func (m *memStore) slotRecord(leaseID, grantID string) (AppSlotRecord, bool) {
 	defer m.mu.Unlock()
 	r, ok := m.appSlots[[2]string{leaseID, grantID}]
 	return r, ok
+}
+
+// appSlotsOf returns the slot records of leaseID.
+func (m *memStore) appSlotsOf(leaseID string) []AppSlotRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []AppSlotRecord
+	for k, r := range m.appSlots {
+		if k[0] == leaseID {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (m *memStore) slotCount() int {
@@ -654,5 +673,79 @@ func TestSlotRestoreRetriesAfterAStoreError(t *testing.T) {
 	fr.Close()
 	if rec, _ := w.store.slotRecord(lease.ID, w.grant.ID); rec.Holder != "hub_b" {
 		t.Fatalf("slot holder = %q, want the process that took the lease over", rec.Holder)
+	}
+}
+
+// TestEveryAppTokenASlotHeldIsConfirmableFromItsRecord: the record of a slot
+// carries a hash for every installation token the slot has held, each written
+// before its token can reach a workload — the first with the lease, a refresh's
+// before its file is delivered — and kept across a takeover, so a hub process
+// that adopts the run recognises any of them in its output and no other token
+// of the same shape (Task 20454). The record still carries no token.
+func TestEveryAppTokenASlotHeldIsConfirmableFromItsRecord(t *testing.T) {
+	w := newSlotWorld(t, []string{"acme/api"}, []string{"contents:write"})
+	a, _ := w.process(t, "hub_a", nil)
+	lease := w.lease(t, a)
+	first := fileToken(t, lease)
+	confirms := func(label, token string) bool {
+		t.Helper()
+		rec, ok := w.store.slotRecord(lease.ID, w.grant.ID)
+		if !ok {
+			t.Fatalf("%s: no slot record", label)
+		}
+		raw, _ := json.Marshal(rec)
+		if strings.Contains(string(raw), token) {
+			t.Fatalf("%s: the slot record carries a token: %s", label, raw)
+		}
+		return len(redact.NewTokens(rec.TokenHashes...).Find("echo "+token+"\n")) == 1
+	}
+	if !confirms("at lease", first) {
+		t.Fatal("the first token is not confirmable from the record written with the lease")
+	}
+	stranger := "ghs_" + strings.Repeat("Ab3", 12)
+	if confirms("at lease", stranger) {
+		t.Fatal("a token of the same shape that the slot never held is confirmed")
+	}
+
+	// Taken over, the slot keeps what its first holder recorded.
+	w.clock.advance(5 * time.Minute)
+	b, _ := w.process(t, "hub_b", nil)
+	taken, err := b.Restore(context.Background(), lease.ID)
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if !confirms("after the takeover", first) {
+		t.Fatal("the takeover lost the first token's hash")
+	}
+	held := func() time.Time { rec, _ := w.store.slotRecord(lease.ID, w.grant.ID); return rec.TokenExpiresAt }
+
+	// A refresh's token is on record before its file reaches the workload,
+	// beside the expiry of the token the workload still holds.
+	refresh := func(label string) string {
+		t.Helper()
+		before := held()
+		fr, err := b.RefreshLeaseFiles(context.Background(), taken)
+		if err != nil || fr == nil || len(fr.Files) != 1 {
+			t.Fatalf("%s: RefreshLeaseFiles = %+v, %v", label, fr, err)
+		}
+		tok := strings.TrimSpace(string(fr.Files[0].Content))
+		if !confirms(label+", before delivery", tok) {
+			t.Fatalf("%s: the refreshed token is not on record before its file is delivered", label)
+		}
+		if got := held(); !got.Equal(before) {
+			t.Fatalf("%s: before delivery the record names expiry %s, want the held token's %s", label, got, before)
+		}
+		fr.Delivered(false)
+		fr.Close()
+		return tok
+	}
+	w.clock.advance(50 * time.Minute)
+	second := refresh("first refresh")
+	w.clock.advance(time.Hour - 5*time.Minute)
+	third := refresh("second refresh")
+	for label, tok := range map[string]string{"first": first, "second": second, "third": third} {
+		if !confirms("at the end", tok) {
+			t.Errorf("the %s token is not confirmable from the record", label)
+		}
 	}
 }

@@ -204,7 +204,7 @@ func (p *Proxy) sessionIDOf(r *http.Request) string {
 	if !ok {
 		return ""
 	}
-	id, _, ok := strings.Cut(strings.TrimSpace(token), ".")
+	id, ok := tokenSessionID(token)
 	if !ok {
 		return ""
 	}

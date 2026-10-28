@@ -30,7 +30,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -480,17 +479,13 @@ func (b *Broker) HeldElsewhere(leaseID string) bool {
 	return rec.Holder != b.leaseHolder
 }
 
-// RedactionValues returns the plaintext a held lease's stored credentials
-// carry — the delivered keys of its env secrets, the token of a personal
-// access token — for a hub process that must scrub its workload's output
-// without having issued it: the one that took the lease over with its run
-// (Task 20382). The issuing process scrubbed with what it delivered; a
-// rehydrated handle has nothing, because a dispatched Spec's secrets are never
-// persisted.
+// RedactionValues returns the plaintext a held lease's credentials carry, for
+// a hub process that must scrub its workload's output without having issued
+// it: the one that took the lease over with its run (Task 20382). The issuing
+// process scrubbed with what it delivered. A rehydrated handle has nothing,
+// because a dispatched Spec's secrets are never persisted.
 //
-// It renders nothing and mints nothing: a GitHub App token was minted for the
-// lease by the process that issued it and is not in the store, and it is the
-// shape the pattern-based scrubbers already recognise. Nil for a lease this
+// It is RedactionCredentials without the provenance. Nil for a lease this
 // broker does not hold.
 func (b *Broker) RedactionValues(leaseID string) []string {
 	creds := b.RedactionCredentials(leaseID)
@@ -504,18 +499,33 @@ func (b *Broker) RedactionValues(leaseID string) []string {
 	return out
 }
 
-// RedactionCredentials is RedactionValues with each value's provenance: the
-// values an adopted run's pushes are scanned for (Task 20436), which a refusal
-// names by grant and secret. It covers what the store can re-derive — env
-// secrets and personal access tokens — and nothing a lease minted or rewrote:
-// a GitHub App token, a kubeconfig or registry document, a proxy session's
-// token.
+// RedactionCredentials re-derives, for a lease this broker took over, every
+// credential its grants delivered, each with its provenance. These are the
+// values the adopted run's output is scrubbed of and its pushes are scanned
+// for (Task 20436), which a refusal names by grant and secret.
+//
+// Each grant's material is rebuilt through the delivery's own narrowing
+// (rederiveMaterial) and taken apart by the code that takes a delivered lease
+// apart (Lease.CredentialValues). That covers the delivered keys of an env
+// secret, a personal access token, a kubeconfig's tokens and client keys after
+// MinimizeKubeconfig (Task 20454), a registry's auth with the password inside
+// it, and an egress proxy secret's URL with its password. So the set equals
+// what the lease delivered, less what only a delivery could produce. Nothing
+// is minted or rendered. A GitHub App installation token and the tokens of
+// the sessions a guard minted have no stored plaintext, so the adopting
+// process finds those by the hashes recorded when they were minted
+// (redact.Tokens).
 func (b *Broker) RedactionCredentials(leaseID string) []CredentialValue {
 	b.mu.Lock()
 	st, ok := b.leases[leaseID]
-	var grantIDs []string
+	var (
+		grantIDs []string
+		req      Requester
+		actor    string
+	)
 	if ok {
 		grantIDs = append(grantIDs, st.grantIDs...)
+		req, actor = st.requester, st.actor
 	}
 	b.mu.Unlock()
 	var out []CredentialValue
@@ -525,37 +535,14 @@ func (b *Broker) RedactionCredentials(leaseID string) []CredentialValue {
 			continue
 		}
 		s, err := b.store.GetSecret(g.SecretID)
-		if err != nil || (s.Kind != KindEnv && s.Kind != KindGitHubPAT) {
-			continue
-		}
-		plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, s.ID), s.Envelope())
 		if err != nil {
 			continue
 		}
-		switch s.Kind {
-		case KindEnv:
-			env := jsonUnmarshalEnv(plaintext, s.Name)
-			keys := make([]string, 0, len(env))
-			for k := range env {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				if v := env[k]; deliverableEnvKey(g.Constraints, k) && v != "" {
-					out = append(out, CredentialValue{Value: v, GrantID: g.ID, SecretName: s.Name, Kind: s.Kind,
-						Field: "env " + k})
-				}
-			}
-		case KindGitHubPAT:
-			// The token, whichever form the payload records it in: a
-			// GitHub Enterprise Server PAT is a JSON document (Task 20423),
-			// and redacting the document would leave the token itself.
-			if token, _, perr := parseGitHubPAT(plaintext); perr == nil && token != "" {
-				out = append(out, CredentialValue{Value: token, GrantID: g.ID, SecretName: s.Name, Kind: s.Kind,
-					Field: "the GitHub token"})
-			}
+		mat, err := b.rederiveMaterial(s, g, req, actor, leaseID)
+		if err != nil {
+			continue
 		}
-		zero(plaintext)
+		out = append(out, mat.credentialValues()...)
 	}
-	return out
+	return dedupeCredentialValues(out)
 }

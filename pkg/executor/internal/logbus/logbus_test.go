@@ -386,3 +386,49 @@ func TestAddRedactionsScrubsAReplacedCredential(t *testing.T) {
 		t.Fatalf("a credential reached the bus: %q", got)
 	}
 }
+
+// TestRedactionsAddedLateScrubTheBacklogAcrossChunks (Task 20454): output
+// emitted before the bus was told what to scrub — a reconnecting device's
+// resend, before the hub process adopting its run hands anything over — is
+// scrubbed in the backlog a later subscriber replays, a token split across two
+// chunks included, and a token whose start ends the backlog is completed by
+// the next chunk rather than published in halves. Nothing else is lost.
+func TestRedactionsAddedLateScrubTheBacklogAcrossChunks(t *testing.T) {
+	split := redact.GitProxyTokenPrefix + strings.Repeat("Ab3_", 10) + "xyz"
+	tail := redact.KubeGuardTokenPrefix + strings.Repeat("Qr7-", 4) + "." + strings.Repeat("Zx9_", 10) + "abc"
+	value := "a-leased-value-0123456789"
+	b := New("h1", executor.StreamCombined, Options{})
+	b.Emit("one " + split[:20])
+	b.Emit(split[20:] + " two " + value[:9])
+	b.Emit(value[9:] + " three " + tail[:15])
+
+	b.AddTokens(redact.HashToken(split), redact.HashToken(tail))
+	b.AddRedactions(value)
+	ch := b.Subscribe(context.Background())
+	b.Emit(tail[15:] + " four\n")
+	b.Close()
+	got, closed := collect(t, ch, 2*time.Second)
+	if !closed {
+		t.Fatal("channel did not close")
+	}
+	want := "one " + redact.Marker + " two " + redact.Marker + " three " + redact.Marker + " four\n"
+	if got != want {
+		t.Fatalf("replayed %q, want %q", got, want)
+	}
+}
+
+// TestALateRedactionNeverRepeatsWhatASubscriberWasSent: with a subscriber
+// already reading, the backlog is scrubbed for the next one, and nothing it
+// was sent is sent again.
+func TestALateRedactionNeverRepeatsWhatASubscriberWasSent(t *testing.T) {
+	b := New("h1", executor.StreamCombined, Options{})
+	live := b.Subscribe(context.Background())
+	b.Emit("token cloop_git1_")
+	b.AddTokens(redact.HashToken(redact.GitProxyTokenPrefix + strings.Repeat("Ab3_", 10) + "xyz"))
+	b.Emit(" done\n")
+	b.Close()
+	got, _ := collect(t, live, 2*time.Second)
+	if got != "token cloop_git1_ done\n" {
+		t.Fatalf("the live subscriber got %q", got)
+	}
+}

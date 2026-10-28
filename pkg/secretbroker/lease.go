@@ -133,6 +133,16 @@ type Material struct {
 	// what lets a kubeconfig whose constraints only the monitor enforces be
 	// delivered without it.
 	kubeUnguardedAck UnguardedAck
+	// kubeUpstream is the minimised kubeconfig a Kubernetes monitor session
+	// presents upstream, for a guarded delivery whose Files carry the
+	// session's document instead. Like githubToken it is for the hub's own
+	// use: credentialValues matches what it holds, and nothing writes it.
+	kubeUpstream []byte
+
+	// rederive marks a material rebuilt for a hub process that took its lease
+	// over (rederiveMaterial): narrowed as its delivery was, with no guard
+	// asked and nothing minted, refused or recorded on the way.
+	rederive bool
 }
 
 // GitHubTokenExpiresAt reports when the GitHub token this material carries

@@ -50,6 +50,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitproxycreds"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretbroker/secretbrokertest"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -470,6 +471,34 @@ users:
 				if want := hex.EncodeToString(ciSum[:]); row["token_sha256"] != want {
 					t.Fatalf("ci_sessions row %s: token_sha256 %q is not the SHA-256 of its token",
 						row["session_id"], row["token_sha256"])
+				}
+			case "app_token_slots":
+				// The hashes a hub process adopting the run confirms an App
+				// token by (Task 20454): each confirms one installation token
+				// GitHub minted for the run, and nothing in the row is one.
+				hs, err := redact.ParseTokenHashes(row["token_hashes"])
+				if err != nil || len(hs) == 0 {
+					t.Fatalf("app_token_slots row %s/%s: token_hashes %q does not record its token (%v)",
+						row["lease_id"], row["grant_id"], row["token_hashes"], err)
+				}
+				confirms := redact.NewTokens(hs...)
+				for _, h := range hs {
+					found := false
+					for _, m := range gh.Scoped() {
+						if redact.HashToken(m.Token) == h {
+							found = true
+						}
+					}
+					if !found {
+						t.Fatalf("app_token_slots row %s/%s records a hash of no token minted for the run",
+							row["lease_id"], row["grant_id"])
+					}
+				}
+				for _, secret := range secrets {
+					if confirms.Find(secret) != nil && !strings.HasPrefix(secret, redact.GitHubAppTokenPrefix) {
+						t.Fatalf("app_token_slots row %s/%s confirms a credential that is not an App token",
+							row["lease_id"], row["grant_id"])
+					}
 				}
 			}
 		}

@@ -117,6 +117,14 @@ func (m Material) credentialValues() []CredentialValue {
 			}
 		}
 	}
+	// The cluster credential behind a Kubernetes monitor session, which the
+	// hub presents upstream and the sandbox never got: matched anyway, for the
+	// reason the GitHub token above is.
+	if m.Kind == KindKubeconfig && len(m.kubeUpstream) > 0 {
+		for _, kv := range kubeconfigCredentials(m.kubeUpstream) {
+			add(kv.value, kv.field)
+		}
+	}
 	return out
 }
 

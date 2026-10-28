@@ -20,6 +20,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -34,6 +35,8 @@ type takeoverExecutor struct {
 	once sync.Once
 	// redactions are the values the hub asked to scrub, per handle.
 	redactions map[string][]string
+	// tokens are the recorded token hashes it asked to scrub, per handle.
+	tokens map[string][]redact.TokenHash
 	// statuses counts Status calls: each is a round trip to a device.
 	statuses int
 }
@@ -48,6 +51,25 @@ func (e *takeoverExecutor) AddHandleRedactions(handleID string, values ...string
 	return true
 }
 
+func (e *takeoverExecutor) AddHandleTokens(handleID string, hs ...redact.TokenHash) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.tokens == nil {
+		e.tokens = map[string][]redact.TokenHash{}
+	}
+	e.tokens[handleID] = append(e.tokens[handleID], hs...)
+	return true
+}
+
+// scrub returns text as a driver's log bus publishes handleID's output: through
+// the set the hub's values and token hashes make, built the way logbus builds
+// it (With, WithTokens) and applied the way it applies it.
+func (e *takeoverExecutor) scrub(handleID, text string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return (*redact.Set)(nil).With(e.redactions[handleID]...).WithTokens(e.tokens[handleID]...).String(text)
+}
+
 func newTakeoverExecutor(id string) *takeoverExecutor {
 	return &takeoverExecutor{id: id, st: executor.Status{State: executor.StateRunning}, done: make(chan struct{})}
 }
@@ -55,7 +77,9 @@ func newTakeoverExecutor(id string) *takeoverExecutor {
 func (e *takeoverExecutor) ID() string   { return e.id }
 func (e *takeoverExecutor) Kind() string { return executor.KindRemoteAgent }
 func (e *takeoverExecutor) Capabilities() executor.Capabilities {
-	return executor.Capabilities{Isolation: executor.IsolationRemote}
+	// A device whose agent places a lease's files itself, as every agent
+	// since protocol 4 does.
+	return executor.Capabilities{Isolation: executor.IsolationRemote, SupportsSecretFiles: true}
 }
 func (e *takeoverExecutor) Start(context.Context, executor.Spec) (executor.Handle, error) {
 	return executor.Handle{}, nil

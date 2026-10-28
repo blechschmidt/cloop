@@ -414,7 +414,7 @@ func (p *Proxy) handleReceivePack(w http.ResponseWriter, r *http.Request, sess *
 	// command line a refusal would quote — and no row about this push may
 	// carry one (Task 20436).
 	scan := p.pushScanFor(sess)
-	m := newMatcher(scan.Secrets)
+	m := newMatcher(scan.Secrets, scan.Tokens...)
 
 	head, raw, rest, err := parseReceivePackSplit(body)
 	if err != nil {

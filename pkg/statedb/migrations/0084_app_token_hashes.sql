@@ -1,0 +1,23 @@
+-- 0084_app_token_hashes: the hashes of the GitHub App installation tokens a
+-- lease's slot has held (Task 20454).
+--
+-- A hub process that adopts a run another one dispatched holds none of the App
+-- tokens that process minted for it. Their plaintext is never stored, so
+-- until the run ended, a workload that printed one, or committed and pushed
+-- it, went unscrubbed and unrefused. The adopting process now searches the
+-- run's output and its pushes for ghs_ candidates and confirms each one against
+-- what this column records:
+--
+--   token_hashes  space-separated "<prefix>:<len>:<sha256 hex>" entries, one
+--                 per token minted for the slot, newest last, at most 64. The
+--                 prefix and length say how a candidate is cut before it is
+--                 hashed. A hash cannot be used to open anything; a token's
+--                 entry is written before the token reaches a sandbox.
+--
+-- Guarded (ADD COLUMN IF NOT EXISTS, pkg/statedb/addcolumn.go) and additive in
+-- schema_compat.go's sense: a column with a default on a table no build
+-- replaces rows of. An older binary sharing the database inserts slots without
+-- it, and updates rows without touching it. A slot recorded that way has no
+-- hashes, so its tokens are not confirmed after a restart, as before.
+
+ALTER TABLE app_token_slots ADD COLUMN IF NOT EXISTS token_hashes TEXT NOT NULL DEFAULT '';
