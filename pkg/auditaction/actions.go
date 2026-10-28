@@ -63,6 +63,22 @@ const (
 	// updated.
 	ActionFeaturePROpen Action = "feature.pr_open"
 
+	// ── requirement ────────────────────────────────────────────────────────
+
+	// ActionRequirementCreate records a requirement added to a project (Task
+	// 20458).
+	ActionRequirementCreate Action = "requirement.create"
+	// ActionRequirementUpdate records a requirement's definition changing.
+	ActionRequirementUpdate Action = "requirement.update"
+	// ActionRequirementDelete records a requirement leaving the project.
+	ActionRequirementDelete Action = "requirement.delete"
+	// ActionRequirementCheck records a check run finishing: what it was asked
+	// about, where it ran, and what it found.
+	ActionRequirementCheck Action = "requirement.check"
+	// ActionRequirementVerdict records a person recording a requirement's
+	// verdict by hand.
+	ActionRequirementVerdict Action = "requirement.verdict"
+
 	// ── step ───────────────────────────────────────────────────────────────
 
 	// ActionStepAppend records one execution step's transcript.

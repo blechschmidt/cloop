@@ -275,6 +275,7 @@ func deferredPanelsHub(t *testing.T) (ts *httptest.Server, srv *Server, device s
 		`{"source":"dashboard","session":"dp0000000000000000","events":[{"kind":"error","seq":1,"message":"deferred-panels-seed"}]}`)
 	fileRequestAs(t, dir, "dana@example.com")
 	seedHub(t, ts, http.MethodPost, "/api/kb", `{"title":"dp-kb-seeded","body":"seeded","tags":[]}`)
+	seedHub(t, ts, http.MethodPost, "/api/requirements", `{"title":"dp-req-seeded","tests":[{"command":"true"}]}`)
 	return ts, srv, device
 }
 
@@ -317,7 +318,7 @@ type movedTabScenario struct {
 // movedTabs is DEFERRED_TABS less the tabs Task 20386 had already moved:
 // each is a deferred script of its own name.
 var movedTabs = []string{"queue", "kanban", "kb", "deps", "risk-matrix", "analytics", "chat", "assistant",
-	"replay", "provider-calls", "executors"}
+	"replay", "provider-calls", "executors", "requirements"}
 
 // checkMovedTabs holds one way's run to what opening a moved tab must do: draw
 // the tab from a script fetched for it alone, answer a control of its moved

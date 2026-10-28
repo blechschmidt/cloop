@@ -230,6 +230,64 @@ var registry = []Entry{
 			"with auto-PR set, so a pull request nobody clicked for is still attributable.",
 	},
 
+	// ── requirement ────────────────────────────────────────────────────────
+	// What a project must keep doing (Task 20458). The definitions are audited
+	// because a requirement's tests are commands its checks run; the checks
+	// because "was this still true, and who asked" is a compliance question.
+	{
+		Action:    ActionRequirementCreate,
+		Home:      HomeProject,
+		Entity:    "requirement",
+		Trigger:   "A requirement is added to the project, from the dashboard or with `cloop requirements add`.",
+		Payload:   []string{"id", "title", "priority", "tests", "fingerprint"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note:      "`tests` is each test's command, as it will run.",
+	},
+	{
+		Action:    ActionRequirementUpdate,
+		Home:      HomeProject,
+		Entity:    "requirement",
+		Trigger:   "A requirement's title, description, priority, tags or tests change.",
+		Payload:   []string{"id", "title", "changed", "tests", "fingerprint", "previous_fingerprint"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`changed` names the fields that differ. A new `fingerprint` means the verdicts recorded " +
+			"before it are about a requirement that no longer reads that way, and the dashboard shows them stale.",
+	},
+	{
+		Action:    ActionRequirementDelete,
+		Home:      HomeProject,
+		Entity:    "requirement",
+		Trigger:   "A requirement, and the history of its checks, is deleted.",
+		Payload:   []string{"id", "title", "checks"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+	},
+	{
+		Action:  ActionRequirementCheck,
+		Home:    HomeProject,
+		Entity:  "requirement",
+		Trigger: "A check run ends — its tests ran on the project's executor, or it failed or was cancelled.",
+		Payload: []string{
+			"run_id", "state", "source", "requirement_ids", "assess", "executor_id",
+			"commit", "dirty", "fulfilled", "unfulfilled", "unverified", "error", "reason",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "One row per run, not per requirement: each requirement's verdict is a row of " +
+			"requirement_checks. `assess` is true when the model was asked about the requirements with no tests.",
+	},
+	{
+		Action:    ActionRequirementVerdict,
+		Home:      HomeProject,
+		Entity:    "requirement",
+		Trigger:   "A person records a requirement's verdict by hand — fulfilled or unfulfilled, with a note.",
+		Payload:   []string{"id", "verdict", "note", "fingerprint"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+	},
+
 	// ── step ───────────────────────────────────────────────────────────────
 	{
 		Action:    ActionStepAppend,

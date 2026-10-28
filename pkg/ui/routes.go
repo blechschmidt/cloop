@@ -796,6 +796,23 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/kb", Handler: s.handleKBAdd, Perm: task, Scope: scopeProject},
 		{Pattern: "DELETE /api/kb/{id}", Handler: s.handleKBDelete, Perm: task, Scope: scopeProject},
 
+		// ── Requirements (Task 20458) ────────────────────────────────
+		// Writing one — its tests included — is `task`: a test is a command
+		// for the project's sandbox, which a task already is. Checking is
+		// `start`, as a reproduction is: the fleet executes the tests and,
+		// asked to assess, a model. Stopping a check is `stop`. The check
+		// itself runs on the project's executor. See requirements_api.go.
+		{Pattern: "GET /api/requirements", Handler: s.handleRequirementsList, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/requirements", Handler: s.handleRequirementCreate, Perm: task, Scope: scopeProject},
+		{Pattern: "PUT /api/requirements/{id}", Handler: s.handleRequirementUpdate, Perm: task, Scope: scopeProject},
+		{Pattern: "DELETE /api/requirements/{id}", Handler: s.handleRequirementDelete, Perm: task, Scope: scopeProject},
+		{Pattern: "GET /api/requirements/{id}/checks", Handler: s.handleRequirementChecks, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/requirements/{id}/verdict", Handler: s.handleRequirementVerdict, Perm: task, Scope: scopeProject},
+		{Pattern: "POST /api/requirements/{id}/task", Handler: s.handleRequirementTask, Perm: task, Scope: scopeProject},
+		{Pattern: "POST /api/requirement-runs", Handler: s.handleRequirementRunStart, Perm: start, Scope: scopeProject},
+		{Pattern: "GET /api/requirement-runs/{run}", Handler: s.handleRequirementRunGet, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/requirement-runs/{run}/cancel", Handler: s.handleRequirementRunCancel, Perm: stop, Scope: scopeProject},
+
 		// ── Replay ───────────────────────────────────────────────────
 		{Pattern: "GET /api/replay-runs", Handler: s.handleReplayRunsList, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/replay-runs/{id}", Handler: s.handleReplayRunGet, Perm: read, Scope: scopeProject},

@@ -124,6 +124,8 @@ var rootCommandGroups = map[string]string{
 	"viz":        groupPlan,
 	"forecast":   groupPlan,
 	"alert":      groupPlan,
+	// What the project must keep doing, and whether it still does (Task 20458).
+	"requirements": groupPlan,
 
 	// Hub, executors and serving — the long-running processes and the
 	// isolated backends they dispatch work to.

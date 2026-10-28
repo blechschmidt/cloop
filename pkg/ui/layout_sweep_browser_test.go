@@ -50,6 +50,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/quota"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -336,6 +337,7 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		[]string{s.Tag}); err != nil {
 		t.Fatal(err)
 	}
+	seedLayoutRequirements(t, primary, s)
 	seedLayoutActivity(t, primary, s)
 
 	srv := New(primary, 0, "")
@@ -568,7 +570,7 @@ func fileLayoutRequest(t *testing.T, dir string, s sweepStrings) {
 // content has rendered is TAB_READY in the driver, which fails a tab it has no
 // entry for.
 var layoutTabs = []string{
-	"overview", "tasks", "queue", "kanban", "timeline", "kb", "deps", "risk-matrix", "analytics",
+	"overview", "tasks", "requirements", "queue", "kanban", "timeline", "kb", "deps", "risk-matrix", "analytics",
 	"chat", "assistant", "replay", "provider-calls",
 	"projects", "budget", "executors", "secrets", "audit", "quotas", "telemetry", "settings",
 }
@@ -1094,4 +1096,48 @@ func deferredTabNames(t *testing.T) []string {
 		out = append(out, n[1])
 	}
 	return out
+}
+
+// seedLayoutRequirements gives the Requirements tab (Task 20458) a requirement
+// whose last check failed — its command, its output and its summary the
+// fixture's long unbroken names — and one with no tests that a person marked
+// fulfilled.
+func seedLayoutRequirements(t *testing.T, primary string, s sweepStrings) {
+	t.Helper()
+	db, err := statedb.Open(state.DBPath(primary))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cmd := layoutLong("go test", s.RepoPath+"/...", "-run", s.FailedTaskTitle)
+	failed, err := db.AddRequirement(requirements.Requirement{
+		// A tag holds only letters, digits and -_.:/, so it is the same long
+		// one in both sweeps.
+		Title: s.TaskTitle, Priority: requirements.PriorityMust,
+		Tags:        []string{"observability_ingest_pipeline_backpressure_alerts_rollout_26"},
+		Description: layoutLong("Every dispatch to", s.Device, "is recorded at", s.URL),
+		Tests:       []requirements.Test{{Name: s.Tag, Command: cmd}},
+	}, s.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := layoutLong("--- FAIL:", s.FailedTaskTitle, "\n    open", s.RepoPath+"/.cloop/state.db: no such file", "\n", s.URL)
+	if _, err := db.RecordRequirementChecks(statedb.CheckRecord{RunID: "run_layout", Commit: "a1b2c3d4e5f6a7b8c9d0",
+		ExecutorID: s.Device, CheckedBy: s.Email}, []requirements.Result{{
+		RequirementID: failed.ID, Fingerprint: failed.Fingerprint(), Method: requirements.MethodTests,
+		Verdict: requirements.VerdictUnfulfilled, Summary: layoutLong("test", s.Tag, "failed (exit 1)"),
+		StartedAt: time.Now().Add(-time.Hour),
+		Tests: []requirements.TestResult{{Name: s.Tag, Command: cmd, Outcome: requirements.OutcomeFail, ExitCode: 1,
+			DurationMS: 1234, Output: out}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	manual, err := db.AddRequirement(requirements.Requirement{Title: s.RiskTaskTitle,
+		Description: layoutLong("Reviewed against", s.URL)}, s.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RecordRequirementVerdict(manual.ID, requirements.VerdictFulfilled, layoutLong("Checked on", s.Device), s.Email); err != nil {
+		t.Fatal(err)
+	}
 }

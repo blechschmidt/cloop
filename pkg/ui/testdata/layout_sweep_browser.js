@@ -709,6 +709,13 @@ const TAB_READY = {
   'overview': `${hasContent('#goalText', F.project)} && document.getElementById('approvalsBadge').style.display !== 'none'
     && document.getElementById('hubHealthBadge').style.display !== 'none'`,
   'tasks': hasContent('#taskListFull', F.taskTitle),
+  // A requirement whose last check failed, with its details open: the test
+  // output and the commands are the long lines (Task 20458).
+  // Readiness opens the first card's details, so they are measured too.
+  'requirements': `(() => { const b = document.querySelector('#reqList [data-act="details"]');
+    const d = document.querySelector('#reqList .req-details');
+    if (b && d && d.style.display === 'none') b.click();
+    return ${hasContent('#reqList', F.taskTitle)} && !!d && d.style.display !== 'none' && ${hasText('#reqList .req-details', 'exit 1')}; })()`,
   'queue': hasContent('#queueTable', F.taskTitle),
   'kanban': hasContent('#kanbanBoard', F.riskTaskTitle),
   'timeline': hasContent('#timelineChart', F.taskTitle.slice(0, 24)),

@@ -12,7 +12,7 @@ groups, and what belongs in each:
 | Group | What is in it |
 |-------|---------------|
 | **Core workflow** | `init`, `run`, `status`, `log`, `goal`, `queue`, `watch`, `reset`, `clean` |
-| **Plan and tasks** | `task`, `plan`, `milestone`, `sprint`, `suggest`, `scope`, and the rest of the plan-shaping commands |
+| **Plan and tasks** | `task`, `plan`, `requirements`, `milestone`, `sprint`, `suggest`, `scope`, and the rest of the plan-shaping commands |
 | **Hub, executors and serving** | `ui`, `serve`, `hub`, `executor`, `egress`, `agent`, `daemon`, `workspace`, `session` |
 | **Secrets, access and spend** | `secret`, `env`, `config`, `budget`, `cost`, `audit`, `audit-log`, `events`, `project` |
 | **Insight and reporting** | `report`, `retro`, `standup`, `insights`, `metrics`, `search`, `trace`, and other read-only views |
@@ -316,6 +316,35 @@ cloop task attachments remove <id> <attachment>  # delete (audited)
 `<attachment>` is an attachment's id, an id prefix of at least six characters,
 or its name. Limits: 32 MiB a file, 100 files and 128 MiB a task, 1 GiB a
 project.
+
+### `cloop requirements`
+
+What the project must keep doing, and whether it still does — see the
+[Requirements guide](../guides/requirements.md). Aliases: `requirement`, `req`,
+`reqs`.
+
+```bash
+cloop requirements add "<title>" [-d <details>] [--test <command>]... [--priority must|should|could] [--tag <tag>]...
+cloop requirements list [--json]
+cloop requirements show <id> [--json]
+cloop requirements edit <id> [--title …] [-d …] [--test …]... [--clear-tests] [--priority …] [--tag …]
+cloop requirements remove <id>
+cloop requirements check [id...] [--ai] [--timeout <d>]
+cloop requirements verdict <id> fulfilled|unfulfilled [--note <text>]
+cloop requirements history <id> [--limit N] [--json]
+```
+
+| Flag (`check`) | Default | Description |
+|------|---------|-------------|
+| `--ai` | off | Ask the model about the requirements that have no tests; without it they are skipped |
+| `--provider`, `--model` | the project's | The model `--ai` asks |
+| `--ai-timeout` | `5m` | How long the model may take over one requirement |
+| `--timeout` | none | Stop the whole check after this long |
+| `--json`, `--no-record`, `--spec` | off | How the hub runs it on a project's executor: a framed report, nothing recorded, the requirements it sends |
+
+`check` exits 1 when a requirement is unfulfilled or its check did not work,
+so a CI job can run it as a gate. `--test-timeout` on `add` and `edit` sets how
+long each test given may run (10 minutes by default).
 
 ### `cloop diff`
 

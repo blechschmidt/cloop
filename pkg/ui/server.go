@@ -733,6 +733,10 @@ type Server struct {
 	suggestJobs map[string]*suggestJob
 	suggestGen  int // numbers generations hub-wide; see suggestJob.gen
 
+	// The requirements checks this member is running (Task 20458), so
+	// shutdown can stop them. See requirements_api.go.
+	reqChecks requirementChecks
+
 	// Multi-project state cache
 	projMu sync.RWMutex
 	// projStatuses and projEntries are refreshed together and must be read
@@ -1768,6 +1772,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// goroutine. A session that outlived the process able to authenticate it
 	// is unusable anyway; what matters is that the record says so.
 	s.closeCI()
+	// Stop the requirements checks this member is running, and record that
+	// it did (Task 20458): a check left running would read as lapsed only
+	// at its deadline, hours on.
+	s.reqChecks.stop(5 * time.Second)
 	// Kill any parked `claude auth login` children. Each one is a subprocess
 	// blocked on stdin waiting for a pasted code, so on a multi-user hub an
 	// unclean stop could otherwise leave one per half-finished login.

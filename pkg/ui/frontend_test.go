@@ -281,6 +281,12 @@ var deviceForwardersSource string
 //go:embed hubhealth.go
 var hubHealthSource string
 
+// requirementsAPISource is pkg/ui/requirements_api.go (Task 20458): the
+// requirements_update push the Requirements tab rereads its list on.
+//
+//go:embed requirements_api.go
+var requirementsAPISource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
@@ -309,7 +315,8 @@ func allUISources() string {
 		"\n" + streamCredentialsSource +
 		"\n" + approvalsAPISource +
 		"\n" + deviceForwardersSource +
-		"\n" + hubHealthSource
+		"\n" + hubHealthSource +
+		"\n" + requirementsAPISource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

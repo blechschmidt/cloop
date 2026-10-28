@@ -189,6 +189,8 @@ var deferredScripts = []struct{ token, path string }{
 	{"queue.js", "assets/js/deferred/queue.js"},
 	{"kanban.js", "assets/js/deferred/kanban.js"},
 	{"kb.js", "assets/js/deferred/kb.js"},
+	// The Requirements tab (Task 20458).
+	{"requirements.js", "assets/js/deferred/requirements.js"},
 	{"deps.js", "assets/js/deferred/deps.js"},
 	{"risk-matrix.js", "assets/js/deferred/risk-matrix.js"},
 	{"analytics.js", "assets/js/deferred/analytics.js"},

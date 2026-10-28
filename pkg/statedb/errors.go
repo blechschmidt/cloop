@@ -188,6 +188,14 @@ var (
 	// attachment on the task asked about (Task 20428): it was deleted, it
 	// belongs to another task, or it never existed.
 	ErrAttachmentNotFound = errors.New("statedb: attachment not found")
+
+	// ErrRequirementNotFound indicates no requirements row has the id asked
+	// about, or no requirement_runs row the run id (Task 20458).
+	ErrRequirementNotFound = errors.New("statedb: requirement not found")
+
+	// ErrRequirementCheckRunning indicates a check of the project's
+	// requirements is already running, on this hub member or another.
+	ErrRequirementCheckRunning = errors.New("statedb: a requirements check is already running")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
@@ -265,9 +273,9 @@ func HTTPStatus(err error) int {
 		return http.StatusOK
 	case errors.Is(err, ErrTaskNotFound), errors.Is(err, ErrProjectNotFound),
 		errors.Is(err, ErrExecutorNotFound), errors.Is(err, ErrAPITokenNotFound),
-		errors.Is(err, ErrAttachmentNotFound):
+		errors.Is(err, ErrAttachmentNotFound), errors.Is(err, ErrRequirementNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, ErrStaleVersion):
+	case errors.Is(err, ErrStaleVersion), errors.Is(err, ErrRequirementCheckRunning):
 		return http.StatusConflict
 	case errors.Is(err, ErrDBLocked):
 		return http.StatusServiceUnavailable

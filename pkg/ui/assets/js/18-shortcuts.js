@@ -60,6 +60,7 @@ const CMD_REGISTRY = [
   { label:'Analytics',       icon:'📊', shortcut:'8', action:()=>switchTab('analytics') },
   { label:'Chat',            icon:'💬', shortcut:'9', action:()=>switchTab('chat') },
   { label:'Assistant',       icon:'🤖', shortcut:'',  action:()=>switchTab('assistant') },
+  { label:'Requirements',    icon:'☑️', shortcut:'',  action:()=>switchTab('requirements') },
   { label:'Projects',        icon:'📁', shortcut:'',  action:()=>switchTab('projects') },
   { label:'Executors',       icon:'🖥', shortcut:'',  action:()=>switchTab('executors') },
   { label:'Settings',        icon:'⚙️', shortcut:'',  action:()=>switchTab('settings') },

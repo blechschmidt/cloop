@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-308 endpoints, by the permission each one requires:
+318 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -102,18 +102,18 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `config.write` | 18 |
 | `executor.manage` | 36 |
 | `executor.read` | 6 |
-| `project.read` | 56 |
+| `project.read` | 59 |
 | `project.share` | 3 |
 | `project.write` | 13 |
-| `run.start` | 4 |
-| `run.stop` | 2 |
+| `run.start` | 5 |
+| `run.stop` | 3 |
 | `sandbox.attach` | 2 |
 | `secret.grant` | 15 |
 | `secret.own` | 15 |
 | `secret.request` | 5 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
-| `task.mutate` | 29 |
+| `task.mutate` | 34 |
 | `token.admin` | 6 |
 | `user.manage` | 24 |
 | `view.prefs` | 2 |
@@ -319,6 +319,16 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/replay-runs` | `task.mutate` | project |
 | GET | `/api/replay-runs/{id}` | `project.read` | project |
 | GET | `/api/reproductions/{id}` | `project.read` | project |
+| POST | `/api/requirement-runs` | `run.start` | project |
+| GET | `/api/requirement-runs/{run}` | `project.read` | project |
+| POST | `/api/requirement-runs/{run}/cancel` | `run.stop` | project |
+| GET | `/api/requirements` | `project.read` | project |
+| POST | `/api/requirements` | `task.mutate` | project |
+| PUT | `/api/requirements/{id}` | `task.mutate` | project |
+| DELETE | `/api/requirements/{id}` | `task.mutate` | project |
+| GET | `/api/requirements/{id}/checks` | `project.read` | project |
+| POST | `/api/requirements/{id}/task` | `task.mutate` | project |
+| POST | `/api/requirements/{id}/verdict` | `task.mutate` | project |
 | POST | `/api/reset` | `project.write` | project |
 | GET | `/api/risk-matrix` | `project.read` | project |
 | POST | `/api/run` | `run.start` | project |

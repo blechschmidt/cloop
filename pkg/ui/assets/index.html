@@ -57,6 +57,7 @@
 <meta name="cloop-queue-src" content="{{asset:queue.js}}">
 <meta name="cloop-kanban-src" content="{{asset:kanban.js}}">
 <meta name="cloop-kb-src" content="{{asset:kb.js}}">
+<meta name="cloop-requirements-src" content="{{asset:requirements.js}}">
 <meta name="cloop-deps-src" content="{{asset:deps.js}}">
 <meta name="cloop-risk-matrix-src" content="{{asset:risk-matrix.js}}">
 <meta name="cloop-analytics-src" content="{{asset:analytics.js}}">
@@ -137,6 +138,7 @@
         <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
         <button class="tab-btn active" data-action="switchTab" data-arg="overview"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
         <button class="tab-btn"        data-action="switchTab" data-arg="tasks"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
+        <button class="tab-btn"        data-action="switchTab" data-arg="requirements" id="tbtn-requirements" title="What the project must keep doing, and whether it still does (per-project)">Requirements</button>
         <button class="tab-btn"        data-action="switchTab" data-arg="queue"     id="tbtn-queue"      title="Per-task activity log: every execution, heal retry, evolve cycle, and external merge tied to its task (per-project)">Activity</button>
         <button class="tab-btn"        data-action="switchTab" data-arg="kanban"    id="tbtn-kanban"     title="Kanban board (per-project)">Kanban</button>
         <button class="tab-btn"        data-action="switchTab" data-arg="timeline"  id="tbtn-timeline"   title="Timeline / Gantt (per-project)">Timeline</button>
@@ -228,6 +230,7 @@
       <div class="mobile-nav-section-label">Project</div>
       <button class="m-tab-btn" data-action="switchTab" data-arg="overview"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
       <button class="m-tab-btn" data-action="switchTab" data-arg="tasks"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
+      <button class="m-tab-btn" data-action="switchTab" data-arg="requirements" id="mtbtn-requirements"><span class="m-tab-icon">&#9745;</span>Requirements</button>
       <button class="m-tab-btn" data-action="switchTab" data-arg="queue"     id="mtbtn-queue"><span class="m-tab-icon">&#128260;</span>Activity</button>
       <button class="m-tab-btn" data-action="switchTab" data-arg="kanban"    id="mtbtn-kanban"><span class="m-tab-icon">&#9783;</span>Kanban</button>
       <button class="m-tab-btn" data-action="switchTab" data-arg="timeline"  id="mtbtn-timeline"><span class="m-tab-icon">&#128197;</span>Timeline</button>
@@ -667,6 +670,7 @@
 
     <!-- ══════════════════════════════════════════════ KNOWLEDGE BASE -->
     <div id="tab-kb" class="tab-panel"></div>
+    <div id="tab-requirements" class="tab-panel"></div>
 
     <!-- ══════════════════════════════════════════════ DEPENDENCIES -->
     <div id="tab-deps" class="tab-panel"></div>

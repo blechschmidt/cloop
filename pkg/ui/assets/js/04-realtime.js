@@ -150,7 +150,7 @@ if (!_clientID) {
 // stream identity rather than by project — see below.
 const PROJECT_SCOPED_EVENTS = new Set([
   'task_update', 'state_diff', 'task_added', 'task_deleted', 'task_mutation',
-  'step_output', 'run_state', 'suggest_status', 'provider_call', 'history_append',
+  'step_output', 'run_state', 'suggest_status', 'provider_call', 'history_append', 'requirements_update',
 ]);
 
 // _streamScope captures what the current selection is, to be frozen into a
@@ -317,6 +317,10 @@ function handleRealtimeMsg(type, data, scope) {
       // Server pushes this on suggest job state changes. Replaces the old
       // /api/suggest/status poll loop.
       try { applySuggestStatus(data); } catch(_) {}
+      break;
+    case 'requirements_update':
+      // A requirement was written, or a check moved on (Task 20458).
+      panelIf('requirements', 'pushed', data);
       break;
     case 'hub_disk':
       // The hub's state volume crossed its free-space floor (Task 20381).
@@ -606,7 +610,7 @@ function connectSSE() {
   };
   // Named SSE events carry the WebSocket message of the same type; 'log' is
   // step_output's older name.
-  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health']) {
+  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health', 'requirements_update']) {
     evtSource.addEventListener(t, (e) => {
       try { handleRealtimeMsg(t === 'log' ? 'step_output' : t, JSON.parse(e.data), scope); } catch(_) {}
     });

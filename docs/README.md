@@ -176,6 +176,12 @@ Seven pages in order, indexed at
   running concurrently and proposed as a GitHub pull request when done. What a
   feature inherits from its project (executor, grants, roles) and why, where it
   may run, and how removal protects uncommitted work.
+- **[Requirements](guides/requirements.md)** — what a project must keep doing,
+  with or without tests, and whether it still does: adding them from the
+  Requirements tab or `cloop requirements`, checking them on the project's
+  executor (and as a CI gate), asking the model about the ones nothing tests,
+  recorded verdicts, when a verdict goes stale, and turning a failure into a
+  task.
 - **[Task attachments](guides/attachments.md)** — the files a run makes for a
   person to look at — reports, charts, screenshots, exports, logs — attached to
   its task: the outbox an agent copies them into, `cloop task attachments`, the

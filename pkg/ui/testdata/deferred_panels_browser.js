@@ -58,7 +58,7 @@ const WAIT_MS = 30000;
 // asset URL. A single-project page fetches the Overview's own cards (harness,
 // devices) at boot; none of these.
 const MOVED_TABS = ['queue', 'kanban', 'kb', 'deps', 'risk-matrix', 'analytics', 'chat', 'assistant',
-  'replay', 'provider-calls', 'executors'];
+  'replay', 'provider-calls', 'executors', 'requirements'];
 const DEFERRED = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'execadmin', 'execpicker']
   .concat(MOVED_TABS);
 const DEFERRED_RE = new RegExp('/assets/(' + DEFERRED.join('|') + ')\\.[0-9a-f]{16}\\.js$');
@@ -876,6 +876,29 @@ const TAB = {
       await click(cdp, '#tab-provider-calls [data-act="load"]');
       await requested(mark, '/api/provider-calls', 'Refresh to re-read the calls');
       return 'refreshed';
+    },
+  },
+  // The Requirements tab (Task 20458): added through its own form, and after a
+  // reconnect one added elsewhere arrives by its requirements_update push.
+  requirements: {
+    before: async way => { await hub('POST', '/api/requirements', {title: 'dp-req-late-' + way}); },
+    ready: way => `${text('#reqList')}.includes('dp-req-seeded') && ${text('#reqList')}.includes('dp-req-late-' + ${q(way)})`,
+    press: async (cdp, way) => {
+      const title = 'dp-req-added-' + way;
+      await click(cdp, '#tab-requirements [data-act="add"]');
+      await waitFor(cdp, visible('#reqTitle'), 'the requirement form');
+      await type(cdp, '#reqTitle', title);
+      await type(cdp, '#reqTests', 'true');
+      await click(cdp, '#tab-requirements [data-act="save"]');
+      await waitFor(cdp, `(async () => { const d = await (await fetch('/api/requirements')).json();
+        return (d.requirements || []).some(r => r.title === ${q(title)} && (r.tests || []).length === 1); })()`, 'the requirement to be stored');
+      await waitFor(cdp, `${text('#reqList')}.includes(${q(title)})`, 'the requirement on the page');
+      return 'added';
+    },
+    after: async (cdp, way) => {
+      await hub('POST', '/api/requirements', {title: 'dp-req-pushed-' + way});
+      await waitFor(cdp, `${text('#reqList')}.includes('dp-req-pushed-' + ${q(way)})`, 'the pushed requirement');
+      return true;
     },
   },
   executors: {

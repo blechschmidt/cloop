@@ -163,6 +163,26 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Requirements: what a project must keep doing, and whether it still does.**
+  A project can now hold requirements, each with or without tests. A test is a
+  shell command run in the project's root that passes when it exits 0. A new
+  Requirements tab, `cloop requirements` and `/api/requirements` add, change and
+  delete them. Checking them (Check all, or `cloop requirements check`) runs
+  their tests where the project's tasks run: the hub dispatches the check to the
+  project's executor, never to its own host unless that is where the tasks run,
+  and records what comes back against what it asked. A check runs in the
+  background, one at a time per project across hub members, and can be
+  stopped. A requirement with no tests is skipped, so a verdict reached before
+  stands. It can instead be assessed by the model reading the code, on the
+  caller's own Claude account, or be given a verdict by hand. A verdict is
+  marked stale once the requirement changes or tasks are done after it. A
+  failure becomes a task that quotes the failing output. Each test runs in its
+  own process group, killed when the test ends, within a timeout. Its last 16
+  KiB of output is kept, scrubbed of credentials; the hub's root key never
+  reaches it. `cloop requirements check` exits 1 when a requirement is
+  unfulfilled, so CI can use it as a gate. Changes and checks are audited
+  (`requirement.*`). New tables in migration 0085 (Task 20458).
+
 - **Copilot projects run in sandboxes: a published image carries the GitHub
   Copilot CLI, and a device installs it on request.** A `copilot` project could
   not run on the flagship isolation path: the published harness image had only
