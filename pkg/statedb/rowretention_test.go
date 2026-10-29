@@ -9,6 +9,7 @@ package statedb
 // the metadata and never the body.
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -571,10 +572,21 @@ func TestPruneIsSafeAgainstAConcurrentWriter(t *testing.T) {
 			// A marker unique to this writer, so the survivors can be identified
 			// without depending on ids the prune is concurrently reasoning about.
 			msg := fmt.Sprintf("concurrent-%d", i)
-			if err := writer.RecordEvent(EventRow{
-				Timestamp: time.Now().UTC(), Type: "task_started",
-				TaskID: i + 1, Message: msg, Step: -1,
-			}); err != nil {
+			// A write refused busy is lock latency, which is not what this
+			// test pins: under -race on a loaded runner one wait outlasted the
+			// 5 s busy timeout twice (Tasks 20454, 20458), with a single batch
+			// measured at ~120 ms here. Retried a few times, a busy write still
+			// fails the test if the prune holds the writer out for good.
+			var err error
+			for attempt := 0; attempt < 3; attempt++ {
+				if err = writer.RecordEvent(EventRow{
+					Timestamp: time.Now().UTC(), Type: "task_started",
+					TaskID: i + 1, Message: msg, Step: -1,
+				}); !errors.Is(err, ErrDBLocked) {
+					break
+				}
+			}
+			if err != nil {
 				mu.Lock()
 				writeErr = fmt.Errorf("write %d: %w", i, err)
 				mu.Unlock()
