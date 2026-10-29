@@ -386,8 +386,8 @@ users:
 		}
 		if !strings.Contains(string(out), "cloop git proxy refused this push") ||
 			!strings.Contains(string(out), fmt.Sprintf("secret %q", secretOf[name])) || !strings.Contains(string(out), "grant ") {
-			t.Errorf("the refusal of the push carrying the %s does not name its grant and secret %q:\n%s",
-				name, secretOf[name], out)
+			t.Errorf("the refusal of the push carrying the %s does not name its grant and secret %q:\n%s%s",
+				name, secretOf[name], out, w.gitProxyRejections())
 		}
 		if strings.Contains(string(out), v) {
 			t.Errorf("the refusal of the push carrying the %s quotes the value", name)
@@ -416,4 +416,18 @@ users:
 		}
 	}
 	w.waitTaskStatus(1, "done")
+}
+
+// gitProxyRejections is what the members' git proxies recorded refusing
+// before any policy ran — an upstream leg that failed is a 502, which git
+// reports without its reason, and a proxy with a database writes the reason to
+// the audit trail rather than to the log a failure prints. Quoted first, so a
+// failure's annotation names it.
+func (w *world) gitProxyRejections() string {
+	rows, err := w.queryControlPlane(`SELECT group_concat(timestamp || ' ' || COALESCE(json_extract(payload, '$.detail'), payload), char(10))
+		FROM audit_events WHERE event_type = 'gitproxy.rejected'`)
+	if err != nil || rows == "" {
+		return ""
+	}
+	return "\nthe git proxies recorded these refusals:\n" + rows
 }
