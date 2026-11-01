@@ -5,6 +5,7 @@ package state
 // task in memory, and only new task IDs made it through a live run.
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/internal/taskfill"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // planProject initialises a project holding two pending tasks.
@@ -354,5 +357,57 @@ func BenchmarkSnapshotDefinitions(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = snapshotDefinitions(plan)
+	}
+}
+
+// TestARunsSaveAdoptsALinkAPersonChanged: the requirements a task implements
+// are a definition field (Task 20460). A link made from the dashboard while a
+// run holds the plan, and a link a requirement's deletion took away, both
+// survive the run's next save, instead of the run writing back the list it
+// loaded.
+func TestARunsSaveAdoptsALinkAPersonChanged(t *testing.T) {
+	dir := planProject(t)
+	ui := mustLoad(t, dir)
+	ui.Plan.TaskByID(1).Requirements = []int{1, 2}
+	if err := ui.SaveDirect(); err != nil {
+		t.Fatal(err)
+	}
+	run := mustLoad(t, dir)
+
+	// Meanwhile: task 2 is linked from the dashboard, and R-2 is deleted,
+	// which takes it off task 1 in the database.
+	ui = mustLoad(t, dir)
+	ui.Plan.TaskByID(2).Requirements = []int{1}
+	if err := ui.SaveDirect(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := statedb.Open(DBPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"one", "two"} {
+		if _, err := db.AddRequirement(requirements.Requirement{Title: title}, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := db.DeleteRequirement(2, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// The run finishes task 1 and saves the plan it holds.
+	run.Plan.TaskByID(1).Status = pm.TaskDone
+	if err := run.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got := mustLoad(t, dir)
+	if l := got.Plan.TaskByID(1).Requirements; fmt.Sprint(l) != "[1]" {
+		t.Errorf("task 1 implements %v after the run's save; the deletion of R-2 was written back over", l)
+	}
+	if l := got.Plan.TaskByID(2).Requirements; fmt.Sprint(l) != "[1]" {
+		t.Errorf("task 2 implements %v after the run's save; the dashboard's link was lost", l)
+	}
+	if got.Plan.TaskByID(1).Status != pm.TaskDone {
+		t.Errorf("the run's outcome was lost: task 1 is %s", got.Plan.TaskByID(1).Status)
 	}
 }

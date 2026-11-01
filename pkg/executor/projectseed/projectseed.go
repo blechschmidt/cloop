@@ -64,6 +64,8 @@ import (
 	"path/filepath"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -87,12 +89,20 @@ const (
 // ErrNoProject reports that the hub has no project state to seed from.
 var ErrNoProject = errors.New("projectseed: no project state")
 
-// Build serialises a project into the bytes a Spec carries.
+// Build serialises a project into the bytes a Spec carries. It is BuildWith
+// carrying no requirements.
+func Build(st *state.ProjectState) ([]byte, error) { return BuildWith(st, nil) }
+
+// BuildWith serialises a project into the bytes a Spec carries, with reqs
+// beside its state: the requirements its tasks implement (LinkedRequirements),
+// which the sandbox's database receives so the run there gives each task's
+// agent its contract as a run on the hub does (Task 20460). A requirements
+// table is not project state, and the sandbox has no other way to it.
 //
 // The input is the hub's own loaded state. It is copied — not mutated — before
 // the fields that must not travel are cleared, because the caller's pointer is
 // very often the live state a handler is still holding.
-func Build(st *state.ProjectState) ([]byte, error) {
+func BuildWith(st *state.ProjectState, reqs []requirements.Requirement) ([]byte, error) {
 	if st == nil {
 		return nil, ErrNoProject
 	}
@@ -118,7 +128,16 @@ func Build(st *state.ProjectState) ([]byte, error) {
 	// rather than depending on that coercion.
 	seed.PMMode = true
 
-	raw, err := json.Marshal(&seed)
+	// The legacy decoder reads the requirements beside the state's own keys
+	// (state.legacyState); a cloop that predates them ignores the key.
+	doc := struct {
+		*state.ProjectState
+		Requirements []requirements.Requirement `json:"requirements,omitempty"`
+	}{ProjectState: &seed}
+	for _, r := range reqs {
+		doc.Requirements = append(doc.Requirements, r.ForSeed())
+	}
+	raw, err := json.Marshal(doc)
 	if err != nil {
 		return nil, fmt.Errorf("projectseed: marshal project state: %w", err)
 	}
@@ -145,6 +164,43 @@ func Build(st *state.ProjectState) ([]byte, error) {
 			len(out), executor.MaxProjectSeedBytes, len(raw))
 	}
 	return out, nil
+}
+
+// maxSeedRequirementBytes bounds the requirements a seed carries, before
+// compression: a plan that links more than this sends the rest by id only, and
+// the run's contract says their text is not available there.
+const maxSeedRequirementBytes = 1 << 20
+
+// LinkedRequirements picks from all the requirements plan's tasks implement
+// that a run may still work on — every task not done or skipped — in id order,
+// as many as maxSeedRequirementBytes holds.
+func LinkedRequirements(plan *pm.Plan, all []requirements.Requirement) []requirements.Requirement {
+	if plan == nil || len(all) == 0 {
+		return nil
+	}
+	wanted := map[int]bool{}
+	for _, t := range plan.Tasks {
+		if t == nil || t.Status == pm.TaskDone || t.Status == pm.TaskSkipped {
+			continue
+		}
+		for _, id := range t.Requirements {
+			wanted[id] = true
+		}
+	}
+	var out []requirements.Requirement
+	used := 0
+	for _, r := range all {
+		if !wanted[r.ID] {
+			continue
+		}
+		n := r.ForSeed().EncodedSize()
+		if used+n > maxSeedRequirementBytes {
+			break
+		}
+		used += n
+		out = append(out, r)
+	}
+	return out
 }
 
 // Write places a seed into a workspace the caller has already confined.

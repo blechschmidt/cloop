@@ -288,7 +288,7 @@ func TestImportAppliesNothingItWasNotAskedTo(t *testing.T) {
 	}
 
 	// A file reusing a deleted id is refused, whatever else it says.
-	if _, err := db.DeleteRequirement(2, "bob"); err != nil {
+	if _, _, err := db.DeleteRequirement(2, "bob"); err != nil {
 		t.Fatal(err)
 	}
 	reused := []requirements.Requirement{file[0], specReq(5, "new"), specReq(2, "not the old R-2")}
@@ -334,7 +334,7 @@ func TestReadingTheSpecMovesTheBaseOnAgreement(t *testing.T) {
 		t.Errorf("an unparsed read moved the base: %+v", snap2.Base)
 	}
 	// One requirement gone from both is forgotten.
-	if _, err := db.DeleteRequirement(1, "bob"); err != nil {
+	if _, _, err := db.DeleteRequirement(1, "bob"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SaveRequirementSpecRead(RequirementSpecRead{Found: true}, []requirements.Requirement{}); err != nil {

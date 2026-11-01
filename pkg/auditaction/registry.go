@@ -260,9 +260,11 @@ var registry = []Entry{
 		Home:      HomeProject,
 		Entity:    "requirement",
 		Trigger:   "A requirement, and the history of its checks, is deleted.",
-		Payload:   []string{"id", "title", "checks"},
+		Payload:   []string{"id", "title", "checks", "unlinked_tasks"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
+		Note: "`unlinked_tasks` are the tasks that implemented it, from which the deletion took it in the " +
+			"same transaction; each also gets a `task.upsert` row under the same actor.",
 	},
 	{
 		Action:  ActionRequirementCheck,
@@ -291,7 +293,8 @@ var registry = []Entry{
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "One row per import, its entity id `spec`. `updated` lists each changed requirement with the fields " +
-			"that changed and its new and previous fingerprints; `deleted` how many recorded checks went with each; " +
+			"that changed and its new and previous fingerprints; `deleted` how many recorded checks went with each, " +
+			"and the tasks it was taken out of (`unlinked_tasks`, each also a `task.upsert` row); " +
 			"`resolved` how each conflict was settled (`file` or `hub`). An import applies nothing unless every " +
 			"conflict is settled, so a row is a whole import. `sha256` is the file's; a dashboard import was read " +
 			"from the project's checkout on its executor at `commit`.",

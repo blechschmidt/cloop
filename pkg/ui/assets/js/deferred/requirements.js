@@ -13,6 +13,9 @@
 // changed", and Review lists what an import would do — each conflict with the
 // choice that settles it — before Import applies exactly that.
 //
+// A requirement's details list the tasks that implement it (Task 20460), and a
+// task's R-n chip opens the requirement here (show).
+//
 // It runs outside the dashboard's IIFE, so it is handed the helpers it calls,
 // and the only name it puts on window is the factory.
 (function () {
@@ -325,6 +328,8 @@
       if (status !== 'approved') chips.push('<span class="exec-chip">' + esc(status) + '</span>');
       if (r.priority) chips.push('<span class="exec-chip' + (r.priority === 'must' ? ' pos' : '') + '">' + esc(r.priority) + '</span>');
       chips.push('<span class="exec-chip">' + (tests ? tests + ' test' + (tests === 1 ? '' : 's') : 'no tests') + '</span>');
+      const impl = (r.tasks || []).length;
+      if (impl) chips.push('<span class="exec-chip" title="Tasks that implement it — its details list them">' + impl + ' task' + (impl === 1 ? '' : 's') + '</span>');
       (r.tags || []).forEach(t => chips.push('<span class="exec-chip">' + esc(t) + '</span>'));
       let meta = 'Never checked.';
       if (lc) {
@@ -446,9 +451,17 @@
     // deleted.
     function del(arg) {
       const r = (data.requirements || []).find(x => x.id === +arg);
-      if (!r || !confirm('Delete R-' + r.id + ' "' + r.title + '" and the history of its checks?\n\nThis cannot be undone.')) return;
+      const n = (r && r.tasks || []).length;
+      if (!r || !confirm('Delete R-' + r.id + ' "' + r.title + '" and the history of its checks?' +
+        (n ? '\n\n' + n + ' task' + (n === 1 ? ' implements' : 's implement') + ' it and will no longer be held to it.' : '') +
+        '\n\nThis cannot be undone.')) return;
       return apiMethod('DELETE', pUrl('/api/requirements/' + r.id), null).then(d => {
-        if (d && d.ok) { toast('Deleted R-' + r.id, 'ok'); if (openID === r.id) openID = null; load(); }
+        if (d && d.ok) {
+          const n = (d.unlinked_tasks || []).length;
+          toast('Deleted R-' + r.id + (n ? '; ' + n + ' task' + (n === 1 ? ' no longer implements' : 's no longer implement') + ' it' : ''), 'ok');
+          if (openID === r.id) openID = null;
+          load();
+        }
         else toast((d && d.error) || 'Delete failed', 'err');
       }).catch(() => toast('Delete failed', 'err'));
     }
@@ -459,6 +472,19 @@
       openID = openID === id ? null : id;
       render();
     }
+    // show opens one requirement's details, for a task's R-n chip (Task
+    // 20460). The tab's own open() is loading the list when it is new; its
+    // render shows them.
+    function show(arg) {
+      openID = +arg;
+      query = '';
+      if (el('reqSearch')) el('reqSearch').value = '';
+      if (!data) return;
+      render();
+      const c = el('reqList').querySelector('[data-req="' + openID + '"]');
+      if (c) c.scrollIntoView({block: 'center'});
+    }
+    function openTask(arg) { window.openTaskDetails(+arg); }
     function showDetails(id) {
       const box = el('reqDetails' + id);
       if (!box) return;
@@ -480,14 +506,21 @@
         html += '<span>No tests: a check passes it by unless the model is asked.</span>';
       }
       html += '</div>';
+      // The tasks that implement it (Task 20460): each holds its run to it.
+      const tasks = d.tasks || [];
+      html += '<div class="exec-meta" style="margin-top:6px"><strong>Implemented by</strong>' + (tasks.length
+        ? tasks.map(t => '<span><button class="btn" style="padding:2px 8px;font-size:11px" data-act="openTask" data-arg="' + (+t.id) + '">#' + (+t.id) +
+          '</button> <span style="' + wrap + '">' + esc(t.title) + '</span> <span class="form-hint">' + esc(t.status || 'pending') + '</span></span>').join('')
+        : '<span>No task yet. A task linked to it — from its own edit dialog, or added below — is given it as its contract.</span>') + '</div>';
+      const retired = (r.status || 'approved') === 'deprecated';
       html += '<div class="exec-actions" style="margin-top:8px">' +
         '<input class="form-input" id="reqNote' + r.id + '" placeholder="Note for a recorded verdict" style="flex:1;min-width:140px">' +
         '<button class="btn" data-perm="task.mutate" data-act="verdict" data-arg="' + r.id + ':fulfilled">Mark fulfilled</button>' +
         '<button class="btn" data-perm="task.mutate" data-act="verdict" data-arg="' + r.id + ':unfulfilled">Mark unfulfilled</button></div>' +
-        '<div class="exec-actions">' +
+        (retired ? '' : '<div class="exec-actions">' +
         '<button class="btn" data-perm="task.mutate" data-act="makeTask" data-arg="' + r.id + ':fix">Add a task to restore it</button>' +
         ((r.tests || []).length ? '' : '<button class="btn" data-perm="task.mutate" data-act="makeTask" data-arg="' + r.id + ':test">Add a task to test it</button>') +
-        '</div>';
+        '</div>');
       const checks = d.checks || [];
       if (!checks.length) return html + '<p class="form-hint">Never checked.</p>';
       html += '<div class="section-title" style="margin:10px 0 4px">Recent checks</div>';
@@ -521,13 +554,13 @@
     function makeTask(arg) {
       const [id, kind] = String(arg).split(':');
       return api(pUrl('/api/requirements/' + id + '/task'), {kind}).then(d => {
-        if (d && d.ok) toast('Added task #' + d.task.id + ': ' + d.task.title, 'ok');
+        if (d && d.ok) { toast('Added task #' + d.task.id + ', linked to R-' + id, 'ok'); load(); }
         else toast((d && d.error) || 'Could not add the task', 'err');
       }).catch(() => toast('Could not add the task', 'err'));
     }
 
     return h.mount({open, load, pushed, filter, checkAll, checkOne, assessOne, stop, add, edit, cancelForm, save, del,
-      details, verdict, makeTask, readSpec, reviewSpec, settleOne, importSpec, download}, 'requirements', `
+      details, show, openTask, verdict, makeTask, readSpec, reviewSpec, settleOne, importSpec, download}, 'requirements', `
     <div class="kb-tab-toolbar">
       <span class="section-title" style="margin:0">Requirements</span>
       <div class="kb-search-wrap">

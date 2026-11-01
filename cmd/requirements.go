@@ -102,14 +102,34 @@ var requirementsShowCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// The tasks that implement it (Task 20460).
+		var implementing []*pm.Task
+		if p.state != nil && p.state.Plan != nil {
+			for _, t := range p.state.Plan.Tasks {
+				if t != nil && slices.Contains(t.Requirements, id) {
+					implementing = append(implementing, t)
+				}
+			}
+		}
 		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
 			out := map[string]any{"requirement": r}
 			if len(checks) > 0 {
 				out["last_check"] = checks[0]
 			}
+			tasks := make([]int, 0, len(implementing))
+			for _, t := range implementing {
+				tasks = append(tasks, t.ID)
+			}
+			out["tasks"] = tasks
 			return printJSON(out)
 		}
 		printRequirement(r)
+		if len(implementing) > 0 {
+			fmt.Println("\nImplemented by:")
+			for _, t := range implementing {
+				fmt.Printf("  #%d %s (%s)\n", t.ID, t.Title, t.Status)
+			}
+		}
 		if len(checks) == 0 {
 			color.New(color.Faint).Println("\nNever checked.")
 			return nil
@@ -232,11 +252,14 @@ var requirementsRemoveCmd = &cobra.Command{
 			return err
 		}
 		defer p.db.Close()
-		gone, err := p.db.DeleteRequirement(id, operatorActor())
+		gone, unlinked, err := p.db.DeleteRequirement(id, operatorActor())
 		if err != nil {
 			return err
 		}
 		fmt.Printf("Removed %s: %s\n", requirements.Key(gone.ID), gone.Title)
+		if len(unlinked) > 0 {
+			fmt.Printf("  No longer implemented by %s\n", taskKeys(unlinked))
+		}
 		return nil
 	},
 }

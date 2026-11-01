@@ -221,6 +221,14 @@ type Task struct {
 	// expensive or experimental can set a tighter cap to bound the blast
 	// radius of repeated provider failures.
 	RetryBudget int `json:"retry_budget,omitempty"`
+	// Requirements are the ids of the project's requirements this task
+	// implements, R-3 as 3 (Task 20460). The orchestrator hands the agent each
+	// one's title, details and tests as the task's acceptance contract. A
+	// definition field: set from the dashboard, `cloop task add/edit
+	// --requirement` and a requirement's "Add a task" actions, each of which
+	// checks the ids against the task's own project, and pruned when a
+	// requirement is deleted.
+	Requirements []int `json:"requirements,omitempty"`
 	// WriteBackBranch and WriteBackCommit record where an isolated executor
 	// left this task's work (Task 20180). They are set only for a task that
 	// ran somewhere the hub does not share a filesystem with: a local run's

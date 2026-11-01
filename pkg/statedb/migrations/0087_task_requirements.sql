@@ -1,0 +1,21 @@
+-- 0087_task_requirements: the requirements a task implements (Task 20460).
+--
+-- plan_tasks.requirements — the ids of the project's requirements (the
+-- requirements table, 0085) the task implements, as a JSON array of integers
+-- like depends_on: R-3 is 3. The orchestrator gives the agent each one's
+-- title, details and tests as the task's acceptance contract; the dashboard
+-- draws them as R-n chips and lists, on a requirement, the tasks that
+-- implement it. Written by `cloop task add/edit --requirement`, the task API
+-- and a requirement's "Add a task" actions, all of which check the ids against
+-- the task's own project, and by DeleteRequirement, which takes a deleted
+-- requirement out of every list in the transaction that deletes it.
+--
+-- IF NOT EXISTS is the migration runner's (addcolumn.go), as in 0054.
+--
+-- An append to plan_tasks, so this is the first migration recorded
+-- additive-columns (schema_compat.go): builds from Task 20388 on update task
+-- rows in place, in the columns they know, and keep this one; every build
+-- before that empties plan_tasks on each save and would erase it, so it reads
+-- the verdict as unknown and refuses the database instead.
+
+ALTER TABLE plan_tasks ADD COLUMN IF NOT EXISTS requirements TEXT NOT NULL DEFAULT '[]';

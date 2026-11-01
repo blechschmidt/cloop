@@ -270,6 +270,7 @@ function renderTasks(s) {
           (t.role?'<span>'+esc(t.role)+'</span>':'')+
           (t.depends_on&&t.depends_on.length?'<span>deps: #'+t.depends_on.join(', #')+'</span>':'')+
           (t.tags&&t.tags.length?'<span class="task-tags">'+t.tags.map(function(tg){return '<span class="task-tag">'+esc(tg)+'</span>';}).join('')+'</span>':'')+
+          fmtReqChips(t)+
           fmtTimeEstimate(t)+
           fmtReviewChip(t)+
           fmtFilesChip(t)+
@@ -345,6 +346,18 @@ function fmtReviewChip(t) {
   return '<span' + (r.blocked ? ' style="color:var(--red)"' : '') + ' title="' +
     esc('Review gate' + (r.model ? ' (' + r.model + ')' : '') + ': ' + r.verdict.replace('_', ' ')) + '">🔍 ' + esc(txt) + '</span>';
 }
+
+// fmtReqChips names the requirements a task implements (Task 20460); one
+// pressed opens in the Requirements tab.
+function fmtReqChips(t) {
+  return t && t.requirements && t.requirements.length ? '<span class="task-tags">' + t.requirements.map(id =>
+    '<span class="task-tag" role="button" tabindex="0" title="A requirement this task implements" data-action="openRequirement" data-arg="' +
+    (+id) + '">R-' + (+id) + '</span>').join('') + '</span>' : '';
+}
+act('openRequirement', function(id) {
+  switchTab('requirements');
+  panelAct('requirements', 'show', id);
+}, NUM);
 
 // fmtFilesChip counts the files a task's runs attached (Task 20428); its
 // details list them.

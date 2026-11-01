@@ -2333,6 +2333,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
 			prompt = learningMem + prompt
 		}
+		// The requirements the task implements, as its acceptance contract
+		// (Task 20460) — after the override, so an edited prompt keeps it too.
+		contract := o.requirementContract(task)
+		prompt = withGateSection(prompt, contract)
 		prompt = withGateSection(prompt, activeGate.promptSection())
 		// Attachments (Task 20428): the outbox the agent copies files into for
 		// this attempt, named in its prompt and in its environment.
@@ -2437,7 +2441,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				Goal:           s.Goal,
 				Instructions:   s.Instructions,
 				ProjectContext: projCtxStr,
-				Notice:         activeGate.promptSection() + outbox.promptSection(),
+				Notice:         contract + activeGate.promptSection() + outbox.promptSection(),
 			})
 			if maErr != nil {
 				if requeueIfInterrupted("while the multi-agent pipeline was running") {
@@ -4546,6 +4550,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
 				prompt = learningMem + prompt
 			}
+			prompt = withGateSection(prompt, o.requirementContract(t))
 			roundOutboxes[i] = o.openOutbox(t, o.router.For(t.Role))
 			prompt = withGateSection(prompt, roundOutboxes[i].promptSection())
 			prebuiltPrompts[i] = prompt

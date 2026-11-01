@@ -219,6 +219,12 @@ act('openEditModal', function(id) {
   document.getElementById('modalDeps').value     = (t.depends_on && t.depends_on.length) ? t.depends_on.join(',') : '';
   const mmEl = document.getElementById('modalMaxMinutes');
   if (mmEl) mmEl.value = t.max_minutes || 0;
+  // The requirements it implements (Task 20460): a deferred list, unsent
+  // unless changed.
+  const rq = document.getElementById('modalReqs');
+  rq.style.display = 'none';
+  delete rq.dataset.ids;
+  panelAct('taskreqs', 'pick', t.id, t.requirements || []);
   openOverlay('modal-overlay', {dismiss: closeModal, focus: '#modalTitle_'});
 }, NUM);
 
@@ -461,6 +467,7 @@ function _renderTaskDetails(d) {
   if (t.assignee) chips.push('<span class="td-chip">Assignee<strong>'+esc(t.assignee)+'</strong></span>');
   if (t.depends_on && t.depends_on.length) chips.push('<span class="td-chip">Deps<strong>#'+t.depends_on.join(', #')+'</strong></span>');
   if (t.tags && t.tags.length) chips.push('<span class="td-chip">Tags<strong>'+t.tags.map(esc).join(', ')+'</strong></span>');
+  if (t.requirements && t.requirements.length) chips.push('<span class="td-chip">Implements<strong>R-'+t.requirements.map(Number).join(', R-')+'</strong></span>');
   if (t.estimated_minutes) chips.push('<span class="td-chip">Est<strong>'+t.estimated_minutes+'m</strong></span>');
   if (t.actual_minutes)    chips.push('<span class="td-chip">Actual<strong>'+t.actual_minutes+'m</strong></span>');
   if (t.max_minutes)       chips.push('<span class="td-chip" title="Per-task timeout override. 0 = inherits project default.">Timeout<strong>'+t.max_minutes+'m</strong></span>');
@@ -663,6 +670,8 @@ act('submitEditTask', function() {
   if (Number.isFinite(mmVal) && mmVal >= 0) {
     payload.max_minutes = mmVal;
   }
+  const rq = document.getElementById('modalReqs').dataset.ids;
+  if (rq) payload.requirements = JSON.parse(rq);
   api(pUrl('/api/task/edit'), payload).then(d => {
     if (d.ok) { closeModal(); toast('Task updated', 'ok'); refreshState(); }
     else toast(d.error||'Edit failed', 'err');

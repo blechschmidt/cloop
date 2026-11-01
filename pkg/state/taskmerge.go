@@ -55,6 +55,12 @@ var definitionFields = []string{
 	"Assignee", "ExternalURL", "Links", "SprintID", "ComplexitySize",
 	"StoryPoints", "OnSuccess", "OnFailure", "RiskScore", "ImpactScore",
 	"RetryBudget",
+
+	// The requirements a task implements (Task 20460): linked from the
+	// dashboard or the CLI while a run may hold the plan, and pruned by a
+	// requirement's deletion, which writes the database directly — a run's
+	// next save must adopt both rather than write its stale list back.
+	"Requirements",
 }
 
 // definitionIndex holds each definition field's index in pm.Task, resolved

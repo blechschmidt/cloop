@@ -58,8 +58,9 @@ var (
 	editDesc     string
 	editPriority int
 	editDeps     string
-	editRole     string // agent role for task edit
-	editDeadline string // deadline override
+	editRole     string   // agent role for task edit
+	editDeadline string   // deadline override
+	editReqs     []string // the requirements the task implements (Task 20460)
 
 	// filter flags
 	taskListTags []string // --tags filter for task list
@@ -277,6 +278,9 @@ var taskShowCmd = &cobra.Command{
 		if len(task.Tags) > 0 {
 			fmt.Printf("Tags:     %s\n", strings.Join(task.Tags, ", "))
 		}
+		if len(task.Requirements) > 0 {
+			fmt.Printf("Implements: %s\n", requirementKeys(task.Requirements))
+		}
 		if task.Description != "" {
 			fmt.Printf("\nDescription:\n")
 			fmt.Printf("  %s\n", strings.ReplaceAll(task.Description, "\n", "\n  "))
@@ -360,8 +364,18 @@ var taskEditCmd = &cobra.Command{
 			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
-		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") && !cmd.Flags().Changed("depends-on") && !cmd.Flags().Changed("role") && !cmd.Flags().Changed("deadline") {
-			return fmt.Errorf("no changes specified — use --title, --desc, --priority, --depends-on, --role, or --deadline")
+		if !cmd.Flags().Changed("title") && !cmd.Flags().Changed("desc") && !cmd.Flags().Changed("priority") &&
+			!cmd.Flags().Changed("depends-on") && !cmd.Flags().Changed("role") && !cmd.Flags().Changed("deadline") &&
+			!cmd.Flags().Changed("requirement") {
+			return fmt.Errorf("no changes specified — use --title, --desc, --priority, --depends-on, --role, --deadline, or --requirement")
+		}
+		// Checked before anything changes: a refused requirement leaves the
+		// task as it was.
+		var reqLinks []int
+		if cmd.Flags().Changed("requirement") {
+			if reqLinks, err = taskRequirementLinks(workdir, editReqs, task.Requirements); err != nil {
+				return err
+			}
 		}
 
 		changed := []string{}
@@ -389,6 +403,10 @@ var taskEditCmd = &cobra.Command{
 			task.Role = pm.AgentRole(editRole)
 			changed = append(changed, "role")
 		}
+		if cmd.Flags().Changed("requirement") {
+			task.Requirements = reqLinks
+			changed = append(changed, "requirements")
+		}
 		if cmd.Flags().Changed("deadline") {
 			if editDeadline == "" || editDeadline == "none" || editDeadline == "clear" {
 				task.Deadline = nil
@@ -412,6 +430,9 @@ var taskEditCmd = &cobra.Command{
 		fmt.Printf("  Priority: %d\n", task.Priority)
 		if task.Role != "" {
 			fmt.Printf("  Role:     %s\n", task.Role)
+		}
+		if len(task.Requirements) > 0 {
+			fmt.Printf("  Implements: %s\n", requirementKeys(task.Requirements))
 		}
 		if task.Description != "" {
 			dimColor := color.New(color.Faint)
@@ -1763,6 +1784,7 @@ func init() {
 	taskEditCmd.Flags().StringVar(&editDeps, "depends-on", "", "Comma-separated IDs of tasks this task depends on (e.g. '1,2'); use '' to clear")
 	taskEditCmd.Flags().StringVar(&editRole, "role", "", "Agent role: backend, frontend, testing, security, devops, data, docs, review")
 	taskEditCmd.Flags().StringVar(&editDeadline, "deadline", "", "Task deadline: relative ('2h', '3d', '1w'), RFC3339, date ('2025-12-31'), or 'none'/'clear' to remove")
+	taskEditCmd.Flags().StringArrayVar(&editReqs, "requirement", nil, requirementFlagUsage+"; replaces the task's list, 'none' clears it")
 
 	taskListCmd.Flags().StringSliceVar(&taskListTags, "tags", nil, "Filter listed tasks by tag (comma-separated or repeated --tags)")
 

@@ -40,7 +40,7 @@ func TestRequirementsRoundTripAndNeverReuseAnID(t *testing.T) {
 	if a.ID != 1 || b.ID != 2 || a.CreatedBy != "alice" || a.CreatedAt.IsZero() {
 		t.Fatalf("added %+v and %+v", a, b)
 	}
-	if _, err := db.DeleteRequirement(b.ID, "bob"); err != nil {
+	if _, _, err := db.DeleteRequirement(b.ID, "bob"); err != nil {
 		t.Fatal(err)
 	}
 	// R-2 named one requirement; a new one must not inherit its verdicts,
@@ -101,7 +101,7 @@ func TestRequirementChecksRecordOnlyWhatStillApplies(t *testing.T) {
 	if _, err := db.UpdateRequirement(b, "x"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.DeleteRequirement(c.ID, "x"); err != nil {
+	if _, _, err := db.DeleteRequirement(c.ID, "x"); err != nil {
 		t.Fatal(err)
 	}
 	at := time.Now().Add(-time.Minute).UTC()
@@ -140,7 +140,7 @@ func TestRequirementChecksRecordOnlyWhatStillApplies(t *testing.T) {
 	if n := auditCount(t, db, auditaction.ActionRequirementVerdict); n != 1 {
 		t.Errorf("%d verdict audit rows", n)
 	}
-	gone, err := db.DeleteRequirement(a.ID, "x")
+	gone, _, err := db.DeleteRequirement(a.ID, "x")
 	if err != nil || gone.ID != a.ID {
 		t.Fatal(err)
 	}

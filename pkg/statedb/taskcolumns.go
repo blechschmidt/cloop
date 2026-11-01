@@ -1,10 +1,11 @@
 // Package statedb — rehydration of the JSON-encoded task columns.
 //
-// plan_tasks stores six list fields as JSON text: depends_on, tags and
-// annotations since the first schema, and links, on_success and on_failure
-// since 0054 (Task 20361). Decoding them used to be a discarded error per
-// column per row, which made a damaged column indistinguishable from an empty
-// one: the field came back nil, and the load reported success.
+// plan_tasks stores seven list fields as JSON text: depends_on, tags and
+// annotations since the first schema, links, on_success and on_failure since
+// 0054 (Task 20361), and requirements since 0087 (Task 20460). Decoding them
+// used to be a discarded error per column per row, which made a damaged column
+// indistinguishable from an empty one: the field came back nil, and the load
+// reported success.
 //
 // For some of them that is a visibility loss. For depends_on it is a
 // correctness bug, because an empty dependency list is not "no information" —
@@ -34,7 +35,7 @@ const maxCorruptValueInError = 64
 
 // taskListColumns holds one row's JSON-encoded list columns as stored.
 type taskListColumns struct {
-	DependsOn, Tags, Annotations, Links, OnSuccess, OnFailure string
+	DependsOn, Tags, Annotations, Links, OnSuccess, OnFailure, Requirements string
 }
 
 // decodeTaskColumns rehydrates the JSON-encoded columns of a freshly scanned
@@ -49,6 +50,11 @@ type taskListColumns struct {
 //     run early, against prerequisites that have not been built, or runs the
 //     branch a task's outcome was meant to skip. That damage is unrecoverable,
 //     while refusing the load is not — the error names the row to repair.
+//
+//   - requirements (Task 20460) is fatal for the same reason: it is the
+//     task's acceptance contract, and "the contract is unreadable" degraded
+//     to "there is none" hands the agent the task without the tests it must
+//     pass. It holds requirement ids, never text.
 //
 //   - tags, annotations and links degrade to empty, and report. Their failure
 //     mode is "shows less": a label-filtered run skips the task, its decision
@@ -75,7 +81,12 @@ func decodeTaskColumns(t *pm.Task, raw taskListColumns) error {
 		t.OnFailure = nil
 		return corruptColumn(t.ID, "on_failure", raw.OnFailure, err)
 	}
-	t.DependsOn, t.OnSuccess, t.OnFailure = deps, onSuccess, onFailure
+	reqs, err := decodeList[int](raw.Requirements)
+	if err != nil {
+		t.Requirements = nil
+		return corruptColumn(t.ID, "requirements", raw.Requirements, err)
+	}
+	t.DependsOn, t.OnSuccess, t.OnFailure, t.Requirements = deps, onSuccess, onFailure, reqs
 
 	t.Tags = degradableList[string](t.ID, "tags", raw.Tags)
 	t.Annotations = degradableList[pm.Annotation](t.ID, "annotations", raw.Annotations)

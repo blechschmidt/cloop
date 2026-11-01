@@ -52,6 +52,8 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/forgehost"
+	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -357,7 +359,7 @@ func projectSeedFor(workDir string) ([]byte, error) {
 	// honours them (Task 20339).
 	st.Provider = resolveProviderName(workDir)
 	st.Model = resolveProjectModel(workDir, st.Provider, st)
-	seed, err := projectseed.Build(st)
+	seed, err := projectseed.BuildWith(st, seedRequirementsFor(workDir, st))
 	if err != nil {
 		return nil, &workspaceSourceError{
 			ProjectPath: workDir,
@@ -365,6 +367,40 @@ func projectSeedFor(workDir string) ([]byte, error) {
 		}
 	}
 	return seed, nil
+}
+
+// seedRequirementsFor reads the requirements st's unfinished tasks implement
+// (Task 20460): the sandbox's run gives each task's agent its contract, and a
+// device or Pod has no requirements table but the one the seed fills. Best
+// effort — a seed without them still runs the plan, and the run's contract
+// then says their text was not available to it.
+func seedRequirementsFor(workDir string, st *state.ProjectState) []requirements.Requirement {
+	if st == nil || st.Plan == nil || !planLinksRequirements(st.Plan) {
+		return nil
+	}
+	db, err := statedb.Open(state.DBPath(workDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ui] %s: the seed goes without its tasks' requirements: %v\n", workDir, err)
+		return nil
+	}
+	defer db.Close()
+	all, err := db.AsProject().Requirements()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ui] %s: the seed goes without its tasks' requirements: %v\n", workDir, err)
+		return nil
+	}
+	return projectseed.LinkedRequirements(st.Plan, all)
+}
+
+// planLinksRequirements reports whether a task of plan implements a
+// requirement, so a plan with none costs a seed no database read.
+func planLinksRequirements(plan *pm.Plan) bool {
+	for _, t := range plan.Tasks {
+		if t != nil && len(t.Requirements) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // logUnseedableExecutor records that a run went out without its project state,

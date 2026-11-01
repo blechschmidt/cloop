@@ -163,6 +163,30 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Tasks implement requirements, and a task's agent is given them as its
+  acceptance contract.** A task can now be linked to the requirements it
+  implements: from its edit dialog (a list of the project's approved
+  requirements to tick), `cloop task add/edit --requirement R-3`, or the task
+  API's new `requirements` field (`3` or `"R-3"`). The task card shows an R-n
+  chip for each, and a requirement's Details and `cloop requirements show` list
+  the tasks that implement it.
+  When the task runs, its prompt gives each requirement's title, details and
+  test commands as the acceptance contract: the task is done only when those
+  tests pass, and they must not be weakened to get there. The requirements are
+  read when the task starts, so an edit made while it waited counts. A run on a
+  device or a Pod receives the requirements its plan's unfinished tasks
+  implement with the project, so it is held to the same contract. Links are
+  checked against the task's own project: an unknown id, which includes another
+  project's requirement, is refused with a 400, as is a new link to a
+  deprecated requirement. The "Add a task to restore/test it" actions link the
+  task they add. Deleting a requirement, by hand or by a spec-file import, takes
+  it out of every task in the same transaction, and the audit row names them
+  (`unlinked_tasks`). The links are a definition field, so an edit made while a
+  run holds the plan survives the run's next save. They are stored in the new
+  `plan_tasks.requirements` column (migration 0087), the first migration
+  recorded `additive-columns`: builds from before Task 20388, which would erase
+  the column on every save, refuse the database instead (Task 20460).
+
 - **Requirements as code: `.cloop/requirements.yaml`, kept in sync with the hub
   both ways.** A project's requirements can now live in its repository too, to
   be reviewed in pull requests and checked by CI with no hub. The spec file

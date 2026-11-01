@@ -20,10 +20,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/requirements"
 )
 
@@ -114,6 +117,9 @@ type RequirementSpecImportResult struct {
 	// ChecksDeleted counts the recorded checks deleted with each requirement
 	// the import deleted.
 	ChecksDeleted map[int]int64 `json:"checks_deleted,omitempty"`
+	// Unlinked are the tasks each requirement the import deleted was taken
+	// out of (Task 20460), as they are after it.
+	Unlinked map[int][]*pm.Task `json:"-"`
 }
 
 const requirementSpecFileColumns = `at, actor, source, direction, executor_id, path, found, content, sha256, git_commit,
@@ -494,7 +500,7 @@ func (d *DB) ImportRequirementSpec(in RequirementSpecImport) (RequirementSpecImp
 			return fmt.Errorf("%w: the import would leave %d requirements, more than the %d a project holds",
 				requirements.ErrInvalid, held, requirements.MaxRequirements)
 		}
-		if res.ChecksDeleted, err = applySpecStepsTx(tx, steps, actor, now); err != nil {
+		if res.ChecksDeleted, res.Unlinked, err = applySpecStepsTx(tx, steps, actor, now); err != nil {
 			return err
 		}
 		if err := replaceSpecBaseTx(tx, in.File, now); err != nil {
@@ -515,14 +521,21 @@ func (d *DB) ImportRequirementSpec(in RequirementSpecImport) (RequirementSpecImp
 	}
 	if !in.DryRun {
 		auditRequirementImport(d, in, res)
+		for _, id := range slices.Sorted(maps.Keys(res.Unlinked)) {
+			for _, t := range res.Unlinked[id] {
+				auditTaskUpsert(d, t, actorOrSystem(in.Sync.Actor))
+			}
+		}
 	}
 	return res, nil
 }
 
 // applySpecStepsTx writes an import's steps, which Resolve ordered: the
 // requirements added and restored, then those updated, then those deleted —
-// each deleted with the history of its checks, as DeleteRequirement does.
-func applySpecStepsTx(tx *sql.Tx, steps []requirements.Step, actor string, now time.Time) (map[int]int64, error) {
+// each deleted with the history of its checks and taken out of the tasks that
+// implemented it, as DeleteRequirement does. It returns the checks deleted and
+// the tasks unlinked, by requirement.
+func applySpecStepsTx(tx *sql.Tx, steps []requirements.Step, actor string, now time.Time) (map[int]int64, map[int][]*pm.Task, error) {
 	for _, s := range steps {
 		if s.Action != requirements.ActionAdd && s.Action != requirements.ActionRestore {
 			continue
@@ -533,7 +546,7 @@ func applySpecStepsTx(tx *sql.Tx, steps []requirements.Step, actor string, now t
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			r.ID, r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
 			formatReqTime(now), formatReqTime(now), actor, actor, r.CurrentStatus()); err != nil {
-			return nil, fmt.Errorf("statedb: import %s: %w", requirements.Key(r.ID), classifyDriverErr(err))
+			return nil, nil, fmt.Errorf("statedb: import %s: %w", requirements.Key(r.ID), classifyDriverErr(err))
 		}
 	}
 	for _, s := range steps {
@@ -546,28 +559,36 @@ func applySpecStepsTx(tx *sql.Tx, steps []requirements.Step, actor string, now t
 			r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
 			r.CurrentStatus(), formatReqTime(now), actor, r.ID)
 		if err != nil {
-			return nil, fmt.Errorf("statedb: import %s: %w", requirements.Key(r.ID), classifyDriverErr(err))
+			return nil, nil, fmt.Errorf("statedb: import %s: %w", requirements.Key(r.ID), classifyDriverErr(err))
 		}
 		if n, _ := res.RowsAffected(); n != 1 {
-			return nil, fmt.Errorf("%w: %s", ErrRequirementNotFound, requirements.Key(r.ID))
+			return nil, nil, fmt.Errorf("%w: %s", ErrRequirementNotFound, requirements.Key(r.ID))
 		}
 	}
 	deleted := map[int]int64{}
+	unlinked := map[int][]*pm.Task{}
 	for _, s := range steps {
 		if s.Action != requirements.ActionDelete {
 			continue
 		}
 		id := s.Requirement.ID
 		if _, err := tx.Exec(`DELETE FROM requirements WHERE id = ?`, id); err != nil {
-			return nil, fmt.Errorf("statedb: import: delete %s: %w", requirements.Key(id), classifyDriverErr(err))
+			return nil, nil, fmt.Errorf("statedb: import: delete %s: %w", requirements.Key(id), classifyDriverErr(err))
 		}
 		res, err := tx.Exec(`DELETE FROM requirement_checks WHERE requirement_id = ?`, id)
 		if err != nil {
-			return nil, fmt.Errorf("statedb: import: delete the checks of %s: %w", requirements.Key(id), classifyDriverErr(err))
+			return nil, nil, fmt.Errorf("statedb: import: delete the checks of %s: %w", requirements.Key(id), classifyDriverErr(err))
 		}
 		deleted[id], _ = res.RowsAffected()
+		tasks, err := unlinkRequirementTx(tx, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(tasks) > 0 {
+			unlinked[id] = tasks
+		}
 	}
-	return deleted, nil
+	return deleted, unlinked, nil
 }
 
 // auditRequirementImport records an import in the project's trail: what it
@@ -600,7 +621,15 @@ func auditRequirementImport(d *DB, in RequirementSpecImport, res RequirementSpec
 			}
 			updated = append(updated, row)
 		case requirements.ActionDelete:
-			deleted = append(deleted, map[string]any{"id": r.ID, "title": r.Title, "checks": res.ChecksDeleted[r.ID]})
+			row := map[string]any{"id": r.ID, "title": r.Title, "checks": res.ChecksDeleted[r.ID]}
+			if tasks := res.Unlinked[r.ID]; len(tasks) > 0 {
+				ids := make([]int, len(tasks))
+				for i, t := range tasks {
+					ids[i] = t.ID
+				}
+				row["unlinked_tasks"] = ids
+			}
+			deleted = append(deleted, row)
 		}
 	}
 	resolved := map[string]string{}

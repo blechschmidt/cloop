@@ -180,6 +180,9 @@ var deferredScripts = []struct{ token, path string }{
 	// A pending task's Split dialog (Task 20154), fetched on the first Split:
 	// deferred by Task 20441 to pay for Decompose beside Add Task.
 	{"split.js", "assets/js/deferred/split.js"},
+	// The edit dialog's list of the requirements a task implements (Task
+	// 20460), fetched on the first Edit.
+	{"taskreqs.js", "assets/js/deferred/taskreqs.js"},
 	// The "Confirm it's you" dialog a privileged action on a session signed
 	// in too long ago opens (Task 20448).
 	{"reauth.js", "assets/js/deferred/reauth.js"},

@@ -170,7 +170,59 @@ output — and the commands that will show it is fixed. A requirement with no
 tests also offers **Add a task to test it**: the agent writes a test that
 passes exactly when the requirement holds and names the command that runs it,
 which you then add to the requirement. Either task is placed by the
-requirement's priority: a `must` ahead of the plan's usual work.
+requirement's priority: a `must` ahead of the plan's usual work, and either
+[implements the requirement](#tasks-that-implement-a-requirement), so its run
+is held to it. A deprecated requirement offers neither.
+
+## Tasks that implement a requirement
+
+A task can be linked to the requirements it implements. When the task runs,
+its agent is given each one — title, details and test commands — as the task's
+**acceptance contract**: the task is done only when those tests pass, run from
+the project's root, and they must not be weakened to get there — not edited,
+skipped, disabled or loosened, and the requirement not narrowed. An agent that
+cannot make a test pass, or finds it wrong, is told to say so and end the task
+as failed. A requirement with no tests is part of the contract through its
+details. The requirements are read when the task starts, so an edit made while
+it waited is the one it is held to.
+
+Link a task from its **Edit** dialog, which lists the project's approved
+requirements (and any the task already implements) to tick; from a terminal:
+
+```bash
+cloop task add "Make config errors exit non-zero" --no-ai --requirement R-3
+cloop task edit 12 --requirement R-3,R-7    # replaces the task's list
+cloop task edit 12 --requirement none       # clears it
+cloop task show 12                          # "Implements: R-3, R-7"
+cloop requirements show R-3                 # lists the tasks that implement it
+```
+
+or through the API, where `POST /api/task/add`, `POST /api/tasks`,
+`POST /api/task/edit` and `PUT`/`PATCH /api/tasks/{id}` take `requirements`, a
+list of ids — `3` or `"R-3"`. On an edit it replaces the task's list, `[]`
+clears it, and leaving it out leaves the list alone.
+
+A task's card shows a chip for each requirement it implements — **R-3** — that
+opens the requirement, and a requirement's **Details** list the tasks that
+implement it, each opening the task.
+
+Requirement ids are the project's own, so a link is always to a requirement of
+the task's own project: an id the project has no requirement for — mistyped,
+deleted, or one that only another project has — is refused with a 400 (the CLI
+exits non-zero), and so is a new link to a deprecated requirement. A link made
+before its requirement was deprecated stays until it is removed; the contract
+names the requirement and leaves it out. Deleting a requirement — from the
+dashboard, with `cloop requirements remove`, or by importing a spec file that
+no longer has it — takes it out of every task that implements it, in the same
+transaction: the `requirement.delete` (or `requirement.import`) audit row names
+the tasks (`unlinked_tasks`), and each gets its `task.upsert` row under the
+same actor.
+
+A run on an executor that does not share the hub's database — a device, a
+Pod — receives the requirements its plan's unfinished tasks implement with the
+project, so its agent is given the same contract. A plan file
+(`cloop plan export`) carries no links: their ids would name other
+requirements, or none, in the project that imports it.
 
 ## Requirements as code
 
@@ -329,6 +381,7 @@ minutes old (hourly for a checkout that had none), for somebody who may import;
 | See the requirements, their checks and runs, and the spec file's state | `project.read` |
 | Download the requirements as a spec file | `project.read` |
 | Add, change or delete a requirement, record a verdict, add a task from one | `task.mutate` |
+| Link a task to the requirements it implements | `task.mutate` |
 | Read the spec file again, and import it | `task.mutate` |
 | Check them | `run.start` |
 | Stop a check | `run.stop` |
@@ -359,6 +412,8 @@ trail: `requirement.create`, `requirement.update`, `requirement.delete`,
 | Check runs kept per project | the newest 200 |
 | A whole check | 6 hours |
 | A spec file | 2 MiB, one YAML document of at most 1,000 requirements, each held to the bounds above |
+| Requirements one task implements | 32 |
+| A task's contract in its prompt | 96 KiB; the requirements past it are named, with where to read them |
 
 On an executor that shares the project's directory — a container sandbox
 bind-mounting it, the hub's own host — the project's database is writable from

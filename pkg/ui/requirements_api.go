@@ -8,7 +8,7 @@ package ui
 //	DELETE /api/requirements/{id}               delete one, and its history
 //	GET    /api/requirements/{id}/checks        its recent checks, test output included
 //	POST   /api/requirements/{id}/verdict       record a verdict by hand
-//	POST   /api/requirements/{id}/task          add a task to restore it, or to test it
+//	POST   /api/requirements/{id}/task          add a task to restore it, or to test it, linked to it
 //	POST   /api/requirement-runs                check them: tests on the project's executor
 //	GET    /api/requirement-runs/{run}          how a check is going
 //	POST   /api/requirement-runs/{run}/cancel   stop it
@@ -100,6 +100,9 @@ type requirementView struct {
 	Stale string `json:"stale,omitempty"`
 	// TasksDoneSince counts the tasks finished after the last check.
 	TasksDoneSince int `json:"tasks_done_since,omitempty"`
+	// Tasks are the ids of the tasks that implement it (Task 20460); its
+	// details list them with their titles.
+	Tasks []int `json:"tasks,omitempty"`
 }
 
 // requirementsList is GET /api/requirements's answer.
@@ -210,15 +213,20 @@ func (s *Server) handleRequirementsList(w http.ResponseWriter, r *http.Request) 
 		out.Spec = &v
 	}
 	var done []time.Time
-	if ps, err := state.LoadLite(workDir); err == nil && ps.Plan != nil {
-		for _, t := range ps.Plan.Tasks {
+	plan := planOf(workDir)
+	if plan != nil {
+		for _, t := range plan.Tasks {
 			if t.Status == pm.TaskDone && t.CompletedAt != nil {
 				done = append(done, *t.CompletedAt)
 			}
 		}
 	}
+	implementing := tasksImplementing(plan)
 	for _, req := range reqs {
 		v := requirementView{Requirement: req, Fingerprint: req.Fingerprint()}
+		for _, t := range implementing[req.ID] {
+			v.Tasks = append(v.Tasks, t.ID)
+		}
 		c, checked := latest[req.ID]
 		if !checked {
 			out.Never++
@@ -310,7 +318,9 @@ func (s *Server) handleRequirementUpdate(w http.ResponseWriter, r *http.Request)
 	jsonOK(w, map[string]any{"ok": true, "requirement": updated})
 }
 
-// handleRequirementDelete answers DELETE /api/requirements/{id}.
+// handleRequirementDelete answers DELETE /api/requirements/{id}. The deletion
+// takes the requirement out of every task that implements it (Task 20460), so
+// open dashboards are sent the plan as well.
 func (s *Server) handleRequirementDelete(w http.ResponseWriter, r *http.Request) {
 	id, ok := requirementPathID(w, r)
 	if !ok {
@@ -321,15 +331,23 @@ func (s *Server) handleRequirementDelete(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	gone, err := db.DeleteRequirement(id, s.auditActor(r))
+	gone, unlinked, err := db.DeleteRequirement(id, s.auditActor(r))
 	db.Close()
 	if err != nil {
 		requirementErr(w, err)
 		return
 	}
 	s.requirementsChanged(workDir, "", "")
+	if len(unlinked) > 0 {
+		if ps, err := state.LoadLite(workDir); err == nil {
+			s.broadcastStateDiff(workDir, ps)
+		}
+	}
 	s.broadcastAuditAppend(string(auditaction.ActionRequirementDelete))
-	jsonOK(w, map[string]any{"ok": true, "deleted": gone})
+	if unlinked == nil {
+		unlinked = []int{}
+	}
+	jsonOK(w, map[string]any{"ok": true, "deleted": gone, "unlinked_tasks": unlinked})
 }
 
 // handleRequirementChecks answers GET /api/requirements/{id}/checks.
@@ -357,7 +375,12 @@ func (s *Server) handleRequirementChecks(w http.ResponseWriter, r *http.Request)
 	if checks == nil {
 		checks = []statedb.RequirementCheck{}
 	}
-	jsonOK(w, map[string]any{"ok": true, "requirement": req, "fingerprint": req.Fingerprint(), "checks": checks})
+	tasks := tasksImplementing(planOf(s.resolveWorkDir(r)))[id]
+	if tasks == nil {
+		tasks = []implementingTask{}
+	}
+	jsonOK(w, map[string]any{"ok": true, "requirement": req, "fingerprint": req.Fingerprint(), "checks": checks,
+		"tasks": tasks})
 }
 
 // handleRequirementVerdict answers POST /api/requirements/{id}/verdict.
@@ -391,7 +414,9 @@ func (s *Server) handleRequirementVerdict(w http.ResponseWriter, r *http.Request
 
 // handleRequirementTask answers POST /api/requirements/{id}/task: a pending
 // task that puts the requirement right ("fix", quoting its last check) or that
-// gives it a test ("test"), so the project's own loop does the work.
+// gives it a test ("test"), so the project's own loop does the work. The task
+// implements the requirement (Task 20460), so its run is held to it; a
+// deprecated requirement, which nothing is held to, gets none.
 func (s *Server) handleRequirementTask(w http.ResponseWriter, r *http.Request) {
 	id, ok := requirementPathID(w, r)
 	if !ok {
@@ -427,6 +452,11 @@ func (s *Server) handleRequirementTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	links, err := requirements.CheckLinks([]int{req.ID}, []requirements.Requirement{req}, nil)
+	if err != nil {
+		requirementErr(w, err)
+		return
+	}
 
 	ps, err := state.LoadLite(workDir)
 	if err != nil {
@@ -444,6 +474,7 @@ func (s *Server) handleRequirementTask(w http.ResponseWriter, r *http.Request) {
 	task := &pm.Task{
 		ID: maxID + 1, Title: title, Description: desc, Priority: requirementTaskPriority(req.Priority),
 		Status: pm.TaskPending, Tags: []string{"requirement", strings.ToLower(requirements.Key(req.ID))},
+		Requirements: links,
 	}
 	ps.Plan.Tasks = append(ps.Plan.Tasks, task)
 	if err := ps.SaveDirect(); err != nil {

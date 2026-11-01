@@ -14,6 +14,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/milestone"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/runbuild"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -1182,6 +1183,12 @@ type legacyState struct {
 	// holds its tasks to "done means committed" inside the sandbox, where the
 	// work is (Task 20370).
 	CommitPolicy *pm.CommitPolicy `json:"commit_policy,omitempty"`
+	// Requirements are not project state but its requirements table's rows
+	// that the plan's unfinished tasks implement: a seed carries them
+	// (projectseed.BuildWith) so the run on an isolating executor gives its
+	// agent each task's contract, as a run on the hub does (Task 20460). A
+	// state.json written by hand has none.
+	Requirements []requirements.Requirement `json:"requirements,omitempty"`
 }
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {
@@ -1241,6 +1248,9 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 
 	if err := db.SaveState(toRaw(s)); err != nil {
 		return err
+	}
+	if err := db.SeedRequirements(legacy.Requirements); err != nil {
+		return fmt.Errorf("store the requirements the seed carries: %w", err)
 	}
 	return importQuarantines(db, s.Plan)
 }

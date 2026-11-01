@@ -22,11 +22,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/requirements"
 )
 
@@ -273,6 +275,52 @@ func (d *DB) AddRequirement(r requirements.Requirement, actor string) (requireme
 	return r, nil
 }
 
+// SeedRequirements stores reqs under their own ids, as a project seed carries
+// them to an executor that does not share the hub's database (Task 20460): the
+// requirements the plan's unfinished tasks implement, which the run there
+// gives its agent as each task's contract. A requirement already stored under
+// an id is replaced in its definition. Nothing is audited — the hub recorded
+// these requirements when they were written; this is its copy for one run.
+func (d *DB) SeedRequirements(reqs []requirements.Requirement) error {
+	if len(reqs) == 0 {
+		return nil
+	}
+	if len(reqs) > requirements.MaxRequirements {
+		return fmt.Errorf("%w: a seed carries at most %d requirements", requirements.ErrInvalid, requirements.MaxRequirements)
+	}
+	now := formatReqTime(time.Now())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("statedb: seed requirements: %w", classifyDriverErr(err))
+	}
+	defer tx.Rollback() //nolint:errcheck // a no-op after a commit
+	for _, r := range reqs {
+		id := r.ID
+		if id <= 0 {
+			return fmt.Errorf("%w: a seeded requirement has no id", requirements.ErrInvalid)
+		}
+		if err := r.Normalize(); err != nil {
+			return fmt.Errorf("%s: %w", requirements.Key(id), err)
+		}
+		if _, err := tx.Exec(`INSERT INTO requirements
+			(id, title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', ?)
+			ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description,
+				priority = excluded.priority, tags = excluded.tags, tests = excluded.tests,
+				updated_at = excluded.updated_at, status = excluded.status`,
+			id, r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
+			now, now, r.CurrentStatus()); err != nil {
+			return fmt.Errorf("statedb: seed requirement %s: %w", requirements.Key(id), classifyDriverErr(err))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("statedb: seed requirements: %w", classifyDriverErr(err))
+	}
+	return nil
+}
+
 // UpdateRequirement replaces the definition of the requirement r.ID names with
 // r's, keeping when and by whom it was created, and returns it as stored. A
 // requirement given no status keeps the one it has.
@@ -353,18 +401,23 @@ func changedRequirementFields(a, b requirements.Requirement) []string {
 	return out
 }
 
-// DeleteRequirement deletes a requirement and the history of its checks, and
-// returns the requirement as it was.
-func (d *DB) DeleteRequirement(id int, actor string) (requirements.Requirement, error) {
+// DeleteRequirement deletes a requirement and the history of its checks,
+// takes it out of every task that implements it (Task 20460), and returns the
+// requirement as it was and the ids of those tasks. The tasks change in the
+// transaction that deletes it, so no task is ever left linked to a requirement
+// that is gone; the requirement.delete row names them, and each gets its
+// task.upsert row under the same actor.
+func (d *DB) DeleteRequirement(id int, actor string) (requirements.Requirement, []int, error) {
 	d.mu.Lock()
 	tx, err := d.conn.Begin()
 	if err != nil {
 		d.mu.Unlock()
-		return requirements.Requirement{}, fmt.Errorf("statedb: delete requirement: %w", classifyDriverErr(err))
+		return requirements.Requirement{}, nil, fmt.Errorf("statedb: delete requirement: %w", classifyDriverErr(err))
 	}
 	var (
-		gone   requirements.Requirement
-		checks int64
+		gone     requirements.Requirement
+		checks   int64
+		unlinked []*pm.Task
 	)
 	err = func() error {
 		rs, err := queryRequirements(tx, `WHERE id = ?`, id)
@@ -383,6 +436,9 @@ func (d *DB) DeleteRequirement(id int, actor string) (requirements.Requirement, 
 			return fmt.Errorf("statedb: delete requirement checks: %w", classifyDriverErr(err))
 		}
 		checks, _ = res.RowsAffected()
+		if unlinked, err = unlinkRequirementTx(tx, id); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}()
 	if err != nil {
@@ -390,14 +446,94 @@ func (d *DB) DeleteRequirement(id int, actor string) (requirements.Requirement, 
 	}
 	d.mu.Unlock()
 	if err != nil {
-		return gone, classifyDriverErr(err)
+		return gone, nil, classifyDriverErr(err)
+	}
+	taskIDs := make([]int, 0, len(unlinked))
+	for _, t := range unlinked {
+		taskIDs = append(taskIDs, t.ID)
 	}
 	emit(d, &AuditEvent{
 		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionRequirementDelete),
 		EntityType: "requirement", EntityID: fmt.Sprint(id),
-		Payload: MarshalAuditPayload(map[string]any{"id": id, "title": gone.Title, "checks": checks}),
+		Payload: MarshalAuditPayload(map[string]any{"id": id, "title": gone.Title, "checks": checks,
+			"unlinked_tasks": taskIDs}),
 	})
-	return gone, nil
+	for _, t := range unlinked {
+		auditTaskUpsert(d, t, actorOrSystem(actor))
+	}
+	return gone, taskIDs, nil
+}
+
+// unlinkRequirementTx takes requirement id out of every task that implements
+// it and returns those tasks as they now are.
+//
+// Each task's audit fingerprint moves with its row, as UpsertTask's does: the
+// change is recorded once, by DeleteRequirement under its actor, instead of
+// again by whichever save comes next as the system's.
+//
+// A row whose list cannot be read is left alone. It already keeps the project
+// from loading (decodeTaskColumns), and the error that says so names the row;
+// rewriting it here would destroy what the repair needs to see.
+func unlinkRequirementTx(tx *sql.Tx, id int) ([]*pm.Task, error) {
+	rows, err := tx.Query(`SELECT id, requirements FROM plan_tasks WHERE requirements NOT IN ('[]', 'null', '')`)
+	if err != nil {
+		return nil, fmt.Errorf("statedb: read task requirements: %w", classifyDriverErr(err))
+	}
+	type relink struct {
+		task int
+		keep []int
+	}
+	var todo []relink
+	for rows.Next() {
+		var (
+			task int
+			raw  string
+		)
+		if err := rows.Scan(&task, &raw); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("statedb: read task requirements: %w", classifyDriverErr(err))
+		}
+		ids, err := decodeList[int](raw)
+		if err != nil || !slices.Contains(ids, id) {
+			continue
+		}
+		todo = append(todo, relink{task: task, keep: slices.DeleteFunc(ids, func(x int) bool { return x == id })})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("statedb: read task requirements: %w", classifyDriverErr(err))
+	}
+	rows.Close()
+
+	out := make([]*pm.Task, 0, len(todo))
+	for _, r := range todo {
+		if _, err := tx.Exec(`UPDATE plan_tasks SET requirements = ? WHERE id = ?`, listText(r.keep), r.task); err != nil {
+			return nil, fmt.Errorf("statedb: unlink %s from task %d: %w", requirements.Key(id), r.task, classifyDriverErr(err))
+		}
+		trows, err := tx.Query(taskSelect+` WHERE id = ?`, r.task)
+		if err != nil {
+			return nil, fmt.Errorf("statedb: read task %d: %w", r.task, classifyDriverErr(err))
+		}
+		var t *pm.Task
+		if trows.Next() {
+			t, err = newTaskScanner().scan(trows)
+		}
+		if err == nil {
+			err = trows.Err()
+		}
+		trows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("statedb: read task %d: %w", r.task, classifyDriverErr(err))
+		}
+		if t == nil {
+			continue
+		}
+		if err := recordTaskFingerprintTx(tx, t.ID, MarshalAuditPayload(t)); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, nil
 }
 
 // RecordRequirementChecks stores one check run's results. A result about a

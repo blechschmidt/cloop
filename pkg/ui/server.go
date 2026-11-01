@@ -56,6 +56,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/ratelimit"
 	"github.com/blechschmidt/cloop/pkg/reqid"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/riskmatrix"
 	"github.com/blechschmidt/cloop/pkg/sameorigin"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -4209,6 +4210,9 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 		Priority    int    `json:"priority"`
 		DependsOn   []int  `json:"depends_on"`
+		// Requirements are the requirements the task implements (Task
+		// 20460), checked against this project's.
+		Requirements requirements.Refs `json:"requirements"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -4255,14 +4259,19 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	links, ok := checkTaskRequirements(w, s.resolveWorkDir(r), req.Requirements, nil)
+	if !ok {
+		return
+	}
 
 	task := &pm.Task{
-		ID:          maxID + 1,
-		Title:       req.Title,
-		Description: req.Description,
-		Priority:    priority,
-		DependsOn:   req.DependsOn,
-		Status:      pm.TaskPending,
+		ID:           maxID + 1,
+		Title:        req.Title,
+		Description:  req.Description,
+		Priority:     priority,
+		DependsOn:    req.DependsOn,
+		Requirements: links,
+		Status:       pm.TaskPending,
 	}
 	ps.Plan.Tasks = append(ps.Plan.Tasks, task)
 
@@ -4700,6 +4709,9 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 		// the absent field is distinguishable from explicit 0 (which means
 		// "inherit project default"). See Task 20143.
 		MaxMinutes *int `json:"max_minutes"`
+		// Requirements replaces the requirements the task implements (Task
+		// 20460): nil leaves them, [] clears them.
+		Requirements *requirements.Refs `json:"requirements"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -4740,6 +4752,13 @@ func (s *Server) handleTaskEdit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		task.DependsOn = *req.DependsOn
+	}
+	if req.Requirements != nil {
+		links, ok := checkTaskRequirements(w, s.resolveWorkDir(r), *req.Requirements, task.Requirements)
+		if !ok {
+			return
+		}
+		task.Requirements = links
 	}
 	if req.MaxMinutes != nil {
 		task.MaxMinutes = *req.MaxMinutes
@@ -4816,6 +4835,9 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 		// Pointer so the absent field is distinguishable from an explicit 0
 		// (which means "fall back to the project / process-wide default").
 		MaxMinutes *int `json:"max_minutes"`
+		// Requirements replaces the requirements the task implements (Task
+		// 20460): nil leaves them, [] clears them.
+		Requirements *requirements.Refs `json:"requirements"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -4859,6 +4881,13 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		task.DependsOn = *req.DependsOn
+	}
+	if req.Requirements != nil {
+		links, ok := checkTaskRequirements(w, s.resolveWorkDir(r), *req.Requirements, task.Requirements)
+		if !ok {
+			return
+		}
+		task.Requirements = links
 	}
 	if req.MaxMinutes != nil {
 		task.MaxMinutes = *req.MaxMinutes
@@ -4922,6 +4951,9 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MaxMinutes != nil {
 		mutatedFields = append(mutatedFields, "max_minutes")
+	}
+	if req.Requirements != nil {
+		mutatedFields = append(mutatedFields, "requirements")
 	}
 	workDir := s.resolveWorkDir(r)
 	clientID := r.Header.Get("X-Client-ID")

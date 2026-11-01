@@ -39,8 +39,9 @@ var corruptValues = map[string]string{
 }
 
 // fatalColumns are the list columns whose loss changes what runs, so a damaged
-// value must fail the load rather than read as empty.
-var fatalColumns = []string{"depends_on", "on_success", "on_failure"}
+// value must fail the load rather than read as empty. requirements is a task's
+// acceptance contract (Task 20460).
+var fatalColumns = []string{"depends_on", "on_success", "on_failure", "requirements"}
 
 // openTaskColumnsDB returns a database holding one saved task.
 func openTaskColumnsDB(t *testing.T, task *pm.Task) *DB {
@@ -329,7 +330,7 @@ func TestDecodeTaskColumnsRejectsPartialDeps(t *testing.T) {
 
 // wellFormed fills every column c leaves empty with an empty JSON array.
 func wellFormed(c taskListColumns) taskListColumns {
-	for _, f := range []*string{&c.DependsOn, &c.Tags, &c.Annotations, &c.Links, &c.OnSuccess, &c.OnFailure} {
+	for _, f := range []*string{&c.DependsOn, &c.Tags, &c.Annotations, &c.Links, &c.OnSuccess, &c.OnFailure, &c.Requirements} {
 		if *f == "" {
 			*f = "[]"
 		}
@@ -344,11 +345,12 @@ func TestDecodeTaskColumnsAcceptsWellFormed(t *testing.T) {
 	cases := map[string]taskListColumns{
 		"populated": {
 			DependsOn: `[1,2]`, Tags: `["a"]`, Annotations: `[{"author":"me","text":"note"}]`,
-			Links: `[{"url":"https://x","kind":"doc"}]`, OnSuccess: `["3"]`, OnFailure: `["4"]`,
+			Links: `[{"url":"https://x","kind":"doc"}]`, OnSuccess: `["3"]`, OnFailure: `["4"]`, Requirements: `[3,5]`,
 		},
-		"empty": {DependsOn: `[]`, Tags: `[]`, Annotations: `[]`, Links: `[]`, OnSuccess: `[]`, OnFailure: `[]`},
+		"empty": {DependsOn: `[]`, Tags: `[]`, Annotations: `[]`, Links: `[]`, OnSuccess: `[]`, OnFailure: `[]`, Requirements: `[]`},
 		// What json.Marshal writes for a nil slice.
-		"null": {DependsOn: `null`, Tags: `null`, Annotations: `null`, Links: `null`, OnSuccess: `null`, OnFailure: `null`},
+		"null": {DependsOn: `null`, Tags: `null`, Annotations: `null`, Links: `null`, OnSuccess: `null`, OnFailure: `null`,
+			Requirements: `null`},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -366,7 +368,7 @@ func TestDecodeTaskColumnsAcceptsWellFormed(t *testing.T) {
 					t.Errorf("DependsOn = %v", task.DependsOn)
 				}
 				if len(task.Tags) != 1 || len(task.Annotations) != 1 || len(task.Links) != 1 ||
-					len(task.OnSuccess) != 1 || len(task.OnFailure) != 1 {
+					len(task.OnSuccess) != 1 || len(task.OnFailure) != 1 || len(task.Requirements) != 2 {
 					t.Errorf("lists did not decode: %+v", task)
 				}
 			}

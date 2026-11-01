@@ -3,10 +3,12 @@ package projectseed
 // The seed and the way back carry every task field (Task 20361).
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/blechschmidt/cloop/internal/taskfill"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -204,5 +206,105 @@ func TestADeviceCannotReleaseOrSetAQuarantine(t *testing.T) {
 	}
 	if got.Plan.TaskByID(2).Quarantined() {
 		t.Error("a device's result quarantined a task on the hub")
+	}
+}
+
+// TestASeedCarriesTheRequirementsItsTasksImplement: a device's run gives each
+// task's agent the requirements the task implements as its contract (Task
+// 20460), and a device has no requirements table but the one its seed fills.
+// What a done task implements, and what no task does, stays on the hub, and
+// who wrote a requirement never leaves it.
+func TestASeedCarriesTheRequirementsItsTasksImplement(t *testing.T) {
+	isolateHome(t)
+	hub := hubProject(t, &state.ProjectState{Goal: "g", Plan: &pm.Plan{Goal: "g", Tasks: []*pm.Task{
+		{ID: 1, Title: "pending", Status: pm.TaskPending, Requirements: []int{2, 3}},
+		{ID: 2, Title: "done", Status: pm.TaskDone, Requirements: []int{4}},
+	}}})
+	db, err := statedb.Open(state.DBPath(hub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"nobody's", "two", "three", "a done task's"} {
+		r := requirements.Requirement{Title: title, Tests: []requirements.Test{{Command: "go test ./" + title[:3]}}}
+		if _, err := db.AddRequirement(r, "alice@example.com"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := db.Requirements()
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.LoadLite(hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked := LinkedRequirements(st.Plan, all)
+	if len(linked) != 2 || linked[0].ID != 2 || linked[1].ID != 3 {
+		t.Fatalf("LinkedRequirements = %+v, want R-2 and R-3", linked)
+	}
+	seed, err := BuildWith(st, linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	onDevice(t, seed, func(dir string, st *state.ProjectState) {
+		if got := st.Plan.TaskByID(1).Requirements; len(got) != 2 {
+			t.Errorf("task 1 implements %v on the device", got)
+		}
+		ddb, err := statedb.Open(state.DBPath(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ddb.Close()
+		got, err := ddb.Requirements()
+		if err != nil || len(got) != 2 || got[0].ID != 2 || got[0].Title != "two" || got[1].Tests[0].Command != "go test ./thr" {
+			t.Fatalf("the device's requirements: %+v, %v", got, err)
+		}
+		if got[0].CreatedBy != "" {
+			t.Errorf("a requirement's author went to the device: %q", got[0].CreatedBy)
+		}
+		contract := requirements.ContractSection(requirements.Resolve(st.Plan.TaskByID(1).Requirements, got))
+		if !strings.Contains(contract, "### R-2: two") || !strings.Contains(contract, "`go test ./thr`") {
+			t.Errorf("the device's contract for task 1:\n%s", contract)
+		}
+	})
+
+	// A seed without requirements still runs: the links travel, their text
+	// does not.
+	plain, err := Build(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDevice(t, plain, func(dir string, st *state.ProjectState) {
+		if got := st.Plan.TaskByID(1).Requirements; len(got) != 2 {
+			t.Errorf("task 1 implements %v on the device", got)
+		}
+	})
+}
+
+// TestLinkedRequirementsAreBounded: a plan that links more than a seed may
+// carry sends the first ones whole and the rest by id only.
+func TestLinkedRequirementsAreBounded(t *testing.T) {
+	var all []requirements.Requirement
+	var ids []int
+	for id := 1; id <= 40; id++ {
+		r := requirements.Requirement{ID: id, Title: "big", Description: strings.Repeat("x", requirements.MaxDescriptionRunes)}
+		for i := 0; i < requirements.MaxTests; i++ {
+			r.Tests = append(r.Tests, requirements.Test{Command: strings.Repeat("c", 3000)})
+		}
+		all = append(all, r)
+		ids = append(ids, id)
+	}
+	got := LinkedRequirements(&pm.Plan{Tasks: []*pm.Task{{ID: 1, Status: pm.TaskPending, Requirements: ids}}}, all)
+	if len(got) == 0 || len(got) >= len(all) {
+		t.Fatalf("%d of %d requirements of ~56 KiB each went into the seed", len(got), len(all))
+	}
+	size := 0
+	for _, r := range got {
+		size += r.ForSeed().EncodedSize()
+	}
+	if size > maxSeedRequirementBytes {
+		t.Errorf("the seed carries %d bytes of requirements, over %d", size, maxSeedRequirementBytes)
 	}
 }

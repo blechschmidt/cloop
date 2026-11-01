@@ -30,6 +30,7 @@ var (
 	addProvider   string
 	addModel      string
 	addTimeout    string
+	addReqs       []string
 )
 
 var taskAddCmd = &cobra.Command{
@@ -47,7 +48,8 @@ Examples:
   cloop task add "we need to refactor the auth module to use JWT tokens"
   cloop task add "set up CI pipeline with GitHub Actions" --auto
   cloop task add "add unit tests for the payment service" --provider anthropic
-  cloop task add "write release notes" --no-ai --priority 5`,
+  cloop task add "write release notes" --no-ai --priority 5
+  cloop task add "make config errors exit non-zero" --no-ai --requirement R-3`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		description := strings.Join(args, " ")
@@ -63,10 +65,16 @@ Examples:
 		if s.Plan == nil {
 			s.Plan = pm.NewPlan(s.Goal)
 		}
+		// Checked before anything else, so a mistyped requirement costs no
+		// model call.
+		reqLinks, err := taskRequirementLinks(workdir, addReqs, nil)
+		if err != nil {
+			return err
+		}
 
 		// --no-ai: simple add without AI structuring (legacy behavior)
 		if addNoAI {
-			return addTaskDirect(s, description)
+			return addTaskDirect(s, description, reqLinks)
 		}
 
 		// Build provider
@@ -211,6 +219,7 @@ Examples:
 			Condition:        taskCondition,
 			Deadline:         deadlinePtr,
 			MaxMinutes:       maxMin,
+			Requirements:     reqLinks,
 			Status:           pm.TaskPending,
 		}
 		s.Plan.Tasks = append(s.Plan.Tasks, task)
@@ -220,6 +229,9 @@ Examples:
 		}
 
 		color.New(color.FgGreen).Printf("Added task %d: %s (priority %d)\n", task.ID, task.Title, task.Priority)
+		if len(reqLinks) > 0 {
+			fmt.Printf("  Implements: %s\n", requirementKeys(reqLinks))
+		}
 
 		return nil
 	},
@@ -227,7 +239,8 @@ Examples:
 
 // addTaskDirect adds a task directly without AI, using the description as the title.
 // This preserves backward-compatible behavior when --no-ai is specified.
-func addTaskDirect(s *state.ProjectState, description string) error {
+// reqLinks are the requirements it implements, already checked.
+func addTaskDirect(s *state.ProjectState, description string, reqLinks []int) error {
 	maxID := 0
 	for _, t := range s.Plan.Tasks {
 		if t.ID > maxID {
@@ -261,16 +274,17 @@ func addTaskDirect(s *state.ProjectState, description string) error {
 	}
 
 	task := &pm.Task{
-		ID:          maxID + 1,
-		Title:       description,
-		Description: addDesc,
-		Priority:    priority,
-		Role:        pm.AgentRole(addRole),
-		DependsOn:   deps,
-		Condition:   addCondition,
-		Deadline:    deadlinePtr,
-		MaxMinutes:  addMaxMinutes,
-		Status:      pm.TaskPending,
+		ID:           maxID + 1,
+		Title:        description,
+		Description:  addDesc,
+		Priority:     priority,
+		Role:         pm.AgentRole(addRole),
+		DependsOn:    deps,
+		Condition:    addCondition,
+		Deadline:     deadlinePtr,
+		MaxMinutes:   addMaxMinutes,
+		Requirements: reqLinks,
+		Status:       pm.TaskPending,
 	}
 	s.Plan.Tasks = append(s.Plan.Tasks, task)
 
@@ -283,6 +297,9 @@ func addTaskDirect(s *state.ProjectState, description string) error {
 		msg += fmt.Sprintf(", role: %s", task.Role)
 	}
 	color.New(color.FgGreen).Println(msg)
+	if len(reqLinks) > 0 {
+		fmt.Printf("  Implements: %s\n", requirementKeys(reqLinks))
+	}
 	return nil
 }
 
@@ -299,6 +316,7 @@ func init() {
 	taskAddCmd.Flags().StringVar(&addProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
 	taskAddCmd.Flags().StringVar(&addModel, "model", "", "Model override for the AI provider")
 	taskAddCmd.Flags().StringVar(&addTimeout, "timeout", "3m", "Timeout for the AI call (e.g. 2m, 300s)")
+	taskAddCmd.Flags().StringArrayVar(&addReqs, "requirement", nil, requirementFlagUsage)
 
 	taskCmd.AddCommand(taskAddCmd)
 }

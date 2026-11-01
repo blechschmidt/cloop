@@ -47,6 +47,9 @@ var notInterchanged = map[string]string{
 		"carry; the importing project's own attachments decide it there",
 	"Stop": "never stored: it carries one execution's stop into the save that records it (Task 20405); " +
 		"the note written beside it travels as an annotation",
+	"Requirements": "ids of the exporting project's requirements, which name other requirements or none in the " +
+		"importing project, and a plan file carries no requirements; .cloop/requirements.yaml is how they travel, " +
+		"and a link is made where its ids are checked (Task 20460)",
 }
 
 // TestEveryTaskFieldIsInterchangedOrExcused round-trips a task with every

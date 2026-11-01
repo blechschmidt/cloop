@@ -566,6 +566,13 @@ func (s *Server) handleRequirementSpecImport(w http.ResponseWriter, r *http.Requ
 		done[st.Action] = append(done[st.Action], st.Requirement.ID)
 	}
 	s.requirementsChanged(workDir, "", "")
+	// A requirement the import deleted was taken out of the tasks that
+	// implemented it (Task 20460).
+	if len(res.Unlinked) > 0 {
+		if ps, err := state.LoadLite(workDir); err == nil {
+			s.broadcastStateDiff(workDir, ps)
+		}
+	}
 	s.broadcastAuditAppend(string(auditaction.ActionRequirementImport))
 	body := map[string]any{"ok": true, "done": done}
 	if v, err := s.specViewFor(db, workDir, false); err == nil {

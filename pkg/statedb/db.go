@@ -1022,6 +1022,8 @@ var taskColumns = []string{
 	"assignee", "external_url", "links", "tdd_status", "tdd_score",
 	"sprint_id", "complexity_size", "story_points", "on_success", "on_failure",
 	"risk_score", "impact_score", "retry_budget",
+	// 0087_task_requirements (Task 20460).
+	"requirements",
 }
 
 // taskSelect reads every task column, then the task's run id, quarantine and
@@ -1071,6 +1073,7 @@ func taskValues(t *pm.Task) []any {
 		t.Assignee, t.ExternalURL, listText(t.Links), t.TDDStatus, t.TDDScore,
 		t.SprintID, t.ComplexitySize, t.StoryPoints, listText(t.OnSuccess), listText(t.OnFailure),
 		t.RiskScore, t.ImpactScore, t.RetryBudget,
+		listText(t.Requirements),
 	}
 }
 
@@ -1115,6 +1118,7 @@ func newTaskScanner() *taskScanner {
 		&t.Assignee, &t.ExternalURL, &sc.lists.Links, &t.TDDStatus, &t.TDDScore,
 		&t.SprintID, &t.ComplexitySize, &t.StoryPoints, &sc.lists.OnSuccess, &sc.lists.OnFailure,
 		&t.RiskScore, &t.ImpactScore, &t.RetryBudget,
+		&sc.lists.Requirements,
 		&t.RunID, &sc.quarantineJSON, &t.AttachmentCount,
 	}
 	return sc
