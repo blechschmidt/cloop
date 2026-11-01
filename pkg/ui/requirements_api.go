@@ -637,7 +637,7 @@ func (s *Server) handleRequirementRunStart(w http.ResponseWriter, r *http.Reques
 	var in struct {
 		IDs    []int `json:"ids"`
 		Assess bool  `json:"assess"`
-		// All checks every requirement named by none, whatever its status;
+		// All checks every requirement named by none but the drafts;
 		// otherwise only the approved ones are.
 		All bool `json:"all"`
 	}
@@ -659,23 +659,36 @@ func (s *Server) handleRequirementRunStart(w http.ResponseWriter, r *http.Reques
 		requirementErr(w, err)
 		return
 	}
-	// Named, a requirement is checked whatever its status; "all of them" is
-	// the approved ones — a draft is not yet agreed, a deprecated one no
-	// longer — unless every one was asked for.
+	// A draft is checked by nothing until a person approves it (Task 20462),
+	// named or not: its tests may be a model's proposal nobody has read.
+	var drafts []string
+	for _, q := range asked {
+		if q.CurrentStatus() == requirements.StatusDraft {
+			drafts = append(drafts, requirements.Key(q.ID))
+		}
+	}
+	if len(in.IDs) > 0 && len(drafts) > 0 {
+		jsonErr(w, strings.Join(drafts, ", ")+" "+plural(len(drafts), "is a draft", "are drafts")+
+			": a draft is not checked until a person approves it", http.StatusBadRequest)
+		return
+	}
+	// Named, a requirement is checked whatever else its status; "all of
+	// them" is the approved ones — a deprecated one is no longer required —
+	// unless every one was asked for, which is the deprecated ones too.
 	unapproved := []int{}
-	if len(in.IDs) == 0 && !in.All {
-		approved := asked[:0:0]
+	if len(in.IDs) == 0 {
+		kept := asked[:0:0]
 		for _, q := range asked {
-			if q.CurrentStatus() == requirements.StatusApproved {
-				approved = append(approved, q)
-			} else {
+			switch st := q.CurrentStatus(); {
+			case st == requirements.StatusApproved, in.All && st == requirements.StatusDeprecated:
+				kept = append(kept, q)
+			default:
 				unapproved = append(unapproved, q.ID)
 			}
 		}
-		asked = approved
+		asked = kept
 		if len(asked) == 0 && len(unapproved) > 0 {
-			jsonErr(w, "none of the project's requirements is approved: approve one, or check one by name",
-				http.StatusBadRequest)
+			jsonErr(w, "none of the project's requirements is approved: approve a draft first", http.StatusBadRequest)
 			return
 		}
 	}

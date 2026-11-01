@@ -163,7 +163,8 @@ func parseReqTime(s string) time.Time {
 	return parseOptionalTime(s)
 }
 
-const requirementColumns = `id, title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status`
+const requirementColumns = `id, title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status,
+	approved_by, approved_at`
 
 type requirementQuerier interface {
 	Query(query string, args ...any) (*sql.Rows, error)
@@ -182,9 +183,10 @@ func queryRequirements(q requirementQuerier, where string, args ...any) ([]requi
 			tags, tests          string
 			created, updated     string
 			createdBy, updatedBy string
+			approvedBy, approved string
 		)
 		if err := rows.Scan(&r.ID, &r.Title, &r.Description, &r.Priority, &tags, &tests, &created, &updated,
-			&createdBy, &updatedBy, &r.Status); err != nil {
+			&createdBy, &updatedBy, &r.Status, &approvedBy, &approved); err != nil {
 			return nil, fmt.Errorf("statedb: read requirements: %w", classifyDriverErr(err))
 		}
 		r.Title = clipText(r.Title, 4*requirements.MaxTitleRunes)
@@ -209,6 +211,11 @@ func queryRequirements(q requirementQuerier, where string, args ...any) ([]requi
 		}
 		r.CreatedAt, r.UpdatedAt = parseReqTime(created), parseReqTime(updated)
 		r.CreatedBy, r.UpdatedBy = clipText(createdBy, 4*requirements.MaxActorRunes), clipText(updatedBy, 4*requirements.MaxActorRunes)
+		// Who approved it, for an approved requirement only: whatever else
+		// says so has since stopped being approved.
+		if r.Status == requirements.StatusApproved {
+			r.ApprovedBy, r.ApprovedAt = clipText(approvedBy, 4*requirements.MaxActorRunes), parseReqTime(approved)
+		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -256,6 +263,11 @@ func (d *DB) AddRequirement(r requirements.Requirement, actor string) (requireme
 	r.ID, r.CreatedAt, r.UpdatedAt = 0, now, now
 	r.CreatedBy, r.UpdatedBy = clipActor(actor), clipActor(actor)
 	r.Status = r.CurrentStatus()
+	// Added approved, it was approved by whoever added it.
+	r.ApprovedBy, r.ApprovedAt = "", time.Time{}
+	if r.Status == requirements.StatusApproved {
+		r.ApprovedBy, r.ApprovedAt = r.CreatedBy, now
+	}
 
 	d.mu.Lock()
 	tx, err := d.conn.Begin()
@@ -264,26 +276,12 @@ func (d *DB) AddRequirement(r requirements.Requirement, actor string) (requireme
 		return r, fmt.Errorf("statedb: add requirement: %w", classifyDriverErr(err))
 	}
 	err = func() error {
-		var n int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM requirements`).Scan(&n); err != nil {
-			return fmt.Errorf("statedb: add requirement: %w", classifyDriverErr(err))
+		if err := roomForRequirementsTx(tx, 1); err != nil {
+			return err
 		}
-		if n >= requirements.MaxRequirements {
-			return fmt.Errorf("%w: a project holds at most %d requirements", requirements.ErrInvalid, requirements.MaxRequirements)
+		if err := insertRequirementTx(tx, &r, now); err != nil {
+			return err
 		}
-		res, err := tx.Exec(`INSERT INTO requirements
-			(title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
-			formatReqTime(now), formatReqTime(now), r.CreatedBy, r.UpdatedBy, r.Status)
-		if err != nil {
-			return fmt.Errorf("statedb: add requirement: %w", classifyDriverErr(err))
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return fmt.Errorf("statedb: add requirement: %w", classifyDriverErr(err))
-		}
-		r.ID = int(id)
 		return tx.Commit()
 	}()
 	if err != nil {
@@ -293,15 +291,219 @@ func (d *DB) AddRequirement(r requirements.Requirement, actor string) (requireme
 	if err != nil {
 		return r, classifyDriverErr(err)
 	}
+	auditRequirementCreate(d, r, actor, "")
+	return r, nil
+}
+
+// roomForRequirementsTx refuses n more requirements in a project that has no
+// room for them.
+func roomForRequirementsTx(tx *sql.Tx, n int) error {
+	var held int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM requirements`).Scan(&held); err != nil {
+		return fmt.Errorf("statedb: add requirement: %w", classifyDriverErr(err))
+	}
+	if held+n > requirements.MaxRequirements {
+		if n == 1 {
+			return fmt.Errorf("%w: a project holds at most %d requirements", requirements.ErrInvalid, requirements.MaxRequirements)
+		}
+		return fmt.Errorf("%w: a project holds at most %d requirements, and this one holds %d: there is no room for %d more",
+			requirements.ErrInvalid, requirements.MaxRequirements, held, n)
+	}
+	return nil
+}
+
+// insertRequirementTx stores r, as AddRequirement prepared it, and gives it
+// its id.
+func insertRequirementTx(tx *sql.Tx, r *requirements.Requirement, now time.Time) error {
+	res, err := tx.Exec(`INSERT INTO requirements
+		(title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status,
+		 approved_by, approved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
+		formatReqTime(now), formatReqTime(now), r.CreatedBy, r.UpdatedBy, r.Status, r.ApprovedBy, formatReqTime(r.ApprovedAt))
+	if err != nil {
+		return fmt.Errorf("statedb: add requirement: %w", classifyDriverErr(err))
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("statedb: add requirement: %w", classifyDriverErr(err))
+	}
+	r.ID = int(id)
+	return nil
+}
+
+// auditRequirementCreate records r added by actor; drafted, when the model
+// drafted it, says from what (Task 20462).
+func auditRequirementCreate(d *DB, r requirements.Requirement, actor, drafted string) {
+	payload := map[string]any{
+		"id": r.ID, "title": r.Title, "priority": r.Priority, "status": r.Status, "tests": testCommands(r.Tests),
+		"fingerprint": r.Fingerprint(),
+	}
+	if drafted != "" {
+		payload["drafted"] = drafted
+	}
 	emit(d, &AuditEvent{
 		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionRequirementCreate),
-		EntityType: "requirement", EntityID: fmt.Sprint(r.ID),
+		EntityType: "requirement", EntityID: fmt.Sprint(r.ID), Payload: MarshalAuditPayload(payload),
+	})
+}
+
+// DraftOrigin says where a set of drafted requirements came from: what the
+// model drafted from, a digest of the text, and where it ran.
+type DraftOrigin struct {
+	// Source is goal, text (pasted in the dashboard), file or stdin.
+	Source string
+	// SHA256 and Bytes describe the text drafted from.
+	SHA256 string
+	Bytes  int
+	// ExecutorID is where the model ran; Via is dashboard or cli.
+	ExecutorID string
+	Via        string
+	// Refused counts the proposals that did not become drafts.
+	Refused int
+}
+
+// AddDraftRequirements stores drafts — requirements the model drafted, which
+// the caller has passed through requirements.CheckDraftResult — as new
+// requirements with the status draft, all of them or none, and returns them
+// with their ids. actor is the person who asked for them. Each is audited as
+// a requirement.create naming where it was drafted from, and the set as one
+// requirement.draft (Task 20462).
+func (d *DB) AddDraftRequirements(drafts []requirements.Requirement, actor string, origin DraftOrigin) ([]requirements.Requirement, error) {
+	if len(drafts) > requirements.MaxDrafts {
+		return nil, fmt.Errorf("%w: at most %d drafts at once, not %d", requirements.ErrInvalid, requirements.MaxDrafts, len(drafts))
+	}
+	now := time.Now().UTC()
+	out := make([]requirements.Requirement, 0, len(drafts))
+	for i, r := range drafts {
+		// A draft, whatever it says: only a person approves.
+		r.Status = requirements.StatusDraft
+		if err := r.Normalize(); err != nil {
+			return nil, fmt.Errorf("draft %d: %w", i+1, err)
+		}
+		r.ID, r.CreatedAt, r.UpdatedAt = 0, now, now
+		r.CreatedBy, r.UpdatedBy = clipActor(actor), clipActor(actor)
+		r.ApprovedBy, r.ApprovedAt = "", time.Time{}
+		out = append(out, r)
+	}
+	d.mu.Lock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("statedb: add drafts: %w", classifyDriverErr(err))
+	}
+	err = func() error {
+		if err := roomForRequirementsTx(tx, len(out)); err != nil {
+			return err
+		}
+		for i := range out {
+			if err := insertRequirementTx(tx, &out[i], now); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}()
+	if err != nil {
+		_ = tx.Rollback()
+	}
+	d.mu.Unlock()
+	if err != nil {
+		return nil, classifyDriverErr(err)
+	}
+	ids := make([]int, len(out))
+	for i, r := range out {
+		ids[i] = r.ID
+		auditRequirementCreate(d, r, actor, origin.Source)
+	}
+	emit(d, &AuditEvent{
+		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionRequirementDraft),
+		EntityType: "requirement", EntityID: "draft",
 		Payload: MarshalAuditPayload(map[string]any{
-			"id": r.ID, "title": r.Title, "priority": r.Priority, "status": r.Status, "tests": testCommands(r.Tests),
-			"fingerprint": r.Fingerprint(),
+			"source": origin.Source, "sha256": origin.SHA256, "bytes": origin.Bytes, "ids": ids,
+			"refused": origin.Refused, "executor_id": origin.ExecutorID, "via": origin.Via,
 		}),
 	})
-	return r, nil
+	return out, nil
+}
+
+// ApproveRequirements approves the drafts ids names, in one transaction:
+// each must be a draft, or already approved, which it stays — so approving
+// "all" twice, or a draft somebody else approved a moment before, is not an
+// error. A deprecated requirement is reinstated by editing it, not here.
+// actor is recorded as each one's approver, and each approval is audited as a
+// requirement.approve. It returns the requirements approved now, and the ids
+// of those that already were.
+func (d *DB) ApproveRequirements(ids []int, actor string) (approved []requirements.Requirement, already []int, err error) {
+	if len(ids) == 0 {
+		return nil, nil, fmt.Errorf("%w: name the drafts to approve", requirements.ErrInvalid)
+	}
+	if len(ids) > requirements.MaxRequirements {
+		return nil, nil, fmt.Errorf("%w: at most %d requirements at once", requirements.ErrInvalid, requirements.MaxRequirements)
+	}
+	now := time.Now().UTC()
+	who := clipActor(actor)
+	d.mu.Lock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		d.mu.Unlock()
+		return nil, nil, fmt.Errorf("statedb: approve requirements: %w", classifyDriverErr(err))
+	}
+	err = func() error {
+		seen := map[int]bool{}
+		for _, id := range ids {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			rs, err := queryRequirements(tx, `WHERE id = ?`, id)
+			if err != nil {
+				return err
+			}
+			if len(rs) == 0 {
+				return fmt.Errorf("%w: %s", ErrRequirementNotFound, requirements.Key(id))
+			}
+			r := rs[0]
+			switch r.CurrentStatus() {
+			case requirements.StatusApproved:
+				already = append(already, id)
+				continue
+			case requirements.StatusDeprecated:
+				return fmt.Errorf("%w: %s is deprecated, not a draft: edit its status to reinstate it",
+					requirements.ErrInvalid, requirements.Key(id))
+			}
+			if _, err := tx.Exec(`UPDATE requirements SET status = ?, approved_by = ?, approved_at = ?, updated_at = ?,
+				updated_by = ? WHERE id = ?`, requirements.StatusApproved, who, formatReqTime(now), formatReqTime(now), who, id); err != nil {
+				return fmt.Errorf("statedb: approve %s: %w", requirements.Key(id), classifyDriverErr(err))
+			}
+			r.Status, r.ApprovedBy, r.ApprovedAt, r.UpdatedAt, r.UpdatedBy = requirements.StatusApproved, who, now, now, who
+			approved = append(approved, r)
+		}
+		return tx.Commit()
+	}()
+	if err != nil {
+		_ = tx.Rollback()
+	}
+	d.mu.Unlock()
+	if err != nil {
+		return nil, nil, classifyDriverErr(err)
+	}
+	for _, r := range approved {
+		auditRequirementApprove(d, r, requirements.StatusDraft, actor, "approve")
+	}
+	return approved, already, nil
+}
+
+// auditRequirementApprove records r becoming approved from the status was,
+// by actor; how is the way it was done — approve, edit or import.
+func auditRequirementApprove(d *DB, r requirements.Requirement, was, actor, how string) {
+	emit(d, &AuditEvent{
+		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionRequirementApprove),
+		EntityType: "requirement", EntityID: fmt.Sprint(r.ID),
+		Payload: MarshalAuditPayload(map[string]any{
+			"id": r.ID, "title": r.Title, "previous_status": was, "via": how, "priority": r.Priority,
+			"tests": testCommands(r.Tests), "fingerprint": r.Fingerprint(), "approved_by": r.ApprovedBy,
+		}),
+	})
 }
 
 // SeedRequirements stores reqs under their own ids, as a project seed carries
@@ -377,10 +579,19 @@ func (d *DB) UpdateRequirement(r requirements.Requirement, actor string) (requir
 		if r.Status == "" {
 			r.Status = before.Status
 		}
+		// Becoming approved is an approval, recorded with who made it
+		// (Task 20462); leaving approved takes the approval back.
+		r.ApprovedBy, r.ApprovedAt = before.ApprovedBy, before.ApprovedAt
+		switch {
+		case r.CurrentStatus() == requirements.StatusApproved && before.CurrentStatus() != requirements.StatusApproved:
+			r.ApprovedBy, r.ApprovedAt = clipActor(actor), now
+		case r.CurrentStatus() != requirements.StatusApproved:
+			r.ApprovedBy, r.ApprovedAt = "", time.Time{}
+		}
 		if _, err := tx.Exec(`UPDATE requirements SET title = ?, description = ?, priority = ?, tags = ?, tests = ?,
-			status = ?, updated_at = ?, updated_by = ? WHERE id = ?`,
+			status = ?, updated_at = ?, updated_by = ?, approved_by = ?, approved_at = ? WHERE id = ?`,
 			r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
-			r.Status, formatReqTime(now), clipActor(actor), r.ID); err != nil {
+			r.Status, formatReqTime(now), clipActor(actor), r.ApprovedBy, formatReqTime(r.ApprovedAt), r.ID); err != nil {
 			return fmt.Errorf("statedb: update requirement: %w", classifyDriverErr(err))
 		}
 		return tx.Commit()
@@ -394,7 +605,13 @@ func (d *DB) UpdateRequirement(r requirements.Requirement, actor string) (requir
 	}
 	r.CreatedAt, r.CreatedBy = before.CreatedAt, before.CreatedBy
 	r.UpdatedAt, r.UpdatedBy = now, clipActor(actor)
-	if changed := changedRequirementFields(before, r); len(changed) > 0 {
+	changed := changedRequirementFields(before, r)
+	approval := r.CurrentStatus() == requirements.StatusApproved && before.CurrentStatus() != requirements.StatusApproved
+	// An approval is its own row; the update row is for what else changed.
+	if approval && len(changed) == 1 {
+		changed = nil
+	}
+	if len(changed) > 0 {
 		emit(d, &AuditEvent{
 			Actor: actorOrSystem(actor), EventType: string(auditaction.ActionRequirementUpdate),
 			EntityType: "requirement", EntityID: fmt.Sprint(r.ID),
@@ -403,6 +620,9 @@ func (d *DB) UpdateRequirement(r requirements.Requirement, actor string) (requir
 				"fingerprint": r.Fingerprint(), "previous_fingerprint": before.Fingerprint(),
 			}),
 		})
+	}
+	if approval {
+		auditRequirementApprove(d, r, before.CurrentStatus(), actor, "edit")
 	}
 	return r, nil
 }
@@ -670,6 +890,10 @@ func (d *DB) RecordRequirementVerdict(id int, verdict, note, actor string) (Requ
 	req, err := d.Requirement(id)
 	if err != nil {
 		return RequirementCheck{}, err
+	}
+	if req.CurrentStatus() == requirements.StatusDraft {
+		return RequirementCheck{}, fmt.Errorf("%w: %s is a draft: approve it before it is given a verdict",
+			requirements.ErrInvalid, requirements.Key(id))
 	}
 	summary := "recorded by hand"
 	if note != "" {

@@ -169,17 +169,22 @@ func Resolve(ids []int, reqs []Requirement) (linked []Requirement, missing []int
 // executor. Empty when the task implements none.
 //
 // A deprecated requirement is named and left out: the project no longer
-// requires it, whatever the task was made for.
+// requires it, whatever the task was made for. So is a draft (Task 20462):
+// nobody has agreed to it yet, nothing checks it, and its tests — perhaps
+// proposed by a model — are not shown to an agent as something to run.
 func ContractSection(linked []Requirement, missing []int) string {
-	var active, retired []Requirement
+	var active, drafts, retired []Requirement
 	for _, r := range linked {
-		if r.CurrentStatus() == StatusDeprecated {
+		switch r.CurrentStatus() {
+		case StatusDeprecated:
 			retired = append(retired, r)
-		} else {
+		case StatusDraft:
+			drafts = append(drafts, r)
+		default:
 			active = append(active, r)
 		}
 	}
-	if len(active) == 0 && len(retired) == 0 && len(missing) == 0 {
+	if len(active) == 0 && len(drafts) == 0 && len(retired) == 0 && len(missing) == 0 {
 		return ""
 	}
 	var b strings.Builder
@@ -209,8 +214,12 @@ func ContractSection(linked []Requirement, missing []int) string {
 		b.WriteString(part)
 		used += len(part)
 	}
-	if len(retired) > 0 || len(missing) > 0 {
+	if len(drafts) > 0 || len(retired) > 0 || len(missing) > 0 {
 		b.WriteString("\n")
+	}
+	for _, r := range drafts {
+		fmt.Fprintf(&b, "%s (%s) is linked to this task but is a draft that nobody has approved yet: it is not "+
+			"part of the contract, and nothing checks it.\n", Key(r.ID), oneLine(r.Title))
 	}
 	for _, r := range retired {
 		fmt.Fprintf(&b, "%s (%s) is linked to this task but deprecated: the project no longer requires it, "+
@@ -236,15 +245,8 @@ func ContractSection(linked []Requirement, missing []int) string {
 func contractEntry(r Requirement) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n### %s: %s", Key(r.ID), oneLine(r.Title))
-	var labels []string
 	if r.Priority != "" {
-		labels = append(labels, r.Priority)
-	}
-	if r.CurrentStatus() == StatusDraft {
-		labels = append(labels, "draft")
-	}
-	if len(labels) > 0 {
-		fmt.Fprintf(&b, " [%s]", strings.Join(labels, ", "))
+		fmt.Fprintf(&b, " [%s]", r.Priority)
 	}
 	b.WriteString("\n")
 	if d := strings.TrimSpace(r.Description); d != "" {
@@ -289,8 +291,14 @@ func longestRun(s string, c rune) int {
 
 // ForSeed is r as a project seed carries it to an executor that does not
 // share the hub's database: what the contract and a check read, and none of
-// who wrote it when.
+// who wrote it when. A draft goes as its title and status alone (Task 20462):
+// nothing there checks it or quotes it, and a device whose cloop predates
+// drafts being inert — whose gate would run a linked draft's tests — is not
+// given a test a model may have proposed and nobody has approved.
 func (r Requirement) ForSeed() Requirement {
+	if r.CurrentStatus() == StatusDraft {
+		return Requirement{ID: r.ID, Title: r.Title, Priority: r.Priority, Status: StatusDraft, Tags: r.Tags}
+	}
 	return Requirement{ID: r.ID, Title: r.Title, Description: r.Description, Priority: r.Priority,
 		Status: r.CurrentStatus(), Tags: r.Tags, Tests: r.Tests}
 }

@@ -113,7 +113,9 @@ e2e-stack:
 ##                never hands the forge a pack it refused (pkg/gitproxy); and
 ##                the requirements spec file, which the hub parses as an
 ##                executor sent it and an export must write back exactly
-##                (pkg/requirements).
+##                (pkg/requirements); and the model's drafted requirements,
+##                read strictly and held to a requirement's bounds whatever
+##                the answer (pkg/requirements, Task 20462).
 ##
 ## This list is the single source of truth. CI's Parser fuzzing job runs this
 ## same target with a shorter budget rather than repeating the targets in YAML,
@@ -137,7 +139,8 @@ FUZZ_TARGETS := \
 	./pkg/forgehost/:FuzzCanonical \
 	./pkg/gitproxy/:FuzzPackScan \
 	./pkg/requirements/:FuzzParseSpecFile \
-	./pkg/requirements/:FuzzSpecFileRoundTrip
+	./pkg/requirements/:FuzzSpecFileRoundTrip \
+	./pkg/requirements/:FuzzParseDraftAnswer
 
 ## Through scripts/fuzz-ci.sh rather than a `go test -fuzz` per line, because
 ## two of its distinctions matter locally as much as in CI: Go intermittently

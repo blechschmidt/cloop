@@ -878,6 +878,17 @@ const OPENERS = {
     open: async () => { await onTask('splitTask', F.pendingTaskID); },
     ready: visible('#dc-overlay button'),
   },
+  // Draft requirements (Task 20462), from the Requirements tab's toolbar: the
+  // fixture's two drafts await approval, with their test and what the rules'
+  // lint says of them — the second repeats the first.
+  'rd-overlay': {
+    open: async () => {
+      await openTab('requirements');
+      await waitFor(visible('#tab-requirements .kb-tab-toolbar [data-act="draftOpen"]'), 'the Draft requirements button');
+      await click('#tab-requirements .kb-tab-toolbar [data-act="draftOpen"]');
+    },
+    ready: `${hasContent('#rdReview', F.draftTitle)} && ${hasText('#rdReview', 'nearly word for word')}`,
+  },
   // "Confirm it's you" (Task 20448) opens on a privileged request refused for
   // want of a recent sign-in, which a hub without sign-on never answers; it is
   // raised as the bundle's 401 handler raises it, its refusal left unhandled

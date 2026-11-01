@@ -239,10 +239,11 @@ var registry = []Entry{
 		Home:      HomeProject,
 		Entity:    "requirement",
 		Trigger:   "A requirement is added to the project, from the dashboard or with `cloop requirements add`.",
-		Payload:   []string{"id", "title", "priority", "status", "tests", "fingerprint"},
+		Payload:   []string{"id", "title", "priority", "status", "tests", "fingerprint", "drafted"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "`tests` is each test's command, as it will run.",
+		Note: "`tests` is each test's command, as it will run. `drafted`, present only for a requirement the model " +
+			"drafted, names what from — `goal`, `text`, `file` or `stdin` — and its status is then always draft.",
 	},
 	{
 		Action:    ActionRequirementUpdate,
@@ -309,6 +310,33 @@ var registry = []Entry{
 		Payload:   []string{"id", "verdict", "note", "fingerprint"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
+	},
+	{
+		Action: ActionRequirementDraft,
+		Home:   HomeProject,
+		Entity: "requirement",
+		Trigger: "The model drafts requirements from the project's goal or a specification, at a person's request — " +
+			"the dashboard's Draft requirements, or `cloop requirements draft`.",
+		Payload:   []string{"source", "sha256", "bytes", "ids", "refused", "executor_id", "via"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "One row per draft, its entity id `draft`, its actor the person who asked. `source` is `goal`, `text` " +
+			"(pasted), `file` or `stdin`; `sha256` and `bytes` describe that text, not its content. `ids` are the " +
+			"requirements stored, every one with the status draft — each also a `requirement.create` row naming the " +
+			"source in `drafted`. `refused` counts the proposals that broke a bound or asked for another status.",
+	},
+	{
+		Action: ActionRequirementApprove,
+		Home:   HomeProject,
+		Entity: "requirement",
+		Trigger: "A requirement becomes approved: a draft approved in the dashboard or with `cloop requirements " +
+			"approve`, a requirement edited to approved, or a spec file import that approves it.",
+		Payload:   []string{"id", "title", "previous_status", "via", "priority", "tests", "fingerprint", "approved_by"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`via` is `approve`, `edit` or `import`. `tests` is each test's command as it will now run: an " +
+			"approval is what lets a check, and the requirements gate, run them. An edit that also changes the " +
+			"definition writes a `requirement.update` row for that beside this one.",
 	},
 
 	// ── step ───────────────────────────────────────────────────────────────

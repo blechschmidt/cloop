@@ -163,6 +163,28 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Draft requirements with the model, then review and approve them.** `cloop
+  requirements draft` (`--from-goal`, `--from-file spec.md`, or stdin) and the
+  Requirements tab's *Draft requirements* dialog turn free text into atomic,
+  testable requirements in EARS form ("When <trigger>, the system shall
+  <response>"), each with acceptance criteria, a suggested priority, tags and,
+  where the repository makes one obvious, a test command. The model runs on the
+  project's executor with the caller's Claude account or Copilot sign-in, as
+  the other dashboard model calls do, never inline on the hub. Its answer is
+  untrusted: it must be one strict JSON object, every proposal is held to a
+  requirement's bounds and refused (with the reason) rather than cut to fit,
+  a proposal that asks for any status but draft is refused, and the hub
+  rechecks whatever the executor's cloop sends back. The drafts are stored with
+  the status draft and approved one at a time, all at once, or after an edit;
+  approving needs task.mutate, records the approver on the requirement
+  (`approved_by`, `approved_at`, migration 0089, additive) and is audited as
+  the new `requirement.approve`, and each draft as the new `requirement.draft`.
+  `cloop requirements lint` and the dialog's lint pass flag ambiguous wording,
+  compound requirements, near-duplicates, contradictions and approved musts
+  with no test; with `--ai` (*Check with the model*) the model is also asked
+  about duplicates in other words, through the semantic dedup auto-evolve uses,
+  and about contradictions (Task 20462).
+
 - **Requirement-gated completion: a task is done only when its requirements
   pass.** A new per-project setting, the requirements gate — `off` (the
   default), `linked` or `linked+must` — set with `cloop requirements gate`,
@@ -417,6 +439,18 @@ schema and the hub's HTTP API may change in any release.
   and then refused with the same sentence (Task 20452).
 
 ### Changed
+
+- **A draft requirement is checked by nothing until a person approves it.**
+  Before, a check that named a draft ran its tests, `--all` and *Check all*
+  with every status included them, and the requirements gate checked a draft a
+  task implemented. Now a draft's tests — perhaps a model's proposal nobody has
+  read — never run before it is approved: `cloop requirements check` refuses a
+  named draft and `--status draft`, `--all` means approved and deprecated, the
+  dashboard refuses to check one, nobody records a verdict for one, the gate
+  leaves linked drafts out and says so in its note, an agent's acceptance
+  contract names a linked draft without quoting its details or tests, and a
+  device run's project seed carries a draft as its title and status only, so
+  even an older device's gate has no draft test to run (Task 20462).
 
 - **Hub health no longer costs a doctor run and two identity-provider fetches
   per open administrator's tab every minute.** The header's indicator asked

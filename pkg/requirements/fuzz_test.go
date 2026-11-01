@@ -111,3 +111,50 @@ func FuzzSpecFileRoundTrip(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseDraftAnswer: the model's answer to a draft is untrusted text (Task
+// 20462). Whatever it is, reading it must not panic, and every requirement it
+// yields is a draft that fits the bounds a person's requirement is held to —
+// as is everything the hub keeps of a result an executor sends back.
+func FuzzParseDraftAnswer(f *testing.F) {
+	f.Add(goodAnswer)
+	f.Add("```json\n" + goodAnswer + "\n```")
+	f.Add(`{"requirements": [{"title": "x", "status": "approved", "test": "rm -rf /"}]}`)
+	f.Add(`{"requirements": [{"title": "a b", "tags": ["A B", "c/d", "é"], "acceptance_criteria": ["", "  x  "]}]}`)
+	f.Add(`{"requirements": [], "notes": "` + strings.Repeat("n", 3000) + `"}`)
+	f.Add(`{"contradictions": [{"a": "R-1", "b": 2, "why": "w"}]}`)
+	f.Fuzz(func(t *testing.T, out string) {
+		a, err := ParseDraftAnswer(out)
+		if err != nil {
+			if !errors.Is(err, ErrNoDraftAnswer) {
+				t.Fatalf("a failure that is not ErrNoDraftAnswer: %v", err)
+			}
+			a = DraftAnswer{}
+		}
+		res := Drafts(a, nil, 0)
+		kept := CheckDraftResult(res, nil, 0)
+		if len(kept.Drafts) != len(res.Drafts) {
+			t.Fatalf("the hub refused %d of the executor's own drafts: %+v", len(res.Drafts)-len(kept.Drafts), kept.Refused)
+		}
+		for _, r := range append(res.Drafts, kept.Drafts...) {
+			if r.Status != StatusDraft || r.ID != 0 {
+				t.Fatalf("a proposal became %+v", r)
+			}
+			c := r
+			if err := c.Normalize(); err != nil {
+				t.Fatalf("a draft outside the bounds: %v", err)
+			}
+		}
+		if len(res.Drafts) > MaxDrafts || len(res.Refused) > maxRefusals {
+			t.Fatalf("%d drafts, %d refusals", len(res.Drafts), len(res.Refused))
+		}
+		known := []Requirement{{ID: 1, Title: "a"}, {ID: 2, Title: "b"}}
+		if fs, err := ParseContradictions(out, known); err == nil {
+			for _, f := range fs {
+				if f.ID != 1 && f.ID != 2 || len(f.Others) != 1 || f.Others[0] == f.ID {
+					t.Fatalf("a contradiction about what it was not shown: %+v", f)
+				}
+			}
+		}
+	})
+}

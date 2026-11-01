@@ -336,7 +336,9 @@ var requirementsCheckCmd = &cobra.Command{
 what they found. A requirement with no tests is skipped — its last verdict,
 a person's or the model's, stands — or, with --ai, assessed by the model
 reading the code. With no ids, every approved requirement is checked (--status
-picks others, --all every one); ids name requirements whatever their status.
+picks others, --all the deprecated ones too); ids name requirements whatever
+their status — except a draft, which nothing checks until a person approves it:
+its tests may be a model's proposal that nobody has read.
 
 With --file the requirements are read from a spec file rather than the
 project's database, and nothing is recorded: a plain CI job with no hub and no
@@ -386,8 +388,8 @@ func init() {
 	f.Duration("timeout", 0, "Stop the whole check after this long (default: no limit beyond each test's)")
 	f.String("file", "", "Check the requirements in this spec file (e.g. "+requirements.SpecFileName+
 		"); needs no hub and no project database, and records nothing")
-	f.StringSlice("status", nil, "With no ids, check the requirements of these statuses (default approved)")
-	f.Bool("all", false, "With no ids, check every requirement, whatever its status")
+	f.StringSlice("status", nil, "With no ids, check the requirements of these statuses (default approved; never draft)")
+	f.Bool("all", false, "With no ids, check the approved and the deprecated requirements")
 }
 
 // requirementsProject is the project in the working directory, opened.
@@ -584,9 +586,17 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 	if noRecord {
 		db = nil
 	}
-	// Named requirements are checked whatever their status; otherwise only
-	// the statuses asked for — approved, unless told — and the hub's spec
-	// is checked as the hub sent it.
+	// A draft is checked by nothing until a person approves it (Task 20462):
+	// its tests may be a model's proposal that nobody has read. The hub's
+	// spec never holds one.
+	if specArg == "" && len(args) > 0 {
+		if err := refuseDrafts(reqs); err != nil {
+			return fail(err)
+		}
+	}
+	// Named requirements are checked whatever else their status; otherwise
+	// only the statuses asked for — approved, unless told — and the hub's
+	// spec is checked as the hub sent it.
 	var unasked []requirements.Requirement
 	if len(args) == 0 && specArg == "" {
 		reqs, unasked = byStatus(reqs, statuses)
@@ -633,8 +643,20 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 			color.New(color.Faint).Printf("%-6s %-11s no tests: ask the model (--ai), or record a verdict\n",
 				requirements.Key(r.ID), "skipped")
 		}
-		if len(unasked) > 0 {
-			color.New(color.Faint).Printf("Not checked: %s — name them, or pass --status or --all\n", describeUnasked(unasked))
+		var drafts, others []requirements.Requirement
+		for _, r := range unasked {
+			if r.CurrentStatus() == requirements.StatusDraft {
+				drafts = append(drafts, r)
+			} else {
+				others = append(others, r)
+			}
+		}
+		if len(others) > 0 {
+			color.New(color.Faint).Printf("Not checked: %s — name them, or pass --status or --all\n", describeUnasked(others))
+		}
+		if len(drafts) > 0 {
+			color.New(color.Faint).Printf("Not checked: %s awaiting approval — nothing checks a draft until a person "+
+				"approves it (cloop requirements approve)\n", describeUnasked(drafts))
 		}
 	}
 
@@ -720,14 +742,15 @@ func selectRequirements(all []requirements.Requirement, args []string) ([]requir
 	return out, nil
 }
 
-// checkStatuses is the statuses a check without ids checks: --all, --status,
-// or approved.
+// checkStatuses is the statuses a check without ids checks: --all (every
+// status a check may check), --status, or approved. Never draft: a draft is
+// checked by nothing until a person approves it (Task 20462).
 func checkStatuses(f interface {
 	GetBool(string) (bool, error)
 	GetStringSlice(string) ([]string, error)
 }) ([]string, error) {
 	if all, _ := f.GetBool("all"); all {
-		return requirements.Statuses, nil
+		return []string{requirements.StatusApproved, requirements.StatusDeprecated}, nil
 	}
 	given, _ := f.GetStringSlice("status")
 	if len(given) == 0 {
@@ -739,11 +762,36 @@ func checkStatuses(f interface {
 		if err != nil {
 			return nil, err
 		}
+		if s == requirements.StatusDraft {
+			return nil, fmt.Errorf("a draft is not checked until a person approves it: " +
+				"review the drafts, then cloop requirements approve <id>")
+		}
 		if s != "" {
 			out = append(out, s)
 		}
 	}
 	return out, nil
+}
+
+// refuseDrafts refuses a check that names a draft: nothing runs a draft's
+// tests until a person has approved it, which is what keeps a command the
+// model proposed from running before anyone has read it.
+func refuseDrafts(reqs []requirements.Requirement) error {
+	var keys []string
+	for _, r := range reqs {
+		if r.CurrentStatus() == requirements.StatusDraft {
+			keys = append(keys, requirements.Key(r.ID))
+		}
+	}
+	switch len(keys) {
+	case 0:
+		return nil
+	case 1:
+		return fmt.Errorf("%s is a draft: a draft is not checked until a person approves it (cloop requirements approve %s)",
+			keys[0], strings.TrimPrefix(keys[0], "R-"))
+	}
+	return fmt.Errorf("%s are drafts: a draft is not checked until a person approves it (cloop requirements approve <id>)",
+		strings.Join(keys, ", "))
 }
 
 // byStatus splits reqs into those of the statuses given and the rest.

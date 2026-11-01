@@ -16,6 +16,14 @@
 // A requirement's details list the tasks that implement it (Task 20460), and a
 // task's R-n chip opens the requirement here (show).
 //
+// Draft requirements (Task 20462) opens a dialog in which the model drafts
+// requirements from the project's goal or a pasted specification — on the
+// project's executor, with the caller's account (requirements_draft_api.go).
+// The drafts are stored as drafts, which nothing checks: the dialog lists every
+// draft awaiting approval with what lint says of it, and approves one, all of
+// them, or opens one in the form to edit first. Everything in it came from a
+// model, so every string is escaped like the rest of the tab.
+//
 // It runs outside the dashboard's IIFE, so it is handed the helpers it calls,
 // and the only name it puts on window is the factory.
 (function () {
@@ -32,6 +40,9 @@
     let review = null;      // GET /api/requirements/spec, while reviewing an import
     let settle = {};        // how each conflict under review is settled: R-<id> → file | hub
     let reading = false;    // a read of the spec file is under way
+    let drafted = null;     // the last draft's answer: what it refused, and the model's notes
+    let lint = null;        // the last lint: {findings, notes, checked, model}
+    let drafting = '';      // what the dialog is waiting on: draft, lint, approve — or nothing
 
     const el = id => document.getElementById(id);
     const VERDICT = {fulfilled: 'approved', unfulfilled: 'denied', error: 'pending', unverified: 'expired'};
@@ -95,6 +106,12 @@
       el('reqList').innerHTML = shown.map(card).join('') ||
         (reqs.length ? '<p class="form-hint">No requirement matches the search.</p>' : '');
       if (openID !== null && shown.some(r => r.id === openID)) showDetails(openID);
+      const nDrafts = draftsOf().length;
+      el('reqDrafts').innerHTML = nDrafts ? '<span class="form-hint" style="' + wrap + '">' + nDrafts + ' draft' +
+        (nDrafts === 1 ? ' awaits' : 's await') + ' approval: nothing checks a draft until a person approves it.</span> ' +
+        '<button class="btn" data-perm="task.mutate" data-act="draftOpen">Review drafts</button>' : '';
+      el('reqDrafts').style.display = nDrafts ? '' : 'none';
+      if (window.isOverlayOpen('rd-overlay')) renderDraft();
       h.applyPermissionGating();
     }
 
@@ -331,7 +348,7 @@
       const impl = (r.tasks || []).length;
       if (impl) chips.push('<span class="exec-chip" title="Tasks that implement it — its details list them">' + impl + ' task' + (impl === 1 ? '' : 's') + '</span>');
       (r.tags || []).forEach(t => chips.push('<span class="exec-chip">' + esc(t) + '</span>'));
-      let meta = 'Never checked.';
+      let meta = status === 'draft' ? 'A draft: nothing checks it until a person approves it.' : 'Never checked.';
       if (lc) {
         meta = 'Checked ' + when(lc.checked_at) + (lc.checked_by ? ' by ' + lc.checked_by : '') + ' via ' + lc.method +
           (lc.commit ? ' at ' + lc.commit.slice(0, 10) + (lc.dirty ? ' (uncommitted changes)' : '') : '') +
@@ -348,10 +365,12 @@
         '<div class="exec-chips">' + chips.join('') + '</div>' +
         (r.description ? '<div class="form-hint" style="white-space:pre-wrap;' + wrap + '">' + esc(r.description.length > 400 ? r.description.slice(0, 400) + '…' : r.description) + '</div>' : '') +
         '<div class="exec-meta"><span style="' + wrap + '">' + esc(meta) + '</span>' +
+        (r.approved_by ? '<span style="' + wrap + '">' + esc('Approved by ' + r.approved_by + ' ' + when(r.approved_at)) + '</span>' : '') +
         (lc && lc.summary ? '<span style="' + wrap + '">' + esc(lc.summary) + '</span>' : '') +
         (stale ? '<span style="color:var(--yellow,#d29922)">' + esc(stale) + '</span>' : '') + '</div>' +
         '<div class="exec-actions">' +
-        (tests ? '<button class="btn" data-perm="run.start" data-act="checkOne" data-arg="' + r.id + '">Check</button>'
+        (status === 'draft' ? '<button class="btn" data-perm="task.mutate" data-act="draftApproveOne" data-arg="' + r.id + '">Approve</button>'
+          : tests ? '<button class="btn" data-perm="run.start" data-act="checkOne" data-arg="' + r.id + '">Check</button>'
           : '<button class="btn" data-perm="run.start" data-act="assessOne" data-arg="' + r.id + '" title="It has no tests: the model reads the code">Ask the model</button>') +
         '<button class="btn" data-act="details" data-arg="' + r.id + '">' + (openID === r.id ? 'Hide details' : 'Details') + '</button>' +
         '<button class="btn" data-perm="task.mutate" data-act="edit" data-arg="' + r.id + '">Edit</button>' +
@@ -516,10 +535,12 @@
           '</button> <span style="' + wrap + '">' + esc(t.title) + '</span> <span class="form-hint">' + esc(t.status || 'pending') + '</span></span>').join('')
         : '<span>No task yet. A task linked to it — from its own edit dialog, or added below — is given it as its contract.</span>') + '</div>';
       const retired = (r.status || 'approved') === 'deprecated';
-      html += '<div class="exec-actions" style="margin-top:8px">' +
+      // A draft has no verdict until it is approved (Task 20462).
+      html += (r.status === 'draft' ? '<p class="form-hint" style="margin-top:8px">A draft has no verdict: approve it first.</p>'
+        : '<div class="exec-actions" style="margin-top:8px">' +
         '<input class="form-input" id="reqNote' + r.id + '" placeholder="Note for a recorded verdict" style="flex:1;min-width:140px">' +
         '<button class="btn" data-perm="task.mutate" data-act="verdict" data-arg="' + r.id + ':fulfilled">Mark fulfilled</button>' +
-        '<button class="btn" data-perm="task.mutate" data-act="verdict" data-arg="' + r.id + ':unfulfilled">Mark unfulfilled</button></div>' +
+        '<button class="btn" data-perm="task.mutate" data-act="verdict" data-arg="' + r.id + ':unfulfilled">Mark unfulfilled</button></div>') +
         (retired ? '' : '<div class="exec-actions">' +
         '<button class="btn" data-perm="task.mutate" data-act="makeTask" data-arg="' + r.id + ':fix">Add a task to restore it</button>' +
         ((r.tests || []).length ? '' : '<button class="btn" data-perm="task.mutate" data-act="makeTask" data-arg="' + r.id + ':test">Add a task to test it</button>') +
@@ -564,8 +585,190 @@
       }).catch(() => toast('Could not add the task', 'err'));
     }
 
+    // ── drafting with the model (Task 20462) ──
+    const draftsOf = () => ((data && data.requirements) || []).filter(r => r.status === 'draft');
+    const SEV = {error: 'var(--red,#f85149)', warning: 'var(--yellow,#d29922)'};
+
+    function draftOpen() {
+      if (!el('rd-overlay')) return;
+      const goal = (h.tl.state() || {}).goal || '';
+      el('rdGoal').textContent = goal || 'The project has no goal yet.';
+      draftSource();
+      renderDraft();
+      window.openOverlay('rd-overlay', {dismiss: draftClose, focus: '#rdText'});
+      return lintRules();
+    }
+    function draftClose() { window.closeOverlay('rd-overlay'); }
+    function draftSource() {
+      const fromGoal = !!(el('rdSrcGoal') && el('rdSrcGoal').checked);
+      el('rdGoal').style.display = fromGoal ? '' : 'none';
+      el('rdText').style.display = fromGoal ? 'none' : '';
+      el('rdFileRow').style.display = fromGoal ? 'none' : '';
+    }
+    // draftFile puts a file chosen from the computer into the text: read here,
+    // never uploaded as a file.
+    function draftFile() {
+      const f = this.files && this.files[0];
+      if (!f) return;
+      if (f.size > 64 * 1024) { toast('That file is larger than 64 KiB: draft from it a part at a time', 'err'); this.value = ''; return; }
+      const rd = new FileReader();
+      rd.onload = () => { el('rdText').value = String(rd.result || ''); };
+      rd.onerror = () => toast('The file could not be read', 'err');
+      rd.readAsText(f);
+    }
+    function busy(what, msg) {
+      drafting = what;
+      el('rdStatus').innerHTML = what ? '<span class="spinner"></span> ' + esc(msg) : '';
+      footer();
+    }
+
+    function draftGo() {
+      if (drafting) return;
+      const fromGoal = el('rdSrcGoal').checked;
+      const text = el('rdText').value;
+      if (!fromGoal && !text.trim()) { toast('Paste the text to draft from, or draft from the goal', 'err'); return; }
+      const max = Math.round(+el('rdMax').value || 0);
+      busy('draft', 'The model is drafting on the project\'s executor… this can take a few minutes.');
+      return api(pUrl('/api/requirements/draft'), {source: fromGoal ? 'goal' : 'text', text: fromGoal ? '' : text, max}).then(d => {
+        busy('', '');
+        if (!d || !d.ok) {
+          if (!h.harnessRefused(d)) el('rdStatus').textContent = (d && d.error) || 'Drafting failed';
+          return;
+        }
+        drafted = {refused: d.refused || [], notes: d.notes || ''};
+        const n = (d.drafts || []).length;
+        toast('Drafted ' + n + ' requirement' + (n === 1 ? '' : 's') + ': review them before approving', 'ok');
+        if (!fromGoal) el('rdText').value = '';
+        return load().then(lintRules);
+      }).catch(() => { busy('', ''); el('rdStatus').textContent = 'Drafting failed: could not reach the server'; });
+    }
+
+    // lintRules asks the hub what the rules say of every requirement: words
+    // only, so it answers at once — but never over a model's lint still on
+    // its way. draftLintModel asks the model too, on the project's executor,
+    // about the drafts.
+    function lintRules() {
+      return api(pUrl('/api/requirements/lint')).then(d => {
+        if (d && d.ok && drafting !== 'lint') { lint = {findings: d.findings || [], notes: [], checked: d.checked}; renderDraft(); }
+      }).catch(() => {});
+    }
+    function draftLintModel() {
+      if (drafting) return;
+      busy('lint', 'The model is reading the requirements on the project\'s executor…');
+      return api(pUrl('/api/requirements/lint'), {ids: draftsOf().map(r => r.id)}).then(d => {
+        busy('', '');
+        if (!d || !d.ok) {
+          if (!h.harnessRefused(d)) el('rdStatus').textContent = (d && d.error) || 'The model\'s lint failed';
+          return;
+        }
+        lint = {findings: d.findings || [], notes: d.notes || [], checked: d.checked, model: true};
+        renderDraft();
+      }).catch(() => { busy('', ''); el('rdStatus').textContent = 'The model\'s lint failed: could not reach the server'; });
+    }
+
+    function findingHTML(f) {
+      const others = (f.others || []).map(o => 'R-' + (+o)).join(', ');
+      return '<div style="border-left:3px solid ' + (SEV[f.severity] || 'var(--border)') + ';padding:2px 0 2px 8px;margin-top:6px;' + wrap + '">' +
+        '<div style="font-size:12px">' + esc(f.severity + ' · ' + f.kind + (f.by === 'model' ? ' (model)' : '') + ' — ' + f.message) +
+        (others ? ' <span class="form-hint">' + esc('(' + others + ')') + '</span>' : '') + '</div>' +
+        (f.hint ? '<div class="form-hint">' + esc(f.hint) + '</div>' : '') + '</div>';
+    }
+    function draftCard(r, fs) {
+      const chips = [];
+      const chip = v => '<span style="' + wrap + ';max-width:100%">' + esc(v) + '</span>';
+      if (r.priority) chips.push(chip(r.priority));
+      (r.tags || []).forEach(t => chips.push(chip(t)));
+      const tests = (r.tests || []).map(t => '<code style="display:block;white-space:pre-wrap;' + wrap + ';font-size:11px;margin-top:2px">' +
+        esc(t.command) + '</code>').join('');
+      return '<div class="dc-sub" style="cursor:default;display:block" data-draft="' + r.id + '">' +
+        '<div class="dc-sub-title" style="' + wrap + '"><span class="exec-id">R-' + r.id + '</span> ' + esc(r.title) + '</div>' +
+        (chips.length ? '<div class="dc-sub-meta">' + chips.join('') + '</div>' : '') +
+        (r.description ? '<div class="dc-sub-desc">' + esc(r.description) + '</div>' : '') +
+        (tests ? '<div class="form-hint" style="margin-top:6px">Proposed test — read it before approving: approving lets checks ' +
+          'and the requirements gate run it.</div>' + tests : '<div class="form-hint" style="margin-top:6px">No test: only the model ' +
+          'or a person can say it holds.</div>') +
+        fs.map(findingHTML).join('') +
+        '<div class="exec-actions" style="margin-top:8px;flex-wrap:wrap">' +
+        '<button class="btn primary" data-perm="task.mutate" data-act="draftApproveOne" data-arg="' + r.id + '">Approve</button>' +
+        '<button class="btn" data-perm="task.mutate" data-act="draftEdit" data-arg="' + r.id + '">Edit first</button>' +
+        '<button class="btn" data-perm="task.mutate" data-act="draftDiscard" data-arg="' + r.id + '">Discard</button></div></div>';
+    }
+    function renderDraft() {
+      const box = el('rdReview');
+      if (!box) return;
+      const drafts = draftsOf();
+      const fs = (lint && lint.findings) || [];
+      const byID = {};
+      fs.forEach(f => { (byID[f.id] = byID[f.id] || []).push(f); });
+      let html = '';
+      if (drafted && drafted.refused.length) {
+        html += '<div class="form-hint" style="margin-bottom:8px;' + wrap + '"><strong>' + drafted.refused.length + ' proposal' +
+          (drafted.refused.length === 1 ? ' was' : 's were') + ' refused</strong>' + drafted.refused.map(f =>
+          '<div>' + esc((f.index ? f.index + '. ' : '') + (f.title ? f.title + ' — ' : '') + f.reason) + '</div>').join('') + '</div>';
+      }
+      if (drafted && drafted.notes) html += '<div class="form-hint" style="margin-bottom:8px;' + wrap + '">' + esc('The model: ' + drafted.notes) + '</div>';
+      html += '<div class="section-title" style="margin:8px 0 6px">' + (drafts.length ? drafts.length + ' draft' +
+        (drafts.length === 1 ? '' : 's') + ' awaiting approval' : 'No drafts await approval') + '</div>';
+      html += drafts.map(r => draftCard(r, byID[r.id] || [])).join('');
+      const elsewhere = fs.filter(f => !drafts.some(r => r.id === f.id));
+      if (elsewhere.length) html += '<div class="section-title" style="margin:12px 0 2px">Elsewhere in the project</div>' +
+        elsewhere.map(f => '<div><span class="exec-id">R-' + (+f.id) + '</span>' + findingHTML(f) + '</div>').join('');
+      if (lint && !fs.length) html += '<p class="form-hint">' + esc('Lint found nothing to fix in ' + (lint.checked || 0) + ' requirement' +
+        (lint.checked === 1 ? '' : 's') + (lint.model ? ', the model included.' : '.')) + '</p>';
+      ((lint && lint.notes) || []).forEach(n => { html += '<div class="form-hint" style="color:var(--yellow,#d29922);' + wrap + '">' + esc('Note: ' + n) + '</div>'; });
+      box.innerHTML = html;
+      footer();
+      h.applyPermissionGating(el('rd-overlay'));
+    }
+    function footer() {
+      const n = draftsOf().length;
+      const all = el('rdApproveAll');
+      if (!all) return;
+      all.textContent = n ? 'Approve all ' + n : 'Approve all';
+      all.disabled = !n || !!drafting;
+      el('rdGo').disabled = !!drafting;
+      el('rdLint').disabled = !!drafting;
+    }
+
+    function approve(ids) {
+      if (!ids.length || drafting) return;
+      busy('approve', 'Approving…');
+      return api(pUrl('/api/requirements/approve'), {ids}).then(d => {
+        busy('', '');
+        if (!d || !d.ok) { toast((d && d.error) || 'Approval failed', 'err'); return; }
+        const keys = (d.approved || []).map(r => 'R-' + (+r.id));
+        toast(keys.length ? 'Approved ' + keys.join(', ') + ': checks and the gate count ' + (keys.length === 1 ? 'it' : 'them') + ' now'
+          : 'Already approved', 'ok');
+        return load().then(lintRules);
+      }).catch(() => { busy('', ''); toast('Approval failed', 'err'); });
+    }
+    function draftApproveOne(arg) { return approve([+arg]); }
+    function draftApproveAll() {
+      const ids = draftsOf().map(r => r.id);
+      if (!ids.length || !confirm('Approve all ' + ids.length + ' draft' + (ids.length === 1 ? '' : 's') + '? From then on checks and ' +
+        'the requirements gate run their tests — read each first.')) return;
+      return approve(ids);
+    }
+    // draftEdit opens a draft in the tab's form: saving it approved approves
+    // it, as whoever saves it.
+    function draftEdit(arg) {
+      draftClose();
+      openForm(+arg);
+      if (el('reqForm').scrollIntoView) el('reqForm').scrollIntoView({block: 'center'});
+    }
+    function draftDiscard(arg) {
+      const r = draftsOf().find(x => x.id === +arg);
+      if (!r || !confirm('Discard the draft R-' + r.id + ' "' + r.title + '"?')) return;
+      return apiMethod('DELETE', pUrl('/api/requirements/' + r.id), null).then(d => {
+        if (d && d.ok) { toast('Discarded R-' + r.id, 'ok'); return load().then(lintRules); }
+        toast((d && d.error) || 'Discard failed', 'err');
+      }).catch(() => toast('Discard failed', 'err'));
+    }
+
     return h.mount({open, load, pushed, filter, checkAll, checkOne, assessOne, stop, add, edit, cancelForm, save, del,
-      details, show, openTask, verdict, makeTask, readSpec, reviewSpec, settleOne, importSpec, download}, 'requirements', `
+      details, show, openTask, verdict, makeTask, readSpec, reviewSpec, settleOne, importSpec, download,
+      draftOpen, draftClose, draftSource, draftFile, draftGo, draftLintModel, draftApproveOne, draftApproveAll, draftEdit,
+      draftDiscard}, 'requirements', `
     <div class="kb-tab-toolbar">
       <span class="section-title" style="margin:0">Requirements</span>
       <div class="kb-search-wrap">
@@ -576,10 +779,13 @@
       <label class="form-hint" style="display:flex;gap:5px;align-items:center" title="A requirement with no tests is otherwise skipped, its last verdict kept">
         <input type="checkbox" id="reqAssess"> Ask the model about untested ones</label>
       <button class="btn" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" data-act="add">+ Add requirement</button>
+      <button class="btn" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" data-act="draftOpen"
+        title="The model drafts testable requirements from the goal or a specification; you approve them">Draft requirements</button>
       <button class="btn" style="padding:4px 10px;font-size:12px" data-act="load">Refresh</button>
     </div>
     <div id="reqSummary" class="form-hint" style="margin-bottom:6px"></div>
     <div id="reqRun" class="exec-actions" style="display:none;align-items:center;margin-bottom:10px"></div>
+    <div id="reqDrafts" class="exec-actions" style="display:none;align-items:center;margin-bottom:10px;flex-wrap:wrap"></div>
     <div id="reqSpec" style="display:none"></div>
     <div id="reqForm" class="kb-add-form" style="display:none">
       <div class="section-title" id="reqFormTitle">New requirement</div>
@@ -608,6 +814,48 @@
       <p>Add what the project must keep doing. A requirement with a test is checked by running it on the project's executor.</p>
     </div>
     <div id="reqList" class="exec-grid" style="align-items:start"></div>
-    `);
+    `, `
+    <div id="rd-overlay" data-overlay="flex" data-dismiss="draftClose"
+      style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:60;align-items:center;justify-content:center">
+      <div role="dialog" aria-modal="true" aria-labelledby="rd-title" style="background:var(--surface);border:1px solid var(--border);
+        border-radius:var(--radius);width:720px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border)">
+          <h2 id="rd-title" style="font-size:14px;font-weight:600;margin:0">Draft requirements</h2>
+          <button class="btn" data-act="draftClose" aria-label="Close" style="padding:2px 10px">&times;</button>
+        </div>
+        <div style="padding:14px 18px;overflow-y:auto;flex:1;min-height:0">
+          <p class="dc-hint">The model turns the text into atomic, testable requirements — "When &lt;trigger&gt;, the system shall
+            &lt;response&gt;" — each with acceptance criteria, a priority, tags and, where the repository makes one obvious, a test.
+            It runs where the project runs, with your account. The drafts count for nothing until you approve them.</p>
+          <div class="exec-actions" style="flex-wrap:wrap;margin-bottom:6px">
+            <label class="form-hint" style="display:flex;gap:5px;align-items:center"><input type="radio" name="rdSource" id="rdSrcText" checked
+              data-change="draftSource"> A specification</label>
+            <label class="form-hint" style="display:flex;gap:5px;align-items:center"><input type="radio" name="rdSource" id="rdSrcGoal"
+              data-change="draftSource"> The project's goal</label>
+          </div>
+          <div id="rdGoal" class="form-hint" style="display:none;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;
+            max-height:140px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:6px 8px"></div>
+          <textarea id="rdText" class="form-input" rows="6" style="width:100%" aria-label="The specification to draft from"
+            placeholder="Paste a specification, user stories or meeting notes (up to 64 KiB)"></textarea>
+          <div id="rdFileRow" class="exec-actions" style="flex-wrap:wrap;align-items:center;margin-top:6px">
+            <label class="form-hint" for="rdFile">Or read a file:</label>
+            <input type="file" id="rdFile" accept=".md,.markdown,.txt,text/plain,text/markdown" data-change="draftFile" style="max-width:100%">
+          </div>
+          <div class="exec-actions" style="flex-wrap:wrap;align-items:center;margin-top:8px">
+            <label class="form-hint" for="rdMax">At most</label>
+            <input type="number" id="rdMax" class="form-input" min="1" max="30" value="12" style="width:80px;flex:0 0 80px">
+            <button class="btn primary" id="rdGo" data-perm="task.mutate" data-act="draftGo">Draft</button>
+          </div>
+          <div id="rdStatus" class="form-hint" role="status" style="margin-top:6px;overflow-wrap:anywhere;word-break:break-word"></div>
+          <div id="rdReview" style="margin-top:6px"></div>
+        </div>
+        <div class="modal-footer" style="padding:12px 18px;border-top:1px solid var(--border);margin-top:0;flex-wrap:wrap;gap:8px">
+          <button class="btn" id="rdLint" data-perm="task.mutate" data-act="draftLintModel" style="margin-right:auto"
+            title="Asks the model whether a draft repeats a requirement in other words, and which contradict each other">Check with the model</button>
+          <button class="btn" data-act="draftClose">Close</button>
+          <button class="btn primary" id="rdApproveAll" data-perm="task.mutate" data-act="draftApproveAll">Approve all</button>
+        </div>
+      </div>
+    </div>`);
   };
 })();

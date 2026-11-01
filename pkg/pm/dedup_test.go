@@ -153,3 +153,58 @@ func containsStr(s, substr string) bool {
 			return false
 		}())
 }
+
+// answerProvider answers every prompt with out, or fails with err, and keeps
+// the prompts it was given.
+type answerProvider struct {
+	out     string
+	err     error
+	prompts []string
+}
+
+func (p *answerProvider) Name() string { return "answer" }
+
+func (p *answerProvider) DefaultModel() string { return "" }
+
+func (p *answerProvider) Complete(_ context.Context, prompt string, _ provider.Options) (*provider.Result, error) {
+	p.prompts = append(p.prompts, prompt)
+	if p.err != nil {
+		return nil, p.err
+	}
+	return &provider.Result{Output: p.out}, nil
+}
+
+// JudgeDuplicates asks the question DeduplicateTasks asks, in its words, and
+// answers with the duplicates rather than dropping them — and, unlike it, an
+// answer it cannot read is an error, never "nothing is a duplicate" (Task 20462).
+func TestJudgeDuplicates(t *testing.T) {
+	existing := []*Task{{ID: 3, Title: "The CLI shall exit 2 on a malformed config"}}
+	candidates := []*Task{{ID: 7, Title: "Malformed configs make the CLI exit 2"}, {ID: 8, Title: "Logs are kept 30 days"}}
+
+	p := &answerProvider{out: `{"novel":[1],"reason":"candidate 0 restates existing #3"}`}
+	v, err := JudgeDuplicates(context.Background(), p, provider.Options{}, existing, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Duplicates) != 1 || v.Duplicates[0] != 0 || v.Reason != "candidate 0 restates existing #3" {
+		t.Fatalf("verdict = %+v", v)
+	}
+	if len(p.prompts) != 1 || p.prompts[0] != dedupPrompt(existing, candidates) {
+		t.Errorf("JudgeDuplicates did not ask the dedup question:\n%v", p.prompts)
+	}
+
+	if _, err := JudgeDuplicates(context.Background(), &answerProvider{out: "I could not decide."}, provider.Options{},
+		existing, candidates); err == nil {
+		t.Error("an unreadable answer was taken for one")
+	}
+	if _, err := JudgeDuplicates(context.Background(), &answerProvider{err: context.DeadlineExceeded}, provider.Options{},
+		existing, candidates); err == nil {
+		t.Error("a failed call was taken for an answer")
+	}
+	// Nothing to compare with: nothing is asked.
+	none := &answerProvider{}
+	if v, err := JudgeDuplicates(context.Background(), none, provider.Options{}, nil, candidates); err != nil ||
+		len(v.Duplicates) != 0 || len(none.prompts) != 0 {
+		t.Errorf("with nothing existing: %+v, %v, %d prompts", v, err, len(none.prompts))
+	}
+}

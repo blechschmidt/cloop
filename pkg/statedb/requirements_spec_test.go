@@ -67,7 +67,8 @@ func TestAnOlderBuildKeepsTheStatus(t *testing.T) {
 	}
 
 	// This build's edit keeps a status it was not given, and changes one it
-	// was; the change is audited.
+	// was; the change is audited — an approval as requirement.approve, with
+	// the approver (Task 20462).
 	r := all[0]
 	r.Status = ""
 	if got, err := db.UpdateRequirement(r, "bob"); err != nil || got.Status != requirements.StatusDraft {
@@ -77,9 +78,13 @@ func TestAnOlderBuildKeepsTheStatus(t *testing.T) {
 	if got, err := db.UpdateRequirement(r, "bob"); err != nil || got.Status != requirements.StatusApproved {
 		t.Fatalf("approving: %+v %v", got, err)
 	}
-	rows, _, err := db.ListAuditEvents(AuditFilter{EventType: string(auditaction.ActionRequirementUpdate)})
-	if err != nil || len(rows) == 0 || !strings.Contains(rows[0].Payload, `"status"`) {
-		t.Errorf("approving was not audited as a status change: %+v %v", rows, err)
+	rows, _, err := db.ListAuditEvents(AuditFilter{EventType: string(auditaction.ActionRequirementApprove)})
+	if err != nil || len(rows) != 1 || rows[0].Actor != "bob" || !strings.Contains(rows[0].Payload, `"previous_status":"draft"`) ||
+		!strings.Contains(rows[0].Payload, `"approved_by":"bob"`) {
+		t.Errorf("approving was not audited as an approval: %+v %v", rows, err)
+	}
+	if got, _ := db.Requirement(r.ID); got.ApprovedBy != "bob" {
+		t.Errorf("the approver reads %q", got.ApprovedBy)
 	}
 
 	// A status nothing in this package wrote is not taken for approval.

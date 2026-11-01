@@ -141,6 +141,12 @@ type Requirement struct {
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
 	CreatedBy string    `json:"created_by,omitempty"`
 	UpdatedBy string    `json:"updated_by,omitempty"`
+	// ApprovedBy and ApprovedAt record who made it approved, and when
+	// (Task 20462): whoever added it approved, or moved it there from a draft
+	// or from deprecated. Empty for a requirement that is not approved, and
+	// for one approved before the hub recorded approvals.
+	ApprovedBy string    `json:"approved_by,omitempty"`
+	ApprovedAt time.Time `json:"approved_at,omitzero"`
 }
 
 // CurrentStatus is r's status, approved when it has none: every requirement
@@ -268,6 +274,7 @@ func (r *Requirement) Normalize() error {
 	r.Tests = tests
 	r.CreatedBy = truncateRunes(strings.TrimSpace(r.CreatedBy), MaxActorRunes)
 	r.UpdatedBy = truncateRunes(strings.TrimSpace(r.UpdatedBy), MaxActorRunes)
+	r.ApprovedBy = truncateRunes(strings.TrimSpace(r.ApprovedBy), MaxActorRunes)
 	return r.checkEncodedSize()
 }
 

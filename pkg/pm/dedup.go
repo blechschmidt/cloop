@@ -53,21 +53,10 @@ func DeduplicateTasks(ctx context.Context, p provider.Provider, opts provider.Op
 		return candidates, nil
 	}
 
-	prompt := dedupPrompt(existing, candidates)
-	result, err := p.Complete(ctx, prompt, opts)
+	novelIndices, reason, err := judgeDuplicates(ctx, p, opts, existing, candidates)
 	if err != nil {
 		// Fail open: return all candidates so novel tasks are not dropped.
-		return candidates, fmt.Errorf("dedup provider call failed (returning all candidates): %w", err)
-	}
-	if result == nil {
-		// Fail open.
-		return candidates, fmt.Errorf("dedup provider returned nil result (returning all candidates)")
-	}
-
-	novelIndices, reason, parseErr := parseDedupResponse(result.Output)
-	if parseErr != nil {
-		// Fail open.
-		return candidates, fmt.Errorf("dedup parse failed (returning all candidates): %w", parseErr)
+		return candidates, fmt.Errorf("%w (returning all candidates)", err)
 	}
 
 	// Build the filtered list.
@@ -89,6 +78,61 @@ func DeduplicateTasks(ctx context.Context, p provider.Provider, opts provider.Op
 	}
 
 	return novel, nil
+}
+
+// judgeDuplicates puts the dedup question to the provider and reads its
+// answer: the indices of the candidates it calls novel, and its reason for
+// the rest.
+func judgeDuplicates(ctx context.Context, p provider.Provider, opts provider.Options, existing, candidates []*Task) ([]int, string, error) {
+	result, err := p.Complete(ctx, dedupPrompt(existing, candidates), opts)
+	if err != nil {
+		return nil, "", fmt.Errorf("dedup provider call failed: %w", err)
+	}
+	if result == nil {
+		return nil, "", fmt.Errorf("dedup provider returned nil result")
+	}
+	novel, reason, err := parseDedupResponse(result.Output)
+	if err != nil {
+		return nil, "", fmt.Errorf("dedup parse failed: %w", err)
+	}
+	return novel, reason, nil
+}
+
+// DuplicateVerdict is the semantic dedup's answer about a set of candidates.
+type DuplicateVerdict struct {
+	// Duplicates are the indices, into the candidates, of those the model
+	// found already covered by existing work, in order.
+	Duplicates []int
+	// Reason is the model's account of them.
+	Reason string
+}
+
+// JudgeDuplicates asks the provider which candidates duplicate the existing
+// tasks — the question DeduplicateTasks asks before auto-evolve injects new
+// work, in the same words — and returns its verdict. Unlike DeduplicateTasks
+// it does not fail open: a caller that reports duplicates (cloop requirements
+// lint, Task 20462) must tell "none" from "could not tell", so a call or an
+// answer that fails is an error. With nothing existing, no candidate can
+// duplicate anything, and the provider is not asked.
+func JudgeDuplicates(ctx context.Context, p provider.Provider, opts provider.Options, existing, candidates []*Task) (DuplicateVerdict, error) {
+	if len(candidates) == 0 || len(existing) == 0 {
+		return DuplicateVerdict{}, nil
+	}
+	novel, reason, err := judgeDuplicates(ctx, p, opts, existing, candidates)
+	if err != nil {
+		return DuplicateVerdict{}, err
+	}
+	keep := make(map[int]bool, len(novel))
+	for _, i := range novel {
+		keep[i] = true
+	}
+	v := DuplicateVerdict{Reason: reason}
+	for i := range candidates {
+		if !keep[i] {
+			v.Duplicates = append(v.Duplicates, i)
+		}
+	}
+	return v, nil
 }
 
 // DedupReason returns the AI's stated reason for dropping tasks.

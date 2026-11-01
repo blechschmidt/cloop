@@ -209,7 +209,7 @@ requirements:
 		t.Fatalf("check --file exited %v:\n%s", err, out)
 	}
 	for _, want := range []string{"R-1    fulfilled", "R-2    unfulfilled", `"the failing one" failed (exit 4)`, "R-5    skipped",
-		"Not checked: 1 draft (R-3), 1 deprecated (R-4)", "1 fulfilled, 1 unfulfilled"} {
+		"Not checked: 1 deprecated (R-4) — name them", "Not checked: 1 draft (R-3) awaiting approval", "1 fulfilled, 1 unfulfilled"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("check --file output lacks %q:\n%s", want, out)
 		}
@@ -223,20 +223,30 @@ requirements:
 		t.Errorf("check --file left %v behind in the checkout", names)
 	}
 
-	if out, err := runHelper(t, exe, dir, "requirements", "check", "--file", "requirements.yaml", "R-1", "3"); exitCode(err) != 1 ||
-		!strings.Contains(string(out), "R-3    unfulfilled") || strings.Contains(string(out), "R-2") {
+	if out, err := runHelper(t, exe, dir, "requirements", "check", "--file", "requirements.yaml", "R-1", "4"); exitCode(err) != 1 ||
+		!strings.Contains(string(out), "R-4    unfulfilled") || strings.Contains(string(out), "R-2") {
 		t.Errorf("named requirements: %v\n%s", err, out)
 	}
-	if out, err := runHelper(t, exe, dir, "requirements", "check", "--file", "requirements.yaml", "--status", "draft"); exitCode(err) != 1 ||
-		!strings.Contains(string(out), "R-3") || strings.Contains(string(out), "R-1 ") {
-		t.Errorf("--status draft: %v\n%s", err, out)
+	// A draft is checked by nothing until a person approves it (Task
+	// 20462), named or by status: its test never runs.
+	for _, args := range [][]string{{"R-1", "3"}, {"--status", "draft"}} {
+		out, err := runHelper(t, exe, dir, append([]string{"requirements", "check", "--file", "requirements.yaml"}, args...)...)
+		if exitCode(err) != 1 || !strings.Contains(string(out), "not checked until a person approves it") ||
+			strings.Contains(string(out), "fulfilled") {
+			t.Errorf("checking the draft with %v: %v\n%s", args, err, out)
+		}
 	}
 	if out, err := runHelper(t, exe, dir, "requirements", "check", "--file", "requirements.yaml", "--all", "--json"); err != nil {
 		t.Errorf("--json: %v\n%s", err, out)
 	} else {
 		var rep requirements.Report
-		if err := clijson.Unmarshal(out, &rep); err != nil || len(rep.Results) != 4 {
+		if err := clijson.Unmarshal(out, &rep); err != nil || len(rep.Results) != 3 {
 			t.Errorf("--all --json reported %+v (%v)", rep, err)
+		}
+		for _, r := range rep.Results {
+			if r.RequirementID == 3 {
+				t.Errorf("--all checked the draft R-3: %+v", r)
+			}
 		}
 	}
 	if out, err := runHelper(t, exe, dir, "requirements", "check", "--file", "missing.yaml"); exitCode(err) != 1 ||

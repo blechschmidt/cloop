@@ -33,6 +33,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -566,7 +567,8 @@ func registerClaudeCode(t *testing.T) {
 	})
 }
 
-// modelCallRequests are the four, with what each dispatches.
+// modelCallRequests are the dashboard's model calls, with what each
+// dispatches: the four of Task 20442, and drafting requirements (Task 20462).
 var modelCallRequests = []struct {
 	name, method, path string
 	body               any
@@ -577,6 +579,7 @@ var modelCallRequests = []struct {
 		map[string]any{"instruction": "and mention the indexes", "description": "Move every table."}, "task-revise"},
 	{"blocker analysis", http.MethodPost, "/api/tasks/1/blocker", map[string]any{}, "task-ai-blocker"},
 	{"plan chat", http.MethodPost, "/api/chat/plan", map[string]any{"message": "What next?"}, "plan-chat"},
+	{"draft requirements", http.MethodPost, "/api/requirements/draft", map[string]any{"source": "goal"}, "requirements-draft"},
 }
 
 // sandboxAnswer is what a sandbox running cloop answers each of the four.
@@ -586,6 +589,8 @@ func sandboxAnswer(t *testing.T) func([]string) string {
 		"task-revise":     framed(t, map[string]any{"description": "Move every table, and the indexes."}),
 		"task-ai-blocker": framed(t, blockerReport()),
 		"plan-chat":       framed(t, map[string]any{"answer": "Task 1."}),
+		"requirements-draft": framed(t, requirements.DraftResult{Drafts: []requirements.Requirement{
+			{Title: "When a run ends, the hub shall record its exit status.", Status: requirements.StatusDraft}}}),
 	}
 	return func(argv []string) string {
 		if len(argv) < 3 {
@@ -673,7 +678,7 @@ func TestModelCallsNeverRunOnTheHubUnderStrictMode(t *testing.T) {
 	for _, argv := range box.argvs() {
 		subs = append(subs, argv[1]+"-"+argv[2])
 	}
-	want := []string{"task-decompose", "task-revise", "task-ai-blocker", "plan-chat"}
+	want := []string{"task-decompose", "task-revise", "task-ai-blocker", "plan-chat", "requirements-draft"}
 	if !reflect.DeepEqual(subs, want) {
 		t.Errorf("the sandbox was asked for %v, want %v", subs, want)
 	}

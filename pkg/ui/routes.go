@@ -820,6 +820,16 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/requirements/spec/read", Handler: s.handleRequirementSpecRead, Perm: task, Scope: scopeProject},
 		{Pattern: "POST /api/requirements/import", Handler: s.handleRequirementSpecImport, Perm: task, Scope: scopeProject},
 		{Pattern: "GET /api/requirements/export", Handler: s.handleRequirementSpecExport, Perm: read, Scope: scopeProject},
+		// Drafting with the model (Task 20462): the draft and the model's
+		// lint run on the project's executor with the caller's account, and
+		// both spend a model call and the draft writes requirements, so both
+		// are `task`, as the Split preview is. Approving a draft is what lets
+		// its tests run: `task`, as writing a test is. The rules' lint reads
+		// words only. See requirements_draft_api.go.
+		{Pattern: "POST /api/requirements/draft", Handler: s.handleRequirementsDraft, Perm: task, Scope: scopeProject},
+		{Pattern: "POST /api/requirements/approve", Handler: s.handleRequirementsApprove, Perm: task, Scope: scopeProject},
+		{Pattern: "GET /api/requirements/lint", Handler: s.handleRequirementsLint, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/requirements/lint", Handler: s.handleRequirementsLintModel, Perm: task, Scope: scopeProject},
 
 		// ── Replay ───────────────────────────────────────────────────
 		{Pattern: "GET /api/replay-runs", Handler: s.handleReplayRunsList, Perm: read, Scope: scopeProject},

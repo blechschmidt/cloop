@@ -9,6 +9,7 @@ package ui
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -274,8 +275,9 @@ func TestTheHubTakesNothingOfTheSpecReadOnTheExecutorsWord(t *testing.T) {
 }
 
 // TestCheckAllChecksTheApprovedRequirements: a draft is not yet agreed and a
-// deprecated requirement is no longer, so "check all" passes them by — unless
-// they are named, or every one is asked for.
+// deprecated requirement is no longer, so "check all" passes them by. A
+// deprecated one is checked when named, or when every one is asked for; a
+// draft never is until a person approves it (Task 20462).
 func TestCheckAllChecksTheApprovedRequirements(t *testing.T) {
 	dir := setupProjectDir(t, "statuses", modelCallTasks())
 	stub := newModelStub(t)
@@ -305,13 +307,20 @@ func TestCheckAllChecksTheApprovedRequirements(t *testing.T) {
 		t.Fatalf("check all = %d %v", code, d)
 	}
 	waitRequirementRun(t, ts, runID)
-	code, d, runID = startRequirementRun(t, ts, map[string]any{"ids": []int{draft}})
-	if code != http.StatusAccepted || ids(d, "requirement_ids")[0] != draft {
-		t.Fatalf("a draft by name = %d %v", code, d)
+	for _, named := range [][]int{{draft}, {approved, draft}} {
+		if code, d, _ := startRequirementRun(t, ts, map[string]any{"ids": named}); code != http.StatusBadRequest ||
+			!strings.Contains(fmt.Sprint(d["error"]), "not checked until a person approves it") {
+			t.Fatalf("a draft by name %v = %d %v", named, code, d)
+		}
+	}
+	code, d, runID = startRequirementRun(t, ts, map[string]any{"ids": []int{gone}})
+	if code != http.StatusAccepted || ids(d, "requirement_ids")[0] != gone {
+		t.Fatalf("a deprecated one by name = %d %v", code, d)
 	}
 	waitRequirementRun(t, ts, runID)
 	code, d, runID = startRequirementRun(t, ts, map[string]any{"all": true})
-	if code != http.StatusAccepted || len(ids(d, "requirement_ids")) != 3 {
+	if got := ids(d, "requirement_ids"); code != http.StatusAccepted || len(got) != 2 || got[0] != approved || got[1] != gone ||
+		len(ids(d, "unapproved")) != 1 {
 		t.Fatalf("every one = %d %v", code, d)
 	}
 	waitRequirementRun(t, ts, runID)

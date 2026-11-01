@@ -521,6 +521,17 @@ func (d *DB) ImportRequirementSpec(in RequirementSpecImport) (RequirementSpecImp
 	}
 	if !in.DryRun {
 		auditRequirementImport(d, in, res)
+		for _, st := range res.Steps {
+			if importApproves(st) {
+				r := st.Requirement
+				r.ApprovedBy = clipActor(actor)
+				was := requirements.StatusDraft
+				if st.Previous != nil {
+					was = st.Previous.CurrentStatus()
+				}
+				auditRequirementApprove(d, r, was, actor, "import")
+			}
+		}
 		for _, id := range slices.Sorted(maps.Keys(res.Unlinked)) {
 			for _, t := range res.Unlinked[id] {
 				auditTaskUpsert(d, t, actorOrSystem(in.Sync.Actor))
@@ -541,11 +552,17 @@ func applySpecStepsTx(tx *sql.Tx, steps []requirements.Step, actor string, now t
 			continue
 		}
 		r := s.Requirement
+		// Imported approved, it was approved by whoever imported it.
+		approvedBy, approvedAt := "", ""
+		if r.CurrentStatus() == requirements.StatusApproved {
+			approvedBy, approvedAt = actor, formatReqTime(now)
+		}
 		if _, err := tx.Exec(`INSERT INTO requirements
-			(id, title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(id, title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status,
+			 approved_by, approved_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			r.ID, r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
-			formatReqTime(now), formatReqTime(now), actor, actor, r.CurrentStatus()); err != nil {
+			formatReqTime(now), formatReqTime(now), actor, actor, r.CurrentStatus(), approvedBy, approvedAt); err != nil {
 			return nil, nil, fmt.Errorf("statedb: import %s: %w", requirements.Key(r.ID), classifyDriverErr(err))
 		}
 	}
@@ -563,6 +580,18 @@ func applySpecStepsTx(tx *sql.Tx, steps []requirements.Step, actor string, now t
 		}
 		if n, _ := res.RowsAffected(); n != 1 {
 			return nil, nil, fmt.Errorf("%w: %s", ErrRequirementNotFound, requirements.Key(r.ID))
+		}
+		// A file that approves a requirement approves it as whoever
+		// imported it (Task 20462); one that takes it out of approved takes
+		// the approval back.
+		switch {
+		case importApproves(s):
+			_, err = tx.Exec(`UPDATE requirements SET approved_by = ?, approved_at = ? WHERE id = ?`, actor, formatReqTime(now), r.ID)
+		case r.CurrentStatus() != requirements.StatusApproved:
+			_, err = tx.Exec(`UPDATE requirements SET approved_by = '', approved_at = '' WHERE id = ?`, r.ID)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("statedb: import %s: %w", requirements.Key(r.ID), classifyDriverErr(err))
 		}
 	}
 	deleted := map[int]int64{}
@@ -589,6 +618,13 @@ func applySpecStepsTx(tx *sql.Tx, steps []requirements.Step, actor string, now t
 		}
 	}
 	return deleted, unlinked, nil
+}
+
+// importApproves reports whether an import's update step makes a requirement
+// approved that was not.
+func importApproves(s requirements.Step) bool {
+	return s.Action == requirements.ActionUpdate && s.Requirement.CurrentStatus() == requirements.StatusApproved &&
+		(s.Previous == nil || s.Previous.CurrentStatus() != requirements.StatusApproved)
 }
 
 // auditRequirementImport records an import in the project's trail: what it

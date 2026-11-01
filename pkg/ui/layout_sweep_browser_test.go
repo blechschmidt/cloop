@@ -135,6 +135,7 @@ type layoutFixture struct {
 	PromptMarker     string              `json:"promptMarker"`
 	ReplayOutput     string              `json:"replayOutput"`
 	Assistant        []map[string]string `json:"assistant"`
+	DraftTitle       string              `json:"draftTitle"`
 }
 
 // The fixture's long content. Unbroken on purpose: CSS offers a line break at
@@ -179,6 +180,10 @@ type sweepStrings struct {
 	Output string
 	// Suggestion fills a finished AI brainstorm; empty seeds none.
 	Suggestion string
+	// DraftTitle is what a requirement the model drafted says (Task 20462):
+	// two drafts await approval in the Draft dialog, the second repeating
+	// the first, so that lint has something to say of them.
+	DraftTitle string
 	// UserAgent is the browser the seeded telemetry claims to come from;
 	// empty sends Go's own.
 	UserAgent string
@@ -196,6 +201,9 @@ var layoutSweepStrings = sweepStrings{
 	Device: layoutDevice, Virtual: layoutVirtual, Image: layoutImage, Email: layoutEmail, Secret: layoutSecret,
 	ResultMarker: layoutResultMarker, PromptMarker: layoutPromptMarker, ReplayOutput: layoutReplayOutput,
 	TokenName: "ci_pipeline_for_" + layoutProject,
+	// Lint finds "fast", and "and alert" starting a second behaviour.
+	DraftTitle: "When_the_ingest_pipeline_backs_up_the_hub_shall_shed_load_fast_and_alert_the_on_call_rotation_of_" +
+		layoutProject,
 }
 
 // seedHubAs is seedHub sent with the User-Agent ua, when one is given.
@@ -405,7 +413,7 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		TokenName: s.TokenName, Token: "cloop_pat_" + strings.Repeat("a1b2c3d4", 8),
 		Transcript: layoutLong("also cover the case where", s.Device, "drops off mid-dispatch, see",
 			s.URL), TranscriptMarker: s.Device,
-		PromptMarker: s.PromptMarker, ReplayOutput: s.ReplayOutput,
+		PromptMarker: s.PromptMarker, ReplayOutput: s.ReplayOutput, DraftTitle: s.DraftTitle,
 		Assistant: []map[string]string{
 			{"role": "user", "content": layoutLong("what blocks", s.TaskTitle+"?")},
 			{"role": "assistant", "content": layoutLong("Nothing — it finished; the test is at", s.URL)},
@@ -1100,8 +1108,10 @@ func deferredTabNames(t *testing.T) []string {
 
 // seedLayoutRequirements gives the Requirements tab (Task 20458) a requirement
 // whose last check failed — its command, its output and its summary the
-// fixture's long unbroken names — and one with no tests that a person marked
-// fulfilled.
+// fixture's long unbroken names — one with no tests that a person marked
+// fulfilled, a must, so that lint names it; and two drafts the model wrote,
+// awaiting approval in the Draft dialog (Task 20462), the second repeating the
+// first.
 func seedLayoutRequirements(t *testing.T, primary string, s sweepStrings) {
 	t.Helper()
 	db, err := statedb.Open(state.DBPath(primary))
@@ -1132,12 +1142,24 @@ func seedLayoutRequirements(t *testing.T, primary string, s sweepStrings) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	manual, err := db.AddRequirement(requirements.Requirement{Title: s.RiskTaskTitle,
+	manual, err := db.AddRequirement(requirements.Requirement{Title: s.RiskTaskTitle, Priority: requirements.PriorityMust,
 		Description: layoutLong("Reviewed against", s.URL)}, s.Email)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.RecordRequirementVerdict(manual.ID, requirements.VerdictFulfilled, layoutLong("Checked on", s.Device), s.Email); err != nil {
+		t.Fatal(err)
+	}
+	if s.DraftTitle == "" {
+		return
+	}
+	draft := requirements.Requirement{Title: s.DraftTitle, Priority: requirements.PriorityShould,
+		Tags:        []string{"observability_ingest_pipeline_backpressure_alerts_rollout_26", "drafted"},
+		Description: layoutLong("Pages", s.Email, "\n\n"+requirements.AcceptanceHeading+"\n-", s.URL, "answers 503 within 200 ms"),
+		Tests:       []requirements.Test{{Command: layoutLong("make load-test TARGET="+s.RepoPath, "DEVICE="+s.Device)}},
+	}
+	if _, err := db.AddDraftRequirements([]requirements.Requirement{draft, {Title: s.DraftTitle}}, s.Email,
+		statedb.DraftOrigin{Source: "text", Via: "dashboard", ExecutorID: s.Device}); err != nil {
 		t.Fatal(err)
 	}
 }

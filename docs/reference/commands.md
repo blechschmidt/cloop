@@ -337,12 +337,15 @@ cloop requirements export [--file <path>|-] [--force]
 cloop requirements import [--file <path>] [--dry-run] [--resolve R-<n>=file|hub]... [--prefer file|hub] [--json]
 cloop requirements validate [--file <path>] [--json]
 cloop requirements gate [off|linked|linked+must] [--assess|--no-assess] [--json]
+cloop requirements draft [--from-goal|--from-file <path>|-] [--max N] [--dry-run] [--json]
+cloop requirements lint [id...] [--ai] [--strict] [--all] [--file <spec>] [--json]
+cloop requirements approve <id>...|--all-drafts [--json]
 ```
 
 | Flag (`check`) | Default | Description |
 |------|---------|-------------|
 | `--ai` | off | Ask the model about the requirements that have no tests; without it they are skipped |
-| `--status`, `--all` | `approved` | With no ids, the statuses checked; `--all` checks every requirement. Named ones are checked whatever their status |
+| `--status`, `--all` | `approved` | With no ids, the statuses checked; `--all` checks the approved and the deprecated ones. Named ones are checked whatever their status — but a draft is never checked until it is approved |
 | `--file` | none | Check the requirements in this spec file; needs no hub and no project database, and records nothing |
 | `--provider`, `--model` | the project's | The model `--ai` asks |
 | `--ai-timeout` | `5m` | How long the model may take over one requirement |
@@ -360,6 +363,22 @@ about linked requirements without tests. When `config.yaml` declares
 or, with `--file`, when the spec file does not validate — so a CI job can run it
 as a gate. `--test-timeout` on `add` and `edit` sets how long each test given
 may run (10 minutes by default).
+
+`draft` has the model draft requirements from the project's goal
+(`--from-goal`), a file (`--from-file`, `-` for stdin) or text piped to it —
+atomic, testable statements in EARS form with acceptance criteria, a priority,
+tags and, where the repository makes one obvious, a test — and stores them as
+drafts (`--dry-run` shows them and stores none; `--max` caps how many, 12 by
+default, 30 at most). The answer is read strictly and every proposal held to a
+requirement's bounds; one that does not fit, or asks to be anything but a
+draft, is refused and named. `approve` approves drafts — nothing checks a draft
+until then — and records who did. `lint` reports ambiguous wording, compound,
+duplicate and contradictory requirements and approved musts with no test, and
+exits 1 on an error (`--strict`: on a warning too); `--ai` asks the model about
+duplicates in other words and contradictions as well. See
+[Drafting requirements with the model](../guides/requirements.md#drafting-requirements-with-the-model).
+With `--json` (and `draft`'s hidden `--text`, `--goal` and `--existing`, `lint`'s
+`--spec`) they are how the hub runs them on a project's executor.
 
 `export`, `import` and `validate` keep the requirements as code, in
 `.cloop/requirements.yaml` (`--file` for another path) — see

@@ -13,9 +13,14 @@ requirement with no tests can be **assessed by the model**, which reads the
 code and says whether it holds, or given a **verdict by hand**.
 
 A requirement is a **draft**, **approved** or **deprecated**, and a check checks
-the approved ones unless it is told otherwise. Requirements can also be kept
-**as code**, in `.cloop/requirements.yaml` beside the code they govern, reviewed
-in pull requests and checked by a CI job with no hub — see
+the approved ones unless it is told otherwise; a draft is checked by nothing
+until a person approves it. The model can **draft** requirements from the
+project's goal or a specification you paste, for you to review and approve —
+see [Drafting requirements with the model](#drafting-requirements-with-the-model) —
+and **lint** says which requirements are vague, compound, repeated,
+contradictory or untested. Requirements can also be kept **as code**, in
+`.cloop/requirements.yaml` beside the code they govern, reviewed in pull
+requests and checked by a CI job with no hub — see
 [Requirements as code](#requirements-as-code).
 
 ## Adding requirements
@@ -48,7 +53,7 @@ the same rule.
 
 | Status | Means | Checked |
 | --- | --- | --- |
-| **draft** | proposed, not yet agreed | only when named |
+| **draft** | proposed, not yet agreed | never, until a person approves it |
 | **approved** | the project must keep it | by every check, unless told otherwise |
 | **deprecated** | no longer required; kept for its history | only when named |
 
@@ -56,10 +61,20 @@ A requirement added without a status is approved, and every requirement written
 before statuses existed is approved, so nothing that was checked stops being
 checked. **Check all** and `cloop requirements check` with no ids check the
 approved requirements; naming a requirement (**Check** on its card,
-`cloop requirements check 4`) checks it whatever its status, and
-`--status draft,approved` or `--all` widens a check from the terminal.
-Approving or deprecating a requirement does not make its verdicts stale: it
-still says the same thing.
+`cloop requirements check 4`) checks a deprecated one too, and
+`--status deprecated` or `--all` widens a check from the terminal.
+
+A **draft** is checked by nothing: not by **Check all** or `--all`, not when it
+is named — `cloop requirements check 4` and the dashboard refuse it — and not by
+the [requirements gate](#requirement-gated-completion), and nobody records a
+verdict for it. Its tests may be a model's proposal that nobody has read yet,
+and nothing runs them until a person has. Approving it is what lets them run:
+**Approve** on its card or in the Draft dialog, `cloop requirements approve 4`,
+saving it in the form with the status *approved*, or importing a spec file that
+approves it. Whoever does is recorded as its **approver** — shown on its card,
+`approved_by` and `approved_at` in the API — and the approval is a
+`requirement.approve` row in the project's audit trail. Approving or deprecating
+a requirement does not make its verdicts stale: it still says the same thing.
 
 ### Writing tests
 
@@ -83,6 +98,119 @@ another.
   environment at all.
 - **Size.** A requirement and its tests must fit in 64 KiB as the hub sends
   them; put a long command in a script in the repository and call that.
+
+## Drafting requirements with the model
+
+The model can turn free text — the project's goal, a specification, user
+stories, meeting notes — into requirements: atomic and testable, each a
+sentence in EARS form,
+
+| Pattern | Form |
+| --- | --- |
+| event | When *trigger*, the system shall *response*. |
+| state | While *state*, the system shall *response*. |
+| unwanted behaviour | If *condition*, then the system shall *response*. |
+| optional feature | Where *feature is included*, the system shall *response*. |
+| always | The system shall *response*. |
+
+with acceptance criteria under its details, a suggested priority, tags and,
+where the repository makes one obvious — an existing test, a make target, a
+script — a test command. Everything it drafts is stored as a **draft**, which
+counts for nothing until you approve it.
+
+In the dashboard, press **Draft requirements** in the Requirements tab. Draft
+from **a specification** — paste it, or read a Markdown or text file from your
+computer into the box — or from **the project's goal**, choose at most how many,
+and press **Draft**. The dialog lists every draft awaiting approval with its
+acceptance criteria, its proposed test and what [lint](#linting-requirements)
+says of it, and the proposals the model made that were refused, with why.
+For each draft: **Approve**, **Edit first** — the requirement opens in the
+tab's form, where saving it as *approved* approves it — or **Discard**.
+**Approve all** approves every draft the dialog shows. A tab with drafts says
+so above the list, with **Review drafts**.
+
+From a terminal, in the project's directory:
+
+```bash
+cloop requirements draft --from-goal          # the project's goal
+cloop requirements draft --from-file spec.md  # a specification
+cat notes.md | cloop requirements draft       # stdin
+cloop requirements draft --from-file spec.md --dry-run --max 5   # show them, store none
+cloop requirements approve 12 13              # or --all-drafts
+```
+
+### Where the model runs
+
+A draft from the dashboard is a model call like the Split preview: the hub
+dispatches `cloop requirements draft --json --dry-run` to the project's
+executor — its sandbox, its device — with **your** Claude account, or your
+Copilot sign-in for a Copilot project, never the hub's, and never on the hub's
+own host. A sandbox with no credential of yours refuses it with the dialog that
+grants one. The hub sends the text, the project's goal and the titles of its
+existing requirements (so that the model does not restate one) as arguments;
+an agent that can read the repository — Claude Code, Copilot — may read it to
+find how its tests run, and is told not to change anything. An executor whose
+`cloop` is older than the hub says so.
+
+### What the model's answer must be
+
+Its answer is untrusted text, read in two steps:
+
+1. **Strictly.** It must be one JSON object of the draft format and nothing
+   else — at most one Markdown code fence around it. Prose before or after it,
+   a second object, or a field the format does not have, and nothing is drafted:
+   an example the model quotes, or an object a pasted specification carries, is
+   never taken for the answer. The text drafted from is fenced in the prompt by
+   markers derived from its own hash, and the model is told it is data, not
+   instructions.
+2. **Each proposal against a requirement's bounds** — the same ones a
+   requirement you type is held to (see [Limits](#limits)), plus at most 10
+   acceptance criteria of 500 characters each. One that does not fit is
+   **refused** with the reason, never cut to fit; so is one that repeats an
+   existing requirement or an earlier proposal, word for word. A tag that is
+   not one is dropped.
+
+A proposal can only ever be a draft: one that asks for any other status is
+refused, not demoted — a model that tries to approve its own proposal, or a
+specification that tells it to, is worth a person's attention. The hub reads
+what the executor's `cloop` sends back through its own copy of these rules,
+since that `cloop` may be anything, and the dashboard escapes everything in
+it. Each draft is a `requirement.create` row naming what it was drafted from
+(`drafted`), and the draft as a whole one `requirement.draft` row: who asked,
+from what (`goal`, `text`, `file` or `stdin`), the text's SHA-256 and length —
+not its content — the drafts stored and how many proposals were refused.
+
+### Linting requirements
+
+`cloop requirements lint`, and the lint pass in the Draft dialog, read the
+requirements as written:
+
+| Finding | Severity | Means |
+| --- | --- | --- |
+| `ambiguous` | warning | wording a check cannot measure — "fast", "user-friendly", "should handle", "etc.", "as appropriate" — each with what to say instead |
+| `compound` | warning | more than one behaviour: a second "shall", a semicolon, a second sentence, "and" before a second verb |
+| `duplicate` | error | a requirement that repeats another |
+| `contradiction` | error | two requirements that cannot both hold |
+| `untested_must` | error | an approved `must` requirement with no test: only the model or a person can say it holds, and the gate's `linked+must` mode passes it by |
+
+By rule, lint finds near-duplicates and contradictions by their words — two
+statements nearly the same, or the same with one negated. **Check with the
+model** in the dialog, or `--ai`, asks the model as well, on the project's
+executor with your account: whether each draft repeats a requirement already
+agreed in other words — the same semantic dedup that keeps auto-evolve from
+injecting a task the plan already has — and which pairs contradict each other.
+Its answers are read as strictly as a draft, and of each finding the hub keeps
+only the requirements it names and the model's reason.
+
+```bash
+cloop requirements lint               # every requirement but the deprecated ones
+cloop requirements lint R-12 R-13     # these
+cloop requirements lint --ai          # and ask the model
+cloop requirements lint --file .cloop/requirements.yaml --strict   # in CI
+```
+
+It exits 1 on an error, and with `--strict` on a warning too, so a CI job can
+run it as a gate.
 
 ## Checking whether they are still fulfilled
 
@@ -184,7 +312,8 @@ skipped, disabled or loosened, and the requirement not narrowed. An agent that
 cannot make a test pass, or finds it wrong, is told to say so and end the task
 as failed. A requirement with no tests is part of the contract through its
 details. The requirements are read when the task starts, so an edit made while
-it waited is the one it is held to.
+it waited is the one it is held to. A linked **draft** is named and left out of
+the contract, its details and tests unquoted, until a person approves it.
 
 Link a task from its **Edit** dialog, which lists the project's approved
 requirements (and any the task already implements) to tick; from a terminal:
@@ -299,7 +428,9 @@ A linked requirement without tests never blocks: it is reported
 model. A must requirement without tests is not checked in `linked+must` mode —
 nothing but the model could tell whether it regressed, at a model call per
 requirement per task — and the check says how many were left out. A deprecated
-linked requirement is not checked.
+linked requirement is not checked, and neither is a linked draft: nothing checks
+a draft until a person approves it, and the check's note names the drafts it
+left out.
 
 ### Back to pending, then failed
 
@@ -537,6 +668,9 @@ minutes old (hourly for a checkout that had none), for somebody who may import;
 | See the requirements, their checks and runs, and the spec file's state | `project.read` |
 | Download the requirements as a spec file | `project.read` |
 | Add, change or delete a requirement, record a verdict, add a task from one | `task.mutate` |
+| Have the model draft requirements, approve drafts | `task.mutate` |
+| Lint the requirements by rule | `project.read` |
+| Lint them with the model | `task.mutate` |
 | Link a task to the requirements it implements | `task.mutate` |
 | Set the requirements gate | `config.write` |
 | Read the spec file again, and import it | `task.mutate` |
@@ -549,7 +683,8 @@ file can add tests, so importing one is `task.mutate`, as adding them is, and
 reading it again starts a workload on the project's executor. Every change to
 a requirement, every import and every check run is in the project's audit
 trail: `requirement.create`, `requirement.update`, `requirement.delete`,
-`requirement.import`, `requirement.check` and `requirement.verdict` — see
+`requirement.import`, `requirement.check`, `requirement.verdict`,
+`requirement.draft` and `requirement.approve` — see
 [Audit events](../reference/audit-events.md). The HTTP endpoints are under
 `/api/requirements` and `/api/requirement-runs` in the
 [HTTP API reference](../reference/http-api.md).
@@ -575,6 +710,9 @@ trail: `requirement.create`, `requirement.update`, `requirement.delete`,
 | A task's record of its last gate check | 50 requirements; 4 KiB of output per failing test |
 | What a re-queued task's prompt quotes of it | 24 KiB |
 | Gate re-queues in a row | `--max-verify-retries` (default 2) |
+| Text drafted from | 64 KiB |
+| Requirements one draft proposes | 30 (12 unless told) |
+| A drafted requirement's acceptance criteria | 10, each 500 characters |
 
 On an executor that shares the project's directory — a container sandbox
 bind-mounting it, the hub's own host — the project's database is writable from

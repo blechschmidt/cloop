@@ -96,6 +96,7 @@ var hostileSweepStrings = sweepStrings{
 	FeatureTitle: hostile("feature"),
 	Output:       hostile("output") + "\nTASK_DONE",
 	Suggestion:   hostile("suggestion"),
+	DraftTitle:   hostile("draft"),
 	UserAgent:    hostileName("agent"),
 }
 

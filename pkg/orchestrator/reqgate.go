@@ -177,18 +177,20 @@ type gateScoped struct {
 }
 
 // requirementsGateScope picks what a check of a task covers: the requirements
-// it implements, in its order — any status but deprecated, which the project
-// no longer requires — and, with must, every approved must requirement that
-// has tests. A must requirement without tests is left out: nothing but the
-// model could say whether it regressed, and asking it about every one of them
-// at every task would cost a model call each. notes say what was left out.
+// it implements, in its order — the approved ones: a deprecated one the
+// project no longer requires, and a draft nobody has approved yet is checked
+// by nothing (Task 20462), its tests perhaps a model's proposal — and, with
+// must, every approved must requirement that has tests. A must requirement
+// without tests is left out: nothing but the model could say whether it
+// regressed, and asking it about every one of them at every task would cost a
+// model call each. notes say what was left out.
 func requirementsGateScope(all []requirements.Requirement, linked []int, must bool) (scope []gateScoped, notes []string) {
 	byID := make(map[int]requirements.Requirement, len(all))
 	for _, r := range all {
 		byID[r.ID] = r
 	}
 	in := map[int]bool{}
-	var missing, deprecated []string
+	var missing, deprecated, drafts []string
 	for _, id := range linked {
 		if in[id] {
 			continue
@@ -200,6 +202,9 @@ func requirementsGateScope(all []requirements.Requirement, linked []int, must bo
 			continue
 		case r.CurrentStatus() == requirements.StatusDeprecated:
 			deprecated = append(deprecated, requirements.Key(id))
+			continue
+		case r.CurrentStatus() == requirements.StatusDraft:
+			drafts = append(drafts, requirements.Key(id))
 			continue
 		}
 		in[id] = true
@@ -224,6 +229,9 @@ func requirementsGateScope(all []requirements.Requirement, linked []int, must bo
 	}
 	if len(deprecated) > 0 {
 		notes = append(notes, strings.Join(deprecated, ", ")+" are deprecated and were not checked")
+	}
+	if len(drafts) > 0 {
+		notes = append(notes, strings.Join(drafts, ", ")+" are drafts awaiting approval and were not checked")
 	}
 	if untestedMust > 0 {
 		notes = append(notes, fmt.Sprintf("%d must requirement(s) without tests were not checked", untestedMust))

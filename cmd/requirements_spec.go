@@ -95,7 +95,9 @@ func init() {
 // readsOnlyItsFiles reports whether cmd, as invoked, works from the files it
 // is given alone: `cloop requirements validate`, `check --file`, and `check
 // --spec --no-record` — the check the hub and the requirements gate dispatch,
-// which is handed its requirements and records nothing (Task 20461). A plain
+// which is handed its requirements and records nothing (Task 20461) — and
+// `draft --dry-run --existing` and `lint --spec` or `--file`, as the hub
+// dispatches the Draft dialog's model calls (Task 20462). A plain
 // CI job runs them in a checkout with no .cloop/state.db, and the gate in a
 // task's worktree, and reconciling executors — which opens that database,
 // creating it — would leave one behind.
@@ -107,6 +109,14 @@ func readsOnlyItsFiles(cmd *cobra.Command) bool {
 		f := cmd.Flags()
 		noRecord, _ := f.GetBool("no-record")
 		return f.Changed("file") || (f.Changed("spec") && noRecord)
+	case requirementsDraftCmd:
+		// As the hub dispatches it (Task 20462): the existing requirements
+		// given, nothing stored.
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		return dryRun && cmd.Flags().Changed("existing")
+	case requirementsLintCmd:
+		f := cmd.Flags()
+		return f.Changed("file") || f.Changed("spec")
 	}
 	return false
 }

@@ -81,6 +81,13 @@ const (
 	// ActionRequirementImport records the project's requirements spec file
 	// (.cloop/requirements.yaml) merged into the hub (Task 20459).
 	ActionRequirementImport Action = "requirement.import"
+	// ActionRequirementDraft records the model drafting requirements from
+	// the project's goal or a specification, at a person's request (Task
+	// 20462).
+	ActionRequirementDraft Action = "requirement.draft"
+	// ActionRequirementApprove records a requirement becoming approved: a
+	// draft approved, or one reinstated.
+	ActionRequirementApprove Action = "requirement.approve"
 
 	// ── step ───────────────────────────────────────────────────────────────
 
