@@ -40,6 +40,8 @@ var notInterchanged = map[string]string{
 	"Background":       "a record of the exporting project's run",
 	"Abort":            "a record of the exporting project's run",
 	"Review":           "the exporting project's review gate's verdict",
+	"RequirementsCheck": "the exporting project's requirements gate's verdict on its last check, about that " +
+		"project's requirements (Task 20461)",
 	"Quarantine": "the exporting hub's failover evidence about its own executors, which only that hub's " +
 		"explicit reset clears; a plan file must not be able to hold a task back on the importing hub, or release one",
 	"ChainInput": "derived at dispatch from the chained predecessor's output",
