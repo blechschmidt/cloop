@@ -416,6 +416,29 @@ func (s *Server) pushHistory(workDir string) {
 	}
 	f.cursor = page.Top
 	s.sendHistory(workDir, msg)
+	// A requirements gate check a run recorded (Task 20461) changed what the
+	// Requirements tab shows: its rows arrive with the journal row that
+	// reports it, so the tab is told to read again. A gap may have hidden
+	// one, and costs the tab one read.
+	if page.Gap || gateCheckRows(page.Rows) {
+		raw, _ := json.Marshal(map[string]string{"source": "gate"})
+		s.deliverToProject(workDir, wsMessage{Type: "requirements_update", Data: raw})
+		s.deliverSSE(workDir, sseEvent{Event: "requirements_update", Data: string(raw)})
+	}
+}
+
+// gateCheckRows reports whether rows hold a requirements gate's journal row.
+func gateCheckRows(rows []statedb.HistoryRow) bool {
+	for _, r := range rows {
+		if r.Event == nil {
+			continue
+		}
+		switch r.Event.Type {
+		case statedb.EventTaskRequirements, statedb.EventRequirementRegression:
+			return true
+		}
+	}
+	return false
 }
 
 // sendHistory delivers msg to workDir's WebSocket room and SSE streams.

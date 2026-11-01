@@ -103,6 +103,7 @@ var (
 	coachMode                bool
 	requireCommitted         string
 	followBuilds             bool
+	requirementsGate         string
 )
 
 var runCmd = &cobra.Command{
@@ -198,6 +199,39 @@ Press Ctrl+C to pause gracefully.`,
 				return fmt.Errorf("--follow-builds: %w", err)
 			}
 			projectState.FollowBuilds = followBuilds
+		}
+
+		// Requirements gate (Task 20461): config.yaml's declaration, then
+		// the flag, set the project's own setting, which this run — and the
+		// dashboard, and a run on an isolating executor — reads from the
+		// project.
+		if projectState != nil && !resume.active {
+			gate, err := applyDeclaredRequirementsGate(workdir, cfg, projectState.RequirementsGate)
+			if err != nil {
+				return fmt.Errorf("requirements gate: %w", err)
+			}
+			projectState.RequirementsGate = gate
+		}
+		if cmd.Flags().Changed("requirements-gate") && !resume.active {
+			mode, err := pm.ParseRequirementsGateMode(requirementsGate)
+			if err != nil {
+				return fmt.Errorf("invalid --requirements-gate: %w", err)
+			}
+			if projectState == nil {
+				return fmt.Errorf("--requirements-gate: no cloop project in %s (run 'cloop init' first)", workdir)
+			}
+			next := projectState.RequirementsGate.Clone()
+			if next == nil {
+				next = &pm.RequirementsGate{}
+			}
+			next.Mode = mode
+			if err := state.SetRequirementsGate(workdir, next); err != nil {
+				return fmt.Errorf("--requirements-gate: %w", err)
+			}
+			if err := syncRequirementsGateDeclaration(workdir, next); err != nil {
+				return fmt.Errorf("--requirements-gate: config.yaml: %w", err)
+			}
+			projectState.RequirementsGate = next
 		}
 
 		// Apply CLOOP_* environment variable overrides to config (env > config file).
@@ -859,6 +893,7 @@ func init() {
 	runCmd.Flags().IntVar(&autoPromoteThresholdDays, "promote-threshold", 3, "PM mode: days-remaining window used by --auto-promote to trigger priority escalation (default 3)")
 	runCmd.Flags().StringVar(&requireCommitted, "require-committed", "", "PM mode: a task is done only once the changes it made are committed: --require-committed, --require-committed=pushed (and on the branch's upstream), --require-committed=off. Stored with the project")
 	runCmd.Flags().Lookup("require-committed").NoOptDefVal = pm.CommitRequireCommitted
+	runCmd.Flags().StringVar(&requirementsGate, "requirements-gate", "", "PM mode: a task is done only once its requirements pass: linked (the ones it implements), linked+must (and every approved must requirement), or off. Stored with the project (see cloop requirements gate)")
 	runCmd.Flags().BoolVar(&followBuilds, "follow-builds", false, "Adopt a newly deployed cloop build at the next task boundary instead of running the build this run started with until it ends (host-process runs on Linux; --follow-builds=false turns it off). Stored with the project")
 	runCmd.Flags().BoolVar(&coachMode, "coach", false, "PM mode: before each task, run an AI coaching session with 3-5 actionable tips, a key clarifying question, and success criteria (sequential only)")
 	rootCmd.AddCommand(runCmd)

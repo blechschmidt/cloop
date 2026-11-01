@@ -1319,7 +1319,9 @@ withdrawn or lapses, and when an API token starts waiting for an administrator
 (Task 20427; see [the configuration reference](../reference/configuration.md#approval-notifications-notifications)).
 `sink` is the webhook's name; `event` is one of `request.filed`,
 `request.reminder`, `request.approved`, `request.denied`, `request.withdrawn`,
-`request.lapsed`, `token.waiting`, or `test` for a message sent from Settings.
+`request.lapsed`, `token.waiting`, `requirement.regression` (a requirement the
+requirements gate, or any check, found broken that passed before — Task
+20461), or `test` for a message sent from Settings.
 
 | `outcome` | Meaning |
 | --- | --- |

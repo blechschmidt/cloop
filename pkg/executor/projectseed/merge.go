@@ -155,6 +155,19 @@ type MergeReport struct {
 	// changed that the hub still holds under the title they were sent with,
 	// and those it created. Only they take the run's attachments.
 	runTasks map[int]bool
+
+	// RequirementChecks counts the requirement checks the hub recorded from
+	// the requirements gate's verdicts the run brought back (Task 20461).
+	RequirementChecks int
+	// gateChecks are those verdicts, by the hub's task id, for Apply to
+	// record as the project's requirement checks.
+	gateChecks []gateCheck
+}
+
+// gateCheck is one requirements gate verdict a run reached on a task.
+type gateCheck struct {
+	taskID int
+	check  *pm.TaskRequirementsCheck
 }
 
 // Changed reports whether the merge altered the hub's project at all.
@@ -202,6 +215,9 @@ func (m MergeReport) Summary() string {
 	}
 	if m.Attached > 0 {
 		recorded = append(recorded, plural(m.Attached, "attached file", "attached files"))
+	}
+	if m.RequirementChecks > 0 {
+		recorded = append(recorded, plural(m.RequirementChecks, "requirement check", "requirement checks"))
 	}
 	if len(recorded) > 0 {
 		parts = append(parts, "recorded "+strings.Join(recorded, ", "))
@@ -322,6 +338,12 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 			continue
 		}
 		startedByRun := !sameTime(tc.Before.StartedAt, after.StartedAt) || tc.Before.Status != after.Status
+		// A requirements gate verdict the run reached is recorded as the
+		// project's requirement checks too (Task 20461), once.
+		if c := after.RequirementsCheck; c != nil && c.RunID != "" &&
+			(tc.Before.RequirementsCheck == nil || tc.Before.RequirementsCheck.RunID != c.RunID) {
+			rep.gateChecks = append(rep.gateChecks, gateCheck{taskID: id, check: sanitizeRequirementsCheck(c, scrub)})
+		}
 		applyOutcome(h, after, scrub)
 		appendAnnotations(h, tc.Before, after, scrub)
 		if startedByRun {
@@ -525,6 +547,13 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 	}
 	if len(rec.Events) > 0 {
 		if err := recordEvents(workDir, rec.Events); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(rep.gateChecks) > 0 {
+		n, err := recordGateChecks(workDir, st.RequirementsGate.AssessUntested(), rep.gateChecks, prov, scrub)
+		rep.RequirementChecks = n
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -797,7 +826,8 @@ func sameOutcome(a, b *pm.Task) bool {
 		a.TDDScore == b.TDDScore &&
 		sameJSON(a.Background, b.Background) &&
 		sameJSON(a.Abort, b.Abort) &&
-		sameJSON(a.Review, b.Review)
+		sameJSON(a.Review, b.Review) &&
+		sameJSON(a.RequirementsCheck, b.RequirementsCheck)
 }
 
 // applyOutcome copies the outcome fields from the run's task onto the hub's.
@@ -816,6 +846,7 @@ func applyOutcome(h, after *pm.Task, scrub func(string) string) {
 	h.Background = sanitizeBackground(after.Background, scrub)
 	h.Abort = sanitizeAbort(after.Abort, h.Abort, scrub)
 	h.Review = sanitizeReview(after.Review, scrub)
+	h.RequirementsCheck = sanitizeRequirementsCheck(after.RequirementsCheck, scrub)
 }
 
 // appendAnnotations adds the notes the run attached to a task. It reports
@@ -970,6 +1001,32 @@ func sanitizeReview(r *pm.TaskReview, scrub func(string) string) *pm.TaskReview 
 	scrubReview(c, scrub)
 	c.Bound()
 	return c
+}
+
+// sanitizeRequirementsCheck bounds a requirements gate record from a run on a
+// device (Task 20461) and scrubs its text: test output above all, which is
+// what a test that printed a credential would carry. The record is the
+// device's account and is kept as one; what the project's requirement checks
+// hold of it is read again through requirements.Sanitize (recordGateChecks).
+func sanitizeRequirementsCheck(c *pm.TaskRequirementsCheck, scrub func(string) string) *pm.TaskRequirementsCheck {
+	if c == nil {
+		return nil
+	}
+	out := c.Clone()
+	out.Bound()
+	out.Note = scrub(out.Note)
+	for i := range out.Requirements {
+		v := &out.Requirements[i]
+		v.Title, v.Summary = scrub(v.Title), scrub(v.Summary)
+		for j := range v.Evidence {
+			v.Evidence[j] = scrub(v.Evidence[j])
+		}
+		for j := range v.Tests {
+			t := &v.Tests[j]
+			t.Name, t.Command, t.Error, t.Output = scrub(t.Name), scrub(t.Command), scrub(t.Error), scrub(t.Output)
+		}
+	}
+	return out
 }
 
 // maxReviewRepos bounds the per-repository lists of a returned review record.

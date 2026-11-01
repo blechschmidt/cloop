@@ -30,6 +30,7 @@
 package approvalnotify
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,14 +68,31 @@ type Notice struct {
 	// Deadline is when the request lapses undecided, or the token expires;
 	// zero for a token that never expires.
 	Deadline time.Time `json:"deadline,omitempty"`
+
+	// The regression, for requirement.regression (Task 20461): the project,
+	// the requirement, the task whose work the check gated and the commit it
+	// ran at. ProjectKey and CheckID make it unique; nothing a test printed
+	// travels.
+	Project          string `json:"project,omitempty"`
+	ProjectKey       string `json:"project_key,omitempty"`
+	CheckID          int64  `json:"check_id,omitempty"`
+	RequirementID    int    `json:"requirement_id,omitempty"`
+	RequirementTitle string `json:"requirement_title,omitempty"`
+	TaskID           int    `json:"task_id,omitempty"`
+	TaskTitle        string `json:"task_title,omitempty"`
+	Commit           string `json:"commit,omitempty"`
+	WasCommit        string `json:"was_commit,omitempty"`
 }
 
 // Key is the notice's outbox key: the event and what it is about. Unique, so a
 // moment noticed twice is recorded once.
 func (n Notice) Key() string {
 	id := n.RequestID
-	if strings.HasPrefix(n.Event, "token.") {
+	switch {
+	case strings.HasPrefix(n.Event, "token."):
 		id = n.TokenID
+	case n.Event == config.NotifyEventRequirementRegression:
+		id = n.ProjectKey + ":" + strconv.FormatInt(n.CheckID, 10)
 	}
 	return n.Event + ":" + id
 }
@@ -103,6 +121,24 @@ type Snapshot struct {
 	// approved — empty, and TokensKnown true, on a hub enforcing none.
 	Waiting     []TokenInfo
 	TokensKnown bool
+
+	// Regressions are the requirement checks of the hub's projects recorded
+	// as regressions lately (Task 20461). They are moments, not something
+	// waiting: each is told once, and none is ever superseded.
+	Regressions []Regression
+}
+
+// Regression is a requirement a check found failing that passed at its
+// previous check of the same definition, as the hub describes it.
+type Regression struct {
+	Project, ProjectKey string
+	CheckID             int64
+	RequirementID       int
+	RequirementTitle    string
+	TaskID              int
+	TaskTitle           string
+	Commit, WasCommit   string
+	At                  time.Time
 }
 
 // Scan returns every notice the snapshot supports at now. Decisions and lapses
@@ -150,6 +186,17 @@ func Scan(snap Snapshot, since, now time.Time) []Notice {
 			l.Event, l.At = config.NotifyEventRequestLapsed, r.ExpiresAt
 			out = append(out, l)
 		}
+	}
+	for _, g := range snap.Regressions {
+		if g.At.Before(since) || g.CheckID <= 0 || g.ProjectKey == "" {
+			continue
+		}
+		out = append(out, Notice{
+			Event: config.NotifyEventRequirementRegression, At: g.At,
+			Project: g.Project, ProjectKey: g.ProjectKey, CheckID: g.CheckID,
+			RequirementID: g.RequirementID, RequirementTitle: g.RequirementTitle,
+			TaskID: g.TaskID, TaskTitle: g.TaskTitle, Commit: g.Commit, WasCommit: g.WasCommit,
+		})
 	}
 	for _, t := range snap.Waiting {
 		out = append(out, Notice{

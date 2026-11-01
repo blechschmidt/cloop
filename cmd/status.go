@@ -86,6 +86,15 @@ var statusCmd = &cobra.Command{
 					fmt.Printf("Done:     on the agent's word (cloop require-committed is off)\n")
 				}
 			}
+			// The requirements gate (Task 20461), likewise.
+			if s.RequirementsGate != nil {
+				if s.RequirementsGate.Active() {
+					fmt.Printf("Done:     only once %s (cloop requirements gate %s)\n",
+						s.RequirementsGate.Describe(), s.RequirementsGate.EffectiveMode())
+				} else {
+					fmt.Printf("Done:     without checking requirements (cloop requirements gate is off)\n")
+				}
+			}
 			if s.Plan != nil {
 				fmt.Printf("Tasks:    %s\n", s.Plan.Summary())
 				// Sort tasks by priority (ascending) for consistent display.

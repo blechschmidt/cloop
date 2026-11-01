@@ -129,6 +129,10 @@ type gateInput struct {
 	// commit holds fix turns to the project's commit policy, as it holds the
 	// task's own (Task 20370). Nil when the policy is off.
 	commit *commitGuard
+	// reqs checks the task's requirements again when fix turns changed the
+	// work, before anything is published (Task 20461). Nil when the
+	// project's requirements gate is off.
+	reqs *requirementsGuard
 }
 
 // gateStep is one fix turn, for the step log.
@@ -159,6 +163,15 @@ type gateOutcome struct {
 
 	changes *reviewgate.Changes
 	snap    *reviewgate.Snapshot
+
+	// requirements is the requirements gate's check of the work the fix
+	// turns left (Task 20461); nil when no fix turn ran or the gate is off.
+	// When it is unmet nothing was published, and the caller settles the
+	// task as the gate decides rather than as the review did. reqInterrupted
+	// reports a check the run's stop cut short, after which nothing was
+	// published either.
+	requirements   *pm.TaskRequirementsCheck
+	reqInterrupted bool
 }
 
 // passGate reviews a finished task and decides what leaves the machine.
@@ -275,12 +288,26 @@ func (o *Orchestrator) passGate(ctx context.Context, g *gateRun, in gateInput) *
 	default:
 		rec.Blocked = mode != pm.ReviewModeAdvisory
 	}
+	// Requirements gate (Task 20461): the fix turns changed the work whose
+	// requirements were checked before the review, so they are checked
+	// again before anything leaves the machine.
+	if !rec.Blocked && len(out.steps) > 0 && in.reqs != nil && ctx.Err() == nil &&
+		acceptableAsDone(out.output, out.background) {
+		out.requirements, out.reqInterrupted = in.reqs.check()
+	}
 	held := g.hold.Pushes()
 	switch {
 	case rec.Blocked:
 		rec.Published = reviewgate.Withhold(g.root, held, "the review did not approve the task")
 		out.fail = true
 		out.note = rec.Headline()
+	case out.reqInterrupted:
+		rec.Published = reviewgate.Withhold(g.root, held, "the run stopped while the task's requirements were checked")
+		out.note = rec.Headline() + " Nothing was published: the run stopped while its requirements were checked."
+	case out.requirements.Unmet():
+		rec.Published = reviewgate.Withhold(g.root, held, "the task's requirements did not pass after the review's fix turns")
+		out.note = rec.Headline() + " Nothing was published: after the fix turns, " +
+			strings.TrimSuffix(out.requirements.Headline(), ".") + "."
 	default:
 		rec.Published = reviewgate.Publish(ctx, out.changes, held)
 		var failed []string

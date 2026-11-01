@@ -188,6 +188,14 @@ func reconcileTask(workDir string, t *pm.Task, stop *Stop) Outcome {
 			return requeue(t, out, "the agent reported it done, but the review gate had not approved it "+
 				"when the run ended, so none of its work was published")
 		}
+		if signal == pm.TaskDone && v.AwaitingRequirements() {
+			// The requirements gate was checking the work when the run
+			// ended, and never saw it pass (Task 20461). Running it again is
+			// how it gets checked.
+			out.Verdict = v
+			return requeue(t, out, "the agent reported it done, but its requirements were still being checked "+
+				"when the run ended")
+		}
 		return adopt(workDir, t, out, output, signal, modTime, truncated, unusable)
 	default:
 		return requeue(t, out, withNote("the agent was interrupted before it reported an outcome", unusable))

@@ -163,6 +163,40 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Requirement-gated completion: a task is done only when its requirements
+  pass.** A new per-project setting, the requirements gate — `off` (the
+  default), `linked` or `linked+must` — set with `cloop requirements gate`,
+  `cloop run --requirements-gate`, the Overview's *Requirements* badge or
+  `requirements.gate` in `config.yaml` (applied when a run starts, rewritten
+  when the setting changes, and refused when it names no mode). With it on, a
+  task whose agent reports done is checked: the orchestrator dispatches `cloop
+  requirements check --json --no-record --spec` where the run runs — the
+  project's executor, the task's own directory, never the hub's host — for the
+  requirements the task implements and, in `linked+must` mode, every approved
+  must requirement that has tests. The report is read back through
+  `requirements.Sanitize`, so commands and fingerprints are the project's. A
+  tested requirement that fails, or cannot be tested, keeps the task from being
+  done: it goes back to pending with the failing commands and the scrubbed end
+  of their output in its next prompt, at most `--max-verify-retries` times in a
+  row, and then fails with reason `requirements_unmet`. A linked requirement
+  without tests is reported unverified and never blocks, unless the project
+  asks the model (`--assess`). The check runs after "done means committed" and
+  before the review gate, and again before the review gate publishes work its
+  fix turns changed. While it runs, the task's verdict says so, so a run that
+  dies mid-check has its task run again rather than adopted done; every outcome
+  is stored before it is announced. Each check is recorded as the project's
+  requirement checks, tied to the task and the commit, with a `gate` check run
+  and a `requirement.check` audit row naming the task; the task keeps the
+  verdict (its card and details show it), and a device run's verdicts come back
+  with its tasks and are recorded by the hub against its own definitions. A
+  requirement that passed at its previous check and fails now is a regression:
+  marked on the check, the task and its next prompt, journalled once as a
+  `requirement_regression` event, and sent by the approvals notifier to a
+  webhook that lists the new opt-in event `requirement.regression`. Stored in
+  migration 0088 (`plan_tasks.requirements_check`, `requirement_checks.task_id`
+  and `regression`, `requirement_runs.task_id`), recorded `additive-columns`
+  like 0087 (Task 20461).
+
 - **Tasks implement requirements, and a task's agent is given them as its
   acceptance contract.** A task can now be linked to the requirements it
   implements: from its edit dialog (a list of the project's approved

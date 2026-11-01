@@ -273,12 +273,14 @@ var registry = []Entry{
 		Trigger: "A check run ends — its tests ran on the project's executor, or it failed or was cancelled.",
 		Payload: []string{
 			"run_id", "state", "source", "requirement_ids", "assess", "executor_id",
-			"commit", "dirty", "fulfilled", "unfulfilled", "unverified", "error", "reason",
+			"commit", "dirty", "fulfilled", "unfulfilled", "unverified", "error", "reason", "task_id",
 		},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "One row per run, not per requirement: each requirement's verdict is a row of " +
-			"requirement_checks. `assess` is true when the model was asked about the requirements with no tests.",
+			"requirement_checks. `assess` is true when the model was asked about the requirements with no tests. " +
+			"A check the requirements gate ran when a task's agent reported it done has `source` `gate` and the " +
+			"task in `task_id`; it is 0 for every other check.",
 	},
 	{
 		Action: ActionRequirementImport,

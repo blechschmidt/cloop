@@ -194,6 +194,9 @@ var deferredScripts = []struct{ token, path string }{
 	{"kb.js", "assets/js/deferred/kb.js"},
 	// The Requirements tab (Task 20458).
 	{"requirements.js", "assets/js/deferred/requirements.js"},
+	// The requirements gate's verdict in a task's details (Task 20461),
+	// fetched the first time a task the gate checked is opened.
+	{"reqgate.js", "assets/js/deferred/reqgate.js"},
 	{"deps.js", "assets/js/deferred/deps.js"},
 	{"risk-matrix.js", "assets/js/deferred/risk-matrix.js"},
 	{"analytics.js", "assets/js/deferred/analytics.js"},

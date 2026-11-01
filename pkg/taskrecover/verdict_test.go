@@ -263,6 +263,44 @@ func TestReconcileAwaitingReviewBlocksOnlyACompletion(t *testing.T) {
 	}
 }
 
+// While the requirements gate was checking a task's work (Task 20461), the
+// agent's TASK_DONE had not been seen to pass its requirements: the task runs
+// again. A decided gate verdict — back to pending, or failed with
+// requirements_unmet — is applied as the orchestrator wrote it.
+func TestReconcileAwaitingRequirementsBlocksACompletion(t *testing.T) {
+	started := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name    string
+		verdict Verdict
+		signal  string
+		want    pm.TaskStatus
+		reason  string
+	}{
+		{"checking, done", Verdict{Status: pm.TaskInProgress, Reason: ReasonRequirementsPending}, "TASK_DONE", pm.TaskPending,
+			"requirements were still being checked"},
+		{"checking, failed", Verdict{Status: pm.TaskInProgress, Reason: ReasonRequirementsPending}, "TASK_FAILED", pm.TaskFailed, ""},
+		{"unmet, re-queued", Verdict{Status: pm.TaskPending, Reason: "requirements_unmet"}, "TASK_DONE", pm.TaskPending, ""},
+		{"unmet, failed", Verdict{Status: pm.TaskFailed, Reason: "requirements_unmet"}, "TASK_DONE", pm.TaskFailed, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			v := tc.verdict
+			v.TaskID, v.Source, v.StartedAt, v.WrittenAt = 1, SourceRequirementsGate, &started, started.Add(time.Second)
+			mustWriteVerdict(t, dir, v)
+			writeLive(t, dir, 1, "Work.\n"+tc.signal+"\n", started.Add(time.Minute))
+
+			task := inProgressTask(1, started)
+			outcomes := Reconcile(dir, &pm.Plan{Tasks: []*pm.Task{task}})
+			if task.Status != tc.want {
+				t.Fatalf("status = %q, want %q (%+v)", task.Status, tc.want, outcomes)
+			}
+			if tc.reason != "" && !strings.Contains(outcomes[0].Reason, tc.reason) {
+				t.Errorf("reason = %q", outcomes[0].Reason)
+			}
+		})
+	}
+}
+
 func TestReadVerdictRefusesSymbolicLinks(t *testing.T) {
 	started := time.Now().Add(-time.Hour)
 

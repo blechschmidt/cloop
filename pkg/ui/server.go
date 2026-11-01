@@ -966,6 +966,9 @@ type Server struct {
 	// approvalNotify is the approval notifier's nudge channel and test knobs
 	// (Task 20427). See approval_notify.go.
 	approvalNotify approvalNotifyState
+	// regressions is the notifier's cache of each project's requirement
+	// regressions (Task 20461).
+	regressions regressionCache
 
 	// kubeShares is this member's record of Kubernetes share renewals: the
 	// failure each share last reported, and which renewal each live monitor

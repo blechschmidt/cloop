@@ -224,6 +224,162 @@ project, so its agent is given the same contract. A plan file
 (`cloop plan export`) carries no links: their ids would name other
 requirements, or none, in the project that imports it.
 
+## Requirement-gated completion
+
+The contract tells the agent which tests must pass. The **requirements gate**
+checks that they do, instead of taking the agent's `TASK_DONE` for it. It is
+off by default and set per project, to one of three modes:
+
+| Mode | What a task's `TASK_DONE` is checked against |
+| --- | --- |
+| `off` | Nothing: the agent's word stands, as before. |
+| `linked` | The requirements the task implements. |
+| `linked+must` | Those, and every approved `must` requirement that has tests: a task may not leave one of them failing. |
+
+```bash
+cloop requirements gate                       # show the setting
+cloop requirements gate linked
+cloop requirements gate linked+must --assess  # and ask the model about untested ones
+cloop requirements gate off
+cloop run --requirements-gate=linked          # set it, then run
+```
+
+In the dashboard it is the **Requirements** badge in the project's Active
+Options: each press moves it on from off to linked to linked+must and back to
+off. The **Assess Untested** badge beside it switches the model's assessment
+on and off. It can be declared in `.cloop/config.yaml` too:
+
+```yaml
+requirements:
+  gate: linked+must   # off | linked | linked+must
+  assess: false       # ask the model about linked requirements without tests
+```
+
+`cloop run` applies a declared gate to the project before it starts, so the
+file stays the source of truth for a project that keeps one. The dashboard
+control and `cloop requirements gate` rewrite the declaration when they change
+a project that has one, so the two never disagree; a project whose
+`config.yaml` declares nothing keeps whatever was set last. A mode the build
+does not know is not read as `off`: it declares nothing, the project's own
+setting stands, and every command that loads the file warns about it.
+`cloop config set` and `cloop config validate` refuse an unknown mode outright.
+
+Like "done means committed", the setting belongs to the project: it travels
+with it to an isolating executor, and a run that is already going picks it up
+at its next task.
+
+### What happens when the agent reports done
+
+When an attempt's turn ends in a way the orchestrator would accept as done —
+`TASK_DONE`, or an unsignalled finish it would promote — the gate dispatches
+`cloop requirements check --json --no-record --spec=<the requirements>` where
+the run runs: on the project's executor, in the directory the agent worked in
+(the task's worktree, in worktree-parallel mode), never on the hub's host. The
+spec carries the requirements as the project defines them, and the report is
+read back through the same rules the hub applies to a dashboard check:
+commands, test names and fingerprints come from the project, and a tested
+requirement's verdict is recomputed from its tests' outcomes, whatever the
+report claims.
+
+The check runs after "done means committed", so it tests committed work, and
+before the review gate, which must not publish work whose requirements fail.
+When the review gate's fix turns change the work, the requirements are checked
+again before anything is pushed or merged; a failure then withholds the held
+pushes, as a blocked review does.
+
+What keeps a task from being done:
+
+- a tested requirement whose tests fail, time out or cannot run — including a
+  check the executor could not run at all;
+- with `--assess`, a linked requirement without tests that the model finds
+  unfulfilled.
+
+A linked requirement without tests never blocks: it is reported
+**unverified**, and nothing is dispatched for it unless the project asked the
+model. A must requirement without tests is not checked in `linked+must` mode —
+nothing but the model could tell whether it regressed, at a model call per
+requirement per task — and the check says how many were left out. A deprecated
+linked requirement is not checked.
+
+### Back to pending, then failed
+
+A task whose requirements do not pass is not done. It goes back to pending,
+and its next attempt is told what failed, ahead of its instructions:
+
+```text
+## REQUIREMENTS NOT MET ON THE LAST ATTEMPT
+The last attempt at this task reported TASK_DONE, but this project accepts a task as done only
+once its requirements pass, and the checks below did not. They ran in the task's working tree at
+commit 1c9d0e4f2a7b.
+
+R-3 Config errors exit non-zero — unfulfilled
+  test "go test ./pkg/config -run TestMalformed" failed (exit 1)
+  $ go test ./pkg/config -run TestMalformed
+  exited 1; its output:
+    | --- FAIL: TestMalformed (0.00s)
+    |     config_test.go:12: exit code 0, want 2
+```
+
+The output is the end of what each failing test printed — at most 4 KiB a
+test, 24 KiB in all — scrubbed of credentials, and quoted as data. The gate
+sends a task back at most `--max-verify-retries` times in a row (default 2), the
+same bound AI verification has; the attempt after that fails the task with
+reason **`requirements_unmet`**, the failing checks as its diagnosis. Resetting
+the failed task gives it the full count again. A task the gate sends back keeps
+its worktree in worktree-parallel mode, so the next attempt fixes that work
+rather than starting over.
+
+Every outcome is stored before anything announces it, and the decision is the
+task's verdict for stale-task recovery: while a check runs the verdict says
+the requirements are being checked, so a run that dies mid-check has its task
+run again rather than adopted done on the agent's word, and a decided
+re-queue or failure is applied as the gate decided it. A run stopped while a
+check runs returns the task to pending as interrupted.
+
+### Where the verdict is recorded
+
+Every gate check is recorded as the project's requirement checks, tied to the
+task and the commit it ran at, under a check run whose source is `gate`, and
+audited as `requirement.check`. The Requirements tab shows them like any other
+check, naming the task ("for task #12"), and refreshes as they land. The task
+keeps the gate's record of its latest check: its card shows **requirements met**
+or **requirements unmet**, and its details list each requirement's verdict, the
+failing commands with the end of their output, and what the gate decided. The
+event history has a `task_requirements` row for every check.
+
+A run on a device brings its tasks' records back with them, and the hub records
+them as its own requirement checks — read through the same rules, against the
+hub's definitions. A requirement the hub changed while the run was out is not
+recorded: the run checked something the project no longer requires.
+
+### Regressions
+
+A requirement that was fulfilled at its previous check of the same definition
+and fails now is a **regression**: something since broke it. The previous check
+is the one before the task got to it — a task's own failing attempts do not
+count — so a regression a task caused stays one through its retries. A
+regression is marked on the check, on the task (and in the next attempt's
+prompt: "regression: it was fulfilled at commit …"), and written once to the
+event history as a `requirement_regression` row naming the task, the commit,
+and where it last passed. A check that could not run, or that nothing could
+verify, is not a verdict and neither breaks nor sets the baseline.
+
+The approvals notifier can send them: a webhook in `notifications.webhooks`
+that lists `requirement.regression` among its `events` is posted each
+regression — the project, the requirement, the task, the commit it fails at and
+the one it last passed at, never any test output. The event is opt-in: a
+webhook with no `events` list, which gets every approval event, is not sent
+regressions unless it names them.
+
+```yaml
+notifications:
+  webhooks:
+    - name: quality
+      type: slack
+      url_env: CLOOP_NOTIFY_QUALITY
+      events: [requirement.regression]
+```
+
 ## Requirements as code
 
 The requirements in the hub's database are where the dashboard keeps them and
@@ -382,6 +538,7 @@ minutes old (hourly for a checkout that had none), for somebody who may import;
 | Download the requirements as a spec file | `project.read` |
 | Add, change or delete a requirement, record a verdict, add a task from one | `task.mutate` |
 | Link a task to the requirements it implements | `task.mutate` |
+| Set the requirements gate | `config.write` |
 | Read the spec file again, and import it | `task.mutate` |
 | Check them | `run.start` |
 | Stop a check | `run.stop` |
@@ -414,6 +571,10 @@ trail: `requirement.create`, `requirement.update`, `requirement.delete`,
 | A spec file | 2 MiB, one YAML document of at most 1,000 requirements, each held to the bounds above |
 | Requirements one task implements | 32 |
 | A task's contract in its prompt | 96 KiB; the requirements past it are named, with where to read them |
+| A requirements gate check | the tests' own timeouts, at most 6 hours |
+| A task's record of its last gate check | 50 requirements; 4 KiB of output per failing test |
+| What a re-queued task's prompt quotes of it | 24 KiB |
+| Gate re-queues in a row | `--max-verify-retries` (default 2) |
 
 On an executor that shares the project's directory — a container sandbox
 bind-mounting it, the hub's own host — the project's database is writable from

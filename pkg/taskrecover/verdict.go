@@ -74,6 +74,9 @@ const (
 	// SourceReviewGate: the review gate (Task 20357) — a block, a publish
 	// that failed, an approval, or a review still pending.
 	SourceReviewGate = "review_gate"
+	// SourceRequirementsGate: the project's requirements gate (Task 20461) —
+	// requirements that did not pass, or a check still running.
+	SourceRequirementsGate = "requirements_gate"
 	// SourceVerify and SourceScriptVerify: --verify and --script-verify.
 	SourceVerify       = "verify"
 	SourceScriptVerify = "script_verify"
@@ -109,6 +112,13 @@ const (
 // adopting a TASK_DONE the reviewer never approved — the work behind it was
 // never published, since held pushes die with the run.
 const ReasonReviewPending = "review_pending"
+
+// ReasonRequirementsPending marks the verdict written while a task's
+// requirements are being checked (Task 20461): from the moment the gate starts
+// its check until the orchestrator records what it decided. Like
+// ReasonReviewPending it decides nothing, and stops recovery from adopting a
+// TASK_DONE whose requirements were never seen to pass.
+const ReasonRequirementsPending = "requirements_pending"
 
 // ErrNoVerdict reports that a task has no verdict sidecar.
 var ErrNoVerdict = errors.New("taskrecover: no verdict")
@@ -174,6 +184,12 @@ func (v *Verdict) Decided() bool {
 // outcome was waiting on the review gate.
 func (v *Verdict) AwaitingReview() bool {
 	return v != nil && v.Status == pm.TaskInProgress && v.Reason == ReasonReviewPending
+}
+
+// AwaitingRequirements reports whether the verdict records an execution whose
+// requirements were being checked when it was written.
+func (v *Verdict) AwaitingRequirements() bool {
+	return v != nil && v.Status == pm.TaskInProgress && v.Reason == ReasonRequirementsPending
 }
 
 // For reports whether v belongs to t's current execution: written no earlier

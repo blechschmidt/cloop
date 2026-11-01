@@ -292,6 +292,12 @@ type Task struct {
 	// changes, and which of the pushes it held were published (Task 20357).
 	// Nil when the gate was off. See review.go.
 	Review *TaskReview `json:"review,omitempty"`
+	// RequirementsCheck records what the project's requirements gate found
+	// when it last checked this task's work (Task 20461): each requirement's
+	// verdict, which of them kept the task from being done, and which are
+	// regressions. Nil when the gate was off or never reached the task. See
+	// requirementsgate.go.
+	RequirementsCheck *TaskRequirementsCheck `json:"requirements_check,omitempty"`
 	// Quarantine marks a task the control plane suspects of taking down the
 	// nodes that ran it (Task 20391): two or more distinct executors went
 	// unreachable while it was running. It runs again only after an explicit

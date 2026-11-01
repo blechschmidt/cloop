@@ -374,8 +374,13 @@ func projectSeedFor(workDir string) ([]byte, error) {
 // device or Pod has no requirements table but the one the seed fills. Best
 // effort — a seed without them still runs the plan, and the run's contract
 // then says their text was not available to it.
+//
+// With the requirements gate in linked+must mode (Task 20461) the seed also
+// carries every approved must requirement that has tests: the run checks them
+// at every task the agent reports done, and on a device the seed is the only
+// copy of them it has.
 func seedRequirementsFor(workDir string, st *state.ProjectState) []requirements.Requirement {
-	if st == nil || st.Plan == nil || !planLinksRequirements(st.Plan) {
+	if st == nil || st.Plan == nil || (!planLinksRequirements(st.Plan) && !st.RequirementsGate.IncludesMust()) {
 		return nil
 	}
 	db, err := statedb.Open(state.DBPath(workDir))
@@ -389,7 +394,7 @@ func seedRequirementsFor(workDir string, st *state.ProjectState) []requirements.
 		fmt.Fprintf(os.Stderr, "[ui] %s: the seed goes without its tasks' requirements: %v\n", workDir, err)
 		return nil
 	}
-	return projectseed.LinkedRequirements(st.Plan, all)
+	return projectseed.SeedRequirements(st.Plan, all, st.RequirementsGate.IncludesMust())
 }
 
 // planLinksRequirements reports whether a task of plan implements a

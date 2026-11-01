@@ -24,6 +24,7 @@ package approvalnotify
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -179,12 +180,37 @@ func compose(n Notice, link string, now time.Time) message {
 			{"Token id", orDash(clean(n.TokenID))},
 		}
 		m.color = 0xf59e0b
+	case config.NotifyEventRequirementRegression:
+		req := "R-" + strconv.Itoa(n.RequirementID)
+		if t := clean(n.RequirementTitle); t != "" {
+			req += " " + t
+		}
+		project := orDash(clean(n.Project))
+		m.title = "Requirement regressed in " + project + ": " + req
+		task := "—"
+		if n.TaskID > 0 {
+			task = "#" + strconv.Itoa(n.TaskID)
+			if t := clean(n.TaskTitle); t != "" {
+				task += " " + t
+			}
+		}
+		m.facts = []fact{{"Project", project}, {"Requirement", req}, {"Task", task},
+			{"Failing at", orDash(shortCommit(clean(n.Commit)))}, {"Passed at", orDash(shortCommit(clean(n.WasCommit)))}}
+		m.color = 0xef4444
 	case EventTest:
 		m.title = "Test notification from cloop: this webhook will be told when an access request or an API token waits on an approver"
 	default:
 		m.title = "cloop: " + orDash(clean(n.Event))
 	}
 	return m
+}
+
+// shortCommit abbreviates a commit id.
+func shortCommit(c string) string {
+	if len(c) > 12 {
+		return c[:12]
+	}
+	return c
 }
 
 // lapseIn says how long until a deadline, for a title.

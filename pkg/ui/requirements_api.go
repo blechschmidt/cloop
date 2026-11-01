@@ -73,16 +73,12 @@ import (
 const (
 	// requirementsAssessTimeout is the model's time on one requirement that
 	// has no tests.
-	requirementsAssessTimeout = 5 * time.Minute
-	// requirementsDispatchSlack is a batch's time beyond its tests and model
-	// calls: starting the workload where the project runs.
-	requirementsDispatchSlack = 3 * time.Minute
+	requirementsAssessTimeout = requirements.AssessTimeout
 	// maxRequirementsCheckTime bounds a whole check, whatever its tests ask.
 	maxRequirementsCheckTime = 6 * time.Hour
-	// requirementsBatchBytes and requirementsBatchSize bound one dispatch's
-	// spec: it is one argument of the command, which Linux caps at 128 KiB.
-	requirementsBatchBytes = 96 << 10
-	requirementsBatchSize  = 25
+	// requirementsBatchSize bounds one dispatch's spec: it is one argument of
+	// the command, which Linux caps at 128 KiB (requirements.Batches).
+	requirementsBatchSize = requirements.BatchSize
 	// requirementsRunsListed is how many past runs the list carries.
 	requirementsRunsListed = 5
 	// maxRequirementTaskContext bounds what a task made from a requirement
@@ -820,39 +816,14 @@ func pickRequirements(all []requirements.Requirement, ids []int) ([]requirements
 	return out, nil
 }
 
-// requirementBatches splits reqs into the dispatches that check them: as few
-// as fit one argument each. A requirement too large for any — one written to
-// the database past what Normalize admits — is a batch of its own, which
-// runRequirementCheck reports rather than sends.
+// requirementBatches splits reqs into the dispatches that check them; see
+// requirements.Batches.
 func requirementBatches(reqs []requirements.Requirement) [][]requirements.Requirement {
-	var (
-		out  [][]requirements.Requirement
-		cur  []requirements.Requirement
-		size int
-	)
-	for _, q := range reqs {
-		n := q.EncodedSize()
-		if len(cur) > 0 && (len(cur) >= requirementsBatchSize || size+n > requirementsBatchBytes || n > requirementsBatchBytes) {
-			out = append(out, cur)
-			cur, size = nil, 0
-		}
-		cur = append(cur, q.ForSpec())
-		size += n
-	}
-	if len(cur) > 0 {
-		out = append(out, cur)
-	}
-	return out
+	return requirements.Batches(reqs)
 }
 
 // oversizedBatch reports whether batch cannot be sent as one argument.
-func oversizedBatch(batch []requirements.Requirement) bool {
-	size := 0
-	for _, q := range batch {
-		size += q.EncodedSize()
-	}
-	return size > requirementsBatchBytes
-}
+func oversizedBatch(batch []requirements.Requirement) bool { return requirements.OversizedBatch(batch) }
 
 // maxSpecGoalRunes bounds the goal a spec carries: it is context for the
 // model, and the requirements are what must fit.
@@ -861,16 +832,7 @@ const maxSpecGoalRunes = 2000
 // batchBudget is how long one dispatch may take: its tests, its model calls,
 // and starting the workload.
 func batchBudget(batch []requirements.Requirement, assess bool) time.Duration {
-	d := requirementsDispatchSlack
-	for _, q := range batch {
-		for _, t := range q.Tests {
-			d += t.Timeout()
-		}
-		if assess && !q.Tested() {
-			d += requirementsAssessTimeout
-		}
-	}
-	return d
+	return requirements.BatchBudget(batch, assess)
 }
 
 // checkBudget is how long a whole check may take, which is also when its run
@@ -1003,32 +965,7 @@ func (s *Server) dispatchRequirementBatch(ctx context.Context, job *requirementC
 // failedRequirementReport is a report saying the check of each of batch did
 // not work, and why.
 func failedRequirementReport(batch []requirements.Requirement, why string) requirements.Report {
-	why = truncateRunes(strings.Join(strings.Fields(why), " "), requirements.MaxSummaryRunes)
-	rep := requirements.Report{Results: make([]requirements.Result, 0, len(batch))}
-	now := time.Now().UTC()
-	for _, q := range batch {
-		method := requirements.MethodNone
-		if q.Tested() {
-			method = requirements.MethodTests
-		}
-		rep.Results = append(rep.Results, requirements.Result{
-			RequirementID: q.ID, Fingerprint: q.Fingerprint(), Method: method, Verdict: requirements.VerdictError,
-			Summary: "the check did not run: " + why, StartedAt: now,
-			Tests: brokenTests(q.Tests, why),
-		})
-	}
-	return rep
-}
-
-func brokenTests(ts []requirements.Test, why string) []requirements.TestResult {
-	if len(ts) == 0 {
-		return nil
-	}
-	out := make([]requirements.TestResult, len(ts))
-	for i, t := range ts {
-		out[i] = requirements.TestResult{Name: t.Name, Command: t.Command, Outcome: requirements.OutcomeError, ExitCode: -1, Error: why}
-	}
-	return out
+	return requirements.FailedReport(batch, why, time.Now().UTC())
 }
 
 // hubScrubber is what the hub passes a report's text through before it is

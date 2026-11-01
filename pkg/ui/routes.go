@@ -886,6 +886,8 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/options/step-timeout", Handler: s.handleStepTimeoutSet, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/task-timeout", Handler: s.handleTaskTimeoutSet, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/provider", Handler: s.handleProviderModelSet, Perm: cfgWrite, Scope: scopeProject},
+		// Requirement-gated completion (Task 20461).
+		{Pattern: "POST /api/options/requirements-gate", Handler: s.handleRequirementsGateSet, Perm: cfgWrite, Scope: scopeProject},
 
 		// ── Budgets and usage ────────────────────────────────────────
 		{Pattern: "GET /api/budget", Handler: s.handleBudgetGet, Perm: read, Scope: scopeProject},

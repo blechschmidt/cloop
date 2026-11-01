@@ -104,7 +104,17 @@ const (
 	NotifyEventRequestWithdrawn = "request.withdrawn"
 	NotifyEventRequestLapsed    = "request.lapsed"
 	NotifyEventTokenWaiting     = "token.waiting"
+	// NotifyEventRequirementRegression is a requirement that passed at its
+	// previous check and failed a later one (Task 20461) — most often the
+	// requirements gate's check of a task's work. Sent only to a webhook
+	// whose events name it (optInEvents): a channel set up for approvals is
+	// not told about a project's tests unless it asks.
+	NotifyEventRequirementRegression = "requirement.regression"
 )
+
+// optInEvents are sent only to a webhook whose events name them; a webhook
+// with no events list gets every other event.
+var optInEvents = map[string]bool{NotifyEventRequirementRegression: true}
 
 // NotificationEvents lists every event in the order a request lives through
 // them, the token's last.
@@ -112,7 +122,7 @@ func NotificationEvents() []string {
 	return []string{
 		NotifyEventRequestFiled, NotifyEventRequestReminder, NotifyEventRequestApproved,
 		NotifyEventRequestDenied, NotifyEventRequestWithdrawn, NotifyEventRequestLapsed,
-		NotifyEventTokenWaiting,
+		NotifyEventTokenWaiting, NotifyEventRequirementRegression,
 	}
 }
 
@@ -158,7 +168,8 @@ type NotificationWebhook struct {
 	// something else.
 	URLEnv string `yaml:"url_env,omitempty"`
 
-	// Events narrows what is sent; empty sends every event.
+	// Events narrows what is sent; empty sends every event but the opt-in
+	// ones, requirement.regression, which must be named.
 	Events []string `yaml:"events,omitempty"`
 
 	// AllowAddresses are the IP addresses or CIDR prefixes a receiver on a
@@ -178,7 +189,7 @@ type NotificationWebhook struct {
 // Wants reports whether the webhook is sent event.
 func (w NotificationWebhook) Wants(event string) bool {
 	if len(w.Events) == 0 {
-		return true
+		return !optInEvents[event]
 	}
 	for _, e := range w.Events {
 		if strings.EqualFold(strings.TrimSpace(e), event) {

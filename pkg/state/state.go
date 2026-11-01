@@ -202,6 +202,16 @@ type ProjectState struct {
 	// sync.
 	CommitPolicy *pm.CommitPolicy `json:"commit_policy,omitempty"`
 
+	// RequirementsGate is the opt-in requirement-gated completion (Task
+	// 20461): with it on, a task whose agent says it is done is checked — its
+	// linked requirements, and in linked+must mode every approved must
+	// requirement — on the project's executor, and is accepted only once they
+	// pass. Nil or off means the agent's word stands. Set from the dashboard,
+	// `cloop requirements gate`, `cloop run --requirements-gate` or
+	// config.yaml's requirements.gate; a running orchestrator picks up changes
+	// at its next sync.
+	RequirementsGate *pm.RequirementsGate `json:"requirements_gate,omitempty"`
+
 	// FollowBuilds is the "follow new builds" option (Task 20389): a run of
 	// this project on this host adopts a newly deployed cloop build at its
 	// next task boundary instead of running the build it started with until
@@ -734,6 +744,8 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) error {
 	s.ReviewGate = disk.ReviewGate
 	// Task 20370: so is "done means committed"; the next task's check uses it.
 	s.CommitPolicy = disk.CommitPolicy
+	// Task 20461: and the requirements gate.
+	s.RequirementsGate = disk.RequirementsGate
 	// Task 20389: and "follow new builds", a pending request to adopt one, and
 	// the run's own record, which only the run writes.
 	s.FollowBuilds = disk.FollowBuilds
@@ -827,6 +839,29 @@ func SetCommitPolicy(workDir string, p *pm.CommitPolicy) error {
 	}
 	defer db.Close()
 	return db.SaveCommitPolicy(p)
+}
+
+// SetRequirementsGate stores a project's requirements gate setting (Task
+// 20461) without rewriting anything else in its state. A run in progress picks
+// the change up at its next sync, and checks the next task that reports done
+// with it.
+func SetRequirementsGate(workDir string, g *pm.RequirementsGate) error {
+	if g == nil {
+		return fmt.Errorf("state: no requirements gate to store")
+	}
+	if err := g.Validate(); err != nil {
+		return err
+	}
+	dbPath := effectiveDBPath(workDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("no cloop project in %s: %w", workDir, err)
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.SaveRequirementsGate(g)
 }
 
 // SaveRunStatus writes the run's status and pause reason and nothing else —
@@ -962,6 +997,7 @@ func toRaw(s *ProjectState) *statedb.State {
 		DryRun:            s.DryRun,
 		ReviewGate:        s.ReviewGate.Clone(),
 		CommitPolicy:      s.CommitPolicy.Clone(),
+		RequirementsGate:  s.RequirementsGate.Clone(),
 	}
 	r.Steps = make([]statedb.StepRow, len(s.Steps))
 	for i, sr := range s.Steps {
@@ -1011,6 +1047,7 @@ func fromRaw(r *statedb.State) *ProjectState {
 		DryRun:            r.DryRun,
 		ReviewGate:        r.ReviewGate,
 		CommitPolicy:      r.CommitPolicy,
+		RequirementsGate:  r.RequirementsGate,
 		FollowBuilds:      r.FollowBuilds,
 		RunOwner:          r.RunOwner,
 		AdoptRequest:      r.AdoptRequest,
@@ -1183,6 +1220,10 @@ type legacyState struct {
 	// holds its tasks to "done means committed" inside the sandbox, where the
 	// work is (Task 20370).
 	CommitPolicy *pm.CommitPolicy `json:"commit_policy,omitempty"`
+	// RequirementsGate travels the same way, so a run on an isolating
+	// executor checks its tasks' requirements inside the sandbox, beside the
+	// work (Task 20461).
+	RequirementsGate *pm.RequirementsGate `json:"requirements_gate,omitempty"`
 	// Requirements are not project state but its requirements table's rows
 	// that the plan's unfinished tasks implement: a seed carries them
 	// (projectseed.BuildWith) so the run on an isolating executor gives its
@@ -1238,6 +1279,7 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 		DryRun:            legacy.DryRun,
 		ReviewGate:        legacy.ReviewGate,
 		CommitPolicy:      legacy.CommitPolicy,
+		RequirementsGate:  legacy.RequirementsGate,
 	}
 
 	db, err := statedb.Open(dbPath)

@@ -591,6 +591,8 @@ function _renderTaskDetails(d) {
   if (t.attachment_count) html += '<div class="td-section" id="td-files"><h3>Attachments ('+t.attachment_count+')</h3><div class="td-empty">Loading…</div></div>';
   // What its runs' firewalls refused (Task 20437): deferred/network.js.
   if (d.network) html += '<div class="td-section" id="td-net"></div>';
+  // The requirements gate's last check (Task 20461): deferred/reqgate.js.
+  if (t.requirements_check) html += '<div class="td-section" id="td-reqgate"></div>';
 
   if (t.annotations && t.annotations.length) {
     const annos = t.annotations.slice().reverse().map(a => {
@@ -637,6 +639,7 @@ function _renderTaskDetails(d) {
   _tdLoadReproductions(t.id);
   if (t.attachment_count) panelAct('attachments', 'show', t.id);
   if (d.network) panelAct('network', 'task', t.id);
+  if (t.requirements_check) panelAct('reqgate', 'show', t.requirements_check);
 }
 
 // Triggered from the task list. Ignore clicks that originated on action

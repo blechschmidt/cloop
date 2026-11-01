@@ -334,7 +334,10 @@
       let meta = 'Never checked.';
       if (lc) {
         meta = 'Checked ' + when(lc.checked_at) + (lc.checked_by ? ' by ' + lc.checked_by : '') + ' via ' + lc.method +
-          (lc.commit ? ' at ' + lc.commit.slice(0, 10) + (lc.dirty ? ' (uncommitted changes)' : '') : '');
+          (lc.commit ? ' at ' + lc.commit.slice(0, 10) + (lc.dirty ? ' (uncommitted changes)' : '') : '') +
+          // The requirements gate checked it for a task (Task 20461).
+          (lc.task_id ? ' for task #' + (+lc.task_id) : '');
+        if (lc.regression) chips.push('<span class="exec-chip" style="color:var(--red)" title="It passed at its previous check of this definition">regression</span>');
       }
       let stale = '';
       if (r.stale === 'changed') stale = 'Stale: the requirement changed since it was checked.';
@@ -527,7 +530,9 @@
       return html + checks.map(c => {
         const stale = c.fingerprint && c.fingerprint !== d.fingerprint ? ' · before the requirement last changed' : '';
         let s = '<div style="border-top:1px solid var(--border);padding:6px 0">' + badge(c.verdict) +
+          (c.regression ? ' <span class="exec-chip" style="color:var(--red)">regression</span>' : '') +
           ' <span class="form-hint" style="' + wrap + '">' + esc(when(c.checked_at) + ' · ' + c.method + (c.checked_by ? ' · ' + c.checked_by : '') +
+            (c.task_id ? ' · task #' + c.task_id : '') +
             (c.executor_id ? ' · ' + c.executor_id : '') + (c.commit ? ' · ' + c.commit.slice(0, 10) + (c.dirty ? '+' : '') : '') + stale) + '</span>';
         if (c.summary) s += '<div style="font-size:12px;' + wrap + '">' + esc(c.summary) + '</div>';
         (c.evidence || []).forEach(e => { s += '<div class="form-hint" style="' + wrap + '">• ' + esc(e) + '</div>'; });

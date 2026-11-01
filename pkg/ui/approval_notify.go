@@ -17,9 +17,12 @@ package ui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +30,10 @@ import (
 	"github.com/blechschmidt/cloop/pkg/approvalnotify"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
+	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // invalidateApprovals: a grant request or a token changed on another member
@@ -196,6 +202,11 @@ func (s *Server) approvalNotifySnapshot(context.Context) (approvalnotify.Snapsho
 		return snap, err
 	}
 	snap.Requests, snap.RequestsKnown = reqs, true
+	// Requirement regressions (Task 20461), from every project the hub
+	// serves. Read best effort: a project whose database cannot be read now is
+	// read at a later pass, and its regressions are not lost — the scan picks
+	// them up for as long as they are recent.
+	snap.Regressions = s.recentRegressions(time.Now())
 	// Device forwarder binding requests (Task 20430) notify like the grant
 	// requests they are filed beside.
 	if fwd, ferr := db.ListForwarderBindingRequests(""); ferr == nil {
@@ -231,4 +242,118 @@ func (s *Server) approvalNotifySnapshot(context.Context) (approvalnotify.Snapsho
 		}
 	}
 	return snap, nil
+}
+
+// regressionWindow is how far back the notifier looks for a project's
+// regressions: as long as a notice may wait to be delivered. The scan only
+// reports the ones checked since its last pass, and records each once.
+const regressionWindow = 24 * time.Hour
+
+// regressionsPerProject bounds what one project contributes to a pass.
+const regressionsPerProject = 20
+
+// regressionCache is what the notifier last read of each project's
+// regressions, with the state files' modification time it read them at: a
+// project whose database has not changed since has no new ones, so a pass
+// opens only the databases that moved (Task 20461).
+type regressionCache struct {
+	mu      sync.Mutex
+	entries map[string]regressionCacheEntry
+}
+
+type regressionCacheEntry struct {
+	mod   time.Time
+	found []approvalnotify.Regression
+}
+
+// recentRegressions returns the regressions recorded in the hub's projects
+// within regressionWindow of now.
+func (s *Server) recentRegressions(now time.Time) []approvalnotify.Regression {
+	c := &s.regressions
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = map[string]regressionCacheEntry{}
+	}
+	since := now.Add(-regressionWindow)
+	seen := map[string]bool{}
+	var out []approvalnotify.Regression
+	for _, e := range s.allProjectEntries() {
+		if seen[e.Path] {
+			continue
+		}
+		seen[e.Path] = true
+		mod, ok := stateModTime(e.Path)
+		if !ok {
+			continue
+		}
+		entry, cached := c.entries[e.Path]
+		if !cached || !entry.mod.Equal(mod) {
+			found, err := readRegressions(e.Name, e.Path, since)
+			if err != nil {
+				continue
+			}
+			entry = regressionCacheEntry{mod: mod, found: found}
+			c.entries[e.Path] = entry
+		}
+		for _, g := range entry.found {
+			if !g.At.Before(since) {
+				out = append(out, g)
+			}
+		}
+	}
+	for p := range c.entries {
+		if !seen[p] {
+			delete(c.entries, p)
+		}
+	}
+	return out
+}
+
+// readRegressions reads one project's recent regressions, with the titles a
+// message names them by.
+func readRegressions(name, dir string, since time.Time) ([]approvalnotify.Regression, error) {
+	if _, err := os.Stat(state.DBPath(dir)); err != nil {
+		return nil, err
+	}
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	db.AsProject()
+	checks, err := db.RequirementRegressionsSince(since, regressionsPerProject)
+	if err != nil || len(checks) == 0 {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(dir))
+	key := hex.EncodeToString(sum[:6])
+	if name == "" {
+		name = filepath.Base(dir)
+	}
+	out := make([]approvalnotify.Regression, 0, len(checks))
+	for _, c := range checks {
+		g := approvalnotify.Regression{
+			Project: name, ProjectKey: key, CheckID: c.ID, RequirementID: c.RequirementID,
+			TaskID: c.TaskID, Commit: c.Commit, At: c.CheckedAt,
+		}
+		if r, err := db.Requirement(c.RequirementID); err == nil {
+			g.RequirementTitle = r.Title
+		}
+		if c.TaskID > 0 {
+			if t, err := db.LoadTask(c.TaskID); err == nil && t != nil {
+				g.TaskTitle = t.Title
+			}
+		}
+		if prior, err := db.RequirementChecks(c.RequirementID, 0); err == nil {
+			for _, p := range prior {
+				if p.ID < c.ID && p.Verdict == requirements.VerdictFulfilled && p.Fingerprint == c.Fingerprint {
+					g.WasCommit = p.Commit
+					break
+				}
+			}
+		}
+		out = append(out, g)
+	}
+	return out, nil
 }

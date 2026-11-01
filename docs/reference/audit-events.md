@@ -178,14 +178,14 @@ Payload keys:
 
 Payload keys:
 
-- `requirement.check` — `run_id`, `state`, `source`, `requirement_ids`, `assess`, `executor_id`, `commit`, `dirty`, `fulfilled`, `unfulfilled`, `unverified`, `error`, `reason`
+- `requirement.check` — `run_id`, `state`, `source`, `requirement_ids`, `assess`, `executor_id`, `commit`, `dirty`, `fulfilled`, `unfulfilled`, `unverified`, `error`, `reason`, `task_id`
 - `requirement.create` — `id`, `title`, `priority`, `status`, `tests`, `fingerprint`
 - `requirement.delete` — `id`, `title`, `checks`, `unlinked_tasks`
 - `requirement.import` — `source`, `path`, `sha256`, `commit`, `added`, `restored`, `updated`, `deleted`, `resolved`, `in_sync`, `exports_pending`
 - `requirement.update` — `id`, `title`, `changed`, `status`, `tests`, `fingerprint`, `previous_fingerprint`
 - `requirement.verdict` — `id`, `verdict`, `note`, `fingerprint`
 
-- `requirement.check` — One row per run, not per requirement: each requirement's verdict is a row of requirement_checks. `assess` is true when the model was asked about the requirements with no tests.
+- `requirement.check` — One row per run, not per requirement: each requirement's verdict is a row of requirement_checks. `assess` is true when the model was asked about the requirements with no tests. A check the requirements gate ran when a task's agent reported it done has `source` `gate` and the task in `task_id`; it is 0 for every other check.
 - `requirement.create` — `tests` is each test's command, as it will run.
 - `requirement.delete` — `unlinked_tasks` are the tasks that implemented it, from which the deletion took it in the same transaction; each also gets a `task.upsert` row under the same actor.
 - `requirement.import` — One row per import, its entity id `spec`. `updated` lists each changed requirement with the fields that changed and its new and previous fingerprints; `deleted` how many recorded checks went with each, and the tasks it was taken out of (`unlinked_tasks`, each also a `task.upsert` row); `resolved` how each conflict was settled (`file` or `hub`). An import applies nothing unless every conflict is settled, so a row is a whole import. `sha256` is the file's; a dashboard import was read from the project's checkout on its executor at `commit`.

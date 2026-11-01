@@ -305,6 +305,9 @@ var runFields = []string{
 	"ArtifactPath", "FailureDiagnosis", "FailCount", "HealAttempts", "Annotations",
 	"NextRunAt", "TDDStatus", "TDDScore", "WriteBackBranch", "WriteBackCommit",
 	"ExecutorID", "ExecutorKind", "Isolation", "Background", "Abort", "Review",
+	// The requirements gate's verdict on the latest attempt (Task 20461):
+	// written by the run that checked it, like the review gate's.
+	"RequirementsCheck",
 }
 
 // derivedFields are not stored as themselves: RunID is read from task_runs,

@@ -365,6 +365,11 @@ type Config struct {
 	// has a more specific budget set.
 	Orchestrator OrchestratorConfig `yaml:"orchestrator,omitempty"`
 
+	// Requirements declares the project's requirements gate (Task 20461):
+	// requirements.gate is off, linked or linked+must, and requirements.assess
+	// asks the model about untested requirements. See RequirementsConfig.
+	Requirements RequirementsConfig `yaml:"requirements,omitempty"`
+
 	// UI configures the cloop ui Web dashboard server. See UIConfig.
 	UI UIConfig `yaml:"ui,omitempty"`
 
@@ -3847,6 +3852,19 @@ func (c *Config) validateAndClamp(path string) {
 	// runs toward keeping the check on, the opposite of task_timeout_minutes
 	// above, because what an unusable value costs here is a task outcome lost
 	// to a full disk.
+	// requirements.gate: a mode this build does not know is dropped, so the
+	// project's own setting stands rather than a guess at what was meant. It
+	// is never read as "off": that would switch off a gate the project's
+	// dashboard has on (Task 20461).
+	if c.Requirements.Declares() {
+		if mode, err := NormalizeRequirementsGate(c.Requirements.Gate); err != nil {
+			warn("requirements.gate", fmt.Sprintf("value %q is not one of %s, so it declares nothing and the project's own setting stands",
+				c.Requirements.Gate, strings.Join(RequirementsGateModes(), ", ")))
+			c.Requirements.Gate = ""
+		} else {
+			c.Requirements.Gate = mode
+		}
+	}
 	if v := c.Orchestrator.MinFreeDiskMB; v != nil && !ValidMinFreeDiskMB(*v) {
 		warn("orchestrator.min_free_disk_mb", fmt.Sprintf("value %d outside [%d, %d] (use 0 to turn the check off); using the default %d",
 			*v, MinFreeDiskMBLower, MinFreeDiskMBUpper, MinFreeDiskMBDefault))
@@ -4135,6 +4153,9 @@ func (c *Config) ValidateNumeric() error {
 	}
 	if v := c.Orchestrator.MinFreeDiskMB; v != nil && !ValidMinFreeDiskMB(*v) {
 		return MinFreeDiskMBError(*v)
+	}
+	if err := ValidateRequirements(c.Requirements); err != nil {
+		return err
 	}
 	if err := ValidateExecutors(c.Executors); err != nil {
 		return err

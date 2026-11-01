@@ -132,6 +132,7 @@ cloop run --follow-builds     # adopt newly deployed builds at task boundaries (
 | `--token-budget` | `0` | Stop when cumulative tokens reach this limit (0 = unlimited) |
 | `--notify` | `false` | Send OS desktop notifications on task done, task failed, and session complete |
 | `--require-committed[=VALUE]` | | Set [done means committed](../guides/done-means-committed.md) for the project, then run: `committed` (the bare flag), `pushed`, or `off`. Stored with the project, like `cloop require-committed` |
+| `--requirements-gate=MODE` | | Set the [requirements gate](../guides/requirements.md#requirement-gated-completion) for the project, then run: `linked`, `linked+must` or `off`. Stored with the project, like `cloop requirements gate`; a `requirements.gate` declared in `config.yaml` is applied first |
 | `--follow-builds[=false]` | off | Follow new builds: when a newer cloop build is deployed at the path this run was started from, adopt it at the next task boundary — same process, same live log — instead of running the old build until the run ends. Host-process runs on Linux. Stored with the project, like the Overview's *Follow New Builds* badge; see [Following new builds](configuration.md#following-new-builds) |
 | `-v, --verbose` | `false` | Show full step output (no truncation) |
 
@@ -335,6 +336,7 @@ cloop requirements history <id> [--limit N] [--json]
 cloop requirements export [--file <path>|-] [--force]
 cloop requirements import [--file <path>] [--dry-run] [--resolve R-<n>=file|hub]... [--prefer file|hub] [--json]
 cloop requirements validate [--file <path>] [--json]
+cloop requirements gate [off|linked|linked+must] [--assess|--no-assess] [--json]
 ```
 
 | Flag (`check`) | Default | Description |
@@ -346,6 +348,13 @@ cloop requirements validate [--file <path>] [--json]
 | `--ai-timeout` | `5m` | How long the model may take over one requirement |
 | `--timeout` | none | Stop the whole check after this long |
 | `--json`, `--no-record`, `--spec` | off | How the hub runs it on a project's executor: a framed report, nothing recorded, the requirements it sends |
+
+`gate` shows or sets [requirement-gated completion](../guides/requirements.md#requirement-gated-completion):
+with it on, a task whose agent reports done is accepted only once its linked
+requirements — and with `linked+must` every approved must requirement that has
+tests — pass their tests on the project's executor. `--assess` asks the model
+about linked requirements without tests. When `config.yaml` declares
+`requirements.gate`, `gate` rewrites the declaration too.
 
 `check` exits 1 when a requirement is unfulfilled or its check did not work —
 or, with `--file`, when the spec file does not validate — so a CI job can run it

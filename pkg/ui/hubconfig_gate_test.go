@@ -73,6 +73,7 @@ var configLoadSites = []configCallSite{
 	{"(*Server).handleClaudeCodeLimitsGet", 1, "a project's Claude Code caps"},
 	{"(*Server).handleClaudeCodeLimitsSave", 1, "loads a project's config.yaml to rewrite it from itself (caps)"},
 	{"(*Server).handleStepTimeoutSet", 1, "loads a project's config.yaml to rewrite it from itself (step_timeout)"},
+	{"(*Server).handleRequirementsGateSet", 1, "loads a project's config.yaml to rewrite its requirements gate declaration, when it has one"},
 
 	// The accessor's own reads of config.yaml alone (hubconfig.go).
 	{"(*Server).governingConfig", 1, "the branch for a directory that is not the hub's own: a project's config.yaml"},
@@ -87,6 +88,7 @@ var configSaveSites = []configCallSite{
 	{"(*Server).handleBudgetProjectSave", 1, "a project's budget, into the config.yaml it was loaded from"},
 	{"(*Server).handleClaudeCodeLimitsSave", 1, "a project's caps, into the config.yaml they were loaded from"},
 	{"(*Server).handleStepTimeoutSet", 1, "a project's step_timeout, into the config.yaml it was loaded from"},
+	{"(*Server).handleRequirementsGateSet", 1, "a project's requirements gate declaration, into the config.yaml it was loaded from"},
 	{"(*hubSettingsSave).commit", 1, "every hub settings save; reached only when the hub has no overlay"},
 }
 

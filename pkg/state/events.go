@@ -75,6 +75,9 @@ const (
 	EventIsolationEvidence = statedb.EventIsolationEvidence
 	EventImageProvenance   = statedb.EventImageProvenance
 	EventLeaseTakeover     = statedb.EventLeaseTakeover
+	// Task 20461.
+	EventTaskRequirements      = statedb.EventTaskRequirements
+	EventRequirementRegression = statedb.EventRequirementRegression
 )
 
 // LogEvent appends one row to the project's event journal. Best-effort: any

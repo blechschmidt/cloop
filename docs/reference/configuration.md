@@ -112,6 +112,29 @@ the work was meant to be waited for.
 
 ---
 
+## Requirement-gated completion (`requirements`)
+
+A project can hold its tasks to their requirements: with the gate on, a task
+whose agent reports done is accepted only once its linked requirements — and in
+`linked+must` mode every approved must requirement that has tests — pass their
+tests on the project's executor (Task 20461). The setting is the project's and
+travels with it; `config.yaml` may declare it:
+
+```yaml
+requirements:
+  gate: linked        # off | linked | linked+must
+  assess: false       # ask the model about linked requirements without tests
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `requirements.gate` | not declared | `cloop run` writes it into the project before it starts. Not declared, the project keeps whatever the dashboard's *Requirements* badge or `cloop requirements gate` set last. A mode the build does not know declares nothing — never `off` — and every load warns about it; `cloop config set` and `cloop config validate` refuse it. |
+| `requirements.assess` | not declared | With the gate on, ask the model about linked requirements without tests; one it finds unfulfilled blocks the task. Without it they are reported unverified and never block. |
+
+See [Requirement-gated completion](../guides/requirements.md#requirement-gated-completion)
+for what a check does, how a task is sent back, and how a regression is
+reported.
+
 ## Following new builds
 
 A deploy replaces the cloop binary but not the runs started from it, and a run
@@ -2212,7 +2235,7 @@ Every webhook:
 | `name` | required | Lower-case letters, digits, `-`, `_`, at most 32. Keys the webhook's delivery cursor and its metric label; a webhook added under a new name hears what happens from then on, not the backlog. |
 | `type` | required | `slack` (an incoming webhook), `teams` (a Microsoft Teams Workflows trigger — "Post to a channel when a webhook request is received" — sent an Adaptive Card), `discord` (one embed, every mention switched off), or `json` (one object: `event`, `title`, `link`, `at`, and `request` or `token`). |
 | `url`, `url_env` | one of them | The webhook's address, `https://` only — it is the credential for its channel, so it never crosses the network in the clear, loopback included. `url` keeps it in this file (the Settings panel writes it there and no API returns it); `url_env` names an environment variable of the hub process holding it, `CLOOP_NOTIFY_` followed by upper-case letters, digits or `_` — the form for a file kept in version control (a Kubernetes Secret mapped into the environment, a systemd `EnvironmentFile`). It is read at every send, on whichever member leads, so set it on every member. Not the hub's secret store: a maintainer may delete and re-mint a shared secret, and the URL decides who hears about every request. |
-| `events` | every event | Any of `request.filed`, `request.reminder`, `request.approved`, `request.denied`, `request.withdrawn`, `request.lapsed`, `token.waiting`. |
+| `events` | every event but `requirement.regression` | Any of `request.filed`, `request.reminder`, `request.approved`, `request.denied`, `request.withdrawn`, `request.lapsed`, `token.waiting`, and `requirement.regression` — a requirement that passed at its previous check and fails a later one, most often the [requirements gate](../guides/requirements.md#regressions)'s check of a task. That one is opt-in: it is sent only to a webhook whose `events` name it, so a channel set up for approvals is not told about a project's tests unless it asks. |
 | `allow_addresses` | — | IP addresses or CIDR prefixes a receiver on a loopback, private, link-local or carrier-grade-NAT address may be reached at. A prefix of every address, a cloud metadata service, or a prefix containing one is refused. |
 | `ca_file` | — | A PEM bundle added to the system roots for this webhook. |
 | `timeout` | `10s` | How long one POST may take, `1s`–`1m`. |

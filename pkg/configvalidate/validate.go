@@ -251,6 +251,7 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		checkAuditForward(rawCfg, add)
 		checkNotifications(rawCfg, add)
 		checkSecrets(rawCfg, add)
+		checkRequirements(rawCfg, add)
 
 		// 2f. Hooks referencing non-executable scripts
 		checkHookScripts(cfg, add)
@@ -552,6 +553,20 @@ func checkSecrets(cfg *config.Config, add func(Finding)) {
 			Severity: SeverityError,
 			Field:    "config.secrets",
 			Message:  err.Error() + " — `cloop ui` refuses to start on it",
+		})
+	}
+}
+
+// checkRequirements runs the strict requirements-gate validator `cloop config
+// set` uses, against what the file says: Load drops a mode it does not know
+// (so the project's own setting stands), and says so only as a warning (Task
+// 20461).
+func checkRequirements(cfg *config.Config, add func(Finding)) {
+	if err := config.ValidateRequirements(cfg.Requirements); err != nil {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.requirements.gate",
+			Message:  err.Error() + " — it declares nothing until fixed, and the project's own setting stands",
 		})
 	}
 }

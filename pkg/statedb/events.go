@@ -299,6 +299,24 @@ const (
 	// or kubectl call through the hub refused — lands on the people running
 	// the project, and the cause is on the hub, out of their sight.
 	EventLeaseTakeover EventType = "lease_takeover"
+
+	// EventTaskRequirements records what a project's requirements gate found
+	// when a task's agent reported it done (Task 20461): each requirement's
+	// verdict, whether they let the task be done, and — when they did not —
+	// whether the task goes back to pending or has run out of attempts.
+	//
+	// Its own type because it explains what a status alone cannot: a task
+	// whose agent said TASK_DONE that went back to pending, or failed with
+	// requirements_unmet, because a test the project keeps did not pass.
+	EventTaskRequirements EventType = "task_requirements"
+
+	// EventRequirementRegression records a requirement that was fulfilled at
+	// its previous check of the same definition and failed the gate's check
+	// of a task's work (Task 20461): something the project had kept doing
+	// stopped. One row per requirement, carrying the task, the commit, and
+	// where it last passed. The hub's notifier sends them to the webhooks
+	// that ask for requirement.regression.
+	EventRequirementRegression EventType = "requirement_regression"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

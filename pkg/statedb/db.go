@@ -75,6 +75,10 @@ type State struct {
 	// 20370), stored as JSON under the commit_policy meta key. Nil when never
 	// set.
 	CommitPolicy *pm.CommitPolicy
+	// RequirementsGate is the project's requirement-gated completion setting
+	// (Task 20461), stored as JSON under the requirements_gate meta key. Nil
+	// when never set.
+	RequirementsGate *pm.RequirementsGate
 	// FollowBuilds, RunOwner and AdoptRequest are the project's side of a
 	// run adopting newer builds (Task 20389): the "follow new builds" option
 	// (follow_builds), the record the run keeps of its own process and build
@@ -442,6 +446,12 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		b, _ := json.Marshal(s.CommitPolicy)
 		meta["commit_policy"] = string(b)
 	}
+	// And for the requirements gate (Task 20461): changed through
+	// SaveRequirementsGate.
+	if s.RequirementsGate != nil {
+		b, _ := json.Marshal(s.RequirementsGate)
+		meta["requirements_gate"] = string(b)
+	}
 
 	// workdir is write-once: it records where the project was created, and the
 	// process saving is not always in a position to know that. An isolating
@@ -680,6 +690,13 @@ func (d *DB) loadStateMetaTx() (*State, error) {
 		var p pm.CommitPolicy
 		if err := json.Unmarshal([]byte(v), &p); err == nil {
 			s.CommitPolicy = &p
+		}
+	}
+
+	if v := metaMap["requirements_gate"]; v != "" {
+		var g pm.RequirementsGate
+		if err := json.Unmarshal([]byte(v), &g); err == nil {
+			s.RequirementsGate = &g
 		}
 	}
 
@@ -1024,6 +1041,8 @@ var taskColumns = []string{
 	"risk_score", "impact_score", "retry_budget",
 	// 0087_task_requirements (Task 20460).
 	"requirements",
+	// 0088_requirements_gate (Task 20461).
+	"requirements_check",
 }
 
 // taskSelect reads every task column, then the task's run id, quarantine and
@@ -1074,6 +1093,7 @@ func taskValues(t *pm.Task) []any {
 		t.SprintID, t.ComplexitySize, t.StoryPoints, listText(t.OnSuccess), listText(t.OnFailure),
 		t.RiskScore, t.ImpactScore, t.RetryBudget,
 		listText(t.Requirements),
+		encodeRequirementsCheck(t.RequirementsCheck),
 	}
 }
 
@@ -1094,7 +1114,7 @@ type taskScanner struct {
 	status, role                                string
 	lists                                       taskListColumns
 	bgJSON, abortJSON, reviewJSON               string
-	quarantineJSON                              string
+	reqCheckJSON, quarantineJSON                string
 	startedAt, completedAt, deadline, nextRunAt sql.NullString
 	reqApproval, approved, pinned               int
 	dest                                        []any
@@ -1119,6 +1139,7 @@ func newTaskScanner() *taskScanner {
 		&t.SprintID, &t.ComplexitySize, &t.StoryPoints, &sc.lists.OnSuccess, &sc.lists.OnFailure,
 		&t.RiskScore, &t.ImpactScore, &t.RetryBudget,
 		&sc.lists.Requirements,
+		&sc.reqCheckJSON,
 		&t.RunID, &sc.quarantineJSON, &t.AttachmentCount,
 	}
 	return sc
@@ -1144,6 +1165,7 @@ func (sc *taskScanner) scan(rows rowScanner) (*pm.Task, error) {
 	t.Quarantine = decodeQuarantine(sc.quarantineJSON)
 	t.Abort = decodeAbort(sc.abortJSON)
 	t.Review = decodeReview(sc.reviewJSON)
+	t.RequirementsCheck = decodeRequirementsCheck(sc.reqCheckJSON)
 	t.RequiresApproval = sc.reqApproval == 1
 	t.Approved = sc.approved == 1
 	t.Pinned = sc.pinned == 1
@@ -1613,6 +1635,32 @@ func (d *DB) SaveCommitPolicy(p *pm.CommitPolicy) error {
 	return nil
 }
 
+// SaveRequirementsGate stores the project's requirements gate setting and
+// nothing else (Task 20461), for the same reason as SaveCommitPolicy: the
+// dashboard and the CLI change it while a run may be saving its tasks.
+func (d *DB) SaveRequirementsGate(g *pm.RequirementsGate) error {
+	value := ""
+	if g != nil {
+		if err := g.Validate(); err != nil {
+			return fmt.Errorf("statedb: %w", err)
+		}
+		b, err := json.Marshal(g)
+		if err != nil {
+			return fmt.Errorf("statedb: encode requirements gate: %w", err)
+		}
+		value = string(b)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, err := d.conn.Exec(
+		`INSERT INTO metadata(key,value) VALUES('requirements_gate',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		value,
+	); err != nil {
+		return fmt.Errorf("statedb: save requirements gate: %w", classifyDriverErr(err))
+	}
+	return nil
+}
+
 // SaveRunStatus stores the run's status and pause reason and nothing else
 // (Task 20362).
 //
@@ -1692,6 +1740,42 @@ func decodeReview(raw string) *pm.TaskReview {
 	}
 	return &r
 }
+
+// encodeRequirementsCheck serialises a task's requirements-gate record for the
+// plan_tasks.requirements_check column (Task 20461), as encodeReview does: absent
+// is the empty string, so a row written by this build reads the same as one
+// predating migration 0088.
+func encodeRequirementsCheck(c *pm.TaskRequirementsCheck) string {
+	if c == nil {
+		return ""
+	}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeRequirementsCheck parses the requirements_check column. Anything
+// unreadable, or a record without an outcome — which could not say what it
+// decided — reads as "never checked". A column past maxRequirementsCheckBytes
+// is not read at all: on an executor that shares the project's directory the
+// row is writable from inside the sandbox, and every plan load decodes it.
+func decodeRequirementsCheck(raw string) *pm.TaskRequirementsCheck {
+	if raw == "" || raw == "null" || len(raw) > maxRequirementsCheckBytes {
+		return nil
+	}
+	var c pm.TaskRequirementsCheck
+	if err := json.Unmarshal([]byte(raw), &c); err != nil || c.Outcome == "" {
+		return nil
+	}
+	return &c
+}
+
+// maxRequirementsCheckBytes bounds a stored requirements-gate record: fifty
+// requirements of sixteen tests, each failing one with a 4 KiB tail, and room
+// for the rest.
+const maxRequirementsCheckBytes = 8 << 20
 
 // SetQueryOnly makes every write through this handle fail, as a read-only
 // database file fails it — for root too, unlike a file mode — or allows

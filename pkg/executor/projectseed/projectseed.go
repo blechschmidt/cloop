@@ -203,6 +203,38 @@ func LinkedRequirements(plan *pm.Plan, all []requirements.Requirement) []require
 	return out
 }
 
+// SeedRequirements is LinkedRequirements, and with must every approved must
+// requirement that has tests as well (Task 20461): the requirements gate in
+// linked+must mode checks them at every task the run's agent reports done.
+// The linked ones come first, so the byte budget favours the contracts; a
+// must requirement that does not fit is not checked there, which the run's
+// gate cannot tell from one that does not exist.
+func SeedRequirements(plan *pm.Plan, all []requirements.Requirement, must bool) []requirements.Requirement {
+	out := LinkedRequirements(plan, all)
+	if !must {
+		return out
+	}
+	have := make(map[int]bool, len(out))
+	used := 0
+	for _, r := range out {
+		have[r.ID] = true
+		used += r.ForSeed().EncodedSize()
+	}
+	for _, r := range all {
+		if have[r.ID] || r.Priority != requirements.PriorityMust || r.CurrentStatus() != requirements.StatusApproved || !r.Tested() {
+			continue
+		}
+		n := r.ForSeed().EncodedSize()
+		if used+n > maxSeedRequirementBytes {
+			break
+		}
+		used += n
+		have[r.ID] = true
+		out = append(out, r)
+	}
+	return out
+}
+
 // Write places a seed into a workspace the caller has already confined.
 //
 // dir must be the workload's working directory. Nothing in seed influences the

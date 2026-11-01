@@ -513,6 +513,9 @@ function renderActiveOptions(s) {
   // toggleKey (optional) makes the badge clickable and POSTs to /api/options/toggle.
   // commit_policy is "done means committed" (Task 20370).
   const cp = s.commit_policy || {};
+  // requirements_gate is requirement-gated completion (Task 20461): its badge
+  // cycles off → linked → linked+must.
+  const rg = s.requirements_gate || {}, rgm = /^linked(\+must)?$/.test(rg.mode) ? rg.mode : 'off';
   const opts = [
     [!!s.auto_evolve,   '🧬', 'Evolve Mode',   '--auto-evolve',  'Click to toggle. Automatically discovers and adds new tasks after the plan completes', 'auto_evolve'],
     [!!s.innovate_mode, '✨', 'Innovate Mode', '--innovate',     'Click to toggle. Creative/experimental feature exploration in evolve prompts', 'innovate_mode'],
@@ -524,6 +527,8 @@ function renderActiveOptions(s) {
     [!!cp.enabled, '📌', 'Done = Committed', '--require-committed', 'Click to toggle. A task is done only once the changes it made are committed; otherwise its turn is handed back', 'require_committed'],
     [!!(cp.enabled && cp.pushed), '🚀', '…and Pushed', '--require-committed=pushed', 'Click to toggle. Also require its commits on the branch upstream', 'require_pushed'],
     [!!s.follow_builds, '🔄', 'Follow New Builds', '--follow-builds', 'Click to toggle. A run on this host adopts a newly deployed cloop build at its next task boundary. Device and container runs keep their own upgrade paths', 'follow_builds'],
+    [rgm !== 'off', '🧾', 'Requirements: ' + rgm, '--requirements-gate', 'Click to cycle off, linked, linked+must. A task is done only once its requirements pass', {off: 'linked', linked: 'linked+must'}[rgm] || 'off', 1],
+    [rgm !== 'off' && !!rg.assess, '🤖', 'Assess Untested', 'gate --assess', 'Click to toggle. The model assesses linked requirements that have no tests', 'assess', 1],
   ];
   const mp = parseInt(s.max_parallel, 10);
   const mpVal = (Number.isFinite(mp) && mp >= 1 && mp <= 64) ? mp : 1;
@@ -669,7 +674,7 @@ function buildOptionBadges(opts) {
     if (toggleKey) {
       return '<button class="option-badge ' + cls + ' togglable" type="button" ' +
         'title="' + esc(o[4]) + '" ' +
-        'data-action="toggleOption" data-arg="' + toggleKey + '" data-arg-on="' + !o[0] + '">' +
+        (o[6] ? 'data-action="setReqGate"' : 'data-action="toggleOption"') + ' data-arg="' + toggleKey + '" data-arg-on="' + !o[0] + '">' +
         '<span class="opt-icon">' + o[1] + '</span>' +
         '<span>' + esc(o[2]) + '</span>' +
         '<span class="opt-flag">' + esc(o[3]) + '</span>' +
@@ -717,6 +722,17 @@ act('toggleOption', function(flag, value) {
     }
     toast('Toggle failed: ' + err.message, 'error');
   });
+}, el => [el.dataset.arg, el.dataset.argOn === 'true']);
+
+// The requirements gate's badges (Task 20461): data-arg is the mode a click
+// sets, or "assess" to toggle the model's assessment of untested ones.
+act('setReqGate', function(arg, on) {
+  apiMethod('POST', pUrl('/api/options/requirements-gate'), arg === 'assess' ? {assess: on} : {mode: arg}).then(d => {
+    if (!d || !d.ok) throw new Error(d && d.error || 'unknown error');
+    const g = d.requirements_gate || {};
+    if (appState) { appState.requirements_gate = g; renderActiveOptions(appState); }
+    toast('Requirements gate: ' + g.mode + (g.assess ? ', assessing untested' : ''), 'success');
+  }).catch(err => toast('Update failed: ' + err.message, 'error'));
 }, el => [el.dataset.arg, el.dataset.argOn === 'true']);
 
 function estimateCost(provider, model, inputTok, outputTok) {

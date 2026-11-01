@@ -2235,6 +2235,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if commitNote != "" {
 			dimColor.Printf("  %s\n", commitNote)
 		}
+		// Requirements gate (Task 20461): what the agent's TASK_DONE is
+		// checked against, captured before it runs.
+		reqGuard := o.openRequirementsGuard(ctx, s, task, o.config.WorkDir, activeGate)
 		var gateOut *gateOutcome
 		// taskSessionID is the conversation the agent's latest turn ran in,
 		// which a review sending it back resumes.
@@ -2337,6 +2340,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// (Task 20460) — after the override, so an edited prompt keeps it too.
 		contract := o.requirementContract(task)
 		prompt = withGateSection(prompt, contract)
+		// A task the requirements gate sent back is told what did not pass
+		// (Task 20461).
+		prompt = withGateSection(prompt, requirementsRetrySection(task.RequirementsCheck))
 		prompt = withGateSection(prompt, activeGate.promptSection())
 		// Attachments (Task 20428): the outbox the agent copies files into for
 		// this attempt, named in its prompt and in its environment.
@@ -3031,9 +3037,22 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if signal == pm.TaskDone || signal == pm.TaskInProgress {
 			commitAbort = commit.abortFor(ctx, taskOutput, taskBackground)
 		}
+		// Requirements gate (Task 20461): a turn about to be accepted as done
+		// is checked against its requirements — after "done means
+		// committed", so on committed work, and before the review gate, which
+		// must not publish work whose requirements fail.
+		var reqCheck *pm.TaskRequirementsCheck
+		if commitAbort == nil && (signal == pm.TaskDone || signal == pm.TaskInProgress) &&
+			acceptableAsDone(taskOutput, taskBackground) {
+			var interrupted bool
+			reqCheck, interrupted = reqGuard.check()
+			if interrupted && requeueIfInterrupted("while its requirements were being checked") {
+				continue
+			}
+		}
 		// The decision so far is written down before anything announces it: a
 		// run whose control plane has gone dies on its next line of output.
-		if commitAbort == nil {
+		if commitAbort == nil && !reqCheck.Unmet() {
 			o.noteDecision(task, signal, decided, activeGate != nil)
 		}
 		if task.Background != nil {
@@ -3050,7 +3069,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// has its changes reviewed before anything leaves the machine. What
 		// the gate does not approve fails here, before any merge or push.
 		reviewReroute := false
-		if activeGate != nil && commitAbort == nil && (signal == pm.TaskDone || signal == pm.TaskInProgress) {
+		if activeGate != nil && commitAbort == nil && !reqCheck.Unmet() && (signal == pm.TaskDone || signal == pm.TaskInProgress) {
 			if requeueIfInterrupted("before the review gate ran") {
 				continue
 			}
@@ -3063,10 +3082,16 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			gateOut = o.passGate(provideraudit.WithTaskContext(taskCtx, task.ID, task.Title), activeGate, gateInput{
 				task: task, goal: s.Goal, conventions: s.Instructions, prompt: prompt,
 				output: taskOutput, signal: signal, sessionID: taskSessionID, background: taskBackground,
-				worker: taskProvider, workerOpts: fixOpts, model: s.Model, commit: commit,
+				worker: taskProvider, workerOpts: fixOpts, model: s.Model, commit: commit, reqs: reqGuard,
 			})
 			if requeueIfInterrupted("while the review gate was running") {
 				continue
+			}
+			// The fix turns changed the work, and passGate checked its
+			// requirements again before it published anything. A check the
+			// run's stop cut short decides nothing, and was caught above.
+			if gateOut.requirements != nil {
+				reqCheck = gateOut.requirements
 			}
 			for i, st := range gateOut.steps {
 				s.AddStep(state.StepResult{
@@ -3110,7 +3135,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				// A fix turn ended with the agent's own failure or skip.
 				decided = agentWhy(signal)
 			}
-			o.noteDecision(task, signal, decided, false)
+			// A check of the fix turns' work that did not pass decides
+			// below; until then the verdict says it was being checked.
+			if !reqCheck.Unmet() {
+				o.noteDecision(task, signal, decided, false)
+			}
 			o.persistBestEffort(s, "the review gate's verdict",
 				"the task's outcome write below stores it as well, and the run stops there if it cannot")
 			o.logReviewEvent(s, task, gateOut)
@@ -3156,6 +3185,42 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				return nil
 			}
 			continue
+		}
+
+		// Requirements gate (Task 20461): the agent's work did not pass its
+		// requirements, so it is not done — back to pending with what failed
+		// in its next prompt, or failed once the gate has sent it back as
+		// often as verification may. Nothing it held was pushed.
+		if reqCheck.Unmet() {
+			if gateOut == nil {
+				activeGate.withheldNote(task)
+			}
+			requeued, err := o.settleUnmetRequirements(s, task, reqCheck, s.CurrentStep)
+			if err != nil {
+				return err
+			}
+			if requeued {
+				o.queueFailed(queueID, "requirements unmet, re-queued: "+requirementsCheckSummary(reqCheck))
+				continue
+			}
+			o.queueFailed(queueID, "requirements unmet: "+requirementsCheckSummary(reqCheck))
+			{
+				done, failed := s.Plan.CountByStatus()
+				o.webhook.Send(webhook.EventTaskFailed, webhook.Payload{
+					Goal:     s.Goal,
+					Task:     &webhook.TaskInfo{ID: task.ID, Title: task.Title, Status: "failed", Duration: taskDur},
+					Progress: &webhook.Progress{Done: done, Total: len(s.Plan.Tasks), Failed: failed},
+					Session:  &webhook.SessionInfo{InputTokens: s.TotalInputTokens, OutputTokens: s.TotalOutputTokens},
+				})
+			}
+			consecutiveErrors++
+			if consecutiveErrors >= maxConsecutiveErrors {
+				return o.failRun(s, fmt.Errorf("%d consecutive task failures", consecutiveErrors))
+			}
+			continue
+		}
+		if reqCheck != nil {
+			o.noteRequirementsMet(task, reqCheck, s.CurrentStep)
 		}
 
 		// Each arm below stores the task's outcome before it announces it — the
@@ -3924,6 +3989,12 @@ type taskResult struct {
 	// gate is what the review gate decided (Task 20357); nil when the gate
 	// is off or the task did not reach it.
 	gate *gateOutcome
+	// reqCheck is what the requirements gate found (Task 20461) — after the
+	// review's fix turns when there were any; nil when the gate is off, or
+	// nothing in its scope. reqInterrupted reports a check the run's stop
+	// cut short.
+	reqCheck       *pm.TaskRequirementsCheck
+	reqInterrupted bool
 }
 
 // parallelShutdownGracePeriod bounds how long runPMParallel will wait for
@@ -4551,6 +4622,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				prompt = learningMem + prompt
 			}
 			prompt = withGateSection(prompt, o.requirementContract(t))
+			prompt = withGateSection(prompt, requirementsRetrySection(t.RequirementsCheck))
 			roundOutboxes[i] = o.openOutbox(t, o.router.For(t.Role))
 			prompt = withGateSection(prompt, roundOutboxes[i].promptSection())
 			prebuiltPrompts[i] = prompt
@@ -4631,6 +4703,23 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					dimColor.Printf("  %s\n", note)
 				}
 				roundGuards[i] = g
+			}
+		}
+		// Requirements gate (Task 20461): one guard per task, in the task's
+		// own directory. Tasks that share a working tree are still checked —
+		// the requirements must pass in the tree they leave — and the record
+		// says the tree was shared.
+		roundReqGuards := make([]*requirementsGuard, len(ready))
+		if s.RequirementsGate.Active() {
+			sharing := map[string]int{}
+			for _, d := range taskWorkDirs {
+				sharing[d]++
+			}
+			for i, t := range ready {
+				if g := o.openRequirementsGuard(ctx, s, t, taskWorkDirs[i], roundGates[i]); g != nil {
+					g.shared = sharing[taskWorkDirs[i]] - 1
+					roundReqGuards[i] = g
+				}
 			}
 		}
 
@@ -4727,6 +4816,18 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				if err == nil && result != nil {
 					commitAbort = guard.abortFor(tAuditCtx, result.Output, result.Background)
 				}
+				// Requirements gate (Task 20461), checked here for the same
+				// reason: after the commit check, and before the review gate,
+				// which must not publish work whose requirements fail.
+				var reqCheck *pm.TaskRequirementsCheck
+				reqInterrupted := false
+				if err == nil && result != nil && commitAbort == nil && roundReqGuards[idx] != nil &&
+					acceptableAsDone(result.Output, result.Background) {
+					sig := pm.CheckTaskSignal(result.Output)
+					if sig == pm.TaskDone || sig == pm.TaskInProgress {
+						reqCheck, reqInterrupted = roundReqGuards[idx].check()
+					}
+				}
 				// The review gate runs here, in the worker, so reviews of a
 				// round's tasks proceed side by side rather than one after
 				// another in the consumer below. It sees what the consumer
@@ -4734,7 +4835,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// not a clarification question, not unfinished background
 				// work.
 				var gateOut *gateOutcome
-				if err == nil && result != nil && gate != nil && commitAbort == nil {
+				if err == nil && result != nil && gate != nil && commitAbort == nil && !reqInterrupted && !reqCheck.Unmet() {
 					sig := pm.CheckTaskSignal(result.Output)
 					if (sig == pm.TaskDone || sig == pm.TaskInProgress) &&
 						!looksLikeClarificationQuestion(result.Output) && !result.Background.Incomplete() {
@@ -4742,6 +4843,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 							task: t, goal: gateGoal, conventions: gateConventions, prompt: prompt,
 							output: result.Output, signal: sig, sessionID: result.SessionID, background: result.Background,
 							worker: taskProvider, workerOpts: opts, model: gateModel, commit: guard,
+							reqs: roundReqGuards[idx],
 						})
 						if len(gateOut.steps) > 0 {
 							// The agent's last word is its fix turn's.
@@ -4750,7 +4852,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 							result.OutputTokens += gateOut.workOut
 							result.ThinkingTokens += gateOut.workThinking
 						}
-						o.noteGateVerdict(taskID, startedAt, gateOut, result.Output, result.Background)
+						if gateOut.requirements != nil || gateOut.reqInterrupted {
+							reqCheck, reqInterrupted = gateOut.requirements, gateOut.reqInterrupted
+						}
+						// A check of the fix turns' work that did not pass is
+						// settled by the consumer; until then the verdict
+						// check wrote says the requirements were being checked.
+						if !reqCheck.Unmet() {
+							o.noteGateVerdict(taskID, startedAt, gateOut, result.Output, result.Background)
+						}
 						// The gate's fix turns are the agent's too.
 						if len(gateOut.steps) > 0 && !gateOut.fail {
 							commitAbort = guard.abortFor(tAuditCtx, result.Output, result.Background)
@@ -4761,7 +4871,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				timedOut := isTimeoutErr(tTaskCtx, err)
 				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut,
 					continued: turns.unfinished, uncommitted: turns.uncommitted, commitAbort: commitAbort,
-					pushed: guard.pushed(), commitNote: guard.passNote(), gate: gateOut}
+					pushed: guard.pushed(), commitNote: guard.passNote(), gate: gateOut,
+					reqCheck: reqCheck, reqInterrupted: reqInterrupted}
 			}(i, task, prebuiltPrompts[i], taskWorkDirs[i])
 		}
 
@@ -4949,6 +5060,18 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				continue
 			}
 
+			// Requirements gate (Task 20461): the run stopped while the
+			// task's requirements were being checked, which is the run's doing
+			// and not the task's. Nothing was decided, so nothing is done.
+			if res.reqInterrupted {
+				cleanupWorktree(task.ID)
+				mu.Lock()
+				o.requeueInterrupted(s, task, "while its requirements were being checked", s.CurrentStep)
+				o.queueFailed(parallelQueueID, interruptedQueueNote)
+				mu.Unlock()
+				continue
+			}
+
 			result := res.result
 			// Empty-output watchdog: same companion to runPMSequential's guard —
 			// a (*Result{Output:""}, nil) on the parallel path otherwise falls
@@ -5117,6 +5240,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// a write that fails leaves nothing claiming a status the database
 			// does not hold.
 			implicitDone := false
+			// reqUnmet is a task the requirements gate kept from being done
+			// (Task 20461), and reqRequeued one it sent back to pending.
+			reqUnmet, reqRequeued := false, false
 			switch {
 			case res.commitAbort != nil && (signal == pm.TaskDone || signal == pm.TaskInProgress):
 				// Done means committed (Task 20370): the worker found the
@@ -5124,7 +5250,14 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				// where the agent put it.
 				consecutiveErrors++
 				abortedTask = res.commitAbort
+			case res.reqCheck.Unmet() && (signal == pm.TaskDone || signal == pm.TaskInProgress):
+				// Requirements gate (Task 20461): the work did not pass its
+				// requirements, so it is not done; settled below.
+				reqUnmet = true
 			case signal == pm.TaskDone:
+				if res.reqCheck != nil {
+					o.noteRequirementsMet(task, res.reqCheck, s.CurrentStep)
+				}
 				task.Status = pm.TaskDone
 				pm.AddAnnotation(task, "ai", fmt.Sprintf("Task completed successfully in %s.", taskDur))
 				consecutiveErrors = 0
@@ -5156,6 +5289,9 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					abortedTask = &ab
 					break
 				}
+				if res.reqCheck != nil {
+					o.noteRequirementsMet(task, res.reqCheck, s.CurrentStep)
+				}
 				task.Status = pm.TaskDone
 				implicitDone = true
 				pm.AddAnnotation(task, "ai", "Task implicitly completed (parallel mode): AI finished without an explicit TASK_DONE/TASK_FAILED/TASK_SKIPPED signal — treated as done.")
@@ -5166,6 +5302,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			case abortedTask != nil:
 				// abortTask stores the task back at pending before it says so.
 				err = o.abortTask(s, task, *abortedTask, s.CurrentStep)
+			case reqUnmet:
+				// Stored, back at pending or failed, before it is announced.
+				reqRequeued, err = o.settleUnmetRequirements(s, task, res.reqCheck, s.CurrentStep)
+				if err == nil && !reqRequeued {
+					consecutiveErrors++
+				}
 			case implicitDone:
 				err = o.persistOutcome(s, task, "completion (no explicit signal)", implicitDoneWhy())
 			default:
@@ -5178,9 +5320,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			}
 
 			switch {
-			case abortedTask != nil:
+			case abortedTask != nil, reqRequeued:
 				// The run produced no work: abortTask has said so, and the
-				// task is pending — not an outcome to announce.
+				// task is pending — not an outcome to announce. Likewise a
+				// task the requirements gate sent back, which it announced.
 			case task.Status == pm.TaskDone:
 				if !o.log.IsJSON() {
 					if implicitDone {
@@ -5247,6 +5390,12 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// fail-open shape the abort path exists to close.
 			if abortedTask != nil {
 				o.queueFailed(parallelQueueID, abortSummaryForQueue(*abortedTask))
+			} else if reqUnmet {
+				note := "requirements unmet: "
+				if reqRequeued {
+					note = "requirements unmet, re-queued: "
+				}
+				o.queueFailed(parallelQueueID, note+requirementsCheckSummary(res.reqCheck))
 			} else {
 				switch task.Status {
 				case pm.TaskDone:
@@ -5319,10 +5468,15 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 					// holds only what was committed (Task 20370). So does one
 					// that held an earlier attempt's work and ended any way
 					// but done.
-					if keepsWorktree(abortedTask) || (reopened && task.Status != pm.TaskDone) {
+					// So does one the requirements gate sent back: its next
+					// attempt fixes that work rather than starting over (Task
+					// 20461).
+					if keepsWorktree(abortedTask) || reqRequeued || (reopened && task.Status != pm.TaskDone) {
 						why := fmt.Sprintf("the task's attempt ended %s", task.Status)
 						if abortedTask != nil {
 							why = string(abortedTask.Class) + ": " + abortedTask.Reason
+						} else if reqRequeued {
+							why = requirementsUnmetReason + ": " + res.reqCheck.Headline()
 						}
 						if kErr := wt.Keep(o.config.WorkDir, why); kErr != nil {
 							dimColor.Printf("  worktree keep task %d: %v\n", task.ID, kErr)

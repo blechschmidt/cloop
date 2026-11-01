@@ -666,6 +666,10 @@ function _eventVisuals(kind) {
     case 'task_background':     return { glyph:'⏳', cls:'ev-task-bg',     label:'background'};
     case 'task_review':         return { glyph:'🔍', cls:'ev-task-review', label:'review'};
     case 'task_attachments':    return { glyph:'📎', cls:'ev-task-status', label:'files'};
+    // The requirements gate's check of a task, and a requirement it found
+    // broken that passed before (Task 20461).
+    case 'task_requirements':   return { glyph:'🧾', cls:'ev-task-review', label:'requirements'};
+    case 'requirement_regression': return { glyph:'↯', cls:'ev-task-fail', label:'regression'};
     // A run that produced no work — a provider limit, a rejected credential,
     // a harness that refused to start. Distinct from 'failed': the task went
     // back in the queue rather than being judged, so the row must not read as

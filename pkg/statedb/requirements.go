@@ -82,6 +82,30 @@ type RequirementCheck struct {
 	CheckedBy     string                    `json:"checked_by,omitempty"`
 	CheckedAt     time.Time                 `json:"checked_at"`
 	DurationMS    int64                     `json:"duration_ms"`
+	// TaskID is the task whose completion the check gated (Task 20461); 0
+	// for a check that gated none.
+	TaskID int `json:"task_id,omitempty"`
+	// Regression reports that the requirement was fulfilled at its previous
+	// check of the same definition, and is unfulfilled at this one.
+	Regression bool `json:"regression,omitempty"`
+	// Persisting reports a regression carried over from the same task's
+	// previous check: the requirement broke at an earlier attempt and still
+	// fails. The journal and the notifier report a regression once, at the
+	// check where it happened.
+	Persisting bool `json:"persisting,omitempty"`
+	// Was is that previous check, on the checks RecordRequirementChecks
+	// returns for a regression. Not stored: the previous check is the row
+	// before this one.
+	Was *PriorCheck `json:"was,omitempty"`
+}
+
+// PriorCheck is the check a regression is measured against.
+type PriorCheck struct {
+	ID        int64     `json:"id"`
+	Verdict   string    `json:"verdict"`
+	Commit    string    `json:"commit,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
+	TaskID    int       `json:"task_id,omitempty"`
 }
 
 // checkDetail is the JSON a check's detail column holds.
@@ -105,6 +129,9 @@ type RequirementRun struct {
 	Counts          requirements.Counts `json:"counts"`
 	Error           string              `json:"error,omitempty"`
 	CancelRequested bool                `json:"cancel_requested,omitempty"`
+	// TaskID is the task whose completion the run gated (Task 20461); 0 for
+	// a run that gated none.
+	TaskID int `json:"task_id,omitempty"`
 }
 
 // CheckRecord is what recording one check run's results needs besides the
@@ -115,6 +142,8 @@ type CheckRecord struct {
 	Dirty      bool
 	ExecutorID string
 	CheckedBy  string
+	// TaskID is the task whose completion the check gates (Task 20461).
+	TaskID int
 }
 
 func formatReqTime(t time.Time) string {
@@ -568,12 +597,28 @@ func (d *DB) RecordRequirementChecks(rec CheckRecord, results []requirements.Res
 		if !ok || (res.Fingerprint != "" && res.Fingerprint != fp) || !requirements.ValidVerdict(res.Verdict) {
 			continue
 		}
+		// A regression is measured against the requirement's previous check
+		// of the same definition: a verdict about what it used to require
+		// says nothing about what the project does now (Task 20461).
+		var (
+			was        *PriorCheck
+			persisting bool
+		)
+		if res.Verdict == requirements.VerdictUnfulfilled {
+			if was, persisting, err = priorCheckTx(tx, res.RequirementID, fp, rec.TaskID); err != nil {
+				return nil, err
+			}
+			if was != nil && was.Verdict != requirements.VerdictFulfilled {
+				was, persisting = nil, false
+			}
+		}
 		c := RequirementCheck{
 			RequirementID: res.RequirementID, RunID: clipText(rec.RunID, 64), Method: clipText(res.Method, 16),
 			Verdict: res.Verdict, Summary: clipText(res.Summary, 4*requirements.MaxRationaleRunes),
 			Tests: append([]requirements.TestResult(nil), res.Tests...), Evidence: res.Evidence, Fingerprint: fp, Commit: clipText(rec.Commit, 64), Dirty: rec.Dirty,
 			ExecutorID: clipText(rec.ExecutorID, 256), CheckedBy: clipActor(rec.CheckedBy),
 			CheckedAt: res.StartedAt.UTC(), DurationMS: res.DurationMS,
+			TaskID: max(rec.TaskID, 0), Regression: was != nil, Persisting: persisting, Was: was,
 		}
 		if c.CheckedAt.IsZero() {
 			c.CheckedAt = now
@@ -587,10 +632,10 @@ func (d *DB) RecordRequirementChecks(rec CheckRecord, results []requirements.Res
 		}
 		r, err := tx.Exec(`INSERT INTO requirement_checks
 			(requirement_id, run_id, method, verdict, summary, detail, fingerprint, git_commit, dirty,
-			 executor_id, checked_by, checked_at, duration_ms)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 executor_id, checked_by, checked_at, duration_ms, task_id, regression)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.RequirementID, c.RunID, c.Method, c.Verdict, c.Summary, detail, c.Fingerprint, c.Commit, boolInt(c.Dirty),
-			c.ExecutorID, c.CheckedBy, formatReqTime(c.CheckedAt), c.DurationMS)
+			c.ExecutorID, c.CheckedBy, formatReqTime(c.CheckedAt), c.DurationMS, c.TaskID, regressionColumn(c))
 		if err != nil {
 			return nil, fmt.Errorf("statedb: record requirement check: %w", classifyDriverErr(err))
 		}
@@ -651,7 +696,60 @@ func (d *DB) RecordRequirementVerdict(id int, verdict, note, actor string) (Requ
 }
 
 const requirementCheckColumns = `id, requirement_id, run_id, method, verdict, summary, detail, fingerprint, git_commit,
-	dirty, executor_id, checked_by, checked_at, duration_ms`
+	dirty, executor_id, checked_by, checked_at, duration_ms, task_id, regression`
+
+// priorCheckTx is what a new check of requirement id, whose definition is fp,
+// is measured against: its newest earlier check of that definition that
+// reached a verdict about it — fulfilled or unfulfilled; a check that could
+// not run, or that nothing could verify, says nothing about the project. For a
+// check that gates task (task > 0), that task's own unfulfilled checks are
+// passed over too: they are its earlier attempts at the work, and the
+// requirement it broke on the first is still a regression on the next —
+// persisting reports that one was passed over. Nil when there is none.
+func priorCheckTx(tx *sql.Tx, id int, fp string, task int) (prior *PriorCheck, persisting bool, err error) {
+	rows, err := tx.Query(`SELECT id, verdict, git_commit, checked_at, task_id FROM requirement_checks
+		WHERE requirement_id = ? AND fingerprint = ? ORDER BY id DESC LIMIT ?`, id, fp, requirementChecksKept)
+	if err != nil {
+		return nil, false, fmt.Errorf("statedb: read the previous checks of %s: %w", requirements.Key(id), classifyDriverErr(err))
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			p      PriorCheck
+			at     string
+			commit string
+		)
+		if err := rows.Scan(&p.ID, &p.Verdict, &commit, &at, &p.TaskID); err != nil {
+			return nil, false, fmt.Errorf("statedb: read the previous checks of %s: %w", requirements.Key(id), classifyDriverErr(err))
+		}
+		switch {
+		case p.Verdict != requirements.VerdictFulfilled && p.Verdict != requirements.VerdictUnfulfilled:
+			continue
+		case task > 0 && p.TaskID == task && p.Verdict == requirements.VerdictUnfulfilled:
+			persisting = true
+			continue
+		}
+		p.Commit, p.CheckedAt = requirements.CleanCommit(commit), parseReqTime(at)
+		return &p, persisting, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("statedb: read the previous checks of %s: %w", requirements.Key(id), classifyDriverErr(err))
+	}
+	return nil, false, nil
+}
+
+// regressionColumn is a check's requirement_checks.regression: 0 for none, 1
+// for a regression that happened at this check, 2 for one carried over from
+// the same task's earlier check.
+func regressionColumn(c RequirementCheck) int {
+	switch {
+	case c.Persisting:
+		return 2
+	case c.Regression:
+		return 1
+	}
+	return 0
+}
 
 func scanRequirementChecks(rows *sql.Rows) ([]RequirementCheck, error) {
 	defer rows.Close()
@@ -662,9 +760,10 @@ func scanRequirementChecks(rows *sql.Rows) ([]RequirementCheck, error) {
 			detail, at     string
 			dirty          int
 			summary, runID string
+			regression     int
 		)
 		if err := rows.Scan(&c.ID, &c.RequirementID, &runID, &c.Method, &c.Verdict, &summary, &detail, &c.Fingerprint,
-			&c.Commit, &dirty, &c.ExecutorID, &c.CheckedBy, &at, &c.DurationMS); err != nil {
+			&c.Commit, &dirty, &c.ExecutorID, &c.CheckedBy, &at, &c.DurationMS, &c.TaskID, &regression); err != nil {
 			return nil, fmt.Errorf("statedb: read requirement checks: %w", classifyDriverErr(err))
 		}
 		c.RunID, c.Summary = clipText(runID, 64), clipText(summary, 4*requirements.MaxRationaleRunes)
@@ -683,6 +782,10 @@ func scanRequirementChecks(rows *sql.Rows) ([]RequirementCheck, error) {
 		}
 		c.Tests, c.Evidence = dt.Tests, dt.Evidence
 		c.Dirty = dirty != 0
+		c.Regression, c.Persisting = regression != 0, regression == 2
+		if c.TaskID < 0 {
+			c.TaskID = 0
+		}
 		c.CheckedAt = parseReqTime(at)
 		out = append(out, c)
 	}
@@ -729,10 +832,57 @@ func (d *DB) RequirementChecks(id, limit int) ([]RequirementCheck, error) {
 	return scanRequirementChecks(rows)
 }
 
+// RequirementRegressionsSince returns the checks at which a regression
+// happened at or after since — not the later checks it persisted through —
+// newest first, at most limit of them (Task 20461). The hub's notifier reads
+// them from every project it serves, so the query rides the regression index
+// and reads no detail column.
+func (d *DB) RequirementRegressionsSince(since time.Time, limit int) ([]RequirementCheck, error) {
+	if limit <= 0 || limit > requirementChecksKept {
+		limit = requirementChecksKept
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	rows, err := d.conn.Query(`SELECT id, requirement_id, run_id, verdict, summary, fingerprint, git_commit,
+			checked_at, task_id FROM requirement_checks
+		WHERE regression = 1 AND checked_at >= ? ORDER BY id DESC LIMIT ?`, formatReqTime(since), limit)
+	// regression = 2 is a persisting one: see regressionColumn.
+	if err != nil {
+		return nil, fmt.Errorf("statedb: read requirement regressions: %w", classifyDriverErr(err))
+	}
+	defer rows.Close()
+	var out []RequirementCheck
+	for rows.Next() {
+		var (
+			c                   RequirementCheck
+			runID, summary, at  string
+			commit, fingerprint string
+		)
+		if err := rows.Scan(&c.ID, &c.RequirementID, &runID, &c.Verdict, &summary, &fingerprint, &commit, &at,
+			&c.TaskID); err != nil {
+			return nil, fmt.Errorf("statedb: read requirement regressions: %w", classifyDriverErr(err))
+		}
+		c.RunID, c.Summary = clipText(runID, 64), clipText(summary, requirements.MaxSummaryRunes)
+		c.Fingerprint, c.Commit = clipText(fingerprint, 128), requirements.CleanCommit(commit)
+		if !requirements.ValidVerdict(c.Verdict) {
+			c.Verdict = requirements.VerdictError
+		}
+		if c.TaskID < 0 {
+			c.TaskID = 0
+		}
+		c.Regression, c.CheckedAt = true, parseReqTime(at)
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("statedb: read requirement regressions: %w", classifyDriverErr(err))
+	}
+	return out, nil
+}
+
 // ── check runs ──────────────────────────────────────────────────────────────
 
 const requirementRunColumns = `run_id, state, source, started_by, started_at, deadline, finished_at, executor_id,
-	assess, requirement_ids, fulfilled, unfulfilled, unverified, errored, error, cancel_requested, heartbeat`
+	assess, requirement_ids, fulfilled, unfulfilled, unverified, errored, error, cancel_requested, heartbeat, task_id`
 
 // liveRunSQL selects the runs still holding their project's one check: running,
 // inside their deadline, and heard from lately. Its two arguments are now and
@@ -756,7 +906,7 @@ func scanRequirementRuns(rows *sql.Rows, now time.Time) ([]RequirementRun, error
 		)
 		if err := rows.Scan(&r.RunID, &r.State, &r.Source, &startedBy, &started, &deadline, &finish, &executor,
 			&assess, &ids, &r.Counts.Fulfilled, &r.Counts.Unfulfilled, &r.Counts.Unverified, &r.Counts.Error,
-			&errTx, &cancel, &heartbeat); err != nil {
+			&errTx, &cancel, &heartbeat, &r.TaskID); err != nil {
 			return nil, fmt.Errorf("statedb: read requirement runs: %w", classifyDriverErr(err))
 		}
 		r.StartedBy, r.ExecutorID, r.Error = clipText(startedBy, 4*requirements.MaxActorRunes), clipText(executor, 256), clipText(errTx, 2048)
@@ -859,12 +1009,12 @@ func (d *DB) RecordFinishedRequirementRun(run RequirementRun) error {
 	defer tx.Rollback() //nolint:errcheck // a no-op after a commit
 	if _, err := tx.Exec(`INSERT INTO requirement_runs
 		(run_id, state, source, started_by, started_at, deadline, finished_at, executor_id, assess, requirement_ids,
-		 fulfilled, unfulfilled, unverified, errored, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 fulfilled, unfulfilled, unverified, errored, error, task_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.RunID, run.State, clipText(run.Source, 32), clipActor(run.StartedBy), formatReqTime(run.StartedAt),
 		formatReqTime(run.FinishedAt), formatReqTime(run.FinishedAt), clipText(run.ExecutorID, 256), boolInt(run.Assess),
 		marshalJSONColumn(ids, "[]"), run.Counts.Fulfilled, run.Counts.Unfulfilled, run.Counts.Unverified,
-		run.Counts.Error, clipText(run.Error, 2048)); err != nil {
+		run.Counts.Error, clipText(run.Error, 2048), max(run.TaskID, 0)); err != nil {
 		return fmt.Errorf("statedb: record requirement check: %w", classifyDriverErr(err))
 	}
 	if err := trimRequirementRunsTx(tx); err != nil {
@@ -1007,6 +1157,7 @@ func AuditRequirementCheck(d *DB, run RequirementRun, commit string, dirty bool,
 			"assess": run.Assess, "executor_id": run.ExecutorID, "commit": commit, "dirty": dirty,
 			"fulfilled": run.Counts.Fulfilled, "unfulfilled": run.Counts.Unfulfilled,
 			"unverified": run.Counts.Unverified, "error": run.Counts.Error, "reason": run.Error,
+			"task_id": run.TaskID,
 		}),
 	})
 }

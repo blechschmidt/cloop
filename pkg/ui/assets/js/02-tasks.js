@@ -272,7 +272,7 @@ function renderTasks(s) {
           (t.tags&&t.tags.length?'<span class="task-tags">'+t.tags.map(function(tg){return '<span class="task-tag">'+esc(tg)+'</span>';}).join('')+'</span>':'')+
           fmtReqChips(t)+
           fmtTimeEstimate(t)+
-          fmtReviewChip(t)+
+          fmtReviewChip(t)+fmtGateChip(t)+
           fmtFilesChip(t)+
         '</div>'+
         fmtBackgroundWork(t)+
@@ -345,6 +345,16 @@ function fmtReviewChip(t) {
   const txt = r.blocked ? 'review: not published' : (r.verdict === 'approved' ? 'reviewed ✓' : 'review: ' + r.verdict.replace('_', ' '));
   return '<span' + (r.blocked ? ' style="color:var(--red)"' : '') + ' title="' +
     esc('Review gate' + (r.model ? ' (' + r.model + ')' : '') + ': ' + r.verdict.replace('_', ' ')) + '">🔍 ' + esc(txt) + '</span>';
+}
+
+// fmtGateChip marks a task the requirements gate checked (Task 20461): red when
+// its requirements kept it from being done, and a regression named.
+function fmtGateChip(t) {
+  const c = t && t.requirements_check;
+  if (!c || !c.outcome) return '';
+  const bad = c.outcome === 'unmet', reg = (c.requirements || []).some(v => v.regression);
+  return '<span' + (bad ? ' style="color:var(--red)"' : '') + ' title="Requirements gate">🧾 requirements ' +
+    (bad ? 'unmet' : 'met') + (reg ? ' · regression' : '') + '</span>';
 }
 
 // fmtReqChips names the requirements a task implements (Task 20460); one

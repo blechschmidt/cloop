@@ -93,15 +93,20 @@ func init() {
 }
 
 // readsOnlyItsFiles reports whether cmd, as invoked, works from the files it
-// is given alone: `cloop requirements validate`, and `check --file`. A plain
-// CI job runs them in a checkout with no .cloop/state.db, and reconciling
-// executors — which opens that database, creating it — would leave one behind.
+// is given alone: `cloop requirements validate`, `check --file`, and `check
+// --spec --no-record` — the check the hub and the requirements gate dispatch,
+// which is handed its requirements and records nothing (Task 20461). A plain
+// CI job runs them in a checkout with no .cloop/state.db, and the gate in a
+// task's worktree, and reconciling executors — which opens that database,
+// creating it — would leave one behind.
 func readsOnlyItsFiles(cmd *cobra.Command) bool {
 	switch cmd {
 	case requirementsValidateCmd:
 		return true
 	case requirementsCheckCmd:
-		return cmd.Flags().Changed("file")
+		f := cmd.Flags()
+		noRecord, _ := f.GetBool("no-record")
+		return f.Changed("file") || (f.Changed("spec") && noRecord)
 	}
 	return false
 }
