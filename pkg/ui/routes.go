@@ -812,6 +812,14 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/requirement-runs", Handler: s.handleRequirementRunStart, Perm: start, Scope: scopeProject},
 		{Pattern: "GET /api/requirement-runs/{run}", Handler: s.handleRequirementRunGet, Perm: read, Scope: scopeProject},
 		{Pattern: "POST /api/requirement-runs/{run}/cancel", Handler: s.handleRequirementRunCancel, Perm: stop, Scope: scopeProject},
+		// Requirements as code (Task 20459): the spec file is read on the
+		// project's executor, never here, and reading it again starts a
+		// workload there — `task`, as the import is, since the file can add
+		// tests. See requirements_spec_api.go.
+		{Pattern: "GET /api/requirements/spec", Handler: s.handleRequirementSpec, Perm: read, Scope: scopeProject},
+		{Pattern: "POST /api/requirements/spec/read", Handler: s.handleRequirementSpecRead, Perm: task, Scope: scopeProject},
+		{Pattern: "POST /api/requirements/import", Handler: s.handleRequirementSpecImport, Perm: task, Scope: scopeProject},
+		{Pattern: "GET /api/requirements/export", Handler: s.handleRequirementSpecExport, Perm: read, Scope: scopeProject},
 
 		// ── Replay ───────────────────────────────────────────────────
 		{Pattern: "GET /api/replay-runs", Handler: s.handleReplayRunsList, Perm: read, Scope: scopeProject},

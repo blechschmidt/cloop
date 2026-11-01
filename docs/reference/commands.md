@@ -324,27 +324,44 @@ What the project must keep doing, and whether it still does — see the
 `reqs`.
 
 ```bash
-cloop requirements add "<title>" [-d <details>] [--test <command>]... [--priority must|should|could] [--tag <tag>]...
+cloop requirements add "<title>" [-d <details>] [--test <command>]... [--priority must|should|could] [--status draft|approved|deprecated] [--tag <tag>]...
 cloop requirements list [--json]
 cloop requirements show <id> [--json]
-cloop requirements edit <id> [--title …] [-d …] [--test …]... [--clear-tests] [--priority …] [--tag …]
+cloop requirements edit <id> [--title …] [-d …] [--test …]... [--clear-tests] [--priority …] [--status …] [--tag …]
 cloop requirements remove <id>
-cloop requirements check [id...] [--ai] [--timeout <d>]
+cloop requirements check [id...] [--ai] [--status <s>,…|--all] [--file <spec>] [--timeout <d>]
 cloop requirements verdict <id> fulfilled|unfulfilled [--note <text>]
 cloop requirements history <id> [--limit N] [--json]
+cloop requirements export [--file <path>|-] [--force]
+cloop requirements import [--file <path>] [--dry-run] [--resolve R-<n>=file|hub]... [--prefer file|hub] [--json]
+cloop requirements validate [--file <path>] [--json]
 ```
 
 | Flag (`check`) | Default | Description |
 |------|---------|-------------|
 | `--ai` | off | Ask the model about the requirements that have no tests; without it they are skipped |
+| `--status`, `--all` | `approved` | With no ids, the statuses checked; `--all` checks every requirement. Named ones are checked whatever their status |
+| `--file` | none | Check the requirements in this spec file; needs no hub and no project database, and records nothing |
 | `--provider`, `--model` | the project's | The model `--ai` asks |
 | `--ai-timeout` | `5m` | How long the model may take over one requirement |
 | `--timeout` | none | Stop the whole check after this long |
 | `--json`, `--no-record`, `--spec` | off | How the hub runs it on a project's executor: a framed report, nothing recorded, the requirements it sends |
 
-`check` exits 1 when a requirement is unfulfilled or its check did not work,
-so a CI job can run it as a gate. `--test-timeout` on `add` and `edit` sets how
-long each test given may run (10 minutes by default).
+`check` exits 1 when a requirement is unfulfilled or its check did not work —
+or, with `--file`, when the spec file does not validate — so a CI job can run it
+as a gate. `--test-timeout` on `add` and `edit` sets how long each test given
+may run (10 minutes by default).
+
+`export`, `import` and `validate` keep the requirements as code, in
+`.cloop/requirements.yaml` (`--file` for another path) — see
+[Requirements as code](../guides/requirements.md#requirements-as-code). `export`
+refuses to overwrite a file that has changes the hub does not (`--force`
+discards them; `--file -` prints the file). `import` merges the file three ways
+and imports nothing while a conflict is unsettled: `--resolve R-<n>=file` takes
+the file's version, `=hub` keeps the hub's, and `--prefer` settles every
+conflict not named; `--dry-run` only lists. `validate` reports every problem
+with its line and exits 1 when the file is missing or invalid; with `--json` it
+prints the file framed, which is how the hub reads it on a project's executor.
 
 ### `cloop diff`
 

@@ -111,21 +111,32 @@ type requirementsList struct {
 	Stale        int                      `json:"stale"`
 	Active       *statedb.RequirementRun  `json:"active,omitempty"`
 	Runs         []statedb.RequirementRun `json:"runs"`
+	// Spec is the project's spec file as last read, and how it merges with
+	// the requirements here (Task 20459).
+	Spec *specView `json:"spec,omitempty"`
 }
 
-// requirementInput is what a client sends to add or change a requirement.
+// requirementInput is what a client sends to add or change a requirement. A
+// status not sent, or sent empty, is approved for a new requirement and
+// unchanged for an existing one: a client from before statuses never approves
+// a draft by editing it.
 type requirementInput struct {
 	Title       string              `json:"title"`
 	Description string              `json:"description"`
 	Priority    string              `json:"priority"`
+	Status      *string             `json:"status"`
 	Tags        []string            `json:"tags"`
 	Tests       []requirements.Test `json:"tests"`
 }
 
 func (in requirementInput) requirement(id int) requirements.Requirement {
-	return requirements.Requirement{
+	r := requirements.Requirement{
 		ID: id, Title: in.Title, Description: in.Description, Priority: in.Priority, Tags: in.Tags, Tests: in.Tests,
 	}
+	if in.Status != nil {
+		r.Status = *in.Status
+	}
+	return r
 }
 
 // openRequirementsDB opens the project's database for a request, writing the
@@ -140,8 +151,13 @@ func openRequirementsDB(w http.ResponseWriter, workDir string) (*statedb.DB, boo
 }
 
 // requirementErr answers a store error: the caller's mistake (400), a
-// requirement that does not exist (404), a check already running (409).
+// requirement that does not exist (404), a check already running or a spec
+// file that conflicts with the hub (409).
 func requirementErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, requirements.ErrSpecConflict) {
+		jsonErr(w, err.Error(), http.StatusConflict)
+		return
+	}
 	if errors.Is(err, requirements.ErrInvalid) {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
@@ -188,6 +204,10 @@ func (s *Server) handleRequirementsList(w http.ResponseWriter, r *http.Request) 
 	}
 	if out.Runs == nil {
 		out.Runs = []statedb.RequirementRun{}
+	}
+	// Best effort: a list without the spec file's state is still the list.
+	if v, err := s.specViewFor(db, workDir, false); err == nil {
+		out.Spec = &v
 	}
 	var done []time.Time
 	if ps, err := state.LoadLite(workDir); err == nil && ps.Plan != nil {
@@ -590,6 +610,9 @@ func (s *Server) handleRequirementRunStart(w http.ResponseWriter, r *http.Reques
 	var in struct {
 		IDs    []int `json:"ids"`
 		Assess bool  `json:"assess"`
+		// All checks every requirement named by none, whatever its status;
+		// otherwise only the approved ones are.
+		All bool `json:"all"`
 	}
 	if !decodeOptionalJSON(w, r, &in) {
 		return
@@ -608,6 +631,26 @@ func (s *Server) handleRequirementRunStart(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		requirementErr(w, err)
 		return
+	}
+	// Named, a requirement is checked whatever its status; "all of them" is
+	// the approved ones — a draft is not yet agreed, a deprecated one no
+	// longer — unless every one was asked for.
+	unapproved := []int{}
+	if len(in.IDs) == 0 && !in.All {
+		approved := asked[:0:0]
+		for _, q := range asked {
+			if q.CurrentStatus() == requirements.StatusApproved {
+				approved = append(approved, q)
+			} else {
+				unapproved = append(unapproved, q.ID)
+			}
+		}
+		asked = approved
+		if len(asked) == 0 && len(unapproved) > 0 {
+			jsonErr(w, "none of the project's requirements is approved: approve one, or check one by name",
+				http.StatusBadRequest)
+			return
+		}
 	}
 	if len(asked) == 0 {
 		jsonErr(w, "the project has no requirements to check", http.StatusBadRequest)
@@ -715,7 +758,7 @@ func (s *Server) handleRequirementRunStart(w http.ResponseWriter, r *http.Reques
 	if skipped == nil {
 		skipped = []int{}
 	}
-	writeJSONStatus(w, http.StatusAccepted, map[string]any{"ok": true, "run": run, "skipped": skipped})
+	writeJSONStatus(w, http.StatusAccepted, map[string]any{"ok": true, "run": run, "skipped": skipped, "unapproved": unapproved})
 }
 
 // pickRequirements is the requirements ids names, in the order named, or all

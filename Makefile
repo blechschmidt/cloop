@@ -110,7 +110,10 @@ e2e-stack:
 ##                grant's (pkg/executor/gitcreds), and the one host comparison
 ##                every path uses is stable and folds nothing a resolver would
 ##                not (pkg/forgehost); and the git proxy's pack reader, which
-##                never hands the forge a pack it refused (pkg/gitproxy).
+##                never hands the forge a pack it refused (pkg/gitproxy); and
+##                the requirements spec file, which the hub parses as an
+##                executor sent it and an export must write back exactly
+##                (pkg/requirements).
 ##
 ## This list is the single source of truth. CI's Parser fuzzing job runs this
 ## same target with a shorter budget rather than repeating the targets in YAML,
@@ -132,7 +135,9 @@ FUZZ_TARGETS := \
 	./pkg/executor/resultframe/:FuzzRoundTrip \
 	./pkg/executor/gitcreds/:FuzzNoCredentialLeavesItsGrantsHost \
 	./pkg/forgehost/:FuzzCanonical \
-	./pkg/gitproxy/:FuzzPackScan
+	./pkg/gitproxy/:FuzzPackScan \
+	./pkg/requirements/:FuzzParseSpecFile \
+	./pkg/requirements/:FuzzSpecFileRoundTrip
 
 ## Through scripts/fuzz-ci.sh rather than a `go test -fuzz` per line, because
 ## two of its distinctions matter locally as much as in CI: Go intermittently

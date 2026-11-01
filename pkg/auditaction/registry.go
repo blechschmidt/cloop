@@ -239,7 +239,7 @@ var registry = []Entry{
 		Home:      HomeProject,
 		Entity:    "requirement",
 		Trigger:   "A requirement is added to the project, from the dashboard or with `cloop requirements add`.",
-		Payload:   []string{"id", "title", "priority", "tests", "fingerprint"},
+		Payload:   []string{"id", "title", "priority", "status", "tests", "fingerprint"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note:      "`tests` is each test's command, as it will run.",
@@ -248,8 +248,8 @@ var registry = []Entry{
 		Action:    ActionRequirementUpdate,
 		Home:      HomeProject,
 		Entity:    "requirement",
-		Trigger:   "A requirement's title, description, priority, tags or tests change.",
-		Payload:   []string{"id", "title", "changed", "tests", "fingerprint", "previous_fingerprint"},
+		Trigger:   "A requirement's title, description, priority, tags, tests or status change.",
+		Payload:   []string{"id", "title", "changed", "status", "tests", "fingerprint", "previous_fingerprint"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "`changed` names the fields that differ. A new `fingerprint` means the verdicts recorded " +
@@ -277,6 +277,24 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 		Note: "One row per run, not per requirement: each requirement's verdict is a row of " +
 			"requirement_checks. `assess` is true when the model was asked about the requirements with no tests.",
+	},
+	{
+		Action: ActionRequirementImport,
+		Home:   HomeProject,
+		Entity: "requirement",
+		Trigger: "The project's requirements spec file (`.cloop/requirements.yaml`) is merged into the hub — " +
+			"from the dashboard's Import, or with `cloop requirements import`.",
+		Payload: []string{
+			"source", "path", "sha256", "commit", "added", "restored", "updated", "deleted", "resolved",
+			"in_sync", "exports_pending",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "One row per import, its entity id `spec`. `updated` lists each changed requirement with the fields " +
+			"that changed and its new and previous fingerprints; `deleted` how many recorded checks went with each; " +
+			"`resolved` how each conflict was settled (`file` or `hub`). An import applies nothing unless every " +
+			"conflict is settled, so a row is a whole import. `sha256` is the file's; a dashboard import was read " +
+			"from the project's checkout on its executor at `commit`.",
 	},
 	{
 		Action:    ActionRequirementVerdict,

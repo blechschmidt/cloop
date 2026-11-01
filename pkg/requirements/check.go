@@ -252,21 +252,45 @@ func (b *tailBuffer) String() (string, bool) {
 func WorkTree(ctx context.Context, dir string) (commit string, dirty bool) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	git := func(args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
-		var stdout bytes.Buffer
-		cmd.Stdout = &stdout
-		err := cmd.Run()
-		return stdout.String(), err
-	}
-	head, err := git("rev-parse", "--verify", "HEAD")
+	head, err := gitIn(ctx, dir, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return "", false
 	}
-	status, err := git("status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude).cloop")
+	status, err := gitIn(ctx, dir, "status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude).cloop")
 	return cleanCommit(head), err == nil && strings.TrimSpace(status) != ""
+}
+
+// SpecFileGit reports HEAD of the git checkout at dir, whether the spec file
+// at path (relative to dir) differs from it — changed, staged, or not yet
+// added — and whether git ignores it, so that it would reach no other
+// checkout. Nothing when dir is not a checkout, or git is missing.
+func SpecFileGit(ctx context.Context, dir, path string) (commit string, dirty, ignored bool) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	head, err := gitIn(ctx, dir, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return "", false, false
+	}
+	commit = cleanCommit(head)
+	// check-ignore answers 0 for a path its rules ignore and that git does
+	// not track; a file force-added under an ignored directory is tracked.
+	if _, err := gitIn(ctx, dir, "check-ignore", "-q", "--", path); err == nil {
+		return commit, false, true
+	}
+	status, err := gitIn(ctx, dir, "status", "--porcelain", "--untracked-files=all", "--", path)
+	return commit, err == nil && strings.TrimSpace(status) != "", false
+}
+
+// gitIn runs git in dir and returns what it printed, without taking any lock
+// a concurrent git in the same checkout could be waiting on.
+func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	err := cmd.Run()
+	return stdout.String(), err
 }
 
 // Describe is a one-line account of r, for a terminal.

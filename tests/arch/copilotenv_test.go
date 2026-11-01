@@ -74,6 +74,8 @@ var leaseClearanceCallers = map[string]string{
 		"speech-to-text service, not the project's model",
 	"(*Server).handleReset → runCloopSubcommandFor":  "`cloop reset` calls no model",
 	"(*Server).handleProjectNew → runWorkloadEnvFor": "`cloop init --skip-clarify` calls no model",
+	"(*Server).handleRequirementSpecRead → runCloopSubcommandFor": "`cloop requirements validate --json` reads " +
+		"the project's spec file; it calls no model",
 }
 
 func TestEveryLeaseTakesTheCopilotPin(t *testing.T) {

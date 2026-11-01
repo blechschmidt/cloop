@@ -163,6 +163,39 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Requirements as code: `.cloop/requirements.yaml`, kept in sync with the hub
+  both ways.** A project's requirements can now live in its repository too, to
+  be reviewed in pull requests and checked by CI with no hub. The spec file
+  holds each requirement's stable id (`R-<n>`, never given to a second
+  requirement), title, details, priority, tags, tests and a new lifecycle
+  status: `draft`, `approved` or `deprecated`. A check (Check all, or `cloop
+  requirements check` with no ids) now checks the approved requirements; a
+  named one is checked whatever its status. `cloop requirements export` writes
+  the file, and refuses to overwrite changes the hub does not have unless told
+  to. `cloop requirements import` merges it three ways, against what the file
+  and the hub last agreed on, using the requirements' fingerprints: a change on
+  one side only is applied or left for the next export; changes to different
+  fields merge; a change on both sides to the same field, or a delete on one
+  side of a requirement changed on the other, is a conflict. A conflict is
+  listed and nothing is imported until each is settled (`--resolve
+  R-<n>=file|hub`, `--prefer`). A file that reuses a deleted requirement's id is
+  refused. `cloop requirements validate` and `cloop requirements check --file`
+  need neither a hub nor a project database, so a plain CI job can gate on the
+  file; no `state.db` is created. The file is read strictly: unknown keys,
+  repeated keys or ids, YAML anchors, aliases and tags, and anything past the
+  database's bounds are refused, every problem with its line and column. In the
+  dashboard, the Requirements tab shows "Spec changed" when the file in the
+  project's checkout differs. Review lists every change and lets you settle each
+  conflict; Import applies exactly the reviewed file and plan. Both need
+  `task.mutate`, and each import is audited as `requirement.import`. The hub
+  reads the file only on the project's executor (`cloop requirements validate
+  --json`, dispatched like a check) and parses the bytes itself; a call-graph
+  test holds it to never opening the file on its own host. The parser and the
+  export round trip are fuzzed (`make fuzz`). Migration 0086 is additive: it
+  adds `requirements.status`, defaulting to `approved` so every existing
+  requirement and every older build's addition stays checked, and two new
+  tables for the merge base and the last read (Task 20459).
+
 - **Requirements: what a project must keep doing, and whether it still does.**
   A project can now hold requirements, each with or without tests. A test is a
   shell command run in the project's root that passes when it exits 0. A new

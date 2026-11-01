@@ -181,7 +181,8 @@ Seven pages in order, indexed at
   Requirements tab or `cloop requirements`, checking them on the project's
   executor (and as a CI gate), asking the model about the ones nothing tests,
   recorded verdicts, when a verdict goes stale, and turning a failure into a
-  task.
+  task. Requirements as code: `.cloop/requirements.yaml` beside the code, its
+  statuses, export and three-way import, and checking it in CI with no hub.
 - **[Task attachments](guides/attachments.md)** — the files a run makes for a
   person to look at — reports, charts, screenshots, exports, logs — attached to
   its task: the outbox an agent copies them into, `cloop task attachments`, the

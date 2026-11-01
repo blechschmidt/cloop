@@ -132,7 +132,7 @@ func parseReqTime(s string) time.Time {
 	return parseOptionalTime(s)
 }
 
-const requirementColumns = `id, title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by`
+const requirementColumns = `id, title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status`
 
 type requirementQuerier interface {
 	Query(query string, args ...any) (*sql.Rows, error)
@@ -153,12 +153,17 @@ func queryRequirements(q requirementQuerier, where string, args ...any) ([]requi
 			createdBy, updatedBy string
 		)
 		if err := rows.Scan(&r.ID, &r.Title, &r.Description, &r.Priority, &tags, &tests, &created, &updated,
-			&createdBy, &updatedBy); err != nil {
+			&createdBy, &updatedBy, &r.Status); err != nil {
 			return nil, fmt.Errorf("statedb: read requirements: %w", classifyDriverErr(err))
 		}
 		r.Title = clipText(r.Title, 4*requirements.MaxTitleRunes)
 		r.Description = clipText(r.Description, 4*requirements.MaxDescriptionRunes)
 		r.Priority = clipText(r.Priority, 16)
+		if !requirements.ValidStatus(r.Status) {
+			// Written by something other than this package: whatever it
+			// meant, it is not approved, so no check runs it unasked.
+			r.Status = requirements.StatusDraft
+		}
 		_ = json.Unmarshal([]byte(tags), &r.Tags)
 		if len(r.Tags) > requirements.MaxTags {
 			r.Tags = r.Tags[:requirements.MaxTags]
@@ -219,6 +224,7 @@ func (d *DB) AddRequirement(r requirements.Requirement, actor string) (requireme
 	now := time.Now().UTC()
 	r.ID, r.CreatedAt, r.UpdatedAt = 0, now, now
 	r.CreatedBy, r.UpdatedBy = clipActor(actor), clipActor(actor)
+	r.Status = r.CurrentStatus()
 
 	d.mu.Lock()
 	tx, err := d.conn.Begin()
@@ -235,10 +241,10 @@ func (d *DB) AddRequirement(r requirements.Requirement, actor string) (requireme
 			return fmt.Errorf("%w: a project holds at most %d requirements", requirements.ErrInvalid, requirements.MaxRequirements)
 		}
 		res, err := tx.Exec(`INSERT INTO requirements
-			(title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(title, description, priority, tags, tests, created_at, updated_at, created_by, updated_by, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
-			formatReqTime(now), formatReqTime(now), r.CreatedBy, r.UpdatedBy)
+			formatReqTime(now), formatReqTime(now), r.CreatedBy, r.UpdatedBy, r.Status)
 		if err != nil {
 			return fmt.Errorf("statedb: add requirement: %w", classifyDriverErr(err))
 		}
@@ -260,7 +266,7 @@ func (d *DB) AddRequirement(r requirements.Requirement, actor string) (requireme
 		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionRequirementCreate),
 		EntityType: "requirement", EntityID: fmt.Sprint(r.ID),
 		Payload: MarshalAuditPayload(map[string]any{
-			"id": r.ID, "title": r.Title, "priority": r.Priority, "tests": testCommands(r.Tests),
+			"id": r.ID, "title": r.Title, "priority": r.Priority, "status": r.Status, "tests": testCommands(r.Tests),
 			"fingerprint": r.Fingerprint(),
 		}),
 	})
@@ -268,7 +274,8 @@ func (d *DB) AddRequirement(r requirements.Requirement, actor string) (requireme
 }
 
 // UpdateRequirement replaces the definition of the requirement r.ID names with
-// r's, keeping when and by whom it was created, and returns it as stored.
+// r's, keeping when and by whom it was created, and returns it as stored. A
+// requirement given no status keeps the one it has.
 func (d *DB) UpdateRequirement(r requirements.Requirement, actor string) (requirements.Requirement, error) {
 	if err := r.Normalize(); err != nil {
 		return requirements.Requirement{}, err
@@ -290,10 +297,13 @@ func (d *DB) UpdateRequirement(r requirements.Requirement, actor string) (requir
 			return fmt.Errorf("%w: %s", ErrRequirementNotFound, requirements.Key(r.ID))
 		}
 		before = rs[0]
+		if r.Status == "" {
+			r.Status = before.Status
+		}
 		if _, err := tx.Exec(`UPDATE requirements SET title = ?, description = ?, priority = ?, tags = ?, tests = ?,
-			updated_at = ?, updated_by = ? WHERE id = ?`,
+			status = ?, updated_at = ?, updated_by = ? WHERE id = ?`,
 			r.Title, r.Description, r.Priority, marshalJSONColumn(r.Tags, "[]"), marshalJSONColumn(r.Tests, "[]"),
-			formatReqTime(now), clipActor(actor), r.ID); err != nil {
+			r.Status, formatReqTime(now), clipActor(actor), r.ID); err != nil {
 			return fmt.Errorf("statedb: update requirement: %w", classifyDriverErr(err))
 		}
 		return tx.Commit()
@@ -312,7 +322,7 @@ func (d *DB) UpdateRequirement(r requirements.Requirement, actor string) (requir
 			Actor: actorOrSystem(actor), EventType: string(auditaction.ActionRequirementUpdate),
 			EntityType: "requirement", EntityID: fmt.Sprint(r.ID),
 			Payload: MarshalAuditPayload(map[string]any{
-				"id": r.ID, "title": r.Title, "changed": changed, "tests": testCommands(r.Tests),
+				"id": r.ID, "title": r.Title, "changed": changed, "status": r.Status, "tests": testCommands(r.Tests),
 				"fingerprint": r.Fingerprint(), "previous_fingerprint": before.Fingerprint(),
 			}),
 		})
@@ -336,6 +346,9 @@ func changedRequirementFields(a, b requirements.Requirement) []string {
 	}
 	if marshalJSONColumn(a.Tests, "[]") != marshalJSONColumn(b.Tests, "[]") {
 		out = append(out, "tests")
+	}
+	if a.CurrentStatus() != b.CurrentStatus() {
+		out = append(out, "status")
 	}
 	return out
 }

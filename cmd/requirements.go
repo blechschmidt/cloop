@@ -8,12 +8,16 @@ package cmd
 // hub has them), --json (a framed report) and --no-record (the hub records what
 // it reads back). Run by hand it reads the project's own requirements, records
 // what it finds, and exits 1 when one is not fulfilled — so it can gate CI.
+// With --file it reads them from the spec file instead (Task 20459), and needs
+// neither a hub nor a project database: requirements_spec.go has the spec
+// file's other commands, export, import and validate.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,7 +56,19 @@ model, or given a verdict by hand.
   cloop requirements verdict 4 fulfilled --note "checked by hand on staging"
   cloop requirements history 3
 
-The dashboard's Requirements tab runs the same check on the project's executor.`,
+A requirement is a draft, approved or deprecated (--status); a check checks the
+approved ones unless it is named or told otherwise.
+
+They can also be kept as code, in .cloop/requirements.yaml beside the code they
+govern, reviewed in pull requests:
+
+  cloop requirements export           # write the spec file from the hub's requirements
+  cloop requirements import           # merge the spec file's changes into the hub
+  cloop requirements validate         # check the spec file, line by line
+  cloop requirements check --file .cloop/requirements.yaml   # in CI, with no hub
+
+The dashboard's Requirements tab runs the same check on the project's executor,
+and shows when the spec file in the project's checkout has changed.`,
 	RunE: func(cmd *cobra.Command, args []string) error { return runRequirementsList(cmd) },
 }
 
@@ -112,6 +128,7 @@ var requirementsAddCmd = &cobra.Command{
 		r := requirements.Requirement{Title: args[0]}
 		r.Description, _ = cmd.Flags().GetString("description")
 		r.Priority, _ = cmd.Flags().GetString("priority")
+		r.Status, _ = cmd.Flags().GetString("status")
 		r.Tags, _ = cmd.Flags().GetStringSlice("tag")
 		tests, err := testsFromFlags(cmd)
 		if err != nil {
@@ -128,6 +145,9 @@ var requirementsAddCmd = &cobra.Command{
 			return err
 		}
 		color.New(color.FgGreen, color.Bold).Printf("Added %s: %s\n", requirements.Key(added.ID), added.Title)
+		if added.Status != requirements.StatusApproved {
+			color.New(color.Faint).Printf("It is %s: a check passes it by unless it is named.\n", added.Status)
+		}
 		if !added.Tested() {
 			color.New(color.Faint).Println("It has no tests: a check skips it unless the model is asked (--ai).")
 		}
@@ -138,10 +158,11 @@ var requirementsAddCmd = &cobra.Command{
 var requirementsEditCmd = &cobra.Command{
 	Use:   "edit <id>",
 	Short: "Change a requirement",
-	Long: `Change a requirement's title, description, priority, tags or tests. A flag
-not given leaves its field as it is; --test replaces the tests with the ones
-given, and --clear-tests removes them all. Changing what a requirement says or
-how it is tested makes its earlier verdicts stale.`,
+	Long: `Change a requirement's title, description, priority, tags, tests or status.
+A flag not given leaves its field as it is; --test replaces the tests with the
+ones given, and --clear-tests removes them all. Changing what a requirement says
+or how it is tested makes its earlier verdicts stale; approving or deprecating
+it does not.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id, err := parseRequirementID(args[0])
@@ -166,6 +187,13 @@ how it is tested makes its earlier verdicts stale.`,
 		}
 		if f.Changed("priority") {
 			r.Priority, _ = f.GetString("priority")
+		}
+		r.Status = ""
+		if f.Changed("status") {
+			r.Status, _ = f.GetString("status")
+			if strings.TrimSpace(r.Status) == "" {
+				return fmt.Errorf("--status is one of %s", strings.Join(requirements.Statuses, ", "))
+			}
 		}
 		if f.Changed("tag") {
 			r.Tags, _ = f.GetStringSlice("tag")
@@ -284,7 +312,16 @@ var requirementsCheckCmd = &cobra.Command{
 	Long: `Run each requirement's tests in the project's root, in order, and report
 what they found. A requirement with no tests is skipped — its last verdict,
 a person's or the model's, stands — or, with --ai, assessed by the model
-reading the code. With no ids, every requirement is checked.
+reading the code. With no ids, every approved requirement is checked (--status
+picks others, --all every one); ids name requirements whatever their status.
+
+With --file the requirements are read from a spec file rather than the
+project's database, and nothing is recorded: a plain CI job with no hub and no
+.cloop/state.db can run
+
+  cloop requirements check --file .cloop/requirements.yaml
+
+and a spec file that does not validate fails it, naming each problem's line.
 
 Exits 1 when a requirement is unfulfilled or its check did not work (a test
 timed out or could not start), so a CI job can run it as a gate. A test's
@@ -296,7 +333,8 @@ part — its last 16 KiB — with credentials scrubbed.`,
 func init() {
 	rootCmd.AddCommand(requirementsCmd)
 	requirementsCmd.AddCommand(requirementsListCmd, requirementsShowCmd, requirementsAddCmd, requirementsEditCmd,
-		requirementsRemoveCmd, requirementsVerdictCmd, requirementsHistoryCmd, requirementsCheckCmd)
+		requirementsRemoveCmd, requirementsVerdictCmd, requirementsHistoryCmd, requirementsCheckCmd,
+		requirementsExportCmd, requirementsImportCmd, requirementsValidateCmd)
 
 	for _, c := range []*cobra.Command{requirementsCmd, requirementsListCmd, requirementsShowCmd, requirementsHistoryCmd} {
 		c.Flags().Bool("json", false, "Print JSON")
@@ -307,6 +345,7 @@ func init() {
 		c.Flags().StringSlice("tag", nil, "A tag (repeatable, or comma-separated)")
 		c.Flags().StringArray("test", nil, "A test's shell command, run in the project's root (repeatable)")
 		c.Flags().Duration("test-timeout", 0, "How long each test given may run (default 10m)")
+		c.Flags().String("status", "", "draft, approved or deprecated (a new requirement is approved)")
 	}
 	requirementsEditCmd.Flags().String("title", "", "A new title")
 	requirementsEditCmd.Flags().Bool("clear-tests", false, "Remove every test")
@@ -322,6 +361,10 @@ func init() {
 	f.String("model", "", "Model for --ai")
 	f.Duration("ai-timeout", 5*time.Minute, "How long the model may take over one requirement")
 	f.Duration("timeout", 0, "Stop the whole check after this long (default: no limit beyond each test's)")
+	f.String("file", "", "Check the requirements in this spec file (e.g. "+requirements.SpecFileName+
+		"); needs no hub and no project database, and records nothing")
+	f.StringSlice("status", nil, "With no ids, check the requirements of these statuses (default approved)")
+	f.Bool("all", false, "With no ids, check every requirement, whatever its status")
 }
 
 // requirementsProject is the project in the working directory, opened.
@@ -430,6 +473,9 @@ func runRequirementsList(cmd *cobra.Command) error {
 		if prio == "" {
 			prio = "-"
 		}
+		if r.CurrentStatus() != requirements.StatusApproved {
+			note += " [" + r.CurrentStatus() + "]"
+		}
 		verdictColor(verdict).Printf("%-6s %-11s", requirements.Key(r.ID), verdict)
 		fmt.Printf(" %-6s %-8s %s%s\n", prio, tests, r.Title, note)
 	}
@@ -448,21 +494,30 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 	}
 	noRecord, _ := f.GetBool("no-record")
 	specArg, _ := f.GetString("spec")
+	fileArg, _ := f.GetString("file")
 	assess, _ := f.GetBool("ai")
 	total, _ := f.GetDuration("timeout")
+	statuses, err := checkStatuses(f)
+	if err != nil {
+		return fail(err)
+	}
 	workDir, err := os.Getwd()
 	if err != nil {
 		return fail(err)
 	}
 
-	// What to check: the hub's spec, or the project's own requirements.
+	// What to check: the hub's spec, a spec file, or the project's own
+	// requirements.
 	var (
 		reqs []requirements.Requirement
 		goal string
 		st   *state.ProjectState
 		db   *statedb.DB
 	)
-	if specArg != "" {
+	switch {
+	case specArg != "" && fileArg != "":
+		return fail(fmt.Errorf("give --spec or --file, not both"))
+	case specArg != "":
 		if len(args) > 0 {
 			return fail(fmt.Errorf("give ids or --spec, not both"))
 		}
@@ -471,7 +526,17 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 			return fail(err)
 		}
 		reqs, goal = sp.Requirements, sp.Goal
-	} else {
+	case fileArg != "":
+		// The spec file alone: no hub, no project database, nothing
+		// recorded — a CI job's checkout has neither.
+		sf, _, err := requirements.LoadSpecFile(workDir, fileArg)
+		if err != nil {
+			return fail(specFileErr(fileArg, err))
+		}
+		if reqs, err = selectRequirements(sf.Requirements, args); err != nil {
+			return fail(err)
+		}
+	default:
 		p, err := openRequirementsProject()
 		if err != nil {
 			return fail(err)
@@ -495,6 +560,13 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 	}
 	if noRecord {
 		db = nil
+	}
+	// Named requirements are checked whatever their status; otherwise only
+	// the statuses asked for — approved, unless told — and the hub's spec
+	// is checked as the hub sent it.
+	var unasked []requirements.Requirement
+	if len(args) == 0 && specArg == "" {
+		reqs, unasked = byStatus(reqs, statuses)
 	}
 	// Without --ai a requirement nothing tests has nothing to run: it is
 	// skipped, not recorded as unverified over a verdict reached before.
@@ -538,6 +610,9 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 			color.New(color.Faint).Printf("%-6s %-11s no tests: ask the model (--ai), or record a verdict\n",
 				requirements.Key(r.ID), "skipped")
 		}
+		if len(unasked) > 0 {
+			color.New(color.Faint).Printf("Not checked: %s — name them, or pass --status or --all\n", describeUnasked(unasked))
+		}
 	}
 
 	ctx := context.Background()
@@ -576,7 +651,7 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 		return clijson.Emit(os.Stdout, report)
 	}
 	if len(reqs) == 0 {
-		if len(skipped) == 0 {
+		if len(skipped) == 0 && len(unasked) == 0 {
 			fmt.Println("No requirements to check.")
 		}
 		return nil
@@ -620,6 +695,70 @@ func selectRequirements(all []requirements.Requirement, args []string) ([]requir
 		}
 	}
 	return out, nil
+}
+
+// checkStatuses is the statuses a check without ids checks: --all, --status,
+// or approved.
+func checkStatuses(f interface {
+	GetBool(string) (bool, error)
+	GetStringSlice(string) ([]string, error)
+}) ([]string, error) {
+	if all, _ := f.GetBool("all"); all {
+		return requirements.Statuses, nil
+	}
+	given, _ := f.GetStringSlice("status")
+	if len(given) == 0 {
+		return []string{requirements.StatusApproved}, nil
+	}
+	var out []string
+	for _, s := range given {
+		s, err := requirements.NormalizeStatus(s)
+		if err != nil {
+			return nil, err
+		}
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// byStatus splits reqs into those of the statuses given and the rest.
+func byStatus(reqs []requirements.Requirement, statuses []string) (in, out []requirements.Requirement) {
+	for _, r := range reqs {
+		if slices.Contains(statuses, r.CurrentStatus()) {
+			in = append(in, r)
+		} else {
+			out = append(out, r)
+		}
+	}
+	return in, out
+}
+
+// describeUnasked says which requirements a check passed by for their status:
+// "2 drafts (R-4, R-5), 1 deprecated (R-9)".
+func describeUnasked(reqs []requirements.Requirement) string {
+	var parts []string
+	for _, status := range requirements.Statuses {
+		var keys []string
+		for _, r := range reqs {
+			if r.CurrentStatus() == status {
+				keys = append(keys, requirements.Key(r.ID))
+			}
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		n, what := len(keys), status
+		if status == requirements.StatusDraft && n > 1 {
+			what = "drafts"
+		}
+		if n > 6 {
+			keys = append(keys[:6], "…")
+		}
+		parts = append(parts, fmt.Sprintf("%d %s (%s)", n, what, strings.Join(keys, ", ")))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func hasUntested(reqs []requirements.Requirement) bool {

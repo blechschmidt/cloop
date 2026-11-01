@@ -67,6 +67,29 @@ const (
 // Priorities lists the priorities in order of weight.
 var Priorities = []string{PriorityMust, PriorityShould, PriorityCould}
 
+// Statuses: where a requirement is in its life (Task 20459). A draft is
+// proposed and not yet agreed; an approved requirement is one the project
+// must keep, and what a check checks unless it is told otherwise; a
+// deprecated one is kept for its history and no longer checked.
+const (
+	StatusDraft      = "draft"
+	StatusApproved   = "approved"
+	StatusDeprecated = "deprecated"
+)
+
+// Statuses lists the statuses in the order of a requirement's life.
+var Statuses = []string{StatusDraft, StatusApproved, StatusDeprecated}
+
+// ValidStatus reports whether s is one of Statuses.
+func ValidStatus(s string) bool {
+	for _, q := range Statuses {
+		if s == q {
+			return true
+		}
+	}
+	return false
+}
+
 // ErrInvalid wraps every validation failure, so a caller can answer it as the
 // caller's mistake (400) rather than its own.
 var ErrInvalid = errors.New("invalid requirement")
@@ -105,16 +128,28 @@ func (t Test) Label() string {
 
 // Requirement is one thing a project must keep doing.
 type Requirement struct {
-	ID          int       `json:"id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description,omitempty"`
-	Priority    string    `json:"priority,omitempty"`
-	Tags        []string  `json:"tags,omitempty"`
-	Tests       []Test    `json:"tests,omitempty"`
-	CreatedAt   time.Time `json:"created_at,omitzero"`
-	UpdatedAt   time.Time `json:"updated_at,omitzero"`
-	CreatedBy   string    `json:"created_by,omitempty"`
-	UpdatedBy   string    `json:"updated_by,omitempty"`
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Priority    string `json:"priority,omitempty"`
+	// Status is one of Statuses. Empty means none was given: a new
+	// requirement is approved, a changed one keeps the status it had.
+	Status    string    `json:"status,omitempty"`
+	Tags      []string  `json:"tags,omitempty"`
+	Tests     []Test    `json:"tests,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+	CreatedBy string    `json:"created_by,omitempty"`
+	UpdatedBy string    `json:"updated_by,omitempty"`
+}
+
+// CurrentStatus is r's status, approved when it has none: every requirement
+// written before statuses existed was one the project kept.
+func (r Requirement) CurrentStatus() string {
+	if r.Status == "" {
+		return StatusApproved
+	}
+	return r.Status
 }
 
 // Spec is what `cloop requirements check --spec` is handed: the requirements
@@ -201,31 +236,22 @@ func (r Requirement) Tested() bool { return len(r.Tests) > 0 }
 // de-duplicated; a test's name and command are trimmed. It never truncates:
 // a requirement saved shorter than it was written would say something else.
 func (r *Requirement) Normalize() error {
-	r.Title = strings.TrimSpace(r.Title)
-	switch {
-	case r.Title == "":
-		return invalid("a requirement needs a title")
-	case !utf8.ValidString(r.Title) || strings.ContainsAny(r.Title, "\r\n"):
-		return invalid("the title must be one line of text")
-	case utf8.RuneCountInString(r.Title) > MaxTitleRunes:
-		return invalid("the title is longer than %d characters", MaxTitleRunes)
-	}
-	r.Description = strings.TrimSpace(r.Description)
-	if !utf8.ValidString(r.Description) {
-		return invalid("the description is not valid text")
-	}
-	if utf8.RuneCountInString(r.Description) > MaxDescriptionRunes {
-		return invalid("the description is longer than %d characters", MaxDescriptionRunes)
-	}
-	r.Priority = strings.ToLower(strings.TrimSpace(r.Priority))
-	if r.Priority != "" && !validPriority(r.Priority) {
-		return invalid("priority %q is not one of %s", r.Priority, strings.Join(Priorities, ", "))
-	}
-	tags, err := normalizeTags(r.Tags)
-	if err != nil {
+	var err error
+	if r.Title, err = NormalizeTitle(r.Title); err != nil {
 		return err
 	}
-	r.Tags = tags
+	if r.Description, err = NormalizeDescription(r.Description); err != nil {
+		return err
+	}
+	if r.Priority, err = NormalizePriority(r.Priority); err != nil {
+		return err
+	}
+	if r.Status, err = NormalizeStatus(r.Status); err != nil {
+		return err
+	}
+	if r.Tags, err = normalizeTags(r.Tags); err != nil {
+		return err
+	}
 	if len(r.Tests) > MaxTests {
 		return invalid("a requirement has at most %d tests", MaxTests)
 	}
@@ -242,11 +268,74 @@ func (r *Requirement) Normalize() error {
 	r.Tests = tests
 	r.CreatedBy = truncateRunes(strings.TrimSpace(r.CreatedBy), MaxActorRunes)
 	r.UpdatedBy = truncateRunes(strings.TrimSpace(r.UpdatedBy), MaxActorRunes)
+	return r.checkEncodedSize()
+}
+
+// checkEncodedSize refuses a requirement too large to send to an executor.
+func (r Requirement) checkEncodedSize() error {
 	if n := r.EncodedSize(); n > MaxEncodedBytes {
 		return invalid("the requirement and its tests take %d bytes to send to an executor, more than %d: "+
 			"shorten its description or move a long command into a script in the repository", n, MaxEncodedBytes)
 	}
 	return nil
+}
+
+// NormalizeTitle is a title trimmed, or why it is not one: empty, more than
+// one line, or longer than MaxTitleRunes. The field checks are exported for
+// the spec file's parser, which reports each against the line it is on.
+func NormalizeTitle(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	switch {
+	case s == "":
+		return s, invalid("a requirement needs a title")
+	case !utf8.ValidString(s) || strings.ContainsAny(s, "\r\n"):
+		return s, invalid("the title must be one line of text")
+	case utf8.RuneCountInString(s) > MaxTitleRunes:
+		return s, invalid("the title is longer than %d characters", MaxTitleRunes)
+	}
+	return s, nil
+}
+
+// NormalizeDescription is a description trimmed, or why it is not one.
+func NormalizeDescription(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if !utf8.ValidString(s) {
+		return s, invalid("the description is not valid text")
+	}
+	if utf8.RuneCountInString(s) > MaxDescriptionRunes {
+		return s, invalid("the description is longer than %d characters", MaxDescriptionRunes)
+	}
+	return s, nil
+}
+
+// NormalizePriority is a priority lower-cased, or why it is not one of
+// Priorities. Empty is no priority.
+func NormalizePriority(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s != "" && !validPriority(s) {
+		return s, invalid("priority %q is not one of %s", truncateRunes(s, 32), strings.Join(Priorities, ", "))
+	}
+	return s, nil
+}
+
+// NormalizeStatus is a status lower-cased, or why it is not one of Statuses.
+// Empty is none given.
+func NormalizeStatus(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s != "" && !ValidStatus(s) {
+		return s, invalid("status %q is not one of %s", truncateRunes(s, 32), strings.Join(Statuses, ", "))
+	}
+	return s, nil
+}
+
+// NormalizeTags is tags lower-cased and de-duplicated, or why they are not
+// tags.
+func NormalizeTags(tags []string) ([]string, error) { return normalizeTags(tags) }
+
+// Normalize is t trimmed, or why it is not a test.
+func (t Test) Normalize() (Test, error) {
+	err := t.normalize()
+	return t, err
 }
 
 func (t *Test) normalize() error {
@@ -320,6 +409,27 @@ func (r Requirement) Fingerprint() string {
 		Description string `json:"description"`
 		Tests       []Test `json:"tests"`
 	}{r.Title, r.Description, tests})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:16])
+}
+
+// SyncFingerprint is Fingerprint and what a spec file adds to it — priority,
+// tags and status (Task 20459). Two requirements with the same SyncFingerprint
+// read the same in the hub and in .cloop/requirements.yaml, so the three-way
+// merge (merge.go) compares these first and looks at fields only when they
+// differ. Fingerprint alone stays what a verdict is about: a requirement
+// approved or re-tagged says the same thing it did.
+func (r Requirement) SyncFingerprint() string {
+	tags := r.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	b, _ := json.Marshal(struct {
+		Fingerprint string   `json:"fingerprint"`
+		Priority    string   `json:"priority"`
+		Tags        []string `json:"tags"`
+		Status      string   `json:"status"`
+	}{r.Fingerprint(), r.Priority, tags, r.CurrentStatus()})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:16])
 }

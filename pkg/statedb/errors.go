@@ -196,6 +196,11 @@ var (
 	// ErrRequirementCheckRunning indicates a check of the project's
 	// requirements is already running, on this hub member or another.
 	ErrRequirementCheckRunning = errors.New("statedb: a requirements check is already running")
+
+	// ErrRequirementSpecChanged indicates an import of the requirements spec
+	// file would now do something other than what its importer reviewed: the
+	// hub's requirements or the merge base changed in between (Task 20459).
+	ErrRequirementSpecChanged = errors.New("statedb: the requirements changed since the import was reviewed")
 )
 
 // classifyDriverErr inspects a raw error returned by the modernc.org/sqlite
@@ -275,7 +280,8 @@ func HTTPStatus(err error) int {
 		errors.Is(err, ErrExecutorNotFound), errors.Is(err, ErrAPITokenNotFound),
 		errors.Is(err, ErrAttachmentNotFound), errors.Is(err, ErrRequirementNotFound):
 		return http.StatusNotFound
-	case errors.Is(err, ErrStaleVersion), errors.Is(err, ErrRequirementCheckRunning):
+	case errors.Is(err, ErrStaleVersion), errors.Is(err, ErrRequirementCheckRunning),
+		errors.Is(err, ErrRequirementSpecChanged):
 		return http.StatusConflict
 	case errors.Is(err, ErrDBLocked):
 		return http.StatusServiceUnavailable

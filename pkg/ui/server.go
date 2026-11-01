@@ -736,6 +736,10 @@ type Server struct {
 	// The requirements checks this member is running (Task 20458), so
 	// shutdown can stop them. See requirements_api.go.
 	reqChecks requirementChecks
+	// The spec-file reads this member is running, one per project, and the
+	// parses of what they read (Task 20459). See requirements_spec_api.go.
+	specReads  specReadJobs
+	specParses specParses
 
 	// Multi-project state cache
 	projMu sync.RWMutex
@@ -1776,6 +1780,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// it did (Task 20458): a check left running would read as lapsed only
 	// at its deadline, hours on.
 	s.reqChecks.stop(5 * time.Second)
+	// And the spec-file reads (Task 20459): a read cut short records only
+	// that it got nothing.
+	s.specReads.stop(5 * time.Second)
 	// Kill any parked `claude auth login` children. Each one is a subprocess
 	// blocked on stdin waiting for a pasted code, so on a multi-user hub an
 	// unclean stop could otherwise leave one per half-finished login.

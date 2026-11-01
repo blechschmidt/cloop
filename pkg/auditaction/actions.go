@@ -78,6 +78,9 @@ const (
 	// ActionRequirementVerdict records a person recording a requirement's
 	// verdict by hand.
 	ActionRequirementVerdict Action = "requirement.verdict"
+	// ActionRequirementImport records the project's requirements spec file
+	// (.cloop/requirements.yaml) merged into the hub (Task 20459).
+	ActionRequirementImport Action = "requirement.import"
 
 	// ── step ───────────────────────────────────────────────────────────────
 

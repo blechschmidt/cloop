@@ -180,6 +180,8 @@ started crashing again — fails.
 | `pkg/executor/resultframe` | `FuzzRoundTrip` | Every payload `resultframe.Write` accepts comes back byte for byte through any chunking, past transcript around it. |
 | `pkg/executor/gitcreds` | `FuzzNoCredentialLeavesItsGrantsHost` | Over (origin URL, grant host, allowlist pattern): a workspace credential is leased only for an origin on its grant's own forge host, is bound to that host, and scopes its header there (Task 20423). |
 | `pkg/forgehost` | `FuzzCanonical` | The one host comparison every credential path uses: canonical forms are stable, `Equal` agrees with them, and nothing equal to `github.com` is a suffix, prefix or look-alike of it. |
+| `pkg/requirements` | `FuzzParseSpecFile` | `.cloop/requirements.yaml`, which the hub parses as a project's executor sent it: any input either reads as requirements within the database's bounds — which then export and read back — or is refused with line-numbered problems, never a panic (Task 20459). |
+| `pkg/requirements` | `FuzzSpecFileRoundTrip` | Every requirement the database can hold comes back from an exported spec file exactly as it went in. |
 
 ### Adding a new fuzz target
 

@@ -356,3 +356,7 @@ func cleanCommit(c string) string {
 
 // oneLine collapses whitespace runs, newlines included, to single spaces.
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// CleanCommit is c as a commit id — hex, at most 64 characters, lower-cased —
+// or "" when it is not one: what an executor reports is not trusted to be one.
+func CleanCommit(c string) string { return cleanCommit(c) }
