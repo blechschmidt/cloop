@@ -157,6 +157,62 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/ci-step.sh --why
 
+  requirements:
+    name: cloop's own requirements hold
+    runs-on: ubuntu-latest
+    # Observed locally: 131 s from a fresh clone with Go's caches warm, most of
+    # it compiling pkg/ui's and tests/security's test binaries once each.
+    timeout-minutes: 30
+    # .cloop/requirements.yaml is cloop's spec of itself: each guarantee the
+    # documentation makes that a test can show — the hub starts no process on
+    # its own host but through an executor, every mutating route enforces RBAC
+    # through authz.Enforced, a state-changing request needs the hub's origin,
+    # migrations stay additive, … — is an approved requirement pointing at the
+    # test that proves it (Task 20466). This job runs
+    #
+    #   cloop requirements check --file .cloop/requirements.yaml --json
+    #
+    # built from the commit, through `make requirements-check`, which isolates
+    # it as hometest isolates a test binary — a fresh HOME, every CLOOP_*
+    # variable unset, Go's caches kept — and fails when a requirement does not
+    # hold. "Say why the job failed" then annotates each failing requirement by
+    # its R-<n> on its line of the spec file, where scripts/ci-why.sh reads it.
+    # Most of these tests also run in the jobs their packages belong to; this
+    # one holds the spec to them, and tests/docs holds every test name the spec
+    # gives to a test that exists, since a -run pattern matching nothing passes.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          # The whole history and its tags: R-8 is the changelog check, which
+          # lists the commits since the latest release.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: The checks do not depend on a clean home directory
+        # The same decoys the unit suite's jobs seed, and the same check after:
+        # nothing the requirements' tests do may touch the runner's home.
+        run: ./scripts/home-decoys.sh seed
+
+      - name: Every approved requirement in .cloop/requirements.yaml holds
+        run: make requirements-check
+
+      - name: The seeded home directory was left untouched
+        if: always()
+        run: ./scripts/home-decoys.sh verify
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above. A
+        # requirement the check found failing is annotated by its R-<n>.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   vulnerability-scan:
     name: Vulnerability scan
     runs-on: ubuntu-latest

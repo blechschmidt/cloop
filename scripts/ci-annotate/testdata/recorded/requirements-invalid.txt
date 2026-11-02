@@ -1,0 +1,10 @@
+
+<<<cloop-json:begin>>>
+{
+  "error": ".cloop/requirements.yaml is not a valid requirements spec (3 problems):\n  .cloop/requirements.yaml:3:5: R-1 has no title\n  .cloop/requirements.yaml:4:5: R-1 has an unknown key \"titel\" (did you mean \"title\"?): the keys are id, title, status, priority, tags, details, tests\n  .cloop/requirements.yaml:6:5: R-1 is already the id of the requirement on line 3: an id names one requirement"
+}
+<<<cloop-json:end>>>
+Error: .cloop/requirements.yaml is not a valid requirements spec (3 problems):
+  .cloop/requirements.yaml:3:5: R-1 has no title
+  .cloop/requirements.yaml:4:5: R-1 has an unknown key "titel" (did you mean "title"?): the keys are id, title, status, priority, tags, details, tests
+  .cloop/requirements.yaml:6:5: R-1 is already the id of the requirement on line 3: an id names one requirement

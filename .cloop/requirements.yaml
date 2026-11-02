@@ -1,0 +1,345 @@
+# What this project must keep doing, kept beside its code (cloop requirements).
+#
+# Review changes here like code. `cloop requirements import` brings them into the
+# hub, `cloop requirements export` writes the hub's back, and
+# `cloop requirements check --file .cloop/requirements.yaml` runs the approved
+# requirements' tests without a hub. An id is never given to a second
+# requirement. Format: docs/guides/requirements.md#requirements-as-code
+
+version: 1
+requirements:
+  - id: R-1
+    title: The hub shall start a process on its own host only through the executor boundary.
+    status: approved
+    priority: must
+    tags: [security, host-execution]
+    details: |-
+      No HTTP handler of pkg/ui or pkg/apiserver, and no background entry point of
+      the hub — its construction, Run, Start and the sweeps and watchers they start —
+      reaches exec.Command or syscall.Exec except through the executor boundary: a
+      call-graph analysis of the whole module, with interface calls resolved to every
+      implementation, finds none, and finds a violation seeded on purpose. With
+      executors.allow_host_process false the host executor is refused at
+      registration, resolution and start, the policy only tightens, the endpoints
+      that touch the host answer 409, and the dashboard's model calls run on the
+      project's executor. Promised in docs/security/model.md, "The no-host-execution
+      guarantee".
+    tests:
+      - name: the call-graph gate and strict mode
+        command: go test ./tests/security -run '^(TestNoHandlerReachesProcessExecution|TestAnalysisDetectsASeededViolation|TestExecutorBoundaryIsNotTraversed|TestInterfaceCallsAreResolved|TestBackgroundAnalysisDetectsASeededViolation|TestStrictModeRefusesHostExecutorAtRegistration|TestStrictModeRefusesHostExecutorAtStart|TestStrictModeRefusesAtResolve|TestApplyHostExecutionPolicyEvictsHostDrivers|TestPolicyOnlyTightens|TestGatedHandlersRefuseUnderStrictMode|TestGatedListsAgree|TestGatedStepsRunNothingUnderStrictMode|TestGatedStepListsAgree)$'
+        timeout: 20m
+      - name: the dashboard's model calls stay off the hub
+        command: go test ./pkg/ui -run '^(TestModelCallsNeverRunOnTheHubUnderStrictMode|TestInlineReplaysStayOffTheHubForAProjectInASandbox)$'
+        timeout: 20m
+  - id: R-2
+    title: Every mutating route shall enforce RBAC through authz.Enforced.
+    status: approved
+    priority: must
+    tags: [security, rbac]
+    details: |-
+      Every route of the hub's route table declares a permission, every route that
+      takes a mutating method declares a permission that allows a change, and a
+      read-only route refuses a mutating method. Whether a role policy is in force at
+      all is decided in one place, authz.Enforced — single sign-on with a written
+      policy — which every reporter asks and nothing copies. Promised in
+      docs/security/model.md, "Identity, roles and permissions" and "When RBAC is in
+      force".
+    tests:
+      - name: every route declares a permission
+        command: go test ./pkg/ui -run '^(TestEveryRouteDeclaresAPermission|TestMutatingRoutesRequireMutatingPermissions|TestRegisterRoutesUsesTheRouteTable|TestReadOnlyRoutesRejectMutatingMethods)$'
+        timeout: 20m
+      - name: the predicate
+        command: go test ./pkg/authz -run '^TestEnforcedIsSSOAndAWrittenPolicy$'
+      - name: one definition, asked by every reporter
+        command: go test ./tests/arch -run '^(TestRBACEnforcementHasOneDefinition|TestDefaultRoleUsesAreStillListed|TestEveryRBACReporterAsksThePredicate|TestRBACGateFlagsASecondCopy)$'
+  - id: R-3
+    title: The hub shall refuse a state-changing request that carries neither its own origin nor a bearer token.
+    status: approved
+    priority: must
+    tags: [security, http]
+    details: |-
+      A cookie-bearing request from a page elsewhere — another site, another origin
+      of the same site, a browser too old to send Sec-Fetch-Site — is refused with
+      403 unless it carries a bearer token; a request body that is not
+      application/json is refused with 415; a hub without sign-in refuses a Host it
+      does not answer to with 421, so DNS rebinding reaches nothing; a WebSocket's
+      Origin must match exactly; and the hub answers no origin's CORS read. Promised
+      in docs/reference/configuration.md, "TLS", and docs/security/model.md,
+      "Requests from other origins".
+    tests:
+      - name: every unsafe route, through the real router
+        command: go test ./pkg/ui -run '^(TestEveryUnsafeRouteRefusesAPageElsewhere|TestUnsafeRoutesAdmitTheHubsOwnPagesAndBearerTokens|TestMultipartRoutesAreRoutes|TestCrossSiteWritableRoutesAreJustified|TestHandlersReadJSONOnlyThroughTheDecoder|TestDNSRebindingIsRefusedOnAnOpenHub|TestTheHubGrantsNoCrossOriginRead|TestWSOriginAllowed|TestWSOriginAllowedHonoursExternalURL)$'
+        timeout: 20m
+      - name: the decision
+        command: go test ./pkg/sameorigin -run '^(TestCheckUnsafe|FuzzCheckUnsafe|TestHostAllowed|FuzzHostAllowed)$'
+      - name: JSON bodies only
+        command: go test ./pkg/jsonbody -run '^TestDecode$'
+      - name: the agent's WebSocket
+        command: go test ./pkg/executor/remote -run '^TestHubCheckOrigin$'
+  - id: R-4
+    title: The hub's environment, its root key included, shall never reach a workload on an isolating executor.
+    status: approved
+    priority: must
+    tags: [security, secrets]
+    details: |-
+      A workload on an isolating executor — a container, a VM, a device, a Pod —
+      starts from the environment its lease gives it, never from the hub's:
+      CLOOP_SECRET_KEY, which unseals every credential in the broker, and
+      CLOOP_UI_TOKEN stay on the hub, and a driver that does not declare its
+      isolation is treated as the host. Secret values never enter a container's
+      argv, a Pod object carries no environment value — each is read from the run's
+      lease Secret — and a requirement's tests never see the root key. Promised in
+      docs/security/threat-model.md (the entry for Task 20234) and
+      docs/security/model.md, "What is scrubbed where".
+    tests:
+      - name: dispatch
+        command: go test ./pkg/ui -run '^(TestIsolatedExecutorDoesNotInheritTheHubEnvironment|TestUndeclaredIsolationIsTreatedAsHostExposure|TestHostExecutorStillInheritsTheEnvironment)$'
+        timeout: 20m
+      - name: container argv and Pod objects
+        command: go test ./tests/security -run '^(TestContainerSecretsNeverEnterArgv|TestKubernetesPodCarriesNoEnvironmentValue)$'
+        timeout: 20m
+      - name: a requirement's tests
+        command: go test ./pkg/requirements -run '^TestTheOutputIsBoundedAndScrubbed$'
+  - id: R-5
+    title: A schema migration shall be additive unless it is acknowledged as breaking.
+    status: approved
+    priority: must
+    tags: [statedb, compatibility]
+    details: |-
+      Each migration is classified when it is applied — additive, additive-columns
+      or breaking — and an older binary opens a database migrated past it only when
+      no migration it lacks is breaking, so a rolling upgrade and a rollback keep
+      working. No writer replaces a whole row (INSERT OR REPLACE, a delete and an
+      insert again), which would erase a column the writing binary does not know,
+      and every breaking migration is acknowledged in a list a reviewer reads.
+      Promised in docs/operations/runbook.md, "Rollback".
+    tests:
+      - name: no writer replaces rows
+        command: go test ./tests/arch -run '^(TestNoWriterReplacesRows|TestRowReplaceAllowancesAreStillUsed|TestRowReplaceGateFlagsWhatItShould)$'
+      - name: the classifier
+        command: go test ./pkg/statedb -run '^(TestClassifyMigration|TestShippedMigrationsThatOnlyAppendAreAdditive|TestShippedVerdictsAreLeftAsTheyWere|TestEveryBreakingMigrationIsAcknowledged|TestAddColumnIsAdditiveWhenAnOlderBinaryCannotTripOverIt|TestAColumnsVerdictAheadOpensAndItsColumnSurvives|TestOnlyARewrittenTableGetsTheColumnsVerdict|TestColumnsVerdictShapes)$'
+  - id: R-6
+    title: The audit event reference shall list exactly the actions the hub emits.
+    status: approved
+    priority: must
+    tags: [audit, docs]
+    details: |-
+      docs/reference/audit-events.md is rendered from pkg/auditaction's registry
+      (make docs-audit); every emission site names a registered action, every action
+      constant and enum has a registry entry, and every action a document cites is
+      live. Promised in docs/reference/audit-events.md.
+    tests:
+      - name: the reference
+        command: go test ./tests/docs -run '^(TestAuditEventsReference|TestAuditEventsReferenceIsSubstantial|TestActionCitationsResolve|TestSecurityClaimsCiteLiveActions)$'
+        timeout: 20m
+      - name: the emission sites
+        command: go test ./tests/arch -run '^(TestEveryEmittedActionIsRegistered|TestEveryActionEnumMapsToARegisteredAction|TestEveryActionConstantHasARegistryEntry|TestEveryNamedTypeExists|TestEveryActionCarrierTypeIsClassified)$'
+  - id: R-7
+    title: The dashboard's first paint shall stay within its byte budget.
+    status: approved
+    priority: should
+    tags: [ui, performance]
+    details: |-
+      What a browser downloads before the dashboard first paints — index.html and the
+      scripts and styles it loads eagerly, gzipped as the hub serves them — stays
+      within the budget pkg/ui/assetbudget_test.go sets (eagerWireBudgetBytes), and
+      the chart library loads only with the tabs that draw charts. A new tab or
+      panel goes into a deferred script. Stated in CONTRIBUTING.md, "Guarantees are
+      requirements".
+    tests:
+      - name: the budget
+        command: go test ./pkg/ui -run '^(TestStaticAssets_FirstPaintBudget|TestStaticAssets_ChartLibraryIsNotEager)$'
+        timeout: 20m
+  - id: R-8
+    title: Every feat, fix or perf commit since the latest release shall have a CHANGELOG entry that names its task.
+    status: approved
+    priority: must
+    tags: [release, changelog]
+    details: |-
+      A commit typed feat, fix or perf that names a task — (Task N) — needs a line
+      added to CHANGELOG.md since the latest release tag, under [Unreleased] or a
+      newer version, that names the task; one that names no task adds a line of its
+      own. This is CI's changelog job, make changelog-check. It reads the whole
+      history and the tags, so it cannot judge a shallow clone. Promised in
+      CONTRIBUTING.md, "Committing".
+    tests:
+      - name: make changelog-check
+        command: make changelog-check
+  - id: R-9
+    title: A hub without sign-in shall listen on loopback only, unless the operator acknowledges the exposure.
+    status: approved
+    priority: must
+    tags: [security, network]
+    details: |-
+      A hub with neither ui.oidc nor a static token lets anyone who reaches it start
+      runs, so whatever address it is given — the default, 0.0.0.0, ::, the host's
+      own address — it binds loopback or refuses to start; only
+      ui.allow_unauthenticated_network lets it out, and then it warns at every
+      start. Loopback is read from the address, never resolved. Promised in
+      docs/reference/configuration.md, "Web UI (cloop ui)", and
+      docs/security/model.md, "Network exposure".
+    tests:
+      - name: the bind decision
+        command: go test ./pkg/exposure -run '^(TestBindAddressForEveryAuthAndListen|TestAcknowledgementNeverWidensTheDefault|TestLoopbackIsDecidedFromTheAddressNotTheResolver|FuzzDecideNeverOpensAnOpenHub)$'
+      - name: a real server
+        command: go test ./tests/security -run '^(TestAnOpenHubNeverListensBeyondLoopback|TestOnlyTheAcknowledgementLetsAnOpenHubOut)$'
+        timeout: 20m
+  - id: R-10
+    title: Every comparison of a secret, token, digest or signature shall take constant time.
+    status: approved
+    priority: must
+    tags: [security, secrets]
+    details: |-
+      tests/security finds every == or != on a value whose name says it is a secret,
+      a token, a digest, a MAC or a signature and that is not a constant, and every
+      comparison of a known secret goes through crypto/subtle. Promised in
+      docs/security/model.md, "Lease and token invariants".
+    tests:
+      - name: the comparison gate
+        command: go test ./tests/security -run '^(TestSecretComparisonsAreConstantTime|TestKnownSecretComparisonsUseSubtle)$'
+        timeout: 20m
+  - id: R-11
+    title: Every package whose tests can reach per-user state shall isolate the home directory in TestMain.
+    status: approved
+    priority: must
+    tags: [tests, hermetic]
+    details: |-
+      A package that resolves a path under the user's home — the projects registry,
+      the global budget, profiles, plugins, Claude credentials — and has tests calls
+      hometest.Isolate in TestMain, so a test run writes nothing to the machine it
+      runs on; CI also seeds the home directory first and checks afterwards that
+      nothing changed it. Promised in docs/reference/configuration.md, "Per-user
+      state: CLOOP_HOME".
+    tests:
+      - name: the hermetic gate
+        command: go test ./tests/hermetic -run '^(TestPackagesReachingPerUserStateIsolateIt|TestExemptionsAreStillWarranted|TestGateRecognisesTheCanonicalTestMain|TestGateDetectsUserHomeDir)$'
+  - id: R-12
+    title: The HTTP API reference shall list exactly the routes the hub and cloop serve register.
+    status: approved
+    priority: should
+    tags: [docs, api]
+    details: |-
+      docs/reference/http-api.md is rendered from the route tables of pkg/ui and
+      pkg/apiserver (make docs-api): a route added, removed or given another
+      permission without regenerating the page fails. Promised in
+      docs/reference/http-api.md.
+    tests:
+      - name: the reference
+        command: go test ./tests/docs -run '^(TestHTTPAPIReference|TestHTTPAPIReferenceIsSubstantial)$'
+        timeout: 20m
+  - id: R-13
+    title: The hub shall read a project's requirements spec file only on the project's executor.
+    status: approved
+    priority: must
+    tags: [security, requirements]
+    details: |-
+      The Requirements tab reads .cloop/requirements.yaml by dispatching cloop
+      requirements validate --json to the project's executor, with the project's
+      lease, and parses the bytes it prints itself; nothing the hub serves opens the
+      file on its own host. Promised in docs/guides/requirements.md, "In the
+      dashboard".
+    tests:
+      - name: the call-graph check
+        command: go test ./tests/security -run '^(TestTheHubReadsTheSpecFileOnlyOnTheProjectsExecutor|TestSpecFileCheckFlagsWhatItShould)$'
+        timeout: 20m
+  - id: R-14
+    title: Every metrics family the hub registers shall have a recording site in the code.
+    status: approved
+    priority: should
+    tags: [metrics, observability]
+    details: |-
+      A registered family nothing records exports a constant zero that reads as a
+      healthy value: an AST gate finds a recording call for every family in
+      pkg/hubmetrics' registry, and docs/operations/metrics.md lists the catalog,
+      the families that are silent on purpose among it. Promised in
+      docs/operations/metrics.md.
+    tests:
+      - name: the recording gate
+        command: go test ./pkg/hubmetrics -run '^(TestEveryFamilyIsRecorded|TestDocListsExactlyTheSilentFamilies|TestRecordedGateFlagsWhatItShould|TestCatalogVarsCoverTheRegistry|TestCatalogIsDocumented)$'
+  - id: R-15
+    title: Every package of the module, other than a command or a test harness, shall be imported by another package.
+    status: approved
+    priority: should
+    tags: [hygiene]
+    details: |-
+      A package nothing imports still builds, vets clean and passes its own tests,
+      so nothing else notices it: pkg/adr was a complete feature in that state for
+      months. tests/arch's orphan gate fails one, and each of its exemptions must say
+      why. Promised in CONTRIBUTING.md, "Unreferenced packages".
+    tests:
+      - name: the orphan gate
+        command: go test ./tests/arch -run '^(TestNoOrphanedPackages|TestExemptionsAreStillWarranted|TestOrphansClassification|TestGateSeesTheRealModule)$'
+  - id: R-16
+    title: A firewall allow list shall open a cloud metadata service only by naming its address.
+    status: approved
+    priority: must
+    tags: [security, firewall]
+    details: |-
+      A metadata service hands whatever runs on a machine that machine's cloud
+      identity, so an allow-list prefix that merely contains one — 169.254.0.0/16
+      around 169.254.169.254, fc00::/7 around fd00:ec2::254 — opens everything in the
+      range but the service. The packet filter and the egress broker reach the same
+      verdict for every address, and a project's rules cannot name what its
+      executor's rules only contain. Promised in docs/guides/firewall.md, "Cloud
+      metadata services".
+    tests:
+      - name: no allow list contains a service
+        command: go test ./tests/security -run '^TestNoAllowlistReachesAMetadataServiceByContainingIt$'
+        timeout: 20m
+      - name: the filter and the broker agree
+        command: go test ./pkg/netfilter -run '^TestAllowListVerdictAgreesAcrossFilterAndBroker$'
+      - name: the two levels
+        command: go test ./pkg/fwpolicy -run '^(TestPermitsRefusesNamingWhatTheParentOnlyContains|TestConstrainNeverNamesAServiceByAccident|TestCloseMetadataWritesTheCarvesIntoTheDenylist)$'
+  - id: R-17
+    title: Every test the security documents cite shall exist in the module.
+    status: approved
+    priority: must
+    tags: [security, docs]
+    details: |-
+      docs/security/model.md and threat-model.md back each claim with the name of
+      the test that checks it, and a reader takes the name for evidence: a renamed
+      or deleted test fails the citation gate, and every residual risk the model
+      lists cites its evidence. Promised in docs/security/model.md, "The guarantee
+      → test table".
+    tests:
+      - name: the citation gates
+        command: go test ./tests/docs -run '^(TestSecurityDocsCiteOnlyRealTests|TestTestCitationGateCatchesAMissingTest|TestEveryResidualRiskCitesEvidence)$'
+        timeout: 20m
+  - id: R-18
+    title: Every scanner that redacts credentials shall recognise every credential shape in the shared registry.
+    status: approved
+    priority: must
+    tags: [security, redaction]
+    details: |-
+      The output scrubbers, the git proxy's push scan, cloop audit and the telemetry
+      ingest share one registry of credential shapes in pkg/redact — GitHub's
+      390-character installation tokens among them. Each detector is held to a
+      corpus of real shapes, no scanner touches ordinary output, and
+      docs/reference/credential-patterns.md is rendered from the registry (make
+      docs-credentials). Promised in docs/security/model.md, "What is scrubbed
+      where" and "Credential shapes".
+    tests:
+      - name: every scanner
+        command: go test ./tests/security -run '^(TestEveryScannerCoversEveryCredential|TestNoScannerTouchesOrdinaryOutput|TestEveryDetectorIsHeldToTheCorpus|TestTelemetryIngestStoresNoCorpusCredential)$'
+        timeout: 20m
+      - name: the corpus
+        command: go test ./pkg/redact -run '^TestCorpusIsWellFormed$'
+      - name: the reference
+        command: go test ./tests/docs -run '^TestCredentialPatternsReference$'
+        timeout: 20m
+  - id: R-19
+    title: Every test this spec names shall exist in a package its command tests.
+    status: approved
+    priority: must
+    tags: [requirements, tests]
+    details: |-
+      A go test pattern that matches no test passes, so a requirement whose test was
+      renamed would hold for good. tests/docs checks that each name a requirement's
+      pattern gives is a test declared in a directory its command tests, that the
+      pattern is anchored names, that each make target is a rule of the Makefile,
+      and that no requirement but a draft goes untested. Promised in
+      CONTRIBUTING.md, "Guarantees are requirements".
+    tests:
+      - name: the spec's citation gate
+        command: go test ./tests/docs -run '^(TestRequirementsCiteOnlyRealTests|TestRequirementCitationGateCatchesAMissingTest)$'
+        timeout: 20m

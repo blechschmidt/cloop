@@ -2,8 +2,13 @@
 cloop
 cloop.exe
 
-# cloop state
-.cloop/
+# cloop state — all of it but the requirements spec (Task 20466):
+# .cloop/requirements.yaml is cloop's guarantees as requirements, each pointing
+# at the test that proves it, reviewed like code and checked by CI's
+# requirements job. Git cannot re-include a file whose directory it ignores, so
+# the directory's entries are ignored rather than the directory.
+.cloop/*
+!.cloop/requirements.yaml
 
 # Go
 *.test

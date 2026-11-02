@@ -1,6 +1,6 @@
 .PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench lint lint-tool lint-version clean \
         docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve docs-freshness \
-        release-dist changelog-check \
+        release-dist changelog-check requirements-check \
         terraform-test terraform-validate
 
 BINARY := cloop
@@ -338,6 +338,23 @@ docs-freshness:
 ## history and the tags; reads git only.
 changelog-check:
 	@python3 scripts/changelog-coverage.py
+
+## requirements-check: check cloop's own requirements, .cloop/requirements.yaml,
+##                     as CI's requirements job does
+##
+## Every guarantee cloop's documentation makes that a test can show — the hub
+## starts no process on its own host but through an executor, every mutating
+## route enforces RBAC through authz.Enforced, migrations stay additive, … — is
+## a requirement there, pointing at the test that proves it (Task 20466). This
+## builds cloop from the checkout, lints the spec and runs
+## `cloop requirements check --file .cloop/requirements.yaml --json`, which
+## exits 1 when a requirement is unfulfilled or could not be checked. It runs
+## hermetically: a fresh HOME, every CLOOP_* variable unset, Go's caches kept
+## (scripts/requirements-check.sh says what and why). Needs the whole history and
+## the tags, as changelog-check does. A new guarantee needs a requirement and a
+## test: CONTRIBUTING.md, "Guarantees are requirements".
+requirements-check:
+	@GO=$(GO) ./scripts/requirements-check.sh
 
 ## screenshots: rebuild docs/screenshots/ from a throwaway demo hub
 ##

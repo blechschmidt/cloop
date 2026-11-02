@@ -1,0 +1,80 @@
+R-4    skipped     no tests: ask the model (--ai), or record a verdict
+Not checked: 1 draft (R-5) awaiting approval — nothing checks a draft until a person approves it (cloop requirements approve)
+R-1    checking    The fixture's passing requirement holds
+R-1    fulfilled   1 test passed
+R-2    checking    A failing requirement, named: with a colon
+R-2    unfulfilled 1 of 2 tests failed: "the failing one"
+R-3    checking    A requirement whose check cannot finish
+R-3    error       test "sleep 5" timed out after 1s
+
+<<<cloop-json:begin>>>
+{
+  "results": [
+    {
+      "requirement_id": 1,
+      "fingerprint": "43ac01c858b0fe31a30259f43545c87c",
+      "method": "tests",
+      "verdict": "fulfilled",
+      "summary": "1 test passed",
+      "tests": [
+        {
+          "name": "passes",
+          "command": "test -n \"$CLOOP_REQUIREMENT_ID\"",
+          "outcome": "pass",
+          "exit_code": 0,
+          "duration_ms": 0
+        }
+      ],
+      "started_at": "2026-11-02T08:00:11.398117607Z",
+      "duration_ms": 0
+    },
+    {
+      "requirement_id": 2,
+      "fingerprint": "1c0274c57402b4d23e02cb7740c725a9",
+      "method": "tests",
+      "verdict": "unfulfilled",
+      "summary": "1 of 2 tests failed: \"the failing one\"",
+      "tests": [
+        {
+          "name": "still passes",
+          "command": "true",
+          "outcome": "pass",
+          "exit_code": 0,
+          "duration_ms": 0
+        },
+        {
+          "name": "the failing one",
+          "command": "for i in $(seq 1 60); do echo \"line $i of the failing test\"; done; echo \"the failure after sixty lines\" \u003e\u00262; exit 3",
+          "outcome": "fail",
+          "exit_code": 3,
+          "duration_ms": 2,
+          "output": "line 1 of the failing test\nline 2 of the failing test\nline 3 of the failing test\nline 4 of the failing test\nline 5 of the failing test\nline 6 of the failing test\nline 7 of the failing test\nline 8 of the failing test\nline 9 of the failing test\nline 10 of the failing test\nline 11 of the failing test\nline 12 of the failing test\nline 13 of the failing test\nline 14 of the failing test\nline 15 of the failing test\nline 16 of the failing test\nline 17 of the failing test\nline 18 of the failing test\nline 19 of the failing test\nline 20 of the failing test\nline 21 of the failing test\nline 22 of the failing test\nline 23 of the failing test\nline 24 of the failing test\nline 25 of the failing test\nline 26 of the failing test\nline 27 of the failing test\nline 28 of the failing test\nline 29 of the failing test\nline 30 of the failing test\nline 31 of the failing test\nline 32 of the failing test\nline 33 of the failing test\nline 34 of the failing test\nline 35 of the failing test\nline 36 of the failing test\nline 37 of the failing test\nline 38 of the failing test\nline 39 of the failing test\nline 40 of the failing test\nline 41 of the failing test\nline 42 of the failing test\nline 43 of the failing test\nline 44 of the failing test\nline 45 of the failing test\nline 46 of the failing test\nline 47 of the failing test\nline 48 of the failing test\nline 49 of the failing test\nline 50 of the failing test\nline 51 of the failing test\nline 52 of the failing test\nline 53 of the failing test\nline 54 of the failing test\nline 55 of the failing test\nline 56 of the failing test\nline 57 of the failing test\nline 58 of the failing test\nline 59 of the failing test\nline 60 of the failing test\nthe failure after sixty lines\n"
+        }
+      ],
+      "started_at": "2026-11-02T08:00:11.398927229Z",
+      "duration_ms": 2
+    },
+    {
+      "requirement_id": 3,
+      "fingerprint": "c627ae91fdae531e35544bdd3d47318f",
+      "method": "tests",
+      "verdict": "error",
+      "summary": "test \"sleep 5\" timed out after 1s",
+      "tests": [
+        {
+          "command": "sleep 5",
+          "outcome": "timeout",
+          "exit_code": -1,
+          "duration_ms": 1000,
+          "error": "timed out after 1s"
+        }
+      ],
+      "started_at": "2026-11-02T08:00:11.401914295Z",
+      "duration_ms": 1000
+    }
+  ]
+}
+<<<cloop-json:end>>>
+
+1 fulfilled, 1 unfulfilled, 0 unverified, 1 error
+Error: not every requirement is fulfilled

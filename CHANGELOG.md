@@ -163,6 +163,25 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **cloop's own guarantees are requirements, checked on every push.** The
+  guarantees the documentation makes — the hub starts no process on its own
+  host except through an executor, every mutating route enforces RBAC through
+  `authz.Enforced`, a state-changing request needs the hub's origin, the hub's
+  environment never reaches a sandbox, migrations stay additive, the audit
+  catalog has no drift, the dashboard's first paint stays within its budget,
+  every feature and fix has a changelog entry, and eleven more — are now 19
+  approved requirements in the repository's `.cloop/requirements.yaml`, each
+  pointing at the existing tests that prove it. A new CI job, *cloop's own
+  requirements hold*, runs `cloop requirements check --file
+  .cloop/requirements.yaml --json` through the new `make requirements-check`,
+  built from the commit, in a fresh home with every `CLOOP_*` variable unset,
+  and fails when one does not hold. Its last step annotates each failing
+  requirement by its R-n on its line of the spec, where `scripts/ci-why.sh`
+  reads it without a token. A `-run` pattern that matches no test passes, so a
+  new gate in `tests/docs` fails a requirement that names a test its command
+  does not have, or a pattern that is not anchored names. CONTRIBUTING.md says
+  how a new guarantee joins them: a requirement and a test (Task 20466).
+
 - **Traceability matrix and spec coverage: each requirement's tasks, commits,
   verdict and proof, and how many musts are tested, proven, passing and
   linked.** Nothing showed, in one place, what had been done about each

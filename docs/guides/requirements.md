@@ -957,6 +957,13 @@ what it is doing — and the same exit status. (Only the hub's own dispatch,
 `--spec`, exits 0 whatever the check found: the hub reads the verdicts
 itself.)
 
+cloop checks itself this way. Its repository's `.cloop/requirements.yaml` holds
+the guarantees this documentation makes — the hub starts no process on its own
+host except through an executor, every mutating route enforces RBAC, the hub's
+environment never reaches a sandbox, migrations stay additive, and more — each
+pointing at the test that proves it, and its CI runs `make requirements-check`
+on every push; CONTRIBUTING.md has how a new guarantee joins them.
+
 ### In the dashboard
 
 The Requirements tab shows the spec file in the project's checkout — which is

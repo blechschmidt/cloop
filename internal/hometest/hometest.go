@@ -182,6 +182,16 @@ func isolate() (restore func(), cleanup func(), err error) {
 	return restore, cleanup, nil
 }
 
+// Redirected and Cleared are the variables Isolate points at the sandbox and
+// the ones it unsets: what a script that isolates a process the way Isolate
+// isolates a test binary has to treat the same way. tests/ciscripts holds
+// scripts/requirements-check.sh, which runs cloop's own requirements' tests
+// (Task 20466), to them.
+func Redirected() []string { return append([]string(nil), redirectedVars...) }
+
+// Cleared: see Redirected.
+func Cleared() []string { return append(append([]string(nil), clearedVars...), rootKeyVars...) }
+
 // verify asserts the redirection actually took, using the same call the code
 // under test uses rather than trusting that Setenv did what it was asked.
 func verify(dir string) error {

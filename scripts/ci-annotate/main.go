@@ -11,7 +11,9 @@
 // This reads what go test, go build and go vet print — the plain text a
 // tee'd step writes, or go test -json — and emits one GitHub workflow command
 // per cause: a failing test, a panic, a data race, a test binary that
-// outlived its -timeout, a package that did not build, vet or set up. GitHub
+// outlived its -timeout, a package that did not build, vet or set up; and the
+// report `cloop requirements check --json` prints, each requirement it found
+// failing by its R-<n>, on its line of the spec file (Task 20466). GitHub
 // keeps the first ten annotations of each level a step emits and fifty a job,
 // so the causes are ranked — the first failed step first, and within it
 // what stopped a package from running at all before what failed inside one —
@@ -52,6 +54,7 @@ type options struct {
 	tail    int    // lines of a failed step with no Go finding to annotate
 	summary string // Markdown file the report is appended to
 	root    string // the module's root
+	spec    string // the requirements spec file a failing requirement points at
 }
 
 func run(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
@@ -65,6 +68,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 	fs.IntVar(&o.tail, "tail", 40, "with -steps: how many last lines to annotate of a failed step whose output names no Go failure")
 	fs.StringVar(&o.summary, "summary", getenv("GITHUB_STEP_SUMMARY"), "a Markdown file to append the full report to (empty: none)")
 	fs.StringVar(&o.root, "root", "", "the module's root (default: the nearest directory above this one holding go.mod)")
+	fs.StringVar(&o.spec, "spec", DefaultSpec, "the requirements spec file, relative to the module's root: a requirement a check found failing is annotated on its line")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: ci-annotate [flags] FILE...\n       ci-annotate [flags] -steps DIR\n\n")
 		fs.PrintDefaults()
@@ -84,6 +88,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 	}
 
 	mod := findModule(o.root)
+	mod.spec = o.spec
 	r := &reporter{opts: o, mod: mod, out: stdout, log: stderr, stepDir: getenv("CI_WHY_STEP_DIR")}
 	if o.steps != "" {
 		r.annotateSteps(o.steps)
@@ -149,6 +154,7 @@ func readInput(name string) ([]byte, error) {
 type module struct {
 	root string // absolute; "" when no go.mod was found
 	path string
+	spec string // its requirements spec file, relative to root (requirements.go)
 }
 
 func findModule(root string) module {

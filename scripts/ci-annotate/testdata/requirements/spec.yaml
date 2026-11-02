@@ -1,0 +1,35 @@
+version: 1
+requirements:
+  - id: R-1
+    title: The fixture's passing requirement holds
+    status: approved
+    priority: must
+    tests:
+      - name: passes
+        command: test -n "$CLOOP_REQUIREMENT_ID"
+  - id: R-2
+    title: "A failing requirement, named: with a colon"
+    status: approved
+    priority: must
+    details: |
+      Its test prints sixty lines and fails; an annotation quotes the end.
+    tests:
+      - name: still passes
+        command: "true"
+      - name: the failing one
+        command: for i in $(seq 1 60); do echo "line $i of the failing test"; done; echo "the failure after sixty lines" >&2; exit 3
+  - id: R-3
+    title: A requirement whose check cannot finish
+    status: approved
+    priority: should
+    tests:
+      - command: sleep 5
+        timeout: 1s
+  - id: R-4
+    title: An untested requirement is skipped
+    status: approved
+  - id: R-5
+    title: A draft is never checked
+    status: draft
+    tests:
+      - command: exit 9

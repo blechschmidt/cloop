@@ -33,13 +33,14 @@ import (
 type kind int
 
 const (
-	kindBuild   kind = iota // a package did not build, vet or set up
-	kindPanic               // a panic or fatal error crashed a test binary
-	kindTimeout             // a test binary outlived its -timeout
-	kindRace                // the race detector reported a data race
-	kindTest                // a test failed
-	kindPackage             // a package failed with no failing test
-	kindStep                // a step failed and its output names no Go failure
+	kindBuild       kind = iota // a package did not build, vet or set up
+	kindPanic                   // a panic or fatal error crashed a test binary
+	kindTimeout                 // a test binary outlived its -timeout
+	kindRace                    // the race detector reported a data race
+	kindTest                    // a test failed
+	kindPackage                 // a package failed with no failing test
+	kindRequirement             // a requirement a check found failing, or a framed failure (requirements.go)
+	kindStep                    // a step failed and its output names no Go failure
 )
 
 // finding is one reason a step failed, as an annotation states it.
@@ -117,6 +118,7 @@ func analyze(mod module, source string, step int, data []byte) []finding {
 	a.plain(plain)
 	a.json(events)
 	a.builds()
+	a.requirementReports(data)
 	return a.found
 }
 

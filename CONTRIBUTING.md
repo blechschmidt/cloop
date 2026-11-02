@@ -328,6 +328,71 @@ it deliberately prefers neither. `tests/arch/orphan_test.go` has an `exempt`
 map for packages that are unreferenced on purpose — it is empty, and an entry
 needs an argument a reader can check.
 
+## Guarantees are requirements
+
+cloop's documentation makes promises a test can check: the hub starts no
+process on its own host except through an executor, every mutating route
+enforces RBAC through `authz.Enforced`, a state-changing request needs the
+hub's origin, the hub's environment never reaches a sandbox, migrations stay
+additive, the audit catalog has no drift, the dashboard's first paint stays
+within its byte budget (`eagerWireBudgetBytes` in
+`pkg/ui/assetbudget_test.go`: a new tab or panel goes into a deferred script),
+and every feature or fix has a changelog entry. Each is a requirement in
+[`.cloop/requirements.yaml`](.cloop/requirements.yaml), cloop's spec of
+itself, pointing at the test that proves it — the format is
+[Requirements as code](docs/guides/requirements.md#requirements-as-code). CI's
+**cloop's own requirements hold** job checks every approved one on every push:
+
+```bash
+make requirements-check
+```
+
+builds cloop from the checkout, lints the spec, and runs
+`cloop requirements check --file .cloop/requirements.yaml --json`, which runs
+each requirement's tests in turn, says what each found on stderr as it goes,
+and exits 1 when one does not hold. It runs hermetically, as the unit suite
+does: in a fresh `HOME`, with every `CLOOP_*` variable and everything else
+`hometest.Isolate` clears unset (`scripts/requirements-check.sh` says what and
+why), so an agent's inherited `CLOOP_SECRET_KEY` changes nothing. Like
+`make changelog-check` it needs the whole history and the tags. When the job
+fails, its last step annotates each failing requirement by its `R-<n>`, on the
+requirement's line of the spec, and `scripts/ci-why.sh <sha>` reads it back.
+
+**A new guarantee needs a requirement and a test**, in the change that makes
+the promise:
+
+1. Write the test, and keep it narrow: the functions that show the guarantee
+   holds and, where the check is structural, a control that seeds a violation
+   and expects it caught.
+2. Add a requirement with the next number — an id never goes to a second
+   requirement, deleted or not — `status: approved`, a title of one sentence
+   ("… shall …") and details that say what holds and which page promises it.
+   Its test is one command:
+   - `go test ./<dir> -run '^(TestA|TestB)$'` — package directories, and the
+     tests' names anchored. A pattern that matches no test passes, so
+     `go test ./tests/docs` fails a name that is not a test in a directory its
+     command tests (`TestRequirementsCiteOnlyRealTests`), and a renamed test
+     fails there rather than turning its requirement into one that always
+     holds; or
+   - `make <target>`.
+
+   Give a test that loads the module or compiles `pkg/ui` `timeout: 20m`.
+3. Check it as CI will: `cloop requirements validate` and
+   `cloop requirements lint --file .cloop/requirements.yaml --strict` (the job
+   fails on lint's errors — an approved `must` with no test is one), then
+   `make requirements-check`.
+4. Prove it where a proof can say something: `cloop requirements prove R-<n>`
+   runs its tests on the commit before the test's implementation and on yours,
+   and says whether they fail without the change and pass with it
+   ([Red-green proofs](docs/guides/requirements.md#red-green-proofs)). The
+   proof is recorded with the project's requirements on its hub, where the
+   Requirements tab shows it on the requirement's card.
+
+Change what a guarantee says, or the test that proves it, in the spec and in
+review, as code. A guarantee the project no longer makes becomes
+`status: deprecated`, which keeps its id and its history; a test that moves
+or is renamed takes its requirement's command with it.
+
 ## When CI is red
 
 A job's log can only be read with admin rights on the repository — without

@@ -161,7 +161,7 @@ func (r *reporter) entitle(f finding) string {
 	switch {
 	case f.kind == kindTest:
 		t = who
-	case f.kind == kindStep:
+	case f.kind == kindStep, f.kind == kindRequirement:
 		t = f.what
 	case who == "":
 		t = f.what
