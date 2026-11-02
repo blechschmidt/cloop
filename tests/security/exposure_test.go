@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/exposure"
 	"github.com/blechschmidt/cloop/pkg/ui"
 )
@@ -36,7 +37,12 @@ func TestAnOpenHubNeverListensBeyondLoopback(t *testing.T) {
 	}
 	for _, listen := range listens {
 		t.Run("listen="+listen, func(t *testing.T) {
-			srv := ui.New(t.TempDir(), freeLoopbackPort(t), "")
+			// A control plane that is already migrated: a hub in a directory
+			// with none creates and migrates one from its watchers within its
+			// first second, and the shutdown below would wait on that — over
+			// ten seconds once, on a loaded runner. What is under test is the
+			// socket, not the first migration.
+			srv := ui.New(statedbtest.Dir(t), freeLoopbackPort(t), "")
 			srv.ListenHost = listen
 
 			ctx, cancel := context.WithCancel(context.Background())
