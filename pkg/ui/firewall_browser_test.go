@@ -46,6 +46,12 @@ func TestFirewallPanels_InBrowser(t *testing.T) {
 	// Configured before the listener starts: requests from Chrome carry no
 	// happens-before edge the race detector can see.
 	srv := New(dir, 0, "")
+	// The page loads the dashboard, then the Executors tab, which refetches
+	// /api/executors on every executor_update: near the default burst of 50,
+	// a 429 left the tab without its list and the driver timed out on "no card
+	// offers virtual" in about one run in five. The limiter is not what this
+	// test is about.
+	srv.RPS, srv.Burst = 100000, 100000
 	withControlPlaneDir(t, dir)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
