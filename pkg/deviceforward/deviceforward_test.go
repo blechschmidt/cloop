@@ -75,10 +75,32 @@ func usbDevice() ForwardedDevice {
 	}
 }
 
+// testLogf is t.Logf until the test's cleanup runs, and nothing after: a
+// hub's connection goroutines can outlive the test — httptest's Close does
+// not wait for a hijacked WebSocket connection — and a log line written
+// through a test that is finishing races its completion (CI's race detector
+// caught one at fcf76196).
+func testLogf(t *testing.T) func(format string, args ...any) {
+	var mu sync.Mutex
+	done := false
+	t.Cleanup(func() {
+		mu.Lock()
+		done = true
+		mu.Unlock()
+	})
+	return func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !done {
+			t.Logf(format, args...)
+		}
+	}
+}
+
 // startHub mounts a Hub on an httptest server and returns it plus the ws URL.
 func startHub(t *testing.T, store Store) (*Hub, string) {
 	t.Helper()
-	hub, err := NewHub(HubOptions{Store: store, Logf: t.Logf})
+	hub, err := NewHub(HubOptions{Store: store, Logf: testLogf(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +151,7 @@ func TestEnrollConnectAndStream(t *testing.T) {
 		Token:          token,
 		CredentialPath: credPath,
 		Source:         src,
-		Logf:           t.Logf,
+		Logf:           testLogf(t),
 	})
 
 	ids := waitConnected(t, hub, 1)
@@ -189,7 +211,7 @@ func TestReconnectWithSavedCredential(t *testing.T) {
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	runForwarder(t, ctx1, ForwarderConfig{
 		Server: url, Token: token, CredentialPath: credPath,
-		Source: &fakeSource{dev: usbDevice(), available: true}, Logf: t.Logf,
+		Source: &fakeSource{dev: usbDevice(), available: true}, Logf: testLogf(t),
 	})
 	waitConnected(t, hub, 1)
 	cancel1()
@@ -204,7 +226,7 @@ func TestReconnectWithSavedCredential(t *testing.T) {
 	defer cancel2()
 	runForwarder(t, ctx2, ForwarderConfig{
 		Server: url, CredentialPath: credPath,
-		Source: &fakeSource{dev: usbDevice(), available: true}, Logf: t.Logf,
+		Source: &fakeSource{dev: usbDevice(), available: true}, Logf: testLogf(t),
 	})
 	waitConnected(t, hub, 1)
 }
@@ -219,7 +241,7 @@ func TestOpenRefusedWhenDeviceUnavailable(t *testing.T) {
 	src := &fakeSource{dev: usbDevice(), available: false, openErr: errors.New("device is unplugged")}
 	runForwarder(t, ctx, ForwarderConfig{
 		Server: url, Token: token, CredentialPath: filepath.Join(t.TempDir(), "c.json"),
-		Source: src, Logf: t.Logf,
+		Source: src, Logf: testLogf(t),
 	})
 	ids := waitConnected(t, hub, 1)
 
@@ -243,7 +265,7 @@ func TestRevokeDropsSession(t *testing.T) {
 	defer cancel()
 	runForwarder(t, ctx, ForwarderConfig{
 		Server: url, Token: token, CredentialPath: filepath.Join(t.TempDir(), "c.json"),
-		Source: &fakeSource{dev: usbDevice(), available: true}, Logf: t.Logf,
+		Source: &fakeSource{dev: usbDevice(), available: true}, Logf: testLogf(t),
 	})
 	ids := waitConnected(t, hub, 1)
 
@@ -277,7 +299,7 @@ func TestConnectRejectsBadCredential(t *testing.T) {
 
 func startHubHandler(t *testing.T, store Store) (*Hub, string) {
 	t.Helper()
-	hub, err := NewHub(HubOptions{Store: store, Logf: t.Logf})
+	hub, err := NewHub(HubOptions{Store: store, Logf: testLogf(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

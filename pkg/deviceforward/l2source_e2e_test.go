@@ -53,13 +53,13 @@ func TestL2ForwardEndToEnd(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	src, err := NewL2Source(a, L2SourceOptions{Logf: t.Logf})
+	src, err := NewL2Source(a, L2SourceOptions{Logf: testLogf(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	runForwarder(t, ctx, ForwarderConfig{
 		Server: url, Token: token, CredentialPath: t.TempDir() + "/c.json",
-		Source: src, Logf: t.Logf,
+		Source: src, Logf: testLogf(t),
 	})
 	ids := waitConnected(t, hub, 1)
 

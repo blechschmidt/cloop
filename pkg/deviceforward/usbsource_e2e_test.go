@@ -54,13 +54,13 @@ func TestUSBForwardEndToEnd(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	src, err := NewUSBSource(match, USBSourceOptions{Logf: t.Logf})
+	src, err := NewUSBSource(match, USBSourceOptions{Logf: testLogf(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	runForwarder(t, ctx, ForwarderConfig{
 		Server: url, Token: token, CredentialPath: t.TempDir() + "/c.json",
-		Source: src, Logf: t.Logf,
+		Source: src, Logf: testLogf(t),
 	})
 	ids := waitConnected(t, hub, 1)
 	t.Cleanup(func() { _ = exec.Command("usbip", "unbind", "-b", busid).Run() })
@@ -80,7 +80,7 @@ func TestUSBForwardEndToEnd(t *testing.T) {
 	}
 	ictx, icancel := context.WithTimeout(ctx, 30*time.Second)
 	defer icancel()
-	imp, err := ImportUSB(ictx, stream, stream.Exported.BusID, ImportOptions{Ledger: ledger, Logf: t.Logf})
+	imp, err := ImportUSB(ictx, stream, stream.Exported.BusID, ImportOptions{Ledger: ledger, Logf: testLogf(t)})
 	if err != nil {
 		t.Fatalf("ImportUSB: %v", err)
 	}
