@@ -179,6 +179,41 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Optional semantic search over the knowledge index: embeddings fused with
+  full-text ranking, off unless an administrator turns them on.** The new hub
+  setting `knowledge.embeddings` names an embedding endpoint: `provider:
+  openai` for any OpenAI-compatible API (OpenAI, Azure OpenAI, Ollama, vLLM)
+  or `provider: voyage`, with `endpoint`, `model`, `dimensions` and the
+  endpoint's key as a shared env secret named by `secret_ref` (never in the
+  file; an `api_key` field, or a credential in the endpoint's query, switches
+  the section off). It is off by default because turning it on sends the text
+  of every chunk, and every search query, to that endpoint. `cloop hub doctor`
+  and Settings → Hub health show a `knowledge.embeddings` finding naming it,
+  and warn about plain http beyond loopback, a key the secret store cannot
+  provide, and syncs that could not embed. Each sync embeds the chunks without
+  a current vector in bounded batches after its listing. That covers changed
+  chunks and the backfill when embeddings are first turned on or their model
+  changes, which makes every source due at once. A chunk whose document
+  changed but whose own text did not keeps its vector. Vectors are float32
+  BLOBs in a new table keyed by chunk and model (migration 0095, additive),
+  removed with their chunks; the leader purges other models' vectors hourly. A
+  search compares the query's vector with every current vector of the
+  project's bound sources by a brute-force cosine scan, through the same
+  bindings and narrowing as the full-text search, capped at `max_candidates`
+  (50,000) and measured. It fuses the two rankings by reciprocal rank, and a
+  hit says whether it was found by words, meaning or both. If the endpoint is
+  down, slow, refuses its key or returns vectors of the wrong length, the sync
+  still succeeds and records a warning in its status, and the search ranks by
+  words and says why; neither fails because of it. New metrics:
+  `cloop_knowledge_searches_total`,
+  `cloop_knowledge_search_vectors_compared_total`,
+  `cloop_knowledge_search_vector_scan_seconds`,
+  `cloop_knowledge_search_vectors_capped_total`,
+  `cloop_knowledge_embedding_requests_total`,
+  `cloop_knowledge_embedding_request_duration_seconds`,
+  `cloop_knowledge_embedded_chunks_total` and, from the leader,
+  `cloop_knowledge_index_vectors` (Task 20471).
+
 - **The hub syncs its knowledge sources itself: on the cluster leader, one sync
   per source at a time, with a manual sync, status, metrics and retention.**
   Until now nothing called a source's sync. `cloop ui` now runs a sync

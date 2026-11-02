@@ -250,6 +250,7 @@ func Run(ctx context.Context, workdir string, opts ValidateOptions) (*Report, er
 		// the file's own text is judged here.
 		checkAuditForward(rawCfg, add)
 		checkNotifications(rawCfg, add)
+		checkEmbeddings(rawCfg, add)
 		checkSecrets(rawCfg, add)
 		checkRequirements(rawCfg, add)
 
@@ -539,6 +540,19 @@ func checkNotifications(cfg *config.Config, add func(Finding)) {
 			Severity: SeverityError,
 			Field:    "config.notifications",
 			Message:  err.Error(),
+		})
+	}
+}
+
+// checkEmbeddings runs the strict knowledge.embeddings validator against what
+// the file says rather than what Load kept, which switches a refused section
+// off (Task 20471).
+func checkEmbeddings(cfg *config.Config, add func(Finding)) {
+	if err := config.ValidateEmbeddings(cfg.Knowledge.Embeddings); err != nil {
+		add(Finding{
+			Severity: SeverityError,
+			Field:    "config.knowledge.embeddings",
+			Message:  err.Error() + " — the hub runs with embeddings off until it loads",
 		})
 	}
 }

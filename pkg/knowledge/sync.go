@@ -84,6 +84,13 @@ type SyncReport struct {
 	// which the reconciliation removed.
 	Reconciled bool
 	Removed    int
+	// Embeddings is what the embedding pass did (Task 20471); nil when
+	// semantic retrieval is off, or the pass never ran.
+	Embeddings *EmbedCounts
+	// Warning says what went wrong without failing the sync: the embedding
+	// endpoint was down, refused the key, or answered with vectors the pass
+	// refused. Scrubbed of credentials.
+	Warning string
 }
 
 // Counts is the report as the source records it.
@@ -91,7 +98,7 @@ func (r SyncReport) Counts() SyncCounts {
 	return SyncCounts{
 		Pages: r.Pages, Listed: r.Listed, Created: r.Created, Updated: r.Updated, Unchanged: r.Unchanged,
 		Deleted: r.Deleted, Rejected: r.Rejected, Removed: r.Swept + r.Removed, Narrowed: r.Narrowed,
-		Complete: r.Complete, Full: r.Full,
+		Complete: r.Complete, Full: r.Full, Embeddings: r.Embeddings, Warning: r.Warning,
 	}
 }
 
@@ -110,6 +117,9 @@ type SyncOptions struct {
 	// page in hand — having listed at least one — and the next resumes from
 	// its cursor. Zero leaves only maxSyncPages.
 	Budget time.Duration
+	// EmbedBudget bounds how long the sync embeds chunks, after its listing
+	// (DefaultEmbedBudget). A source with more to embed is due again at once.
+	EmbedBudget time.Duration
 }
 
 // Why a sync stopped before its end without failing: the runner cancels a
@@ -246,7 +256,13 @@ func (s *Service) SyncWith(ctx context.Context, id int64, opts SyncOptions) (rep
 		// last answer standing.
 		return report, r.finish(listErr)
 	}
-	return report, r.finish(errors.Join(listErr, r.narrow()))
+	err = errors.Join(listErr, r.narrow())
+	if !overtaken(err) && ctx.Err() == nil {
+		// Even after a listing that failed: what earlier syncs indexed may
+		// still have no vector. The pass never fails the sync.
+		r.embed()
+	}
+	return report, r.finish(err)
 }
 
 // syncRun is one sync in progress.
@@ -674,9 +690,11 @@ func (r *syncRun) finish(err error) error {
 		text = r.scrub(err.Error())
 	}
 	counts, _ := json.Marshal(r.report.Counts())
+	embedMore := r.report.Embeddings != nil && r.report.Embeddings.More
 	outcome := statedb.KnowledgeSyncOutcome{
 		Status: status, Error: text, Origin: r.opts.Origin, StartedAt: r.started, FinishedAt: r.s.now(),
-		Report: string(counts), More: status == StatusInterrupted || (status == StatusOK && !r.report.Complete),
+		Report: string(counts),
+		More:   status == StatusInterrupted || (status == StatusOK && (!r.report.Complete || embedMore)),
 		Holder: r.opts.Holder,
 	}
 	recErr := r.s.db.RecordKnowledgeSyncOutcome(r.row.ID, outcome)

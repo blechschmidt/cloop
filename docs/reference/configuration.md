@@ -1880,6 +1880,11 @@ When you run cloop in any AI-powered mode (PM, suggest, explain, etc.) cloop sen
 **No API keys, passwords, or environment variables** are ever included in prompts.
 **No telemetry** is sent to Anthropic or any third party by cloop itself.
 
+A hub with [semantic knowledge search](#semantic-knowledge-search-knowledgeembeddings)
+turned on also sends the text of its knowledge chunks, and every knowledge search
+query, to the embedding endpoint `knowledge.embeddings` names. It is off unless an
+administrator turns it on.
+
 The hub does collect a browser diagnostic trail, but it never leaves the
 deployment: it is written by your own front ends to your own hub, stored in
 your own database, and scrubbed of credentials on the way in. See
@@ -2271,6 +2276,105 @@ leads. Decisions are picked up from the time the leader last scanned, less two
 minutes, so members' clocks must agree to within that — run NTP. Delivery is at
 least once: for the moment two members both believe they lead, a notice can be
 posted twice.
+
+### Semantic knowledge search (`knowledge.embeddings`)
+
+The knowledge index ranks a project's chunks by their words: SQLite's full-text
+index and BM25, on the hub and nowhere else. `knowledge.embeddings` adds ranking
+by meaning (Task 20471). Each chunk gets a vector from an embedding endpoint
+during its source's sync, and a search compares the query's vector with the
+vectors of the project's bound sources and fuses that ranking with the
+words'. **Off unless enabled**, and it should be turned on deliberately: on, the
+hub sends **the text of every chunk of every synced source, and every search
+query, to the endpoint**. `cloop hub doctor` and Settings → Hub health always
+show a `knowledge.embeddings` finding naming it.
+
+```yaml
+knowledge:
+  embeddings:
+    enabled: true
+    provider: openai                     # any OpenAI-compatible API
+    endpoint: https://api.openai.com/v1  # posts to <endpoint>/embeddings
+    model: text-embedding-3-small
+    dimensions: 1536
+    secret_ref: openai-embeddings        # a shared env secret holding the key
+```
+
+The same `provider: openai` reaches the other OpenAI-compatible endpoints:
+
+| Endpoint | `endpoint` | Notes |
+| --- | --- | --- |
+| OpenAI | `https://api.openai.com/v1` | `request_dimensions: true` shortens a `text-embedding-3` model's vectors to `dimensions`. |
+| Azure OpenAI | `https://<resource>.openai.azure.com/openai/deployments/<deployment>?api-version=2024-10-21` | The key goes in the `api-key` header, the default for an Azure OpenAI host. The `v1` API (`…/openai/v1`) takes it too. |
+| Ollama | `http://localhost:11434/v1` | No `secret_ref`. `model: nomic-embed-text`, `dimensions: 768`. |
+| vLLM | `http://<host>:8000/v1` | `secret_ref` when the server runs with `--api-key`. |
+
+`provider: voyage` speaks Voyage AI's API (`endpoint` defaults to
+`https://api.voyageai.com/v1`), telling it whether it embeds documents or a
+query.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `enabled` | `false` | Turns semantic search on. |
+| `provider` | required | `openai` or `voyage`. |
+| `endpoint` | required for `openai` | The API's base URL. An `http` endpoint that is not loopback sends chunk text, queries and the key unencrypted, and the doctor warns. A cloud metadata service is refused, here and at every connection. |
+| `model` | required | The embedding model, as the endpoint names it. |
+| `dimensions` | required | The length of the model's vectors, 1–8192. A vector of any other length is refused, stored nowhere and compared with nothing. |
+| `request_dimensions` | `false` | Ask the endpoint for `dimensions`-long vectors (OpenAI's `dimensions`, Voyage's `output_dimension`), for a model that can shorten its vectors. |
+| `secret_ref` | — | The endpoint's key: a **shared env secret** (`cloop secret mint <name> --kind env`), `name` or `name#KEY`, opened by the hub as its own credential and never handed to an executor. Re-opened every 5 minutes and after the endpoint refuses it, so a rotated secret takes effect without a restart. |
+| `auth` | `api-key` for an Azure OpenAI host, else `bearer` | How the key is sent: `Authorization: Bearer`, or the `api-key` header. |
+| `batch_size` | `64` | Chunks per request, 1–512. |
+| `timeout` | `30s` | How long one request may take, `1s`–`5m`. A search waits at most 5 seconds for its query's vector, whatever this says. |
+| `max_candidates` | `50000` | How many vectors one search compares its query with, 1,000–1,000,000. A project whose sources hold more is searched by meaning over that many and by words over all of them; `cloop_knowledge_search_vectors_capped_total` counts the searches it cut. |
+
+The comparison is a brute-force scan of every current vector of the project's
+bound sources, read from the hub's database, so its cost grows with the
+project's knowledge: on a 4-core host, comparing 50,000 vectors of 768
+dimensions takes about half a second, and the words' ranking of the same 50,000
+chunks about 20 ms (`go test ./pkg/knowledge -run '^$' -bench Search50k`).
+Lower `max_candidates` to bound it; `cloop_knowledge_search_vector_scan_seconds`
+shows what it costs.
+
+No key in the file: an `api_key` field, or an endpoint whose query carries a
+parameter that reads as a credential, switches the section off at load, as does
+an endpoint, model or dimensions missing. `cloop hub doctor` reports the
+switch-off as a failure, and `cloop config validate` refuses it. The client
+follows no redirect, uses the proxy the hub's environment names (`HTTPS_PROXY`,
+never for loopback), and reads an answer only up to what the vectors asked for
+could take.
+
+**What a sync does.** After its listing, each sync embeds, in batches, the
+chunks of its source that have no current vector: new chunks, chunks of a
+document that changed, and every chunk when embeddings are first turned on or
+the model, provider or dimensions change. A model change makes every source due
+at once, so the backfill starts within a minute. A chunk whose document
+changed but whose own text did not keeps its vector without a request. A pass
+stops after 10 minutes; a source with more waiting is synced again within a
+minute. Vectors live in the hub's database, one per chunk and model, as float32
+values; they go with their chunk, and the cluster leader purges other models'
+vectors hourly. Turning embeddings off keeps the vectors for when they are
+turned back on.
+
+**What a search does.** The query's vector is asked for while the words are
+ranked. Then every current vector of the project's bound sources is compared
+with it, through the same bindings and narrowing (spaces, query matches) as the
+full-text search, never another project's. The two rankings are fused by
+reciprocal rank (`1/(60+rank)` from each), and each hit says whether it was
+found by words, meaning or both (`found_by`). The search answers `retrieval`:
+`mode` `hybrid`, the model and how many vectors it compared.
+
+**When the endpoint fails.** Neither a sync nor a search fails because of the
+endpoint. A sync whose endpoint is down, refuses the key, or returns vectors of
+the wrong length ends `ok` with a `warning` in its status, and the chunks wait
+for the next sync. A search ranks by words, `mode` `lexical` with a `warning`
+saying why, and for 30 seconds after a failure does not ask the endpoint at all.
+The doctor's `knowledge.embeddings.sync` finding lists the sources whose last
+sync could not embed. See [the metrics](../operations/metrics.md#knowledge-search-and-embeddings).
+
+In a hub cluster the leader's section decides what syncs embed, and each
+member's what its own searches compare, so every member should run the same
+section: a member configured with another model finds no vectors of it and
+ranks by words.
 
 ### Disk retention
 

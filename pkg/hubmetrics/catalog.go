@@ -1038,6 +1038,91 @@ var (
 	})
 )
 
+// Knowledge search and semantic retrieval (Task 20471). With
+// knowledge.embeddings on, each chunk gets a vector from the configured
+// embedding endpoint during its source's sync, and a search fuses the full-text
+// index's ranking with a brute-force cosine scan of the searching project's
+// vectors; when the query cannot be embedded the search ranks by words alone.
+//
+// `retrieval` is knowledge.Retrieval* (lexical, hybrid, fallback), `purpose`
+// KnowledgeEmbedPurpose* below, `outcome` KnowledgeEmbedRequest* or
+// KnowledgeEmbedChunk* below, `kind` as for the syncs. Every family but the
+// index gauge is per process — each member counts its own searches and the
+// syncs it ran — and the gauge describes the shared database, so only the
+// leader exports it.
+var (
+	KnowledgeSearches = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_searches_total",
+		Help:   "Knowledge searches, by how they ranked: lexical (by words alone; semantic retrieval is off), hybrid (the full-text ranking fused with the vector ranking), fallback (semantic retrieval is on, and the query could not be embedded — the endpoint down, slow, refusing its key, or answering with a vector of the wrong length — so the search ranked by words alone).",
+		Type:   TypeCounter,
+		Labels: []string{"retrieval"},
+	})
+
+	KnowledgeSearchVectorsCompared = Default.MustRegister(Definition{
+		Name: "cloop_knowledge_search_vectors_compared_total",
+		Help: "Vectors hybrid knowledge searches compared their query with — the current vectors of the sources bound to each searching project, at most knowledge.embeddings.max_candidates per search. Divided by cloop_knowledge_searches_total{retrieval=\"hybrid\"}, the vectors one search compares.",
+		Type: TypeCounter,
+	})
+
+	KnowledgeSearchVectorScanDuration = Default.MustRegister(Definition{
+		Name:    "cloop_knowledge_search_vector_scan_seconds",
+		Help:    "How long each hybrid knowledge search took to compare its query with the vectors of the searching project's bound sources: the brute-force cosine scan, which grows with the project's knowledge.",
+		Type:    TypeHistogram,
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+	})
+
+	KnowledgeSearchVectorsCapped = Default.MustRegister(Definition{
+		Name: "cloop_knowledge_search_vectors_capped_total",
+		Help: "Hybrid knowledge searches whose project's sources held more current vectors than knowledge.embeddings.max_candidates: the query was compared with that many, and the rest were found by their words alone.",
+		Type: TypeCounter,
+	})
+
+	KnowledgeEmbeddingRequests = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_embedding_requests_total",
+		Help:   "Requests to the knowledge embedding endpoint, by purpose — document (a sync's batch of chunks) or query (a search's) — and outcome: ok, error (it failed, timed out, or answered an error), rejected (it answered with vectors the hub refuses: too many or too few, of the wrong length, or not finite), skipped (a query not sent because the endpoint failed within the last 30 seconds).",
+		Type:   TypeCounter,
+		Labels: []string{"purpose", "outcome"},
+	})
+
+	KnowledgeEmbeddingRequestDuration = Default.MustRegister(Definition{
+		Name:    "cloop_knowledge_embedding_request_duration_seconds",
+		Help:    "How long each request to the knowledge embedding endpoint took, by purpose: document or query.",
+		Type:    TypeHistogram,
+		Labels:  []string{"purpose"},
+		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60},
+	})
+
+	KnowledgeEmbeddedChunks = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_embedded_chunks_total",
+		Help:   "Chunks the embedding passes of knowledge syncs handled, by connector kind and outcome: embedded (given a new vector), reused (their document changed and their own text did not, so they kept their vector), failed (sent to the endpoint and given no usable vector; they wait for the next sync).",
+		Type:   TypeCounter,
+		Labels: []string{"kind", "outcome"},
+	})
+
+	KnowledgeIndexVectors = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_index_vectors",
+		Help:   "Chunks of the hub's knowledge index with a vector of the configured embedding model — current, or awaiting their source's next sync — by connector kind; 0 while knowledge.embeddings is off. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"kind"},
+	})
+)
+
+// What a request to the embedding endpoint was for, and how it went; what an
+// embedding pass did with one chunk.
+const (
+	KnowledgeEmbedPurposeDocument = "document"
+	KnowledgeEmbedPurposeQuery    = "query"
+
+	KnowledgeEmbedRequestOK       = "ok"
+	KnowledgeEmbedRequestError    = "error"
+	KnowledgeEmbedRequestRejected = "rejected"
+	KnowledgeEmbedRequestSkipped  = "skipped"
+
+	KnowledgeEmbedChunkEmbedded = "embedded"
+	KnowledgeEmbedChunkReused   = "reused"
+	KnowledgeEmbedChunkFailed   = "failed"
+)
+
 // What a knowledge sync did with one document, and the kind of a source this
 // build has no connector for.
 const (

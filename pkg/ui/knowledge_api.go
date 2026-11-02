@@ -85,6 +85,9 @@ type knowledgeSyncView struct {
 	// disabled one.
 	NextAt  string                `json:"next_at,omitempty"`
 	Running *knowledgeRunningView `json:"running,omitempty"`
+	// Warning is what went wrong in the last sync without failing it — the
+	// embedding endpoint down, say — scrubbed of credentials.
+	Warning string `json:"warning,omitempty"`
 }
 
 // knowledgeRunningView is a sync in progress.
@@ -116,7 +119,7 @@ func knowledgeSyncViewOf(src knowledge.Source, manageable bool) knowledgeSyncVie
 		IntervalMinutes: int(src.Interval() / time.Minute), DefaultInterval: src.SyncInterval == 0,
 		StartedAt: knowledgeTime(st.StartedAt), DurationMS: st.Duration.Milliseconds(), Origin: st.Origin,
 		More: st.More, LastOKAt: knowledgeTime(st.OKAt), NextAt: knowledgeTime(st.NextAt),
-		Running: knowledgeRunningViewOf(st.Running, manageable),
+		Running: knowledgeRunningViewOf(st.Running, manageable), Warning: st.Warning,
 	}
 	if !st.StartedAt.IsZero() {
 		counts := st.Counts
@@ -144,10 +147,13 @@ type knowledgeSourceView struct {
 	Documents     int               `json:"documents"`
 	Chunks        int               `json:"chunks"`
 	Bindings      int               `json:"bindings"`
-	CreatedAt     string            `json:"created_at,omitempty"`
-	CreatedBy     string            `json:"created_by,omitempty"`
-	UpdatedAt     string            `json:"updated_at,omitempty"`
-	UpdatedBy     string            `json:"updated_by,omitempty"`
+	// Vectors counts the chunks with a vector of the hub's embedding model;
+	// 0 while knowledge.embeddings is off.
+	Vectors   int    `json:"vectors"`
+	CreatedAt string `json:"created_at,omitempty"`
+	CreatedBy string `json:"created_by,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	UpdatedBy string `json:"updated_by,omitempty"`
 }
 
 type knowledgeBindingView struct {
@@ -176,8 +182,28 @@ type knowledgeHitView struct {
 	Ancestors []string `json:"ancestors,omitempty"`
 	Snippet   string   `json:"snippet"`
 	// Rank is the hit's place, from 1. Its BM25 score is not given out: it is
-	// weighed against every project's sources (see knowledge.Access.Search).
+	// weighed against every project's sources (see knowledge.Access.Retrieve).
 	Rank int `json:"rank"`
+	// FoundBy says what found the hit: "lexical" (its words), "semantic"
+	// (its meaning), or both.
+	FoundBy []string `json:"found_by"`
+}
+
+// knowledgeRetrievalView is how a search ranked.
+type knowledgeRetrievalView struct {
+	// Mode is "hybrid" — the words' ranking fused with the vectors' — or
+	// "lexical", by words alone.
+	Mode string `json:"mode"`
+	// Model is the embedding model whose vectors were compared, or would
+	// have been.
+	Model string `json:"model,omitempty"`
+	// Candidates counts the vectors the query was compared with; Capped
+	// says the project's sources hold more than one search compares.
+	Candidates int  `json:"candidates,omitempty"`
+	Capped     bool `json:"capped,omitempty"`
+	// Warning says why a search that would have been hybrid ranked by
+	// words alone.
+	Warning string `json:"warning,omitempty"`
 }
 
 type knowledgeSourceRef struct {
@@ -201,6 +227,7 @@ func knowledgeSourceViewOf(acc *knowledge.Access, src knowledge.Source) knowledg
 		Manageable: manageable, Config: src.Config, HasCredential: src.SecretRef != "", Enabled: src.Enabled,
 		Sync:      knowledgeSyncViewOf(src, manageable),
 		Documents: src.Counts.Documents, Chunks: src.Counts.Chunks, Bindings: src.Counts.Bindings,
+		Vectors:   src.Counts.Vectors,
 		CreatedAt: knowledgeTime(src.CreatedAt), CreatedBy: src.CreatedBy,
 		UpdatedAt: knowledgeTime(src.UpdatedAt), UpdatedBy: src.UpdatedBy,
 	}
@@ -234,6 +261,7 @@ func (s *Server) knowledgeAccess(w http.ResponseWriter, r *http.Request, g *gran
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, "the hub's database is not available"))
 		return nil, nil, false
 	}
+	opts = append([]knowledge.Option{knowledge.WithEmbeddings(s.knowledgeEmbeddings())}, opts...)
 	return knowledge.New(db, opts...).For(s.knowledgePrincipal(r, g)), func() { _ = db.Close() }, true
 }
 
@@ -247,7 +275,7 @@ func (s *Server) knowledgeAccessWithSecrets(w http.ResponseWriter, r *http.Reque
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, "the hub's database is not available"))
 		return nil, nil, false
 	}
-	var opts []knowledge.Option
+	opts := []knowledge.Option{knowledge.WithEmbeddings(s.knowledgeEmbeddings())}
 	if bs.secret != nil {
 		opts = append(opts, knowledge.WithCredentials(bs.secret))
 	}
@@ -364,7 +392,30 @@ func (s *Server) handleKnowledgeSources(w http.ResponseWriter, r *http.Request) 
 		"connectors":          knowledge.DefaultRegistry().Kinds(),
 		"can_create_org":      decision.Allows(authz.PermKnowledgeAdmin),
 		"can_create_personal": decision.Allows(authz.PermSecretOwn) && acc.Principal().Identity != "",
+		"embeddings":          knowledgeEmbeddingsViewOf(acc.Service().Embeddings(), decision.Allows(authz.PermKnowledgeAdmin)),
 	})
+}
+
+// knowledgeEmbeddingsView is the hub's semantic retrieval, as the sources
+// listing shows it: whether it is on, with which model, and — to an
+// administrator, who configures it — where chunk text is sent.
+type knowledgeEmbeddingsView struct {
+	Enabled  bool   `json:"enabled"`
+	Model    string `json:"model,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	// Broken says why a section an administrator turned on is not used.
+	Broken string `json:"broken,omitempty"`
+}
+
+func knowledgeEmbeddingsViewOf(e knowledge.Embeddings, admin bool) knowledgeEmbeddingsView {
+	v := knowledgeEmbeddingsView{Enabled: e.Model() != "", Model: e.Model()}
+	if admin {
+		v.Broken = e.Broken
+		if e.Embedder != nil && v.Enabled {
+			v.Endpoint = e.Embedder.Endpoint()
+		}
+	}
+	return v
 }
 
 // handleKnowledgeSource serves GET /api/knowledge/sources/{id}: one source,
@@ -710,19 +761,29 @@ func (s *Server) handleProjectKnowledgeSearch(w http.ResponseWriter, r *http.Req
 		return
 	}
 	defer done()
-	hits, err := acc.Search(r.Context(), project, q.Get("q"), k)
+	res, err := acc.Retrieve(r.Context(), project, q.Get("q"), k)
 	if err != nil {
 		s.writeKnowledgeError(w, err, "search the project's knowledge")
 		return
 	}
-	views := make([]knowledgeHitView, 0, len(hits))
-	for _, h := range hits {
+	views := make([]knowledgeHitView, 0, len(res.Hits))
+	for _, h := range res.Hits {
+		foundBy := []string{}
+		if h.Lexical {
+			foundBy = append(foundBy, knowledge.RetrievalLexical)
+		}
+		if h.Semantic {
+			foundBy = append(foundBy, "semantic")
+		}
 		views = append(views, knowledgeHitView{
 			ChunkID: h.ChunkID, DocumentID: h.DocumentID,
 			Source: knowledgeSourceRef{ID: h.Source.ID, Name: h.Source.Name, Kind: h.Source.Kind},
 			Title:  h.Title, URL: h.URL, Space: h.Space, ExternalID: h.ExternalID, Heading: h.Heading,
-			Ancestors: h.Ancestors, Snippet: h.Snippet, Rank: h.Rank,
+			Ancestors: h.Ancestors, Snippet: h.Snippet, Rank: h.Rank, FoundBy: foundBy,
 		})
 	}
-	jsonOK(w, map[string]any{"query": q.Get("q"), "hits": views})
+	rt := res.Retrieval
+	jsonOK(w, map[string]any{"query": q.Get("q"), "hits": views, "retrieval": knowledgeRetrievalView{
+		Mode: rt.Mode, Model: rt.Model, Candidates: rt.Candidates, Capped: rt.Capped, Warning: rt.Warning,
+	}})
 }

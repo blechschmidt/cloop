@@ -168,7 +168,7 @@ cloop_audit_forward_backlog_rows          cloop_hub_ca_not_after_timestamp_secon
 cloop_hub_ca_rotation_phase               cloop_hub_ca_rotation_step_age_seconds
 cloop_hub_ca_runs_blocking                cloop_hub_ca_members_behind
 cloop_knowledge_index_documents           cloop_knowledge_index_chunks
-cloop_knowledge_index_bytes
+cloop_knowledge_index_bytes               cloop_knowledge_index_vectors
 ```
 
 `sum()` and `max()` over the cluster therefore both give the right answer. A
@@ -1398,6 +1398,68 @@ histogram_quantile(0.95, sum by (le, kind) (rate(cloop_knowledge_sync_duration_s
 
 A source that keeps failing shows why on the source itself — `cloop knowledge
 sources` prints each one's status and last error, scrubbed of credentials.
+
+## Knowledge search and embeddings
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_knowledge_searches_total` | counter | `retrieval` |
+| `cloop_knowledge_search_vectors_compared_total` | counter | — |
+| `cloop_knowledge_search_vector_scan_seconds` | histogram | — |
+| `cloop_knowledge_search_vectors_capped_total` | counter | — |
+| `cloop_knowledge_embedding_requests_total` | counter | `purpose`, `outcome` |
+| `cloop_knowledge_embedding_request_duration_seconds` | histogram | `purpose` |
+| `cloop_knowledge_embedded_chunks_total` | counter | `kind`, `outcome` |
+| `cloop_knowledge_index_vectors` | gauge | `kind` |
+
+With [`knowledge.embeddings`](../reference/configuration.md#semantic-knowledge-search-knowledgeembeddings)
+on, each chunk gets a vector from the embedding endpoint during its source's
+sync, and a search fuses its ranking by words with a ranking by meaning (Task
+20471). Every family but the gauge is per process.
+
+`cloop_knowledge_searches_total` counts knowledge searches by `retrieval`:
+`lexical` (embeddings are off), `hybrid` (both rankings, fused), and `fallback`
+(embeddings are on, but the query could not be embedded, so the search ranked by
+words alone). A share of `fallback` is the endpoint failing searches; each one
+answered with a `warning` saying why.
+
+`cloop_knowledge_search_vectors_compared_total` counts the vectors hybrid
+searches compared their query with — the current vectors of each searching
+project's bound sources — and `cloop_knowledge_search_vector_scan_seconds` times
+each comparison. That scan is a hybrid search's cost, and it grows with the
+project's knowledge: divided by the hybrid searches, the counter is the vectors
+one search compares. `cloop_knowledge_search_vectors_capped_total` counts the
+searches that found more than `max_candidates` and compared only that many.
+
+`cloop_knowledge_embedding_requests_total` counts requests to the endpoint by
+`purpose` — `document` (a sync's batch of chunks) or `query` (a search's) — and
+`outcome`: `ok`; `error` (it failed, timed out or answered an error); `rejected`
+(it answered with vectors the hub refuses: too many, too few, of the wrong
+length, or not numbers); `skipped` (a query not sent because the endpoint failed
+within the last 30 seconds). `cloop_knowledge_embedding_request_duration_seconds`
+times them.
+
+`cloop_knowledge_embedded_chunks_total` counts what syncs' embedding passes did,
+by `kind` and `outcome`: `embedded` (a new vector), `reused` (the document
+changed and the chunk's text did not, so it kept its vector), `failed` (sent,
+and given no usable vector; it waits for the next sync).
+
+`cloop_knowledge_index_vectors` is how many chunks have a vector of the
+configured model, current or waiting for their source's next sync, exported by
+the leader only; beside `cloop_knowledge_index_chunks` it is the backfill's
+progress, and it reads 0 while embeddings are off.
+
+```promql
+sum(rate(cloop_knowledge_searches_total{retrieval="fallback"}[15m]))
+  / sum(rate(cloop_knowledge_searches_total{retrieval=~"hybrid|fallback"}[15m])) > 0.1
+sum(cloop_knowledge_index_vectors) / sum(cloop_knowledge_index_chunks)
+rate(cloop_knowledge_search_vectors_compared_total[1h]) / rate(cloop_knowledge_searches_total{retrieval="hybrid"}[1h])
+histogram_quantile(0.95, sum by (le) (rate(cloop_knowledge_search_vector_scan_seconds_bucket[1h])))
+```
+
+A source whose last sync could not embed shows it as its `warning` (`cloop
+knowledge sources`), and `cloop hub doctor` lists such sources under
+`knowledge.embeddings.sync`.
 
 ## Registry self-monitoring
 

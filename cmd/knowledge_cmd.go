@@ -150,7 +150,9 @@ var knowledgeSearchCmd = &cobra.Command{
 	Use:   "search <project> <query...>",
 	Short: "Search the knowledge sources bound to a project",
 	Long: `Search what the knowledge sources bound to a project hold, best matches first.
-Every word of the query must match; a word ending in * matches a prefix.`,
+The hub ranks by the query's words — a word ending in * matches a prefix — and,
+with its knowledge.embeddings on, by their meaning too. A search that could not
+use meaning says why on stderr.`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, err := remoteClient()
@@ -163,9 +165,12 @@ Every word of the query must match; a word ending in * matches a prefix.`,
 			return remoteErr(c, err)
 		}
 		query := strings.TrimSpace(strings.Join(args[1:], " "))
-		hits, err := c.SearchKnowledge(ctx, p.Idx, query, knowledgeK)
+		hits, retrieval, err := c.SearchKnowledgeRetrieval(ctx, p.Idx, query, knowledgeK)
 		if err != nil {
 			return remoteErr(c, err)
+		}
+		if retrieval.Warning != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "note: %s\n", retrieval.Warning)
 		}
 		out := cmd.OutOrStdout()
 		if knowledgeJSON {

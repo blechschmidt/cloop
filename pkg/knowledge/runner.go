@@ -24,6 +24,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -59,6 +60,11 @@ const (
 	resumeAfter = time.Minute
 	// purgeBudget bounds the purge of deleted sources' rows each pass runs.
 	purgeBudget = 5 * time.Second
+	// vectorPurgeEvery is how often a pass also purges the vectors no search
+	// can use — of a model the hub no longer embeds with, or of a chunk an
+	// older build dropped — while semantic retrieval is on: the first purge
+	// reads every vector, so it is not every pass's.
+	vectorPurgeEvery = time.Hour
 )
 
 // ErrRunnerStopped reports a sync asked of a runner that has stopped.
@@ -153,6 +159,10 @@ type Runner struct {
 	// lastPassErr is the last error a pass of the schedule could not read
 	// it with, so a lasting one is logged once rather than every tick.
 	lastPassErr string
+	// vectorsPurged is when a pass last purged unusable vectors, and of
+	// which model it kept.
+	vectorsPurged     time.Time
+	vectorsPurgedKept string
 }
 
 // runningEntry is one sync this process runs.
@@ -297,7 +307,43 @@ func (r *Runner) pass(ctx context.Context, slots chan struct{}, mine *sync.WaitG
 	if res, err := svc.db.PurgeKnowledge(pctx, time.Time{}, false); err != nil && pctx.Err() == nil {
 		r.o.Logf("knowledge: purge what deleted sources left: %v", err)
 	} else if res.Rows() > 0 {
-		r.o.Logf("knowledge: purged %d documents and %d chunks deleted sources left", res.Documents, res.Chunks)
+		r.o.Logf("knowledge: purged %d documents, %d chunks and %d vectors deleted sources left", res.Documents,
+			res.Chunks, res.Vectors)
+	}
+	r.purgeVectors(pctx, svc, now)
+}
+
+// purgeVectors removes, at most every vectorPurgeEvery and at once after the
+// embedding model changed, the vectors no search can use: those of every
+// model but the one the hub embeds with — a backfill under a new model has
+// made them dead weight, as large as the index itself — and those of chunks
+// an older build dropped. Only while semantic retrieval is on: with it off,
+// the vectors are kept for when it is turned back on.
+func (r *Runner) purgeVectors(ctx context.Context, svc *Service, now time.Time) {
+	model := svc.EmbeddingModel()
+	if model == "" {
+		return
+	}
+	r.mu.Lock()
+	due := r.vectorsPurgedKept != model || now.Sub(r.vectorsPurged) >= vectorPurgeEvery
+	r.mu.Unlock()
+	if !due {
+		return
+	}
+	res, err := svc.db.PurgeKnowledgeEmbeddings(ctx, model, false)
+	if err != nil {
+		if ctx.Err() == nil {
+			r.o.Logf("knowledge: purge unusable vectors: %v", err)
+		}
+		// Cut short by the pass's budget: the next pass goes on.
+		return
+	}
+	r.mu.Lock()
+	r.vectorsPurged, r.vectorsPurgedKept = now, model
+	r.mu.Unlock()
+	if res.Rows() > 0 {
+		r.o.Logf("knowledge: purged %d vectors of other embedding models and %d of chunks that are gone",
+			res.OtherModels, res.Orphans)
 	}
 }
 
@@ -337,7 +383,7 @@ func (r *Runner) dueSources(svc *Service, now time.Time) ([]int64, error) {
 		if _, held := leases[row.ID]; held {
 			continue
 		}
-		next := nextSync(row)
+		next := nextSyncFor(row, svc.EmbeddingModel())
 		if next.IsZero() || now.Before(next) {
 			continue
 		}
@@ -351,9 +397,16 @@ func (r *Runner) dueSources(svc *Service, now time.Time) ([]int64, error) {
 	return out, nil
 }
 
-// nextSync is when the schedule next syncs a source: zero for a disabled one,
-// and for one never synced, the moment it was created.
-func nextSync(row statedb.KnowledgeSourceRow) time.Time {
+// nextSync is nextSyncFor with semantic retrieval off.
+func nextSync(row statedb.KnowledgeSourceRow) time.Time { return nextSyncFor(row, "") }
+
+// nextSyncFor is when the schedule next syncs a source, for a hub that embeds
+// with model ("" for none): zero for a disabled source, and for one never
+// synced, the moment it was created. A source whose last good sync embedded
+// with another model — or with none, before embeddings were turned on — is due
+// at once, so turning embeddings on or changing their model starts every
+// source's backfill within a minute rather than an interval later.
+func nextSyncFor(row statedb.KnowledgeSourceRow, model string) time.Time {
 	if !row.Enabled {
 		return time.Time{}
 	}
@@ -373,10 +426,26 @@ func nextSync(row statedb.KnowledgeSourceRow) time.Time {
 		row.SyncStatus == StatusOK && row.SyncMore,
 		// Changed since the last sync began — reconfigured, re-enabled, or
 		// mid-sync, which that sync refused to write past.
-		row.UpdatedAt.After(row.SyncStartedAt):
+		row.UpdatedAt.After(row.SyncStartedAt),
+		// Ended well, embedding with another model or none.
+		row.SyncStatus == StatusOK && model != "" && embeddedWith(row.SyncReport) != model:
 		return last.Add(resumeAfter)
 	}
 	return last.Add(interval)
+}
+
+// embeddedWith is the model a sync report says its embedding pass used, or ""
+// for none.
+func embeddedWith(report string) string {
+	var r struct {
+		Embeddings *struct {
+			Model string `json:"model"`
+		} `json:"embeddings"`
+	}
+	if err := json.Unmarshal([]byte(report), &r); err != nil || r.Embeddings == nil {
+		return ""
+	}
+	return r.Embeddings.Model
 }
 
 // SyncNow runs one sync of source id in the caller's goroutine: it takes the
@@ -417,7 +486,7 @@ func stillDue(svc *Service, id int64, now time.Time) bool {
 		// Let the sync find out, and say, what is wrong.
 		return true
 	}
-	next := nextSync(row)
+	next := nextSyncFor(row, svc.EmbeddingModel())
 	return !next.IsZero() && !now.Before(next)
 }
 
@@ -623,6 +692,20 @@ func (r *Runner) record(res SyncResult) {
 		if n > 0 {
 			hubmetrics.KnowledgeDocumentsIndexed.Add(float64(n), res.Kind, change)
 		}
+	}
+	if e := res.Report.Embeddings; e != nil {
+		for outcome, n := range map[string]int{
+			hubmetrics.KnowledgeEmbedChunkEmbedded: e.Embedded,
+			hubmetrics.KnowledgeEmbedChunkReused:   e.Reused,
+			hubmetrics.KnowledgeEmbedChunkFailed:   e.Failed,
+		} {
+			if n > 0 {
+				hubmetrics.KnowledgeEmbeddedChunks.Add(float64(n), res.Kind, outcome)
+			}
+		}
+	}
+	if res.Report.Warning != "" {
+		r.o.Logf("knowledge: %s sync of source %d: %s", res.Origin, res.SourceID, res.Report.Warning)
 	}
 	if res.Status == StatusError {
 		reason := FailureReason(res.Err)

@@ -742,6 +742,9 @@ type Server struct {
 	// the leader's schedule and the syncs people ask this member for. See
 	// knowledge_sync.go.
 	knowledgeSync knowledgeSyncState
+	// knowledgeEmbed is the embedding client knowledge.embeddings names
+	// (Task 20471), kept while the section is unchanged.
+	knowledgeEmbed knowledgeEmbedState
 	// The spec-file reads this member is running, one per project, and the
 	// parses of what they read (Task 20459). See requirements_spec_api.go.
 	specReads  specReadJobs

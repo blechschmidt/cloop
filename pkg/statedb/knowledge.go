@@ -1506,8 +1506,12 @@ func writeKnowledgeChunksTx(tx *sql.Tx, doc KnowledgeDocumentRow, docID int64, c
 }
 
 // dropKnowledgeChunksTx deletes the chunks where matches, with their full-text
-// entries. where is one of this file's own predicates over knowledge_chunks.
+// entries and their vectors (knowledge_embeddings.go). where is one of this
+// file's own predicates over knowledge_chunks.
 func dropKnowledgeChunksTx(tx *sql.Tx, where string, args ...any) error {
+	if _, err := tx.Exec(`DELETE FROM knowledge_chunk_embeddings WHERE chunk_id IN (SELECT id FROM knowledge_chunks WHERE `+where+`)`, args...); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM knowledge_chunks_fts WHERE rowid IN (SELECT id FROM knowledge_chunks WHERE `+where+`)`, args...); err != nil {
 		return err
 	}

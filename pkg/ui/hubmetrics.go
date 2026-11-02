@@ -223,7 +223,7 @@ func registerHubCollectors() {
 		hubmetrics.CollectorSpec{
 			Name: "knowledge_index",
 			Families: []*hubmetrics.Metric{hubmetrics.KnowledgeIndexDocuments, hubmetrics.KnowledgeIndexChunks,
-				hubmetrics.KnowledgeIndexBytes},
+				hubmetrics.KnowledgeIndexBytes, hubmetrics.KnowledgeIndexVectors},
 			Collect: withScrape(collectKnowledgeIndex),
 		},
 	)

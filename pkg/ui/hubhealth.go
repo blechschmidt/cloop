@@ -1034,6 +1034,7 @@ var hubHealthDocAnchors = []struct{ prefix, anchor string }{
 	{"hubca.", "doctor-hubca"},
 	{"kubeguard.", "doctor-kubeguard"},
 	{"egress.", "doctor-egress"},
+	{"knowledge.", "doctor-knowledge"},
 	{"projects.", "doctor-projects"},
 	{"storage.", "doctor-storage"},
 	{"statedb.", "doctor-storage"},

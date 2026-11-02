@@ -494,11 +494,12 @@ func (d *DB) RecordKnowledgeSyncOutcome(id int64, o KnowledgeSyncOutcome) error 
 type KnowledgePurgeResult struct {
 	// Tombstones counts the tombstones purged for being older than the cut.
 	Tombstones int64 `json:"tombstones"`
-	// Documents and Chunks count what deleted sources had left: their
-	// documents, tombstones among them, and their chunks with their
-	// full-text entries.
+	// Documents, Chunks and Vectors count what deleted sources had left:
+	// their documents, tombstones among them, their chunks with their
+	// full-text entries, and their chunks' vectors.
 	Documents int64 `json:"documents"`
 	Chunks    int64 `json:"chunks"`
+	Vectors   int64 `json:"vectors"`
 	// Sources counts the deleted sources whose rows were found.
 	Sources int `json:"sources"`
 	// BodyBytes is the text the purged documents held.
@@ -506,12 +507,13 @@ type KnowledgePurgeResult struct {
 }
 
 // Rows is how many rows the purge removed.
-func (r KnowledgePurgeResult) Rows() int64 { return r.Tombstones + r.Documents + r.Chunks }
+func (r KnowledgePurgeResult) Rows() int64 { return r.Tombstones + r.Documents + r.Chunks + r.Vectors }
 
 func (r *KnowledgePurgeResult) add(o KnowledgePurgeResult) {
 	r.Tombstones += o.Tombstones
 	r.Documents += o.Documents
 	r.Chunks += o.Chunks
+	r.Vectors += o.Vectors
 	r.Sources += o.Sources
 	r.BodyBytes += o.BodyBytes
 }
@@ -551,7 +553,7 @@ func (d *DB) deletedKnowledgeSources() ([]int64, error) {
 	defer d.mu.Unlock()
 	seen := map[int64]bool{}
 	var gone []int64
-	for _, table := range []string{"knowledge_chunks", "knowledge_documents"} {
+	for _, table := range knowledgeSourceTables {
 		last := int64(-1 << 62)
 		for {
 			var next sql.NullInt64
@@ -579,9 +581,14 @@ func (d *DB) deletedKnowledgeSources() ([]int64, error) {
 	return gone, nil
 }
 
-// purgeKnowledgeOfSource removes the chunks, then the documents, of source id
-// — which must no longer exist: every transaction checks, so a purge can never
-// reach a live source's rows — knowledgePurgeBatch at a time.
+// knowledgeSourceTables are the tables holding a source's rows by source_id,
+// in the order a deleted source's are purged: the chunks' vectors, the chunks,
+// then the documents.
+var knowledgeSourceTables = []string{"knowledge_chunk_embeddings", "knowledge_chunks", "knowledge_documents"}
+
+// purgeKnowledgeOfSource removes the vectors, the chunks, then the documents,
+// of source id — which must no longer exist: every transaction checks, so a
+// purge can never reach a live source's rows — knowledgePurgeBatch at a time.
 func (d *DB) purgeKnowledgeOfSource(ctx context.Context, id int64, dryRun bool) (KnowledgePurgeResult, error) {
 	var out KnowledgePurgeResult
 	if dryRun {
@@ -600,21 +607,28 @@ func (d *DB) purgeKnowledgeOfSource(ctx context.Context, id int64, dryRun bool) 
 		if err := d.conn.QueryRow(`SELECT COUNT(*) FROM knowledge_chunks WHERE source_id = ?`, id).Scan(&out.Chunks); err != nil {
 			return out, wrapErr(err)
 		}
+		if err := d.conn.QueryRow(`SELECT COUNT(*) FROM knowledge_chunk_embeddings WHERE source_id = ?`, id).
+			Scan(&out.Vectors); err != nil {
+			return out, wrapErr(err)
+		}
 		if err := d.conn.QueryRow(`SELECT COUNT(*), COALESCE(SUM(body_bytes), 0) FROM knowledge_documents WHERE source_id = ?`, id).
 			Scan(&out.Documents, &out.BodyBytes); err != nil {
 			return out, wrapErr(err)
 		}
 		return out, nil
 	}
-	for _, table := range []string{"knowledge_chunks", "knowledge_documents"} {
+	for _, table := range knowledgeSourceTables {
 		for {
 			if err := ctx.Err(); err != nil {
 				return out, err
 			}
 			n, bytes, done, err := d.purgeKnowledgeBatch(id, table)
-			if table == "knowledge_chunks" {
+			switch table {
+			case "knowledge_chunk_embeddings":
+				out.Vectors += n
+			case "knowledge_chunks":
 				out.Chunks += n
-			} else {
+			default:
 				out.Documents += n
 				out.BodyBytes += bytes
 			}
@@ -650,7 +664,13 @@ func (d *DB) purgeKnowledgeBatch(id int64, table string) (n, bodyBytes int64, do
 		// Not deleted: nothing of a live source is ever purged.
 		return 0, 0, true, nil
 	}
-	ids, err := idsTx(tx, `SELECT id FROM `+table+` WHERE source_id = ? LIMIT ?`, id, knowledgePurgeBatch)
+	// A vector's row has no id column of its own; its rowid is as stable for
+	// the length of this transaction.
+	key := "id"
+	if table == "knowledge_chunk_embeddings" {
+		key = "rowid"
+	}
+	ids, err := idsTx(tx, `SELECT `+key+` FROM `+table+` WHERE source_id = ? LIMIT ?`, id, knowledgePurgeBatch)
 	if err != nil {
 		return 0, 0, false, wrapErr(err)
 	}
@@ -673,7 +693,7 @@ func (d *DB) purgeKnowledgeBatch(id int64, table string) (n, bodyBytes int64, do
 			return 0, 0, false, wrapErr(err)
 		}
 	}
-	res, err := tx.Exec(`DELETE FROM `+table+` WHERE id IN (SELECT value FROM json_each(?))`, list)
+	res, err := tx.Exec(`DELETE FROM `+table+` WHERE `+key+` IN (SELECT value FROM json_each(?))`, list)
 	if err != nil {
 		return 0, 0, false, wrapErr(err)
 	}

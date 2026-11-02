@@ -260,6 +260,9 @@ type SyncState struct {
 	Origin    string
 	// Counts is what the last sync did.
 	Counts SyncCounts
+	// Warning is what went wrong in the last sync without failing it: the
+	// embedding endpoint was down, say. Empty for none.
+	Warning string
 	// More reports a last sync that stopped before its listing's end; the
 	// next one is due at once.
 	More bool
@@ -292,6 +295,12 @@ type SyncCounts struct {
 	Complete bool `json:"complete"`
 	// Full reports a sync that took part in a full listing.
 	Full bool `json:"full,omitempty"`
+	// Embeddings is what the sync's embedding pass did; absent when
+	// semantic retrieval is off.
+	Embeddings *EmbedCounts `json:"embeddings,omitempty"`
+	// Warning is what went wrong without failing the sync — the embedding
+	// endpoint failing, say — scrubbed of credentials.
+	Warning string `json:"warning,omitempty"`
 }
 
 // RunningSync is a sync in progress, as its lease says.
@@ -309,6 +318,10 @@ type Counts struct {
 	Documents int
 	Chunks    int
 	Bindings  int
+	// Vectors counts the chunks with a vector of the hub's embedding model,
+	// current or awaiting the next sync; zero while semantic retrieval is
+	// off.
+	Vectors int
 }
 
 // Filter narrows a binding.
@@ -368,9 +381,14 @@ type Hit struct {
 	// SnippetOpen and SnippetClose.
 	Snippet string
 	// Rank is the hit's place in the results, from 1. The BM25 score it was
-	// ranked by is not given out: see Access.Search.
+	// ranked by is not given out: see Access.Retrieve.
 	Rank    int
 	Ordinal int
+	// Lexical and Semantic say what found the hit: its words — the
+	// full-text index — and its meaning — its vector's nearness to the
+	// query's. A search with semantic retrieval off finds by words alone.
+	Lexical  bool
+	Semantic bool
 }
 
 // SourceRef names a source in a search result.

@@ -127,7 +127,14 @@ func sinkPrerequisites(dir string, s config.AuditForwardSink) string {
 			return "path: " + err.Error()
 		}
 	}
-	refs := s.StoreRefs()
+	return hubCredentialProblem(dir, s.StoreRefs())
+}
+
+// hubCredentialProblem reports what stops the hub presenting the secrets refs
+// name as itself — a secret store it cannot open, a secret it does not hold, or
+// one that is not a shared env secret — judged without opening any; "" when
+// nothing does.
+func hubCredentialProblem(dir string, refs []string) string {
 	if len(refs) == 0 {
 		return ""
 	}

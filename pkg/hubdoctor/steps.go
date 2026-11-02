@@ -169,6 +169,11 @@ func steps(dir string, cfg *config.Config, opts Options, wal walSample, rep *Rep
 		// 20438).
 		step{"hubca", "Hub certificate authority", func(_ context.Context, add addFn) { checkHubCA(dir, cfg, opts, add) }},
 		step{"egress", "Egress proxy", func(ctx context.Context, add addFn) { checkEgressBroker(ctx, dir, cfg, opts, add) }},
+		// Beside it: the other way the hub sends data out on purpose — the
+		// text of its knowledge chunks to an embedding endpoint (Task 20471).
+		step{"knowledge.embeddings", "Knowledge embeddings", func(_ context.Context, add addFn) {
+			checkKnowledgeEmbeddings(dir, cfg, add)
+		}},
 		// Beside the storage the projects live in: whether any registered
 		// project's directory overlaps what the hub must never bind (Task 20418).
 		step{"projects.confinement", "Project directories", func(_ context.Context, add addFn) {

@@ -96,7 +96,15 @@ func (a *Access) visible(id int64) (statedb.KnowledgeSourceRow, error) {
 	return row, nil
 }
 
-func sourceFromRow(row statedb.KnowledgeSourceRow) Source {
+// sourceFromRow is row as the caller sees it, its next sync as this Service
+// schedules it.
+func (a *Access) sourceFromRow(row statedb.KnowledgeSourceRow) Source {
+	return sourceFromRowFor(row, a.s.EmbeddingModel())
+}
+
+// sourceFromRowFor is row as a Source whose next sync is scheduled for the
+// embedding model model ("" for none).
+func sourceFromRowFor(row statedb.KnowledgeSourceRow, model string) Source {
 	var counts SyncCounts
 	// A report this build cannot read is shown as none: it says what a sync
 	// did, and decides nothing.
@@ -108,10 +116,21 @@ func sourceFromRow(row statedb.KnowledgeSourceRow) Source {
 		Sync: SyncState{
 			Status: row.SyncStatus, Error: row.SyncError, At: row.SyncedAt, Resumes: row.SyncCursor != "",
 			ReconciledAt: row.ReconciledAt, StartedAt: row.SyncStartedAt, Duration: row.SyncDuration,
-			Origin: row.SyncOrigin, Counts: counts, More: row.SyncMore, OKAt: row.SyncedOKAt, NextAt: nextSync(row),
+			Origin: row.SyncOrigin, Counts: counts, Warning: counts.Warning, More: row.SyncMore, OKAt: row.SyncedOKAt,
+			NextAt: nextSyncFor(row, model),
 		},
 		CreatedAt: row.CreatedAt, CreatedBy: row.CreatedBy, UpdatedAt: row.UpdatedAt, UpdatedBy: row.UpdatedBy,
 	}
+}
+
+// vectorCounts returns, per source id, how many of its chunks have a vector
+// of the Service's embedding model: none while semantic retrieval is off.
+func (a *Access) vectorCounts() (map[int64]int, error) {
+	model := a.s.EmbeddingModel()
+	if model == "" {
+		return map[int64]int{}, nil
+	}
+	return a.s.db.CountKnowledgeVectors(model)
 }
 
 // cleanSyncInterval checks a source's sync interval: zero for the default,
@@ -164,6 +183,10 @@ func (a *Access) Sources(ctx context.Context) ([]Source, error) {
 	if err != nil {
 		return nil, err
 	}
+	vectors, err := a.vectorCounts()
+	if err != nil {
+		return nil, err
+	}
 	out := []Source{}
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
@@ -172,9 +195,9 @@ func (a *Access) Sources(ctx context.Context) ([]Source, error) {
 		if !a.canSee(row) {
 			continue
 		}
-		src := withSchedule(sourceFromRow(row), row, leases)
+		src := withSchedule(a.sourceFromRow(row), row, leases)
 		c := counts[row.ID]
-		src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings}
+		src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings, Vectors: vectors[row.ID]}
 		out = append(out, src)
 	}
 	return out, nil
@@ -202,13 +225,17 @@ func (a *Access) Source(ctx context.Context, id int64) (Source, []Binding, error
 	if err != nil {
 		return Source{}, nil, err
 	}
-	src := withSchedule(sourceFromRow(row), row, leases)
+	src := withSchedule(a.sourceFromRow(row), row, leases)
 	counts, err := a.s.db.CountKnowledge(row.ID)
 	if err != nil {
 		return Source{}, nil, err
 	}
+	vectors, err := a.vectorCounts()
+	if err != nil {
+		return Source{}, nil, err
+	}
 	c := counts[row.ID]
-	src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings}
+	src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings, Vectors: vectors[row.ID]}
 	if !a.canManage(row) && !a.isAdmin() {
 		// Where a source is bound names projects; a caller who cannot manage
 		// the source may not be able to see them.
@@ -304,7 +331,7 @@ func (a *Access) CreateSource(ctx context.Context, in SourceInput) (Source, erro
 	if err != nil {
 		return Source{}, err
 	}
-	return sourceFromRow(row), nil
+	return a.sourceFromRow(row), nil
 }
 
 func (a *Access) unknownKind(kind string) error {
@@ -428,7 +455,7 @@ func (a *Access) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (S
 		}
 	}
 	if len(u.Changed) == 0 {
-		return sourceFromRow(row), nil
+		return a.sourceFromRow(row), nil
 	}
 	if err := ctx.Err(); err != nil {
 		return Source{}, err
@@ -445,7 +472,7 @@ func (a *Access) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (S
 	case err != nil:
 		return Source{}, err
 	}
-	return sourceFromRow(updated), nil
+	return a.sourceFromRow(updated), nil
 }
 
 // MaySync returns source id when the caller may ask the hub to sync it now:
@@ -466,7 +493,7 @@ func (a *Access) MaySync(ctx context.Context, id int64) (Source, error) {
 	if !row.Enabled {
 		return Source{}, fmt.Errorf("%w: %s; enable it to sync it", ErrDisabled, row.Name)
 	}
-	return sourceFromRow(row), ctx.Err()
+	return a.sourceFromRow(row), ctx.Err()
 }
 
 // DeleteSource removes a source and everything it indexed.
@@ -491,7 +518,7 @@ func (a *Access) DeleteSource(ctx context.Context, id int64) (Source, Counts, er
 	if err != nil {
 		return Source{}, Counts{}, err
 	}
-	return sourceFromRow(deleted), Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings}, nil
+	return a.sourceFromRow(deleted), Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings}, nil
 }
 
 // requireProject refuses a caller without perm on project: not found when
@@ -627,6 +654,10 @@ func (a *Access) ProjectSources(ctx context.Context, project Project) ([]BoundSo
 	if err != nil {
 		return nil, err
 	}
+	vectors, err := a.vectorCounts()
+	if err != nil {
+		return nil, err
+	}
 	out := []BoundSource{}
 	for _, b := range rows {
 		if err := ctx.Err(); err != nil {
@@ -639,14 +670,14 @@ func (a *Access) ProjectSources(ctx context.Context, project Project) ([]BoundSo
 		if err != nil {
 			return nil, err
 		}
-		src := withSchedule(sourceFromRow(row), row, leases)
+		src := withSchedule(a.sourceFromRow(row), row, leases)
 		src.Config, src.SecretRef = nil, ""
 		if src.Sync.Running != nil {
 			// Who asked for a sync is the source's managers' to know.
 			src.Sync.Running.Actor = ""
 		}
 		c := counts[row.ID]
-		src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings}
+		src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings, Vectors: vectors[row.ID]}
 		out = append(out, BoundSource{Source: src, Binding: bindingFromRow(b)})
 	}
 	return out, nil
@@ -662,59 +693,3 @@ const (
 
 // searchSlots holds a token for each search in progress in this process.
 var searchSlots = make(chan struct{}, maxConcurrentSearches)
-
-// Search returns the k chunks of project's knowledge that best match query,
-// best first: only sources bound to project, through each binding's
-// narrowing. k <= 0 means DefaultResults; more than MaxResults is cut to it.
-//
-// A hit says where it ranks, never its BM25 score. FTS5 weighs a term by how
-// rare it is across the whole index — every project's sources — so a score,
-// read against a chunk the caller can see, would tell them how often a word
-// occurs in knowledge bound only to other projects.
-func (a *Access) Search(ctx context.Context, project Project, query string, k int) ([]Hit, error) {
-	if err := a.requireProject(project, authz.PermProjectRead); err != nil {
-		return nil, err
-	}
-	match, err := MatchExpression(query)
-	if err != nil {
-		return nil, err
-	}
-	if k <= 0 {
-		k = DefaultResults
-	}
-	k = min(k, MaxResults)
-	ctx, cancel := context.WithTimeout(ctx, searchTimeout)
-	defer cancel()
-	select {
-	case searchSlots <- struct{}{}:
-		defer func() { <-searchSlots }()
-	case <-ctx.Done():
-		return nil, fmt.Errorf("%w: the hub is busy with other searches; try again", ErrUnavailable)
-	}
-	rows, err := a.s.db.SearchKnowledge(ctx, statedb.KnowledgeSearchQuery{
-		ProjectPath: project.Path, Match: match, Limit: k,
-		SnippetOpen: SnippetOpen, SnippetClose: SnippetClose, SnippetEllipsis: SnippetEllipsis, SnippetTokens: 32,
-	})
-	switch {
-	case errors.Is(err, statedb.ErrKnowledgeQuery):
-		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
-	case err != nil && ctx.Err() != nil:
-		return nil, fmt.Errorf("%w: the search took longer than %s; narrow the query", ErrUnavailable, searchTimeout)
-	case err != nil:
-		return nil, err
-	}
-	out := make([]Hit, 0, len(rows))
-	for i, r := range rows {
-		snippet := r.Snippet
-		if strings.TrimSpace(snippet) == "" {
-			snippet = r.Title
-		}
-		out = append(out, Hit{
-			ChunkID: r.ChunkID, DocumentID: r.DocumentID,
-			Source: SourceRef{ID: r.SourceID, Name: r.SourceName, Kind: r.SourceKind},
-			Title:  r.Title, URL: r.URL, Space: r.SpaceKey, ExternalID: r.ExternalID, Heading: r.Heading,
-			Ancestors: r.Ancestors, Snippet: snippet, Rank: i + 1, Ordinal: r.Ordinal,
-		})
-	}
-	return out, nil
-}

@@ -186,20 +186,43 @@ type KnowledgeHit struct {
 	// Snippet is the chunk's best-matching passage, terms marked « and ».
 	Snippet string `json:"snippet"`
 	Rank    int    `json:"rank"`
+	// FoundBy says what found the hit: "lexical" (its words), "semantic"
+	// (its meaning, with the hub's knowledge.embeddings on), or both.
+	FoundBy []string `json:"found_by,omitempty"`
+}
+
+// KnowledgeRetrieval is how a search ranked: "hybrid" — words and meaning,
+// fused — or "lexical", with Warning saying why a search that would have been
+// hybrid was not.
+type KnowledgeRetrieval struct {
+	Mode       string `json:"mode"`
+	Model      string `json:"model,omitempty"`
+	Candidates int    `json:"candidates,omitempty"`
+	Capped     bool   `json:"capped,omitempty"`
+	Warning    string `json:"warning,omitempty"`
 }
 
 // SearchKnowledge searches the knowledge bound to the project at index idx
 // for query, returning at most k hits (the hub's default for k <= 0).
 func (c *Client) SearchKnowledge(ctx context.Context, idx int, query string, k int) ([]KnowledgeHit, error) {
+	hits, _, err := c.SearchKnowledgeRetrieval(ctx, idx, query, k)
+	return hits, err
+}
+
+// SearchKnowledgeRetrieval is SearchKnowledge with how the hub ranked the
+// hits; an older hub, which ranks by words alone and does not say, answers a
+// zero KnowledgeRetrieval.
+func (c *Client) SearchKnowledgeRetrieval(ctx context.Context, idx int, query string, k int) ([]KnowledgeHit, KnowledgeRetrieval, error) {
 	q := url.Values{"q": {query}}
 	if k > 0 {
 		q.Set("k", strconv.Itoa(k))
 	}
 	var out struct {
-		Hits []KnowledgeHit `json:"hits"`
+		Hits      []KnowledgeHit     `json:"hits"`
+		Retrieval KnowledgeRetrieval `json:"retrieval"`
 	}
 	if err := c.Do(ctx, http.MethodGet, fmt.Sprintf("/api/projects/%d/knowledge/search", idx), q, nil, &out); err != nil {
-		return nil, err
+		return nil, KnowledgeRetrieval{}, err
 	}
-	return out.Hits, nil
+	return out.Hits, out.Retrieval, nil
 }

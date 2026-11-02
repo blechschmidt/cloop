@@ -87,7 +87,8 @@ func (s *Server) openKnowledgeSync() (*knowledge.Service, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	opts := []knowledge.Option{knowledge.WithCredentials(syncCredentials{s: s})}
+	opts := []knowledge.Option{knowledge.WithCredentials(syncCredentials{s: s}),
+		knowledge.WithEmbeddings(s.knowledgeEmbeddings())}
 	s.knowledgeSync.mu.Lock()
 	opts = append(opts, s.knowledgeSync.serviceOptions...)
 	s.knowledgeSync.mu.Unlock()
@@ -218,7 +219,13 @@ func collectKnowledgeIndex(sc *metricsScrape) {
 	if err != nil {
 		return
 	}
-	type size struct{ docs, chunks, bytes float64 }
+	vectors := map[int64]int{}
+	if model := sc.srv.knowledgeEmbeddings().Model(); model != "" {
+		if vectors, err = db.CountKnowledgeVectors(model); err != nil {
+			return
+		}
+	}
+	type size struct{ docs, chunks, bytes, vectors float64 }
 	byKind := map[string]*size{}
 	for _, kind := range knowledge.DefaultRegistry().Kinds() {
 		byKind[kind] = &size{}
@@ -237,10 +244,12 @@ func collectKnowledgeIndex(sc *metricsScrape) {
 		sz.docs += float64(c.Documents)
 		sz.chunks += float64(c.Chunks)
 		sz.bytes += float64(c.BodyBytes)
+		sz.vectors += float64(vectors[src.ID])
 	}
 	for kind, sz := range byKind {
 		hubmetrics.KnowledgeIndexDocuments.Set(sz.docs, kind)
 		hubmetrics.KnowledgeIndexChunks.Set(sz.chunks, kind)
 		hubmetrics.KnowledgeIndexBytes.Set(sz.bytes, kind)
+		hubmetrics.KnowledgeIndexVectors.Set(sz.vectors, kind)
 	}
 }

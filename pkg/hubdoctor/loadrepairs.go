@@ -13,7 +13,7 @@ package hubdoctor
 // So the loader records its repairs (config.LoadRepair) and this reports them:
 // a value it reset as a warning — the hub works, not as written — and a
 // section it switched off as a failure, because the operator asked for a
-// control or a capability that is not running. The three sections with checks
+// control or a capability that is not running. The sections with checks
 // of their own report their switch-off there, in the terms of what the hub does
 // without them.
 
@@ -29,6 +29,8 @@ var sectionsWithOwnCheck = map[string]bool{
 	"executors.git_proxy":  true,
 	"executors.kube_guard": true,
 	"executors.egress":     true,
+	// checkKnowledgeEmbeddings: what the knowledge index does without it.
+	"knowledge.embeddings": true,
 }
 
 func checkLoadRepairs(cfg *config.Config, add addFn) {

@@ -414,6 +414,12 @@ type Config struct {
 	// overlay merged in. See secrets.go.
 	Secrets SecretsConfig `yaml:"secrets,omitempty"`
 
+	// Knowledge configures how the knowledge index is searched: semantic
+	// retrieval through an embedding endpoint, off unless enabled (Task
+	// 20471). Hub-scope: read by `cloop ui` with its per-instance overlay
+	// merged in. See knowledge.go.
+	Knowledge KnowledgeConfig `yaml:"knowledge,omitempty"`
+
 	// envShadow records what the file held for each credential the
 	// environment overrode, so Save can write the file's own value back
 	// instead of committing a secret that was deliberately kept out of it.
@@ -3791,6 +3797,10 @@ func (c *Config) validateAndClamp(path string) {
 	// its URL in two places or names an address range holding a metadata
 	// service is dropped and recorded as switched off.
 	c.clampNotifications(path, warn)
+	// Knowledge embeddings (Task 20471): a section that names no endpoint,
+	// holds a key, or points at a metadata service is switched off — off
+	// sends no chunk text anywhere.
+	c.clampEmbeddings(path, warn)
 	// Retention janitor: zero means "use the package default" for every
 	// field, so an out-of-range value falls back to zero and the hub runs the
 	// default policy. That is the conservative reading here — the opposite of
@@ -4037,6 +4047,8 @@ func (c *Config) sectionEnabled(key string) bool {
 		return c.Executors.KubeGuard.Enabled
 	case "executors.model_relay":
 		return c.Executors.ModelRelay.Enabled && c.Executors.ModelRelay.Broken == ""
+	case "knowledge.embeddings":
+		return c.Knowledge.Embeddings.Enabled
 	}
 	return false
 }
@@ -4112,6 +4124,9 @@ func (c *Config) ValidateNumeric() error {
 	}
 	if err := ValidateNotifications(c.Notifications); err != nil {
 		return err
+	}
+	if err := ValidateEmbeddings(c.Knowledge.Embeddings); err != nil {
+		return fmt.Errorf("knowledge.embeddings: %w", err)
 	}
 	if c.Retention.IntervalHours != 0 && (c.Retention.IntervalHours < RetentionIntervalHoursLower || c.Retention.IntervalHours > RetentionIntervalHoursUpper) {
 		return fmt.Errorf("retention.interval_hours must be between %d and %d (or 0 for the default) (got %d)",

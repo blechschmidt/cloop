@@ -3276,6 +3276,33 @@ prefix.
 The ACL hints a connector reports for a document are stored with it but not
 enforced: a binding is what decides who may search a source.
 
+**Semantic search: chunk text sent to an endpoint an administrator names.**
+`knowledge.embeddings` (Task 20471) is off unless an administrator turns it on
+in the hub's own configuration, never a project's. On, the hub sends the text of
+every chunk of every synced source, and every search query, to the embedding
+endpoint it names, and `cloop hub doctor` always reports a finding naming that
+endpoint (`TestKnowledgeEmbeddingsFindings`). The text is what the index holds,
+already scrubbed of anything shaped like a credential. The endpoint's key is a
+shared env secret the hub presents as itself, named by `secret_ref`. A key
+written into the section, or a credential in the endpoint's query, switches the
+section off at load (`TestEmbeddingsConfig`). The client follows no redirect,
+refuses a cloud metadata service at every connection, reads answers within a
+bound, and keeps the key out of every error it returns
+(`TestRedirectsAreNotFollowed`, `TestTheDialerRefusesMetadataServices`,
+`TestRefusalsNameTheProblemAndNeverTheKey`). A vector of the wrong length is
+never stored or compared (`TestEmbeddingDimensionMismatchIsRejected`). Vectors
+live in the hub's database beside the chunks, and a search compares the query
+only with the current vectors of the project's own bound sources, through the
+same bindings and narrowing as the full-text search: never another project's,
+a disabled source's, or one made for what a document said before it changed
+(`TestKnowledgeVectorScanIsolatesProjects`,
+`TestSemanticSearchNeverCrossesProjects`). A hit carries its rank, never its
+cosine. An endpoint that is down or misconfigured fails neither a sync nor a
+search: the sync records a warning and the search ranks by words
+(`TestEmbeddingOutageFallsBackToWords`). What the endpoint does with the text is
+outside the hub's control. Turn embeddings on only for an endpoint the
+organisation would trust with every page of every source it connects.
+
 Every change is on the trail:
 [`knowledge.source.create`](../reference/audit-events.md#knowledgesource),
 [`knowledge.source.update`](../reference/audit-events.md#knowledgesource),

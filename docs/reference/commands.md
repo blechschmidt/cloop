@@ -1479,7 +1479,11 @@ as [`knowledge.source.sync`](audit-events.md#knowledgesource).
 
 `search` prints the best chunks of the knowledge bound to the project — where
 each sits at its source, its link, and the passage that matched with the terms
-marked « » — at most `-k` of them (10 by default, at most 50).
+marked « » — at most `-k` of them (10 by default, at most 50). With the hub's
+[semantic search](configuration.md#semantic-knowledge-search-knowledgeembeddings)
+on, the chunks are ranked by the query's meaning as well as its words; a search
+that had to rank by words alone — the embedding endpoint down, say — prints why
+on stderr. `--json` hits carry `found_by`.
 
 ### `cloop hub grant`
 

@@ -149,15 +149,7 @@ func (s *Server) auditForwardChains() []auditforward.Chain {
 // auditForwardCredential opens a secret a sink presents — its HEC token, its
 // client key — from the hub's secret store.
 func (s *Server) auditForwardCredential(ref string) ([]byte, error) {
-	bs, err := s.openBrokers()
-	if err != nil {
-		return nil, err
-	}
-	defer bs.close()
-	if bs.secret == nil {
-		return nil, fmt.Errorf("%s: %s", bs.status.Reason, bs.status.Remediation)
-	}
-	return bs.secret.HubCredential(ref)
+	return s.hubCredential(ref)
 }
 
 // collectAuditForward publishes each sink's lag and backlog. Leader only: the

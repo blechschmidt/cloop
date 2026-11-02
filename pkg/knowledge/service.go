@@ -32,6 +32,8 @@ type Service struct {
 	// reconcileEvery is how often a Reconciler is asked what its source
 	// holds.
 	reconcileEvery time.Duration
+	// embeddings is semantic retrieval: off unless an Embedder is set.
+	embeddings Embeddings
 
 	// onChunk, when set, is called each time a document is chunked. Tests use
 	// it to prove an unchanged document is not.
