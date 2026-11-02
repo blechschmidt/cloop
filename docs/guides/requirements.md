@@ -23,6 +23,12 @@ contradictory or untested. Requirements can also be kept **as code**, in
 requests and checked by a CI job with no hub — see
 [Requirements as code](#requirements-as-code).
 
+The planners read them too. **Plan from requirements** has the model plan the
+tasks that close the open gaps — must first — each linked to what it closes,
+and auto-evolve, the suggestions panel, the plan assistant and Split all plan
+with the requirements in view — see
+[Planning from the requirements](#planning-from-the-requirements).
+
 ## Adding requirements
 
 From the dashboard, open a project's **Requirements** tab and press
@@ -301,6 +307,116 @@ which you then add to the requirement. Either task is placed by the
 requirement's priority: a `must` ahead of the plan's usual work, and either
 [implements the requirement](#tasks-that-implement-a-requirement), so its run
 is held to it. A deprecated requirement offers neither.
+
+## Planning from the requirements
+
+Every approved requirement stands somewhere against the plan, and the
+Requirements tab says where on its card. Its **gaps** say what is open — it
+fails, it is stale, it has no test, no task implements it, nothing has checked
+it — and its **action** says what closes it:
+
+| Action | When | Closed by |
+| --- | --- | --- |
+| **fix** | its latest check of its current definition found it unfulfilled, or could not run its tests | a task that restores it |
+| **implement** | nothing shows it holds: never checked, or no test and no verdict | a task that implements it, with a test if it has none |
+| **verify** | it was found to hold, but has changed since | a task that verifies it and restores it if needed |
+| **test** | it holds by the model's or a person's word and lacks only a test | a task that only adds its test |
+| covered | an open task implements it | nothing more |
+| check | a task implementing it finished since its verdict, or tasks finished since it held | a check, not a task |
+| needs its test | a task implementing it finished and it still has no test | a person attaching the test that task wrote |
+| stuck | a task meant to close it failed or was skipped, or is done while it still fails | a person |
+
+The first four are a planner's **targets**. The others are not a task's to
+close, which is also why auto-evolve cannot loop on a requirement: once a task
+linked to a target finishes, fails or is skipped, no planner plans for it
+again until the requirement changes, a check finds it holding, or a person
+resets the task. A check that finds it failing again — the requirements gate
+checks every must requirement at every task — confirms a failed attempt rather
+than undoing it, and a task marked done by hand, with no completion time,
+counts as the latest attempt. A requirement whose tests pass needs no task,
+linked or not. Drafts and deprecated requirements have no standing and are
+never planned for.
+
+### Plan from requirements
+
+**Plan from requirements**, in the Requirements tab, has the model plan the
+tasks that close the open gaps — the button shows how many there are. The
+model runs on the project's executor with your account, like every dashboard
+model call, and the plan arrives in the Tasks tab's **AI Feature Suggestions**
+panel, which the button opens, as a plan's numbered steps: add them one at a
+time or with **Add all**, as any plan's. From a terminal:
+
+```bash
+cloop requirements plan              # review the plan task by task
+cloop requirements plan --dry-run    # show it, add nothing
+cloop requirements plan --yes        # add every task
+cloop requirements plan --count 5    # at most five tasks
+```
+
+Whatever the model proposes is held to the requirements before you see it:
+
+- a task links only requirements with an open gap — a link to a draft, a
+  deprecated requirement, one that holds or an id that names nothing is
+  dropped;
+- a task's **kind** follows from what it links: in a plan from the
+  requirements, one that links only requirements lacking nothing but a test is
+  a **test only** task, given to the testing role and told to change nothing
+  else and to end with the command that runs its test, which a person then adds
+  to the requirement (a brainstormed idea or a planned request linking such a
+  requirement is not taken to be one);
+- a task repeating what an open task implements is left out, and said so;
+- a must gap the model left open gets a task of its own, by template;
+- the tasks run by the priority of what they close — must at priority 1 ahead
+  of the plan's usual work, should at 2, could at 4 — each still after the
+  tasks it depends on, which run as early as what waits for them.
+
+Each card says what it closes — an **R-n** chip per requirement — and the
+panel warns while an approved must requirement with an open gap is closed by no
+card left and by no task added from them, so skipping the only card that
+closes one says so. A task added from the plan
+[implements](#tasks-that-implement-a-requirement) what its card closed, and its
+agent is held to it.
+
+### Auto-evolve and the suggestions panel
+
+An [auto-evolve](../getting-started/concepts.md#auto-evolve) round and the
+panel's **Generate** are shown the same summary — every approved requirement
+with its gaps, and the open ones first — and asked to link what each proposal
+closes. With an open **must** gap they close it before anything new:
+
+- the proposals that close gaps come first, by their requirements' priority,
+  and every one that closes none runs after all of them;
+- a must gap no proposal closes gets a task by template — up to five a round —
+  even when the model proposed nothing at all;
+- every task a round adds links the approved requirements it addresses: what
+  the model named, or what its title names as `R-n`; anything else is dropped,
+  and a project without approved requirements gets no links at all;
+- the semantic deduplication also drops a proposal that links only
+  requirements an open task already implements, and the model judging the rest
+  is shown which requirements each task implements and whether it is open.
+
+A plan of a request you typed keeps the steps and order you asked for; its
+tasks link the requirements they make hold. On a device the run has no copy of
+the hub's checks, so its seed carries what the hub knows of every approved
+requirement, and its own requirements gate's checks are laid over it; the links
+of the tasks it adds come back with its result, kept where the hub still holds
+the requirement approved. A device whose cloop predates the requirement status
+is asked again without it, and what it answers is held to the requirements on
+the hub all the same.
+
+### The plan assistant and Split
+
+The plan assistant is shown the same summary. An answer that proposes tasks
+ends with a list of them the dashboard reads: under the answer, each proposed
+task is shown with the requirements it covers, and a warning names the
+approved must requirements with an open gap that neither the proposal nor an
+open task covers.
+
+**Split**, for a task that implements requirements, asks the model to cover
+every approved one the task implements, and each proposed sub-task names the
+ones it makes hold; applying links them. The dialog warns while an approved
+must requirement of the task is covered by no selected sub-task: once the task
+is split it is skipped, and nothing open would implement the requirement.
 
 ## Tasks that implement a requirement
 
@@ -669,6 +785,7 @@ minutes old (hourly for a checkout that had none), for somebody who may import;
 | Download the requirements as a spec file | `project.read` |
 | Add, change or delete a requirement, record a verdict, add a task from one | `task.mutate` |
 | Have the model draft requirements, approve drafts | `task.mutate` |
+| Plan from the requirements | `task.mutate` |
 | Lint the requirements by rule | `project.read` |
 | Lint them with the model | `task.mutate` |
 | Link a task to the requirements it implements | `task.mutate` |
@@ -713,6 +830,9 @@ trail: `requirement.create`, `requirement.update`, `requirement.delete`,
 | Text drafted from | 64 KiB |
 | Requirements one draft proposes | 30 (12 unless told) |
 | A drafted requirement's acceptance criteria | 10, each 500 characters |
+| Tasks one plan from the requirements proposes | 20, the tasks for must gaps included |
+| Tasks by template one brainstorm or evolve round adds for must gaps | 5 |
+| The requirement status a planner is sent | 64 KiB; past it the least pressing requirements are left out and counted |
 
 On an executor that shares the project's directory — a container sandbox
 bind-mounting it, the hub's own host — the project's database is writable from

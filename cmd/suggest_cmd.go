@@ -14,6 +14,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/memory"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/suggest"
 	"github.com/fatih/color"
@@ -28,6 +29,9 @@ var (
 	suggestYes      bool
 	suggestDryRun   bool
 	suggestJSON     bool
+	// suggestRequirements is the hub's requirement status summary (Task
+	// 20463): a device's copy of the project holds no checks.
+	suggestRequirements string
 )
 
 var suggestCmd = &cobra.Command{
@@ -46,6 +50,11 @@ ordered tasks of a plan, each naming the earlier tasks it depends on.
 as long as the request needs. Accepted tasks join the end of the run queue
 in plan order, and keep their dependencies on each other — through any task
 you reject.
+
+A project with approved requirements is planned with them in view: each idea
+or task links the requirements it closes, and with an open must gap the
+brainstorm closes it before proposing anything new ('cloop requirements plan'
+plans for the gaps alone).
 
 Examples:
   cloop suggest                          # brainstorm 5 ideas (default)
@@ -132,12 +141,27 @@ Examples:
 			memStr = mem.FormatForPrompt(10)
 		}
 
+		// Where the project's requirements stand (Task 20463): the hub's
+		// summary when it sent one, else the project's own. A brainstorm
+		// closes the must gaps first; a plan's tasks link what they close.
+		given := cmd.Flags().Changed("requirements")
+		if given && !suggestJSON {
+			return fmt.Errorf("--requirements is the hub's: give --json with it")
+		}
+		reqs, err := plannerRequirementStatus(workdir, s.Plan, suggestRequirements, given)
+		if err != nil {
+			// Planned without it, as a project without requirements is: the
+			// hub holds the result to its own copy all the same.
+			fmt.Fprintf(os.Stderr, "warning: the requirement status is unreadable, suggesting without it: %v\n", err)
+			reqs = requirements.StatusSummary{}
+		}
+
 		// Summarize existing tasks to avoid duplicates
 		existingTasks := ""
 		if s.Plan != nil && len(s.Plan.Tasks) > 0 {
 			var tb strings.Builder
 			for _, t := range s.Plan.Tasks {
-				tb.WriteString(fmt.Sprintf("- [%s] Task %d: %s\n", t.Status, t.ID, t.Title))
+				tb.WriteString(fmt.Sprintf("- [%s] Task %d: %s%s\n", t.Status, t.ID, t.Title, taskLinkKeys(t)))
 			}
 			existingTasks = tb.String()
 		}
@@ -154,13 +178,22 @@ Examples:
 		opts := provider.Options{Model: model, Timeout: timeout, WorkDir: workdir}
 		generate := func() (*suggest.Result, error) {
 			if planMode {
-				prompt := suggest.BuildPlanPrompt(s.Goal, s.Instructions, projCtx.FileTree,
-					projCtx.RecentLog, memStr, existingTasks, request, count)
-				return suggest.GeneratePlan(ctx, prov, prompt, opts, request, count)
+				prompt := suggest.BuildPlanPromptWith(s.Goal, s.Instructions, projCtx.FileTree,
+					projCtx.RecentLog, memStr, existingTasks, request, count, reqs)
+				r, err := suggest.GeneratePlan(ctx, prov, prompt, opts, request, count)
+				if err == nil {
+					suggest.ApplyRequirements(r, reqs, suggest.ForRequest, count)
+				}
+				return r, err
 			}
-			prompt := suggest.BuildPrompt(s.Goal, s.Instructions, projCtx.FileTree,
-				projCtx.RecentLog, memStr, existingTasks, count)
-			return suggest.Generate(ctx, prov, prompt, opts)
+			prompt := suggest.BuildPromptWith(s.Goal, s.Instructions, projCtx.FileTree,
+				projCtx.RecentLog, memStr, existingTasks, count, reqs)
+			r, err := suggest.Generate(ctx, prov, prompt, opts)
+			if err == nil {
+				suggest.NormalizeIdeas(r, count)
+				suggest.ApplyRequirements(r, reqs, suggest.ForIdeas, count)
+			}
+			return r, err
 		}
 
 		if suggestJSON {
@@ -224,8 +257,14 @@ Examples:
 
 		if suggestDryRun {
 			// Show all suggestions without prompting
+			for _, n := range result.Notes {
+				dimColor.Printf("  Note: %s\n", n)
+			}
 			for i, sg := range result.Suggestions {
 				printSuggestion(i+1, sg, boldColor, dimColor, labelColor)
+				if len(sg.Requirements) > 0 {
+					printLinks(sg, reqs, dimColor)
+				}
 			}
 			dimColor.Printf("  (dry-run) Run without --dry-run to accept/reject interactively.\n\n")
 			return nil
@@ -235,8 +274,14 @@ Examples:
 		reader := bufio.NewReader(os.Stdin)
 		accepted := []*suggest.Suggestion{}
 
+		for _, n := range result.Notes {
+			dimColor.Printf("  Note: %s\n", n)
+		}
 		for i, sg := range result.Suggestions {
 			printSuggestion(i+1, sg, boldColor, dimColor, labelColor)
+			if len(sg.Requirements) > 0 {
+				printLinks(sg, reqs, dimColor)
+			}
 
 			if suggestYes {
 				goodColor.Printf("  → Accepted (--yes)\n\n")
@@ -322,7 +367,12 @@ func joinTaskIDs(ids []int) string {
 // tasks also say which earlier tasks they come after.
 func printSuggestion(n int, sg *suggest.Suggestion, boldColor, dimColor, labelColor *color.Color) {
 	boldColor.Printf("  %d. %s", n, sg.Title)
-	labelColor.Printf("  [%s | %s]\n", suggest.CategoryLabel(sg.Category), suggest.EffortLabel(sg.Effort))
+	if sg.Category == "" {
+		// A task by template for a requirement's gap has none.
+		labelColor.Printf("  [%s]\n", suggest.EffortLabel(sg.Effort))
+	} else {
+		labelColor.Printf("  [%s | %s]\n", suggest.CategoryLabel(sg.Category), suggest.EffortLabel(sg.Effort))
+	}
 	if sg.Description != "" {
 		fmt.Printf("     What: %s\n", sg.Description)
 	}
@@ -347,5 +397,7 @@ func init() {
 	suggestCmd.Flags().BoolVar(&suggestYes, "yes", false, "Auto-accept all suggestions")
 	suggestCmd.Flags().BoolVar(&suggestDryRun, "dry-run", false, "Show suggestions without prompting or adding tasks")
 	suggestCmd.Flags().BoolVar(&suggestJSON, "json", false, "Output suggestions as JSON to stdout (no interactive prompt, no state mutation)")
+	suggestCmd.Flags().StringVar(&suggestRequirements, "requirements", "", "The requirement status summary, as JSON (the hub's; default: the project's own)")
+	_ = suggestCmd.Flags().MarkHidden("requirements")
 	rootCmd.AddCommand(suggestCmd)
 }

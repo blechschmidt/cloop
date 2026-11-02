@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 )
 
 // Planning a request (Task 20342). Given something the user wants done, the
@@ -48,6 +49,14 @@ func CleanRequest(s string) (string, error) {
 // tasks. count > 0 asks for exactly that many; 0 leaves the number to the
 // request — as many tasks as it genuinely needs, up to MaxCount.
 func BuildPlanPrompt(goal, instructions, fileTree, recentLog, memCtx, existingTasks, request string, count int) string {
+	return BuildPlanPromptWith(goal, instructions, fileTree, recentLog, memCtx, existingTasks, request, count, requirements.StatusSummary{})
+}
+
+// BuildPlanPromptWith is BuildPlanPrompt for a project whose requirements
+// stand as reqs (Task 20463): the plan's tasks link the approved requirements
+// they make hold. The request decides the work; the requirements only say
+// what it closes.
+func BuildPlanPromptWith(goal, instructions, fileTree, recentLog, memCtx, existingTasks, request string, count int, reqs requirements.StatusSummary) string {
 	var b strings.Builder
 	b.WriteString("You are a senior software architect turning a request into an executable plan.\n")
 	b.WriteString("Break the request below into concrete tasks that AI coding agents will carry out one after another.\n\n")
@@ -68,6 +77,7 @@ func BuildPlanPrompt(goal, instructions, fileTree, recentLog, memCtx, existingTa
 	if memCtx != "" {
 		fmt.Fprintf(&b, "## PROJECT MEMORY\n%s\n\n", memCtx)
 	}
+	b.WriteString(reqs.Section())
 	fmt.Fprintf(&b, "## REQUEST\n%s\n\n", request)
 
 	b.WriteString("## TASK\n")
@@ -83,13 +93,22 @@ func BuildPlanPrompt(goal, instructions, fileTree, recentLog, memCtx, existingTa
 	b.WriteString("- Each must be concrete and implementable by an AI agent in one session\n")
 	b.WriteString("- Each description must stand on its own: the agent doing a task sees that task, not the request\n")
 	b.WriteString("- List the tasks in the order they should be done\n")
-	b.WriteString("- depends_on lists the ids of EARLIER tasks in this plan that must be finished first; [] if none\n\n")
+	b.WriteString("- depends_on lists the ids of EARLIER tasks in this plan that must be finished first; [] if none\n")
+	if !reqs.Empty() {
+		b.WriteString("- requirements lists the ids of the approved requirements above that a task makes hold, as numbers; [] if none\n")
+	}
+	b.WriteString("\n")
 	b.WriteString("For category, choose from: feature, ux, performance, security, dx, integration, docs\n")
 	b.WriteString("For effort, choose from: xs (<1h), s (1-4h), m (4-16h), l (1-5d), xl (>1wk)\n\n")
 	b.WriteString("Output ONLY valid JSON, no explanation, no markdown:\n")
 	b.WriteString(`{"summary":"one sentence overview of the plan","suggestions":[`)
-	b.WriteString(`{"id":1,"title":"short title","description":"what to do and how","rationale":"why the plan needs it","category":"feature","effort":"m","depends_on":[]},`)
-	b.WriteString(`{"id":2,"title":"...","description":"...","rationale":"...","category":"feature","effort":"s","depends_on":[1]}`)
+	if reqs.Empty() {
+		b.WriteString(`{"id":1,"title":"short title","description":"what to do and how","rationale":"why the plan needs it","category":"feature","effort":"m","depends_on":[]},`)
+		b.WriteString(`{"id":2,"title":"...","description":"...","rationale":"...","category":"feature","effort":"s","depends_on":[1]}`)
+	} else {
+		b.WriteString(`{"id":1,"title":"short title","description":"what to do and how","rationale":"why the plan needs it","category":"feature","effort":"m","depends_on":[],"requirements":[3]},`)
+		b.WriteString(`{"id":2,"title":"...","description":"...","rationale":"...","category":"feature","effort":"s","depends_on":[1],"requirements":[]}`)
+	}
 	b.WriteString(`]}`)
 	return b.String()
 }

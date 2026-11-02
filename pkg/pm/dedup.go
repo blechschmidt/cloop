@@ -10,20 +10,25 @@ import (
 )
 
 // dedupPrompt builds the prompt asking the AI to filter candidates that duplicate existing tasks.
+// A task that implements requirements says which (Task 20463), and an existing one whether it is
+// still open: a candidate doing the same work for a requirement an open task implements repeats it.
 func dedupPrompt(existing, candidates []*Task) string {
 	var b strings.Builder
 	b.WriteString("You are a task deduplication assistant. Your job is to identify which candidate tasks\n")
 	b.WriteString("are genuinely new and not already covered by the existing task list.\n\n")
 
+	links := false
 	b.WriteString("## EXISTING TASKS (already done or in progress)\n")
 	for _, t := range existing {
-		b.WriteString(fmt.Sprintf("- [%d] %s: %s\n", t.ID, t.Title, t.Description))
+		b.WriteString(fmt.Sprintf("- [%d] %s: %s%s\n", t.ID, t.Title, t.Description, dedupLinks(t, true)))
+		links = links || len(t.Requirements) > 0
 	}
 	b.WriteString("\n")
 
 	b.WriteString("## CANDIDATE TASKS (newly proposed — may overlap with existing)\n")
 	for i, t := range candidates {
-		b.WriteString(fmt.Sprintf("- [%d] %s: %s\n", i, t.Title, t.Description))
+		b.WriteString(fmt.Sprintf("- [%d] %s: %s%s\n", i, t.Title, t.Description, dedupLinks(t, false)))
+		links = links || len(t.Requirements) > 0
 	}
 	b.WriteString("\n")
 
@@ -33,11 +38,38 @@ func dedupPrompt(existing, candidates []*Task) string {
 	b.WriteString("- DUPLICATE: already handled, covered, or superseded by an existing task\n\n")
 	b.WriteString("A candidate is a duplicate if an existing task already implements the same feature,\n")
 	b.WriteString("test, fix, or improvement — even if the wording differs.\n\n")
+	if links {
+		b.WriteString("Tasks marked \"implements R-<n>\" are held to those project requirements. A candidate\n")
+		b.WriteString("that does what an OPEN existing task implementing the same requirement already does is\n")
+		b.WriteString("a duplicate of it, whatever the wording.\n\n")
+	}
 	b.WriteString("Output ONLY valid JSON (no explanation, no markdown):\n")
 	b.WriteString(`{"novel":[0,2],"reason":"Task 1 duplicates existing #5; task 3 duplicates existing #12"}`)
 	b.WriteString("\n\nThe 'novel' array contains the 0-based indices of candidate tasks that are genuinely novel.\n")
 	b.WriteString("If ALL candidates are novel, include all indices. If NONE are novel, use an empty array [].")
 	return b.String()
+}
+
+// dedupLinks is what a dedup line says of the requirements t implements, and
+// for an existing task whether it is still open; nothing when it implements
+// none, so a project without requirements is asked what it always was.
+func dedupLinks(t *Task, existing bool) string {
+	if len(t.Requirements) == 0 {
+		return ""
+	}
+	keys := make([]string, len(t.Requirements))
+	for i, id := range t.Requirements {
+		keys[i] = fmt.Sprintf("R-%d", id)
+	}
+	s := " (implements " + strings.Join(keys, ", ")
+	if existing {
+		if t.Status == TaskPending || t.Status == TaskInProgress {
+			s += "; open"
+		} else if t.Status != "" {
+			s += "; " + string(t.Status)
+		}
+	}
+	return s + ")"
 }
 
 // DeduplicateTasks calls the provider to filter out candidates that duplicate existing tasks.

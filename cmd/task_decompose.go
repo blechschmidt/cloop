@@ -13,6 +13,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/decompose"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/fatih/color"
@@ -42,6 +43,9 @@ type decomposePreviewTask struct {
 	Description      string `json:"description"`
 	Role             string `json:"role,omitempty"`
 	EstimatedMinutes int    `json:"estimated_minutes,omitempty"`
+	// Requirements are the parent's approved requirements the sub-task
+	// makes hold (Task 20463).
+	Requirements []int `json:"requirements,omitempty"`
 }
 
 var taskDecomposeCmd = &cobra.Command{
@@ -166,12 +170,24 @@ Examples:
 			Timeout: timeout,
 		}
 
+		// The requirements the task implements (Task 20463): the split must
+		// cover them, and each sub-task keeps the ones it makes hold. On a
+		// device the seed brought the ones the plan links. Best effort: a
+		// split without them still splits.
+		var reqs []requirements.Requirement
+		if len(rootTask.Requirements) > 0 {
+			if db, err := statedb.Open(state.DBPath(workdir)); err == nil {
+				reqs, _ = db.AsProject().Requirements()
+				db.Close()
+			}
+		}
+
 		if decomposeJSON {
 			// One level, whatever --depth says: a preview proposes sub-tasks
 			// for the task asked about, and nothing is injected to recurse into.
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			res, err := decompose.Decompose(ctx, prov, opts, s.Plan, taskID)
+			res, err := decompose.DecomposeWith(ctx, prov, opts, s.Plan, taskID, reqs)
 			if err != nil {
 				return fail(err)
 			}
@@ -183,6 +199,7 @@ Examples:
 					Description:      st.Description,
 					Role:             string(st.Role),
 					EstimatedMinutes: st.EstimatedMinutes,
+					Requirements:     st.Requirements,
 				})
 			}
 			return clijson.Emit(os.Stdout, out)
@@ -229,7 +246,7 @@ Examples:
 
 			fmt.Printf("Asking AI to decompose task %d: %s...\n", task.ID, task.Title)
 
-			res, decompErr := decompose.Decompose(ctx, prov, opts, planCopy, item.taskID)
+			res, decompErr := decompose.DecomposeWith(ctx, prov, opts, planCopy, item.taskID, reqs)
 			if decompErr != nil {
 				return fmt.Errorf("decompose task %d: %w", item.taskID, decompErr)
 			}
@@ -256,6 +273,9 @@ Examples:
 				}
 				if st.EstimatedMinutes > 0 {
 					dimColor.Printf("         est: %d min\n", st.EstimatedMinutes)
+				}
+				if len(st.Requirements) > 0 {
+					dimColor.Printf("         covers:%s\n", taskLinkKeys(st))
 				}
 			}
 			fmt.Println()

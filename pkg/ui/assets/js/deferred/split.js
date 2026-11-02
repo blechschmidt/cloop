@@ -4,6 +4,12 @@
 // for that task, the user keeps the ones they want, and applying adds them in
 // sequence — each depending on the one before — and marks the task skipped.
 //
+// A task that implements requirements (Task 20460) is split so the work stays
+// held to them (Task 20463): each proposed sub-task names the ones it makes
+// hold, applying links it to those, and the dialog warns while an approved
+// must requirement of the task is covered by no kept sub-task — once the task
+// is skipped, nothing open would implement it.
+//
 // Fetched on the first Split rather than bundled (static.go, deferredScripts):
 // Task 20441 moved it here to pay for Decompose, the button beside Add Task
 // that plans a task before it exists. It runs outside the dashboard's IIFE, so
@@ -18,6 +24,7 @@
     const el = id => document.getElementById(id);
     let taskId = 0;    // the task being split; 0 while the dialog is closed
     let subtasks = []; // the proposal, each sub-task with a _keep flag
+    let reqs = [];     // the task's approved requirements: {id, title, priority, gap}
     let busy = false;  // a proposal or an apply is in flight
 
     function open(id) {
@@ -26,6 +33,7 @@
       const t = ((st && st.plan && st.plan.tasks) || []).find(x => x.id === id);
       taskId = id;
       subtasks = [];
+      reqs = [];
       busy = true;
       el('dc-title').textContent = 'Split Task #' + id + (t && t.title ? ' — ' + t.title : '');
       el('dc-apply-btn').style.display = 'none';
@@ -48,6 +56,7 @@
           return;
         }
         subtasks = (d.subtasks || []).map(s => Object.assign({_keep: true}, s));
+        reqs = d.requirements || [];
         render();
       }).catch(() => {
         if (taskId !== id) return;
@@ -61,7 +70,16 @@
       closeOverlay('dc-overlay');
       taskId = 0;
       subtasks = [];
+      reqs = [];
       busy = false;
+    }
+
+    // chips names the requirements a sub-task makes hold.
+    function chips(ids) {
+      return (ids || []).map(id => {
+        const q = reqs.find(r => r.id === +id) || {};
+        return '<span class="task-tag" title="' + esc(q.title || '') + '">R-' + (+id) + '</span>';
+      }).join(' ');
     }
 
     function render() {
@@ -72,19 +90,28 @@
         footer();
         return;
       }
+      const covered = new Set();
+      subtasks.forEach(st => { if (st._keep) (st.requirements || []).forEach(id => covered.add(+id)); });
+      const open = reqs.filter(q => q.gap && !covered.has(q.id));
       body.innerHTML =
         '<div class="dc-hint">Review the proposed sub-tasks. Applying adds the selected ones in sequence ' +
-        '(each depending on the previous) and marks the parent task as <strong>skipped</strong>.</div>' +
+        '(each depending on the previous) and marks the parent task as <strong>skipped</strong>.' +
+        (reqs.length ? ' Each sub-task implements the requirements named on it.' : '') + '</div>' +
+        (open.length ? '<div class="dc-hint" style="color:var(--yellow,#d29922);overflow-wrap:anywhere">⚠ No selected sub-task covers ' +
+          open.map(q => 'R-' + (+q.id) + ' (' + esc(q.title) + ')').join(', ') + ': once the task is split, no open task implements ' +
+          (open.length === 1 ? 'this approved must requirement' : 'these approved must requirements') +
+          '. Link it to a sub-task from its edit dialog after applying.</div>' : '') +
         subtasks.map((st, i) =>
           '<label class="dc-sub' + (st._keep ? '' : ' off') + '">' +
             '<input type="checkbox" ' + (st._keep ? 'checked' : '') + ' data-change="toggle" data-arg="' + i + '">' +
             '<div style="flex:1;min-width:0">' +
               '<div class="dc-sub-title">' + (i + 1) + '. ' + esc(st.title || '') + '</div>' +
               (st.description ? '<div class="dc-sub-desc">' + esc(st.description) + '</div>' : '') +
-              ((st.role || st.estimated_minutes) ?
+              ((st.role || st.estimated_minutes || (st.requirements || []).length) ?
                 '<div class="dc-sub-meta">' +
                   (st.role ? '<span>' + esc(st.role) + '</span>' : '') +
                   (st.estimated_minutes ? '<span>est: ' + esc(st.estimated_minutes) + 'm</span>' : '') +
+                  ((st.requirements || []).length ? '<span>covers ' + chips(st.requirements) + '</span>' : '') +
                 '</div>' : '') +
             '</div>' +
           '</label>'
@@ -112,12 +139,12 @@
     function apply() {
       if (busy || !taskId) return;
       const id = taskId;
-      const kept = subtasks.filter(st => st._keep).map(st => ({
+      const kept = subtasks.filter(st => st._keep).map(st => Object.assign({
         title: st.title || '',
         description: st.description || '',
         role: st.role || '',
         estimated_minutes: st.estimated_minutes || 0,
-      }));
+      }, (st.requirements || []).length ? {requirements: st.requirements.map(Number)} : {}));
       if (!kept.length) return;
       busy = true;
       footer();

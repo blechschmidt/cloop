@@ -68,7 +68,12 @@ govern, reviewed in pull requests:
   cloop requirements check --file .cloop/requirements.yaml   # in CI, with no hub
 
 The dashboard's Requirements tab runs the same check on the project's executor,
-and shows when the spec file in the project's checkout has changed.`,
+and shows when the spec file in the project's checkout has changed.
+
+  cloop requirements plan             # plan the tasks that close the open gaps
+
+plans the work the requirements are waiting for — must first — each task linked
+to what it closes; auto-evolve and suggest plan with them in view too.`,
 	RunE: func(cmd *cobra.Command, args []string) error { return runRequirementsList(cmd) },
 }
 

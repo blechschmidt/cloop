@@ -57,6 +57,24 @@ const IDEAS = {
   ],
 };
 
+// A plan from the requirements (Task 20463): each card says what it closes,
+// and the panel warns of a must gap no card closes.
+const REQ_PLAN = {
+  gen: 11, running: false, done: true, error: '',
+  request: "Close the open gaps in the project's requirements", summary: 'close the gaps',
+  notes: ['Left out "Expire sooner": R-4 is already implemented by open task #1.'],
+  requirements: {refs: [
+    {id: 1, title: 'Config <exit>', priority: 'must', gap: true},
+    {id: 3, title: 'The audit log is signed', priority: 'must', gap: true},
+    {id: 2, title: 'Exports are paginated', priority: 'should'},
+  ], added: []},
+  suggestions: [
+    {id: 1, title: 'Restore the exit code', description: 'd1', requirements: [1], kind: 'fix', priority: 1},
+    {id: 2, title: 'Add a test for R-3', description: 'd2', requirements: [3], kind: 'test', priority: 1},
+    {id: 3, title: 'Paginate exports', description: 'd3', requirements: [2], kind: 'implement', priority: 2, depends_on: [1]},
+  ],
+};
+
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
 
 async function boot() {
@@ -396,6 +414,84 @@ const scenarios = {
       split_title: String(el('dc-title').textContent || ''), split_body: body, count, button,
       split_posts: posts(h, '/api/tasks/4/decompose'), toast: String(el('toast').textContent || ''),
     };
+  },
+
+  // A plan from the requirements (Task 20463): its cards name what they
+  // close, the test-only one says so, the notes join the summary, and
+  // skipping the only card that closes a must gap brings up the warning — as
+  // does a generation re-sent with the must gap's card added elsewhere, not.
+  async requirement_plan_shows_what_each_card_closes() {
+    const h = await boot();
+    const ws = await openBeta(h);
+    ws.deliver('suggest_status', clone(REQ_PLAN));
+    await globalThis.__settle(2);
+    const first = {html: String(el('suggestList').innerHTML || ''), summary: panel().summary};
+    window.rejectSuggestion(1); // the test card, the only one closing R-3
+    await globalThis.__settle();
+    const skipped = String(el('suggestList').innerHTML || '');
+    // Another tab added the exit-code card: the re-sent generation says so.
+    const resent = clone(REQ_PLAN);
+    resent.suggestions = resent.suggestions.filter(sg => sg.id !== 1);
+    resent.requirements.added = [1];
+    ws.deliver('suggest_status', resent);
+    await globalThis.__settle(2);
+    return {req_first: first.html, summary: first.summary, req_skipped: skipped, req_resent: String(el('suggestList').innerHTML || '')};
+  },
+
+  // Plan from requirements, in the Requirements tab, opens the panel its plan
+  // arrives in; with nothing to plan it says why and stays.
+  async requirements_tab_plan_opens_the_panel() {
+    const h = await boot();
+    await openBeta(h);
+    window.toggleSuggestPanel(); // closed again
+    window.switchTab('requirements');
+    await globalThis.__settle(5);
+    h.routes['/api/requirements/plan'] = {ok: true, started: true, gen: 12, targets: 3, must: 2};
+    await window.panelAct('requirements', 'planGaps');
+    await globalThis.__settle(3);
+    // The shim does not query by class, so the tab on screen is read from the
+    // Add Task button, which shows on the Tasks tab alone.
+    const onTasks = () => el('fab-add-task').style.display === 'flex';
+    const started = {
+      tasks: onTasks(), opened: vis('suggestPanel'),
+      toast: String(el('toast').textContent || ''),
+    };
+    window.switchTab('requirements');
+    await globalThis.__settle(3);
+    h.routes['/api/requirements/plan'] = {ok: true, started: false, message: 'Nothing to plan: every approved requirement holds.'};
+    await window.panelAct('requirements', 'planGaps');
+    await globalThis.__settle(3);
+    return {
+      plan_started: started, plan_posts: posts(h, '/api/requirements/plan'),
+      plan_nothing: {tasks: onTasks(), toast: String(el('toast').textContent || '')},
+    };
+  },
+
+  // A split of a task that implements requirements (Task 20463): each
+  // sub-task names what it covers, dropping the only one that covers a must
+  // requirement brings up the warning, and applying sends each kept
+  // sub-task's links.
+  async split_dialog_covers_the_tasks_requirements() {
+    const h = await boot();
+    await openBeta(h);
+    h.routes['/api/tasks/4/decompose/apply'] = {ok: true, parent_id: 4, added: [5]};
+    h.routes['/api/tasks/4/decompose'] = {ok: true, parent_id: 4, parent_title: 'Big task', subtasks: [
+      {title: 'Fix it', description: 'd1', requirements: [1]},
+      {title: 'Page it', description: 'd2', requirements: [2]},
+    ], requirements: [
+      {id: 1, title: 'Must <one>', priority: 'must', gap: true},
+      {id: 2, title: 'Should one', priority: 'should'},
+    ]};
+    h.requests.length = 0;
+    await window.splitTask(4);
+    await globalThis.__settle(5);
+    const before = String(el('dc-body').innerHTML || '');
+    const P = await window.panelAct('split');
+    P.toggle('0'); // drop the one covering R-1
+    const after = String(el('dc-body').innerHTML || '');
+    await P.apply();
+    await globalThis.__settle();
+    return {split_before: before, split_after: after, split_posts: posts(h, '/api/tasks/4/decompose/apply')};
   },
 
   // The proposal is asked of the project's executor (Task 20442). A sandbox

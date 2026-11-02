@@ -329,9 +329,18 @@ tests, documentation, performance, security, UX and refactoring. `--innovate`
 does not change that focus list — it prepends a short instruction to think
 creatively and unconventionally about novel capabilities.
 
+A project with approved [requirements](../guides/requirements.md) is evolved
+with them in view: the round is shown where each stands, every task it adds
+links the requirements it closes, and an open **must** gap is closed before
+anything new — the gap-closing tasks run first, and a must gap the model left
+open gets a task of its own. See
+[Planning from the requirements](../guides/requirements.md#auto-evolve-and-the-suggestions-panel).
+
 The candidates are then filtered. Semantic deduplication is **on by default**:
 a second provider call compares them against the existing plan and drops
-anything already covered, even when the wording differs. It fails open — a
+anything already covered, even when the wording differs; a candidate that links
+only requirements an open task already implements is dropped before it is
+asked. It fails open — a
 provider error keeps all candidates rather than silently dropping novel work —
 and `--no-dedup` skips it. Survivors are renumbered to avoid ID collisions and
 appended to the plan, at which point they are ordinary tasks: visible in

@@ -1230,6 +1230,11 @@ type legacyState struct {
 	// agent each task's contract, as a run on the hub does (Task 20460). A
 	// state.json written by hand has none.
 	Requirements []requirements.Requirement `json:"requirements,omitempty"`
+	// RequirementStatus is what the hub knew of where every approved
+	// requirement stood when it made the seed (Task 20463): the run's
+	// auto-evolve plans from it, since this database holds neither the other
+	// requirements nor any check of them.
+	RequirementStatus json.RawMessage `json:"requirement_status,omitempty"`
 }
 
 func migrateFromJSON(dir, jsonPath, dbPath string) error {
@@ -1293,6 +1298,15 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 	}
 	if err := db.SeedRequirements(legacy.Requirements); err != nil {
 		return fmt.Errorf("store the requirements the seed carries: %w", err)
+	}
+	if len(legacy.RequirementStatus) > 0 {
+		// A status that does not read is the hub's fault, and costs the run
+		// only its planners' view of the requirements: said, not fatal.
+		if status, err := requirements.ParseStatusSummary(legacy.RequirementStatus); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: the seed's requirement status is unreadable, planning goes without it: %v\n", err)
+		} else if err := db.SeedRequirementStatus(status); err != nil {
+			return fmt.Errorf("store the requirement status the seed carries: %w", err)
+		}
 	}
 	return importQuarantines(db, s.Plan)
 }

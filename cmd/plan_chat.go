@@ -11,6 +11,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/chat"
 	"github.com/blechschmidt/cloop/pkg/clijson"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/spf13/cobra"
@@ -23,6 +24,9 @@ var (
 	planChatModel    string
 	planChatTimeout  time.Duration
 	planChatJSON     bool
+	// planChatRequirements is the hub's requirement status summary (Task
+	// 20463).
+	planChatRequirements string
 )
 
 // planChatToken is one streamed piece of the answer.
@@ -75,6 +79,24 @@ var planChatCmd = &cobra.Command{
 		if err != nil {
 			return fail(fmt.Errorf("provider: %w", err))
 		}
+		// Where the requirements stand (Task 20463): the hub's summary, or
+		// the project's own when it has one — a proposal says which
+		// requirements each task it proposes covers.
+		system := chat.PlanSystemPrompt(s)
+		given := cmd.Flags().Changed("requirements")
+		if given || s != nil {
+			var plan *pm.Plan
+			if s != nil {
+				plan = s.Plan
+			}
+			reqs, err := plannerRequirementStatus(workdir, plan, planChatRequirements, given)
+			if err != nil {
+				// Answered without it: the question does not depend on it.
+				fmt.Fprintf(os.Stderr, "warning: the requirement status is unreadable, answering without it: %v\n", err)
+			} else {
+				system += "\n" + reqs.Section() + reqs.ChatRules()
+			}
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), planChatTimeout)
 		defer cancel()
@@ -82,7 +104,7 @@ var planChatCmd = &cobra.Command{
 		var streamed atomic.Bool
 		opts := provider.Options{
 			Model:        model,
-			SystemPrompt: chat.PlanSystemPrompt(s),
+			SystemPrompt: system,
 			WorkDir:      workdir,
 			Timeout:      planChatTimeout,
 			OnToken: func(token string) {
@@ -123,5 +145,6 @@ func init() {
 	planChatCmd.Flags().StringVar(&planChatModel, "model", "", "Model override for the AI provider")
 	planChatCmd.Flags().DurationVar(&planChatTimeout, "timeout", 2*time.Minute, "Timeout for the model call")
 	planChatCmd.Flags().BoolVar(&planChatJSON, "json", false, "Stream framed chunks and report the answer as framed JSON, for the hub")
+	planChatCmd.Flags().StringVar(&planChatRequirements, "requirements", "", "The requirement status summary, as JSON (the hub's)")
 	planCmd.AddCommand(planChatCmd)
 }

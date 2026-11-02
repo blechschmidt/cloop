@@ -17,6 +17,8 @@ type assistantScenario struct {
 	Toast  string `json:"toast"`
 	Posted int    `json:"posted"`
 	Error  string `json:"error"`
+	// Proposals is what shows under an answer that proposed tasks.
+	Proposals string `json:"proposals"`
 }
 
 // TestDashboard_AssistantRefusals: the plan assistant's model call runs on the
@@ -59,6 +61,18 @@ func TestDashboard_AssistantRefusals(t *testing.T) {
 	if f, ok := got["fatal"]; ok {
 		t.Fatalf("the scenarios threw: %s", f.Error)
 	}
+	// An answer that proposed tasks (Task 20463).
+	if r := got["proposals"]; r.Bubble == nil || r.Bubble.Text != "Do these next." || r.Bubble.Error {
+		t.Errorf("an answer with proposals reads %+v", r.Bubble)
+	} else {
+		for _, want := range []string{"• Fix &lt;the&gt; exit code — covers R-1 Config &lt;exit&gt;", "• Dark mode — covers no requirement",
+			"Neither these nor an open task cover R-3 The audit log is signed: approved must requirements with an open gap."} {
+			if !strings.Contains(r.Proposals, want) {
+				t.Errorf("under the answer, no %q:\n%s", want, r.Proposals)
+			}
+		}
+	}
+	delete(got, "proposals")
 	for name, want := range map[string]struct{ text, toast string }{
 		"harness_refusal": {"No active grant gives the sandbox a Claude credential.",
 			"Refused: this sandbox has no usable Claude credential"},

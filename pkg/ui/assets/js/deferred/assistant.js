@@ -5,6 +5,11 @@
 // the tab's first open since Task 20456, markup included; it was the first
 // half of 17-assistant.js.
 //
+// An answer that proposes tasks ends with a list of them the hub reads (Task
+// 20463): under the answer each proposed task is shown with the requirements
+// it covers, and a warning names the approved must requirements with an open
+// gap that neither it nor an open task covers.
+//
 // It runs outside the dashboard's IIFE, so it is handed the helpers it calls,
 // and the only name it puts on window is the factory. open() redraws the
 // conversation on every visit.
@@ -12,7 +17,7 @@
   'use strict';
 
   window.cloopAssistantPanel = function (h) {
-    const {toast, pUrl, authHeaders, harnessRefused} = h;
+    const {toast, pUrl, authHeaders, harnessRefused, esc} = h;
 
     // The chat tab's time format, for the bubbles both draw.
     const chatFmtTime = ts => (ts ? new Date(ts) : new Date()).toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
@@ -88,7 +93,21 @@
       row.appendChild(inner);
       box.appendChild(row);
       box.scrollTop = box.scrollHeight;
-      return { row, bubbleDiv };
+      return { row, bubbleDiv, inner };
+    }
+
+    // proposalsBox puts, under an answer, the tasks it proposed with what
+    // each covers, and the must gaps none does.
+    function proposalsBox(inner, d) {
+      const ref = q => 'R-' + (+q.id) + ' ' + esc(q.title || '');
+      const box = document.createElement('div');
+      box.className = 'chat-bubble-time';
+      box.style.cssText = 'white-space:normal;overflow-wrap:anywhere;word-break:break-word';
+      box.innerHTML = (d.proposals || []).map(p => '<div>• ' + esc(p.title) + ' — ' +
+        ((p.requirements || []).length ? 'covers ' + p.requirements.map(ref).join(', ') : 'covers no requirement') + '</div>').join('') +
+        ((d.uncovered || []).length ? '<div style="color:var(--yellow,#d29922)">⚠ Neither these nor an open task cover ' +
+          d.uncovered.map(ref).join(', ') + ': approved must requirements with an open gap.</div>' : '');
+      inner.appendChild(box);
     }
 
     function chipAsk(question) {
@@ -122,7 +141,7 @@
       // Show streaming assistant bubble.
       const result = appendAssistantBubble('assistant', '', true);
       if (!result) return;
-      const { bubbleDiv } = result;
+      const { bubbleDiv, inner } = result;
       let accumulated = '';
 
       assistantStreaming = true;
@@ -191,6 +210,16 @@
                 // Remove cursor.
                 const cursor = document.getElementById('assistantCursor');
                 if (cursor) cursor.remove();
+                // The tasks it proposed, read from the block that listed
+                // them, which the answer is shown without.
+                try {
+                  const d = JSON.parse(raw);
+                  if ((d.proposals || []).length) {
+                    accumulated = d.text || '';
+                    bubbleDiv.textContent = accumulated;
+                    proposalsBox(inner, d);
+                  }
+                } catch(e) {}
               }
               eventType = '';
             }

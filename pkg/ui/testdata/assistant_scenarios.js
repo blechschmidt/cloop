@@ -73,6 +73,26 @@ async function main() {
     out.policy_refusal = await ask(h);
   }
 
+  // 3. An answer that proposed tasks (Task 20463): shown without the block
+  //    that listed them, with what each covers and the must gap none does
+  //    under it — every title escaped.
+  {
+    const done = {text: 'Do these next.', proposals: [
+      {title: 'Fix <the> exit code', requirements: [{id: 1, title: 'Config <exit>', priority: 'must'}]},
+      {title: 'Dark mode', requirements: []},
+    ], uncovered: [{id: 3, title: 'The audit log is signed', priority: 'must', gap: true}]};
+    const token = 'Do these next.\n\n```tasks\n[{"title":"Fix <the> exit code","requirements":[1]}]\n```';
+    const h = await boot({__sse: 'event: token\ndata: ' + JSON.stringify({token}) + '\n\nevent: done\ndata: ' +
+      JSON.stringify(done) + '\n\n'}, 200);
+    const r = await ask(h);
+    const box = document.getElementById('assistantMessages');
+    const rows = (box.children || []).filter(x => String(x.className || '').indexOf('assistant') >= 0);
+    const inner = rows[rows.length - 1].children[1];
+    // inner → [bubble, time, the proposals].
+    r.proposals = String((inner.children[2] || {}).innerHTML || '');
+    out.proposals = r;
+  }
+
   process.stdout.write(JSON.stringify(out));
 }
 

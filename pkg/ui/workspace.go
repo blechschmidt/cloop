@@ -359,7 +359,7 @@ func projectSeedFor(workDir string) ([]byte, error) {
 	// honours them (Task 20339).
 	st.Provider = resolveProviderName(workDir)
 	st.Model = resolveProjectModel(workDir, st.Provider, st)
-	seed, err := projectseed.BuildWith(st, seedRequirementsFor(workDir, st))
+	seed, err := projectseed.BuildFull(st, seedRequirementsFor(workDir, st), seedRequirementStatusFor(workDir, st))
 	if err != nil {
 		return nil, &workspaceSourceError{
 			ProjectPath: workDir,
@@ -395,6 +395,22 @@ func seedRequirementsFor(workDir string, st *state.ProjectState) []requirements.
 		return nil
 	}
 	return projectseed.SeedRequirements(st.Plan, all, st.RequirementsGate.IncludesMust())
+}
+
+// seedRequirementStatusFor is where the project's approved requirements
+// stand (Task 20463), for the seed: the run's auto-evolve on a device plans
+// from it, and the device's database holds neither every requirement nor any
+// check. Best effort — a run without it evolves as one with no requirements.
+func seedRequirementStatusFor(workDir string, st *state.ProjectState) requirements.StatusSummary {
+	if st == nil {
+		return requirements.StatusSummary{}
+	}
+	sum, err := requirementStatusOf(workDir, st.Plan)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ui] %s: the seed goes without the requirement status: %v\n", workDir, err)
+		return requirements.StatusSummary{}
+	}
+	return sum
 }
 
 // planLinksRequirements reports whether a task of plan implements a

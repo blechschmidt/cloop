@@ -9,6 +9,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 )
 
 // scriptedProvider returns one canned output (or error) per Complete call, in
@@ -319,5 +320,50 @@ func TestInjectSubTasks_WiringAndParentSkip(t *testing.T) {
 			ids[i] = tk.ID
 		}
 		t.Errorf("insertion order wrong: %v", ids)
+	}
+}
+
+// A task that implements requirements is split so the work stays held to
+// them (Task 20463): the model is shown the approved ones, and each sub-task
+// keeps those it says it makes hold — never a draft, a deprecated one, or a
+// requirement the task does not implement.
+func TestDecomposeWithKeepsTheTasksApprovedRequirements(t *testing.T) {
+	plan, parent := testPlan()
+	parent.Requirements = []int{3, 4, 6, 7}
+	reqs := []requirements.Requirement{
+		{ID: 3, Title: "Logins are rate limited", Priority: requirements.PriorityMust},
+		{ID: 4, Title: "Sessions expire", Priority: requirements.PriorityShould},
+		{ID: 5, Title: "Not this task's"},
+		{ID: 6, Title: "A draft", Status: requirements.StatusDraft},
+		{ID: 7, Title: "Deprecated", Status: requirements.StatusDeprecated},
+	}
+	p := &scriptedProvider{outputs: []string{`[` +
+		`{"title":"Rate limit","description":"d","requirements":["R-3",5,6,7]},` +
+		`{"title":"Expire","description":"d","requirements":[4,4]},` +
+		`{"title":"Docs","description":"d"}]`}}
+	res, err := DecomposeWith(context.Background(), p, provider.Options{}, plan, parent.ID, reqs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, st := range res.SubTasks {
+		got = append(got, fmt.Sprintf("%s:%v", st.Title, st.Requirements))
+	}
+	if strings.Join(got, " ") != "Rate limit:[3] Expire:[4] Docs:[]" {
+		t.Errorf("sub-tasks %v", got)
+	}
+	for _, want := range []string{"## REQUIREMENTS THE TASK IMPLEMENTS", "- R-3 [must] Logins are rate limited", "- R-4 [should] Sessions expire"} {
+		if !strings.Contains(p.prompts[0], want) {
+			t.Errorf("the prompt lacks %q", want)
+		}
+	}
+	for _, never := range []string{"A draft", "Deprecated", "Not this task's"} {
+		if strings.Contains(p.prompts[0], never) {
+			t.Errorf("the prompt names %q", never)
+		}
+	}
+	// Without requirements the prompt is what it always was.
+	if prompt := DecomposePrompt(parent, 1); strings.Contains(prompt, "REQUIREMENTS") || strings.Contains(prompt, `"requirements"`) {
+		t.Error("a split without requirements is asked about them")
 	}
 }

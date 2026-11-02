@@ -94,15 +94,27 @@ var ErrNoProject = errors.New("projectseed: no project state")
 func Build(st *state.ProjectState) ([]byte, error) { return BuildWith(st, nil) }
 
 // BuildWith serialises a project into the bytes a Spec carries, with reqs
+// beside its state. It is BuildFull carrying no requirement status.
+func BuildWith(st *state.ProjectState, reqs []requirements.Requirement) ([]byte, error) {
+	return BuildFull(st, reqs, requirements.StatusSummary{})
+}
+
+// BuildFull serialises a project into the bytes a Spec carries, with reqs
 // beside its state: the requirements its tasks implement (LinkedRequirements),
 // which the sandbox's database receives so the run there gives each task's
 // agent its contract as a run on the hub does (Task 20460). A requirements
 // table is not project state, and the sandbox has no other way to it.
 //
+// status is what the hub knows of where every approved requirement stands
+// (Task 20463): the run's auto-evolve plans from it, and the sandbox's
+// database holds neither the other requirements nor a check of any. Only its
+// facts travel — the run works out the rest against its own plan — bounded by
+// requirements.MaxStatusBytes.
+//
 // The input is the hub's own loaded state. It is copied — not mutated — before
 // the fields that must not travel are cleared, because the caller's pointer is
 // very often the live state a handler is still holding.
-func BuildWith(st *state.ProjectState, reqs []requirements.Requirement) ([]byte, error) {
+func BuildFull(st *state.ProjectState, reqs []requirements.Requirement, status requirements.StatusSummary) ([]byte, error) {
 	if st == nil {
 		return nil, ErrNoProject
 	}
@@ -132,15 +144,28 @@ func BuildWith(st *state.ProjectState, reqs []requirements.Requirement) ([]byte,
 	// (state.legacyState); a cloop that predates them ignores the key.
 	doc := struct {
 		*state.ProjectState
-		Requirements []requirements.Requirement `json:"requirements,omitempty"`
+		Requirements      []requirements.Requirement `json:"requirements,omitempty"`
+		RequirementStatus json.RawMessage            `json:"requirement_status,omitempty"`
 	}{ProjectState: &seed}
 	for _, r := range reqs {
 		doc.Requirements = append(doc.Requirements, r.ForSeed())
 	}
-	raw, err := json.Marshal(doc)
-	if err != nil {
+	if !status.Empty() {
+		facts, err := status.EncodeFacts()
+		if err != nil {
+			return nil, fmt.Errorf("projectseed: encode the requirement status: %w", err)
+		}
+		doc.RequirementStatus = facts
+	}
+	// Without HTML escaping: the requirement status is bounded in bytes as it
+	// is written, and escaping would grow every <, > and & in it to six.
+	var enc bytes.Buffer
+	je := json.NewEncoder(&enc)
+	je.SetEscapeHTML(false)
+	if err := je.Encode(doc); err != nil {
 		return nil, fmt.Errorf("projectseed: marshal project state: %w", err)
 	}
+	raw := bytes.TrimRight(enc.Bytes(), "\n")
 
 	var buf bytes.Buffer
 	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)

@@ -830,6 +830,11 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "POST /api/requirements/approve", Handler: s.handleRequirementsApprove, Perm: task, Scope: scopeProject},
 		{Pattern: "GET /api/requirements/lint", Handler: s.handleRequirementsLint, Perm: read, Scope: scopeProject},
 		{Pattern: "POST /api/requirements/lint", Handler: s.handleRequirementsLintModel, Perm: task, Scope: scopeProject},
+		// Planning from the requirements (Task 20463): a suggest job whose
+		// model call runs on the project's executor with the caller's
+		// account, reviewed in the suggestions panel — `task`, as the
+		// panel's Generate is. See requirements_plan_api.go.
+		{Pattern: "POST /api/requirements/plan", Handler: s.handleRequirementsPlan, Perm: task, Scope: scopeProject},
 
 		// ── Replay ───────────────────────────────────────────────────
 		{Pattern: "GET /api/replay-runs", Handler: s.handleReplayRunsList, Perm: read, Scope: scopeProject},

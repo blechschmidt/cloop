@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 )
 
 // Category classifies the type of a suggestion.
@@ -47,6 +48,18 @@ type Suggestion struct {
 	// DependsOn names the earlier tasks of the same plan, by ID, that must be
 	// finished before this one can start. Always empty for brainstormed ideas.
 	DependsOn []int `json:"depends_on,omitempty"`
+	// Requirements are the project's approved requirements the task closes
+	// the gaps of (Task 20463): the task it becomes implements them, and its
+	// agent is held to them. Read leniently from a model, then held to the
+	// requirements as they stand (ApplyRequirements).
+	Requirements requirements.LooseRefs `json:"requirements,omitempty"`
+	// Kind is what the task does for them — fix, implement, verify, or test,
+	// which writes a test and changes nothing else. Empty for a task that
+	// closes no gap.
+	Kind string `json:"kind,omitempty"`
+	// Priority, when above 0, is the run-queue priority the task takes: the
+	// priority its requirements ask for.
+	Priority int `json:"priority,omitempty"`
 }
 
 // Result holds all AI-generated suggestions and an optional summary.
@@ -56,10 +69,22 @@ type Result struct {
 	// Request is what the user asked to have planned. Non-empty means the
 	// suggestions are the tasks of one plan, in order, rather than loose ideas.
 	Request string `json:"request,omitempty"`
+	// Notes say what holding the suggestions to the project's requirements
+	// changed: a proposal dropped for repeating open work, a task added for
+	// a must gap nothing closed (ApplyRequirements).
+	Notes []string `json:"notes,omitempty"`
 }
 
 // BuildPrompt constructs the prompt for generating feature suggestions.
 func BuildPrompt(goal, instructions, fileTree, recentLog, memCtx, existingTasks string, count int) string {
+	return BuildPromptWith(goal, instructions, fileTree, recentLog, memCtx, existingTasks, count, requirements.StatusSummary{})
+}
+
+// BuildPromptWith is BuildPrompt for a project whose requirements stand as
+// reqs (Task 20463): the brainstorm is shown the open gaps, asked to link the
+// requirements each idea closes and, with a must gap open, to close the gaps
+// before it proposes anything new.
+func BuildPromptWith(goal, instructions, fileTree, recentLog, memCtx, existingTasks string, count int, reqs requirements.StatusSummary) string {
 	var b strings.Builder
 	b.WriteString("You are a senior product manager and software architect brainstorming feature ideas.\n")
 	b.WriteString("Your role is to suggest concrete, high-value features that are directly relevant to this project.\n\n")
@@ -86,6 +111,9 @@ func BuildPrompt(goal, instructions, fileTree, recentLog, memCtx, existingTasks 
 		b.WriteString(fmt.Sprintf("## PROJECT MEMORY\n%s\n\n", memCtx))
 	}
 
+	b.WriteString(reqs.Section())
+	b.WriteString(reqs.GapRules())
+
 	b.WriteString(fmt.Sprintf("## TASK\n"))
 	b.WriteString(fmt.Sprintf("Generate exactly %d feature/improvement ideas for this project.\n\n", count))
 	b.WriteString("Requirements for each suggestion:\n")
@@ -98,8 +126,13 @@ func BuildPrompt(goal, instructions, fileTree, recentLog, memCtx, existingTasks 
 	b.WriteString("For effort, choose from: xs (<1h), s (1-4h), m (4-16h), l (1-5d), xl (>1wk)\n\n")
 	b.WriteString("Output ONLY valid JSON, no explanation, no markdown:\n")
 	b.WriteString(`{"summary":"one sentence overview of the suggestion set","suggestions":[`)
-	b.WriteString(`{"id":1,"title":"short title","description":"what to build and how","rationale":"why this matters","category":"feature","effort":"m"},`)
-	b.WriteString(`{"id":2,"title":"...","description":"...","rationale":"...","category":"ux","effort":"s"}`)
+	if reqs.Empty() {
+		b.WriteString(`{"id":1,"title":"short title","description":"what to build and how","rationale":"why this matters","category":"feature","effort":"m"},`)
+		b.WriteString(`{"id":2,"title":"...","description":"...","rationale":"...","category":"ux","effort":"s"}`)
+	} else {
+		b.WriteString(`{"id":1,"title":"short title","description":"what to build and how","rationale":"why this matters","category":"feature","effort":"m","requirements":[3]},`)
+		b.WriteString(`{"id":2,"title":"...","description":"...","rationale":"...","category":"ux","effort":"s","requirements":[]}`)
+	}
 	b.WriteString(`]}`)
 
 	return b.String()

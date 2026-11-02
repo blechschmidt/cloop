@@ -16,6 +16,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/kb"
 	"github.com/blechschmidt/cloop/pkg/promptstats"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/skill"
 )
 
@@ -818,6 +819,15 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 
 // ParseTaskPlan extracts a Plan from the AI's JSON response.
 func ParseTaskPlan(goal, output string) (*Plan, error) {
+	return parseTaskPlan(goal, output, false)
+}
+
+// parseTaskPlan is ParseTaskPlan, keeping the requirements each task says it
+// links when withLinks is set — an auto-evolve round's (Task 20463), which the
+// caller holds to the project's requirements (LinkProposedTasks) before the
+// tasks join the plan. Every other planner's tasks link nothing: a link no
+// caller checked is not one to store.
+func parseTaskPlan(goal, output string, withLinks bool) (*Plan, error) {
 	// Find JSON in the output
 	start := strings.Index(output, "{")
 	end := strings.LastIndex(output, "}")
@@ -835,6 +845,9 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 			Role                AgentRole `json:"role"`
 			DependsOn           []int     `json:"depends_on"`
 			TimeEstimateMinutes int       `json:"time_estimate_minutes"`
+			// Requirements are read leniently: an entry that names no
+			// requirement is passed over, not a reason to drop the plan.
+			Requirements requirements.LooseRefs `json:"requirements"`
 		} `json:"tasks"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
@@ -851,7 +864,7 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 		if id == 0 {
 			id = i + 1
 		}
-		plan.Tasks = append(plan.Tasks, &Task{
+		task := &Task{
 			ID:               id,
 			Title:            t.Title,
 			Description:      t.Description,
@@ -860,7 +873,11 @@ func ParseTaskPlan(goal, output string) (*Plan, error) {
 			DependsOn:        t.DependsOn,
 			Status:           TaskPending,
 			EstimatedMinutes: t.TimeEstimateMinutes,
-		})
+		}
+		if withLinks && len(t.Requirements) > 0 {
+			task.Requirements = []int(t.Requirements)
+		}
+		plan.Tasks = append(plan.Tasks, task)
 	}
 
 	return plan, nil
@@ -962,8 +979,11 @@ func AdaptiveReplanPrompt(goal, instructions string, plan *Plan, failedTask *Tas
 }
 
 // EvolveDiscoverPrompt builds a prompt asking the AI to discover new improvement tasks
-// for auto-evolve mode after the current plan is complete.
-func EvolveDiscoverPrompt(goal, instructions string, plan *Plan, evolveStep int, innovate bool) string {
+// for auto-evolve mode after the current plan is complete. reqs is where the
+// project's requirements stand (Task 20463): the round is shown the open gaps,
+// asked to link what it closes and — with a must gap open — to close the gaps
+// before it proposes anything new. An empty summary adds nothing.
+func EvolveDiscoverPrompt(goal, instructions string, plan *Plan, evolveStep int, innovate bool, reqs requirements.StatusSummary) string {
 	var b strings.Builder
 	b.WriteString("You are an AI product manager in AUTO-EVOLVE mode.\n")
 	b.WriteString("The current task plan is complete. Your job is to discover new improvement tasks\n")
@@ -1006,11 +1026,15 @@ func EvolveDiscoverPrompt(goal, instructions string, plan *Plan, evolveStep int,
 		}
 	}
 
+	b.WriteString(reqs.Section())
+
 	if innovate {
 		b.WriteString("## INNOVATION MODE\n")
 		b.WriteString("Think creatively and unconventionally. Explore novel capabilities,\n")
 		b.WriteString("cross-cutting improvements, or anything that would make this project stand out.\n\n")
 	}
+
+	b.WriteString(reqs.GapRules())
 
 	b.WriteString("## INSTRUCTIONS\n")
 	b.WriteString("Analyze the completed work and propose 1-5 NEW improvement tasks.\n")
@@ -1019,7 +1043,11 @@ func EvolveDiscoverPrompt(goal, instructions string, plan *Plan, evolveStep int,
 	b.WriteString(fmt.Sprintf("Assign IDs starting from %d.\n\n", maxID+1))
 	b.WriteString("If the project is already excellent and needs no further improvement, output: {\"tasks\":[]}\n\n")
 	b.WriteString("Output ONLY valid JSON (no explanation, no markdown):\n")
-	b.WriteString(fmt.Sprintf(`{"tasks":[{"id":%d,"title":"short title","description":"detailed description of what to implement","priority":1,"role":"backend","depends_on":[]}]}`, maxID+1))
+	example := fmt.Sprintf(`{"tasks":[{"id":%d,"title":"short title","description":"detailed description of what to implement","priority":1,"role":"backend","depends_on":[]}]}`, maxID+1)
+	if !reqs.Empty() {
+		example = fmt.Sprintf(`{"tasks":[{"id":%d,"title":"short title","description":"detailed description of what to implement","priority":1,"role":"backend","depends_on":[],"requirements":[]}]}`, maxID+1)
+	}
+	b.WriteString(example)
 	b.WriteString("\n\nIf no new tasks: {\"tasks\":[]}")
 	return b.String()
 }
@@ -1027,7 +1055,7 @@ func EvolveDiscoverPrompt(goal, instructions string, plan *Plan, evolveStep int,
 // ParseEvolveTasks parses newly discovered tasks from evolve mode output,
 // ensuring IDs don't conflict with existing plan tasks.
 func ParseEvolveTasks(goal, output string, existing *Plan) ([]*Task, error) {
-	newPlan, err := ParseTaskPlan(goal, output)
+	newPlan, err := parseTaskPlan(goal, output, true)
 	if err != nil {
 		return nil, err
 	}

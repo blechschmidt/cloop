@@ -10,6 +10,10 @@ let suggestGen   = 0;     // generation the cards came from; echoed back on add
 let suggestShown = 0;     // generation whose outcome has been announced
 let suggestPlan  = false; // the cards are a plan's tasks rather than ideas
 let suggestBusy  = false; // an add is in flight
+// The requirements the cards close and the must gaps to close (Task 20463):
+// {refs, added}, refs naming each with its title, added the ones the tasks
+// added from this generation close.
+let suggestReqs  = null;
 
 act('toggleSuggestPanel', function() {
   const panel = document.getElementById('suggestPanel');
@@ -60,6 +64,7 @@ act('runSuggest', function(place, started) {
 function applySuggestStatus(d) {
   if (!d) return;
   const btn = document.getElementById('suggestBtn');
+  suggestReqs = d.requirements || null;
   if (d.running) {
     // A generation started elsewhere (another tab, or before a reload) says
     // so; one started here keeps the more specific line runSuggest wrote.
@@ -103,7 +108,7 @@ function applySuggestStatus(d) {
   // What Decompose carried over from the task it broke down.
   const after = (d.depends_on || []).map(n => '#'+n).join(', ');
   const place = [d.priority && 'runs at priority '+d.priority, after && 'waits for '+after].filter(Boolean).join(' and ');
-  sum.textContent = [d.summary, place && 'Each task '+place+'.'].filter(Boolean).join('\n');
+  sum.textContent = [d.summary, place && 'Each task '+place+'.'].concat(d.notes || []).filter(Boolean).join('\n');
   sum.style.display = sum.textContent ? '' : 'none';
   renderSuggestions();
   const n = currentSuggestions.length, what = suggestPlan ? 'task' : 'idea';
@@ -121,10 +126,15 @@ function renderSuggestions() {
   const wrap = document.getElementById('suggestList');
   const badge = document.getElementById('suggestCountBadge');
   const n = currentSuggestions.length;
+  // A must gap no card, and no task added from them, closes.
+  const R = suggestReqs, open = R ? (R.refs || []).filter(r => r.gap && !(R.added || []).includes(r.id) &&
+    !currentSuggestions.some(sg => (sg.requirements || []).includes(r.id))) : [];
+  const warn = open.length ? '<div class="suggest-summary" style="color:var(--yellow,#d29922);font-style:normal">⚠ No task here closes ' +
+    open.map(r => 'R-'+(+r.id)+' ('+esc(r.title)+')').join(', ')+': approved must requirement'+(open.length === 1 ? '' : 's')+' with an open gap.</div>' : '';
   document.getElementById('suggestAddAllBtn').style.display = n ? '' : 'none';
   document.getElementById('suggestClearBtn').style.display  = n ? '' : 'none';
   if (!n) {
-    wrap.innerHTML = '';
+    wrap.innerHTML = warn;
     badge.textContent = '';
     // The summary describes cards; with none left it describes nothing.
     document.getElementById('suggestSummary').style.display = 'none';
@@ -143,6 +153,7 @@ function renderSuggestions() {
         '<div class="suggest-card-head">'+
           '<div class="suggest-card-title">'+title+'</div>'+
           '<div class="suggest-card-tags">'+
+            (sg.kind === 'test' ? '<span class="suggest-tag suggest-tag-dep">test only</span>' : '')+
             (after ? '<span class="suggest-tag suggest-tag-dep">after '+esc(after)+'</span>' : '')+
             (cat ? '<span class="suggest-tag suggest-tag-cat">'+esc(cat)+'</span>' : '')+
             (eff ? '<span class="suggest-tag suggest-tag-eff">'+esc(eff)+'</span>' : '')+
@@ -150,14 +161,23 @@ function renderSuggestions() {
         '</div>'+
         (desc ? '<div class="suggest-card-desc"><span class="suggest-card-label">What:</span> '+desc+'</div>' : '')+
         (why  ? '<div class="suggest-card-why"><span class="suggest-card-label">Why:</span> '+why+'</div>' : '')+
+        ((sg.requirements || []).length ? '<div class="suggest-card-why"><span class="suggest-card-label">Closes:</span> '+fmtReqChips(sg)+'</div>' : '')+
         '<div class="suggest-card-actions">'+
           '<button class="btn primary" data-action="acceptSuggestion" data-arg="'+i+'">Add as task</button>'+
           '<button class="btn"         data-action="rejectSuggestion" data-arg="'+i+'">Skip</button>'+
         '</div>'+
       '</div>';
   });
-  wrap.innerHTML = cards.join('');
+  wrap.innerHTML = warn + cards.join('');
 }
+
+// The Requirements tab's Plan from requirements (Task 20463) is a generation
+// like any other: its plan arrives here, by the suggest_status push. Called by
+// that tab's script, never by markup.
+window.showSuggestions = function() {
+  switchTab('tasks');
+  if (document.getElementById('suggestPanel').style.display === 'none') toggleSuggestPanel();
+};
 
 // _suggestAdd accepts proposals by ID. The server holds the generation, so it
 // adds exactly what it proposed and, for a plan, what each step follows.
@@ -203,6 +223,7 @@ act('clearSuggestions', function() {
 // them in the wrong plan. The next project's own job, if it has one, arrives
 // on that project's stream.
 function resetSuggestPanel() {
+  suggestReqs = null;
   clearSuggestions();
   suggestGen = suggestShown = 0;
   document.getElementById('suggestInput').value = '';

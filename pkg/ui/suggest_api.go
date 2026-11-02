@@ -22,6 +22,7 @@ package ui
 // from one tenant's code, served to another.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/clijson"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/suggest"
@@ -49,7 +51,12 @@ type suggestJob struct {
 	request string // what is being planned; empty for a brainstorm
 	// place is where a plan's tasks join the queue: the priority and
 	// dependencies typed for the task Decompose broke down (Task 20441).
-	place   suggest.Placement
+	place suggest.Placement
+	// reqs is where the project's requirements stood when the job began
+	// (Task 20463): what its result is held to, and what the panel warns is
+	// left uncovered. purpose says how far the requirements may change it.
+	reqs    requirements.StatusSummary
+	purpose suggest.Purpose
 	running bool
 	done    bool
 	err     string
@@ -81,8 +88,59 @@ func (j *suggestJob) status() map[string]interface{} {
 	if j.result != nil {
 		st["summary"] = j.result.Summary
 		st["suggestions"] = j.ledger.Pending(j.result.Suggestions)
+		st["notes"] = j.result.Notes
+		if !j.reqs.Empty() {
+			st["requirements"] = j.requirementsView()
+		}
 	}
 	return st
+}
+
+// suggestReqRef is a requirement as the panel names it: on a card's chip, and
+// in the warning about a must gap left uncovered.
+type suggestReqRef struct {
+	ID       int    `json:"id"`
+	Title    string `json:"title"`
+	Priority string `json:"priority,omitempty"`
+	// Gap marks a must requirement with an open gap: one the panel warns of
+	// while no card, and no task added from them, closes it.
+	Gap bool `json:"gap,omitempty"`
+}
+
+// requirementsView is what the panel needs to say which requirements each
+// card closes and which must gaps none does (Task 20463): the requirements
+// the cards link and the must gaps, and the ones the tasks already added from
+// this generation link. Called with s.suggestMu held.
+func (j *suggestJob) requirementsView() map[string]any {
+	refs := []suggestReqRef{}
+	seen := map[int]bool{}
+	add := func(st requirements.Standing, gap bool) {
+		if !seen[st.ID] {
+			seen[st.ID] = true
+			refs = append(refs, suggestReqRef{ID: st.ID, Title: st.Title, Priority: st.Priority, Gap: gap})
+		}
+	}
+	for _, st := range j.reqs.MustGaps() {
+		add(st, true)
+	}
+	for _, sg := range j.result.Suggestions {
+		for _, id := range sg.Requirements {
+			if st, ok := j.reqs.Lookup(id); ok {
+				add(st, false)
+			}
+		}
+	}
+	added := []int{}
+	done := map[int]bool{}
+	for _, sid := range j.ledger.Added() {
+		done[sid] = true
+	}
+	for _, sg := range j.result.Suggestions {
+		if done[sg.ID] {
+			added = append(added, sg.Requirements...)
+		}
+	}
+	return map[string]any{"refs": refs, "added": added}
 }
 
 // suggestStatusJSON renders workDir's job for the wire. ok is false when the
@@ -173,6 +231,19 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Where the project's requirements stand (Task 20463): the brainstorm
+	// closes the must gaps before anything new, a plan's tasks link what they
+	// close. Read here and sent, since a device's copy of the project holds
+	// no checks. Best effort: without it, the panel brainstorms as before.
+	reqs, rerr := requirementStatusFor(workDir)
+	if rerr != nil {
+		fmt.Fprintf(os.Stderr, "ui: suggest for %s goes without the requirement status: %v\n", workDir, rerr)
+	}
+	purpose := suggest.ForIdeas
+	if request != "" {
+		purpose = suggest.ForRequest
+	}
+
 	// A brainstorm and a plan both call the provider inside the project's
 	// executor, so a sandbox with no Claude login is refused here, with the
 	// 409 the dialog opens on, rather than minutes later as a job that failed
@@ -182,20 +253,10 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.suggestMu.Lock()
-	if j := s.suggestJobs[workDir]; j != nil && j.running {
-		s.suggestMu.Unlock()
-		jsonErr(w, "suggest already running", http.StatusConflict)
+	job := &suggestJob{count: count, request: request, place: place, reqs: reqs, purpose: purpose}
+	if !s.beginSuggestJob(w, workDir, job) {
 		return
 	}
-	if s.suggestJobs == nil {
-		s.suggestJobs = make(map[string]*suggestJob)
-	}
-	s.suggestGen++
-	job := &suggestJob{gen: s.suggestGen, count: count, request: request, place: place, running: true}
-	s.suggestJobs[workDir] = job
-	s.suggestMu.Unlock()
-	s.broadcastSuggestStatus(workDir)
 
 	args := []string{"suggest", "--json"}
 	if request != "" {
@@ -206,43 +267,81 @@ func (s *Server) handleSuggestGenerate(w http.ResponseWriter, r *http.Request) {
 	if count > 0 {
 		args = append(args, "--count", strconv.Itoa(count))
 	}
+	args = append(args, requirementsStatusArgs(reqs)...)
 	exe := s.selfExe()
 	// Resolved here rather than inside the goroutine: planning spends the
 	// caller's Claude tokens, and r must not outlive this handler.
 	claudeEnv := s.claudeEnvResolver(r)
 
 	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				fmt.Fprintf(os.Stderr, "ui: suggest goroutine panic recovered: %v\n", rec)
-				// Release the job so the user can retry.
-				s.finishSuggest(workDir, job, nil, fmt.Sprintf("internal panic: %v", rec))
-			}
-		}()
+		defer s.recoverSuggest(workDir, job)
 		// Hard timeout: nothing else cancels this goroutine, and a hung
 		// sub-binary would otherwise leave the job running forever — every
 		// later generate for this project refused with 409.
 		out, runErr := runCloopSubcommandFor(context.Background(), exe, workDir, suggestSubprocessTimeout, claudeEnv, suggestClear, args...)
-		if runErr != nil {
-			msg := strings.TrimSpace(string(out))
-			if msg == "" {
-				msg = runErr.Error()
-			}
-			s.finishSuggest(workDir, job, nil, msg)
-			return
+		if runErr != nil && refusedStatusArg(out, args) {
+			// A cloop older than the requirement status: asked again
+			// without it, and the result still held to it here.
+			out, runErr = runCloopSubcommandFor(context.Background(), exe, workDir, suggestSubprocessTimeout, claudeEnv,
+				suggestClear, args[:len(args)-1]...)
 		}
-		// Not json.Unmarshal(out): out is stdout and stderr merged by the
-		// executor, so the payload has to be located in it rather than
-		// assumed to be all of it. See pkg/clijson (Task 20325).
-		var result suggest.Result
-		if err := clijson.Unmarshal(out, &result); err != nil {
-			s.finishSuggest(workDir, job, nil, "could not parse suggestions: "+err.Error())
-			return
-		}
-		s.finishSuggest(workDir, job, &result, "")
+		s.readSuggestResult(workDir, job, out, runErr)
 	}()
 
 	jsonOK(w, map[string]interface{}{"ok": true, "count": count, "gen": job.gen})
+}
+
+// beginSuggestJob makes job the project's running job, numbering it, unless
+// one is running there already — which is refused with 409. On refusal the
+// response has been written.
+func (s *Server) beginSuggestJob(w http.ResponseWriter, workDir string, job *suggestJob) bool {
+	s.suggestMu.Lock()
+	if j := s.suggestJobs[workDir]; j != nil && j.running {
+		s.suggestMu.Unlock()
+		jsonErr(w, "suggest already running", http.StatusConflict)
+		return false
+	}
+	if s.suggestJobs == nil {
+		s.suggestJobs = make(map[string]*suggestJob)
+	}
+	s.suggestGen++
+	job.gen, job.running = s.suggestGen, true
+	s.suggestJobs[workDir] = job
+	s.suggestMu.Unlock()
+	s.broadcastSuggestStatus(workDir)
+	return true
+}
+
+// recoverSuggest releases a job whose goroutine panicked, so the user can
+// retry. Deferred by the goroutine that dispatches the job.
+func (s *Server) recoverSuggest(workDir string, job *suggestJob) {
+	if rec := recover(); rec != nil {
+		fmt.Fprintf(os.Stderr, "ui: suggest goroutine panic recovered: %v\n", rec)
+		s.finishSuggest(workDir, job, nil, fmt.Sprintf("internal panic: %v", rec))
+	}
+}
+
+// readSuggestResult ends job with what its dispatch printed.
+func (s *Server) readSuggestResult(workDir string, job *suggestJob, out []byte, runErr error) {
+	if runErr != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = runErr.Error()
+		} else if bytes.Contains(out, []byte("unknown flag: --")) || bytes.Contains(out, []byte(`unknown command "`)) {
+			msg = modelCallReason(out, runErr)
+		}
+		s.finishSuggest(workDir, job, nil, msg)
+		return
+	}
+	// Not json.Unmarshal(out): out is stdout and stderr merged by the
+	// executor, so the payload has to be located in it rather than
+	// assumed to be all of it. See pkg/clijson (Task 20325).
+	var result suggest.Result
+	if err := clijson.Unmarshal(out, &result); err != nil {
+		s.finishSuggest(workDir, job, nil, "could not parse suggestions: "+err.Error())
+		return
+	}
+	s.finishSuggest(workDir, job, &result, "")
 }
 
 // finishSuggest records how job ended and tells its project's clients.
@@ -251,12 +350,22 @@ func (s *Server) finishSuggest(workDir string, job *suggestJob, result *suggest.
 		// Checked here rather than trusted: on a device, the result came from
 		// whatever cloop that device runs. What the hub asked for decides
 		// whether it is a plan, not what came back.
+		limit := job.count
 		if job.request != "" {
-			suggest.NormalizePlan(result, job.count)
+			suggest.NormalizePlan(result, limit)
 		} else {
-			suggest.NormalizeIdeas(result, job.count)
+			if limit > 0 && !job.reqs.Empty() {
+				// Room for the ideas added for must gaps the model left
+				// open, which come first.
+				limit += requirements.MaxGapFallback
+			}
+			suggest.NormalizeIdeas(result, limit)
 		}
 		result.Request = job.request
+		result.Notes = cleanSuggestNotes(result.Notes)
+		// The hub's copy of the rules: links only to the requirements the
+		// hub sent, the must gaps closed, the gap work first.
+		suggest.ApplyRequirements(result, job.reqs, job.purpose, job.count)
 	}
 	s.suggestMu.Lock()
 	job.running, job.done, job.err = false, true, errMsg
@@ -266,6 +375,28 @@ func (s *Server) finishSuggest(workDir string, job *suggestJob, result *suggest.
 	}
 	s.suggestMu.Unlock()
 	s.broadcastSuggestStatus(workDir)
+}
+
+// maxSuggestNotes and maxSuggestNoteRunes bound the notes a result from an
+// executor may carry: they are shown, and said nothing the hub relies on.
+const (
+	maxSuggestNotes     = 12
+	maxSuggestNoteRunes = 400
+)
+
+// cleanSuggestNotes keeps what an executor's notes may show: a few lines of
+// bounded text.
+func cleanSuggestNotes(in []string) []string {
+	var out []string
+	for _, n := range in {
+		if n = truncateRunes(strings.Join(strings.Fields(n), " "), maxSuggestNoteRunes); n != "" {
+			out = append(out, n)
+		}
+		if len(out) == maxSuggestNotes {
+			break
+		}
+	}
+	return out
 }
 
 // suggestPlacement checks where a plan's tasks are to join the queue, as
@@ -386,6 +517,19 @@ func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
 	} else {
 		loose = req.Suggestions
 	}
+	// A proposal sent whole is a client's word: it links nothing, whatever it
+	// says (Task 20463). Links come only from a generation the hub held to
+	// the requirements.
+	stripped := loose[:0:0]
+	for _, sg := range loose {
+		if sg == nil {
+			continue
+		}
+		c := *sg
+		c.Requirements, c.Kind, c.Priority = nil, "", 0
+		stripped = append(stripped, &c)
+	}
+	loose = stripped
 	if len(picked) == 0 && len(loose) == 0 {
 		jsonErr(w, "no suggestions to add", http.StatusBadRequest)
 		return
@@ -406,6 +550,9 @@ func (s *Server) handleSuggestAdd(w http.ResponseWriter, r *http.Request) {
 	var fromJob, fromLoose []*pm.Task
 	if ledger != nil {
 		fromJob = ledger.Apply(ps.Plan, picked)
+		// A requirement deleted or deprecated since the generation is no
+		// longer one a new task may be linked to.
+		keepCurrentLinks(workDir, fromJob)
 	}
 	if len(loose) > 0 {
 		extra := &suggest.Result{Suggestions: loose}

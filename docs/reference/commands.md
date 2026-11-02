@@ -340,6 +340,7 @@ cloop requirements gate [off|linked|linked+must] [--assess|--no-assess] [--json]
 cloop requirements draft [--from-goal|--from-file <path>|-] [--max N] [--dry-run] [--json]
 cloop requirements lint [id...] [--ai] [--strict] [--all] [--file <spec>] [--json]
 cloop requirements approve <id>...|--all-drafts [--json]
+cloop requirements plan [--count N] [--dry-run|--yes] [--json]
 ```
 
 | Flag (`check`) | Default | Description |
@@ -351,6 +352,11 @@ cloop requirements approve <id>...|--all-drafts [--json]
 | `--ai-timeout` | `5m` | How long the model may take over one requirement |
 | `--timeout` | none | Stop the whole check after this long |
 | `--json`, `--no-record`, `--spec` | off | How the hub runs it on a project's executor: a framed report, nothing recorded, the requirements it sends |
+
+`plan` has the model plan the tasks that close the open gaps of the approved
+requirements — must first — each linked to the requirements it closes, and
+offers them for review; `--yes` adds them all, `--dry-run` none. See
+[Planning from the requirements](../guides/requirements.md#planning-from-the-requirements).
 
 `gate` shows or sets [requirement-gated completion](../guides/requirements.md#requirement-gated-completion):
 with it on, a task whose agent reports done is accepted only once its linked

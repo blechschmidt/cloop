@@ -66,6 +66,23 @@ type suggestScenario struct {
 	Count      string        `json:"count"`
 	Button     string        `json:"button"`
 	SplitPosts []suggestPost `json:"split_posts"`
+
+	// Planning with the requirements in view (Task 20463).
+	ReqFirst    string        `json:"req_first"`
+	ReqSkipped  string        `json:"req_skipped"`
+	ReqResent   string        `json:"req_resent"`
+	PlanPosts   []suggestPost `json:"plan_posts"`
+	PlanStarted struct {
+		Tasks  bool   `json:"tasks"`
+		Opened bool   `json:"opened"`
+		Toast  string `json:"toast"`
+	} `json:"plan_started"`
+	PlanNothing struct {
+		Tasks bool   `json:"tasks"`
+		Toast string `json:"toast"`
+	} `json:"plan_nothing"`
+	SplitBefore string `json:"split_before"`
+	SplitAfter  string `json:"split_after"`
 }
 
 func runSuggestScenarios(t *testing.T) map[string]suggestScenario {
@@ -104,6 +121,59 @@ func runSuggestScenarios(t *testing.T) map[string]suggestScenario {
 func TestDashboard_SuggestPanelPlansARequest(t *testing.T) {
 	t.Parallel()
 	got := runSuggestScenarios(t)
+
+	t.Run("a plan from the requirements says what each card closes", func(t *testing.T) {
+		r := got["requirement_plan_shows_what_each_card_closes"]
+		for _, want := range []string{`data-action="openRequirement" data-arg="1">R-1</span>`, `data-arg="3">R-3</span>`,
+			`<span class="suggest-tag suggest-tag-dep">test only</span>`, `<span class="suggest-card-label">Closes:</span>`} {
+			if !strings.Contains(r.ReqFirst, want) {
+				t.Errorf("the cards lack %q:\n%s", want, r.ReqFirst)
+			}
+		}
+		if strings.Contains(r.ReqFirst, "No task here closes") {
+			t.Errorf("a warning while every must gap has a card:\n%s", r.ReqFirst)
+		}
+		if !strings.Contains(r.Summary, `Left out "Expire sooner": R-4 is already implemented by open task #1.`) {
+			t.Errorf("the summary %q lacks the note", r.Summary)
+		}
+		if !strings.Contains(r.ReqSkipped, "No task here closes R-3 (The audit log is signed): approved must requirement with an open gap.") ||
+			strings.Contains(r.ReqSkipped, "R-1 (") {
+			t.Errorf("after skipping the R-3 card:\n%s", r.ReqSkipped)
+		}
+		if strings.Contains(r.ReqResent, "R-1 (") || strings.Contains(r.ReqResent, "Config <exit>") {
+			t.Errorf("an added card's requirement is warned of, or a title unescaped:\n%s", r.ReqResent)
+		}
+	})
+
+	t.Run("Plan from requirements opens the panel", func(t *testing.T) {
+		r := got["requirements_tab_plan_opens_the_panel"]
+		if !r.PlanStarted.Tasks || !r.PlanStarted.Opened ||
+			r.PlanStarted.Toast != "Planning 3 open gaps with the model: review the plan in the suggestions panel" {
+			t.Errorf("a plan that started: %+v", r.PlanStarted)
+		}
+		if r.PlanNothing.Tasks || r.PlanNothing.Toast != "Nothing to plan: every approved requirement holds." {
+			t.Errorf("nothing to plan: %+v", r.PlanNothing)
+		}
+		if len(r.PlanPosts) != 2 || !strings.Contains(r.PlanPosts[0].URL, "project_idx=1") {
+			t.Errorf("posts %+v", r.PlanPosts)
+		}
+	})
+
+	t.Run("the Split dialog keeps the task's requirements", func(t *testing.T) {
+		r := got["split_dialog_covers_the_tasks_requirements"]
+		if !strings.Contains(r.SplitBefore, `covers <span class="task-tag" title="Must &lt;one&gt;">R-1</span>`) ||
+			strings.Contains(r.SplitBefore, "No selected sub-task covers") {
+			t.Errorf("the proposal:\n%s", r.SplitBefore)
+		}
+		if !strings.Contains(r.SplitAfter, "No selected sub-task covers R-1 (Must &lt;one&gt;)") {
+			t.Errorf("after dropping the sub-task that covers R-1:\n%s", r.SplitAfter)
+		}
+		want := map[string]any{"subtasks": []any{map[string]any{"title": "Page it", "description": "d2", "role": "",
+			"estimated_minutes": 0.0, "requirements": []any{2.0}}}}
+		if len(r.SplitPosts) != 1 || !reflect.DeepEqual(r.SplitPosts[0].Body, want) {
+			t.Errorf("the apply posted %+v, want %v", r.SplitPosts, want)
+		}
+	})
 
 	t.Run("the count says what it counts", func(t *testing.T) {
 		m := got["mode_follows_the_input"]

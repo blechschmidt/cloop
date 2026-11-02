@@ -5926,7 +5926,10 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	})
 	o.queueRunning(evolveQueueID)
 
-	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, s.InnovateMode)
+	// Where the project's requirements stand (Task 20463): the round is shown
+	// the open gaps and asked to close the must ones before anything new.
+	reqs := o.requirementStatus(s.Plan)
+	prompt := pm.EvolveDiscoverPrompt(s.Goal, s.Instructions, s.Plan, s.EvolveStep, s.InnovateMode, reqs)
 	opts, _ := o.makeOpts(s.Model, s.LiveEffort(), true)
 	result, err := safeComplete(ctx, o.provider, prompt, opts)
 	if err != nil {
@@ -5964,6 +5967,19 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 			return 0, &evolveRefused{ab: ab}
 		}
 	}
+	// Read again: the plan may have moved on while the model answered — a
+	// task added from the dashboard may implement a requirement now.
+	if !reqs.Empty() {
+		reqs = o.requirementStatus(s.Plan)
+	}
+	// With a must gap open, the round closes it whatever the model answered
+	// — nothing parseable, or nothing at all — with the tasks by template
+	// below (pm.CloseMustGaps).
+	mustOpen := len(reqs.MustGaps()) > 0
+	if err != nil && mustOpen {
+		dimColor.Printf("  Task discovery parse error: %v — closing the open must gaps by template\n", err)
+		newTasks, err = nil, nil
+	}
 	if err != nil {
 		o.persistBestEffort(s, "an evolve round's bookkeeping (its step and tokens)",
 			"no task and no plan content changed, and the next write stores them too")
@@ -5971,7 +5987,10 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 		dimColor.Printf("  Task discovery parse error: %v\n", err)
 		return 0, nil
 	}
-	if len(newTasks) == 0 {
+	// Always: with no approved requirement — or none readable — the links
+	// the model wrote name nothing a task may implement, and are dropped.
+	pm.LinkProposedTasks(newTasks, reqs)
+	if len(newTasks) == 0 && !mustOpen {
 		o.persistBestEffort(s, "an evolve round's bookkeeping (its step and tokens)",
 			"no task and no plan content changed, and the next write stores them too")
 		o.queueDone(evolveQueueID, "no new tasks discovered")
@@ -5985,7 +6004,16 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	}
 
 	// Semantic deduplication: filter out candidates that duplicate existing work.
-	if !o.config.NoDedup {
+	if !o.config.NoDedup && !reqs.Empty() {
+		// A candidate linking only requirements an open task implements
+		// repeats that task, whatever its words (Task 20463).
+		kept, dropped := pm.DedupByRequirements(newTasks, reqs)
+		for _, d := range dropped {
+			dimColor.Printf("  Dedup: dropped %s.\n", d.Reason())
+		}
+		newTasks = kept
+	}
+	if !o.config.NoDedup && len(newTasks) > 0 {
 		dedupOpts, _ := o.makeOpts(s.Model, s.LiveEffort(), false)
 		deduped, dedupErr := pm.DeduplicateTasks(ctx, o.provider, dedupOpts, s.Plan.Tasks, newTasks)
 		if dedupErr != nil {
@@ -5997,6 +6025,16 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 			dimColor.Printf("  Dedup: removed %d duplicate task(s), %d novel task(s) remain.\n", dropped, len(deduped))
 		}
 		newTasks = deduped
+	}
+	if !reqs.Empty() {
+		// Gap-closing work first, must before should before could, and a
+		// task by template for each must gap nothing closes.
+		newTasks = pm.CloseMustGaps(newTasks, reqs)
+		maxID := 0
+		for _, t := range s.Plan.Tasks {
+			maxID = max(maxID, t.ID)
+		}
+		newTasks = pm.OrderByRequirements(newTasks, reqs, maxID+1)
 	}
 
 	if len(newTasks) == 0 {
@@ -6034,7 +6072,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 	{
 		titles := make([]string, 0, len(newTasks))
 		for _, t := range newTasks {
-			titles = append(titles, fmt.Sprintf("#%d %s", t.ID, t.Title))
+			titles = append(titles, fmt.Sprintf("#%d %s%s", t.ID, t.Title, linkedRequirements(t)))
 		}
 		state.LogEventDetails(o.config.WorkDir, state.EventRow{
 			Type:    state.EventEvolveDiscovered,
@@ -6049,7 +6087,7 @@ func (o *Orchestrator) evolvePM(ctx context.Context) (int, error) {
 
 	evolveColor.Printf("  Discovered %d new task(s):\n", len(newTasks))
 	for _, t := range newTasks {
-		fmt.Printf("    + [P%d] %s\n", t.Priority, t.Title)
+		fmt.Printf("    + [P%d] %s%s\n", t.Priority, t.Title, linkedRequirements(t))
 		dimColor.Printf("      %s\n", truncate(t.Description, 100))
 	}
 	fmt.Println()

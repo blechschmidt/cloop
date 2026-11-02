@@ -5,15 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 )
 
 // DecomposePrompt builds a prompt asking the AI to break a complex task into 3-7 sub-tasks.
 // depth indicates how many more levels of recursion are intended (for informational framing only).
-func DecomposePrompt(task *pm.Task, depth int) string {
+func DecomposePrompt(task *pm.Task, depth int) string { return DecomposePromptWith(task, depth, nil) }
+
+// DecomposePromptWith is DecomposePrompt for a task that implements the
+// approved requirements linked (Task 20463): the split must cover every one of
+// them, and each sub-task says which it makes hold.
+func DecomposePromptWith(task *pm.Task, depth int, linked []requirements.Requirement) string {
 	var b strings.Builder
 	b.WriteString("You are an AI product manager. A task needs to be recursively decomposed into concrete sub-tasks.\n\n")
 
@@ -43,9 +50,27 @@ func DecomposePrompt(task *pm.Task, depth int) string {
 	if depth > 1 {
 		b.WriteString(fmt.Sprintf("- At a granularity appropriate for %d more levels of decomposition\n", depth-1))
 	}
+	if len(linked) > 0 {
+		b.WriteString("\n## REQUIREMENTS THE TASK IMPLEMENTS\n")
+		b.WriteString("The task is held to these approved project requirements. Split it so that every one of them —\n")
+		b.WriteString("the must ones above all — is made to hold by some sub-task, and give each sub-task, in\n")
+		b.WriteString("\"requirements\", the ids of the ones it makes hold (as numbers; [] for none):\n")
+		for _, r := range linked {
+			fmt.Fprintf(&b, "- %s", requirements.Key(r.ID))
+			if r.Priority != "" {
+				fmt.Fprintf(&b, " [%s]", r.Priority)
+			}
+			fmt.Fprintf(&b, " %s\n", strings.Join(strings.Fields(r.Title), " "))
+		}
+	}
 	b.WriteString("\nOutput ONLY a valid JSON array of at least 3 sub-task objects (no explanation, no markdown fences):\n")
-	b.WriteString(`[{"title":"short title","description":"detailed description","priority":1,"role":"backend","estimated_minutes":30},`)
-	b.WriteString(`{"title":"another sub-task","description":"details","priority":2,"role":"testing","estimated_minutes":20}]`)
+	if len(linked) > 0 {
+		fmt.Fprintf(&b, `[{"title":"short title","description":"detailed description","priority":1,"role":"backend","estimated_minutes":30,"requirements":[%d]},`, linked[0].ID)
+		b.WriteString(`{"title":"another sub-task","description":"details","priority":2,"role":"testing","estimated_minutes":20,"requirements":[]}]`)
+	} else {
+		b.WriteString(`[{"title":"short title","description":"detailed description","priority":1,"role":"backend","estimated_minutes":30},`)
+		b.WriteString(`{"title":"another sub-task","description":"details","priority":2,"role":"testing","estimated_minutes":20}]`)
+	}
 	b.WriteString("\n\nFor role, choose one of: backend, frontend, testing, security, devops, data, docs, review, or empty string.\n")
 	b.WriteString("priority is the relative order within the sub-tasks (1 = do first).\n")
 	b.WriteString("estimated_minutes is your best estimate of how long the sub-task will take.")
@@ -61,11 +86,12 @@ const retryInstruction = "\n\nIMPORTANT: A previous attempt did not produce a us
 
 // decomposeItem is the raw JSON structure returned by the AI for a single sub-task.
 type decomposeItem struct {
-	Title            string       `json:"title"`
-	Description      string       `json:"description"`
-	Priority         int          `json:"priority"`
-	Role             pm.AgentRole `json:"role"`
-	EstimatedMinutes int          `json:"estimated_minutes"`
+	Title            string                 `json:"title"`
+	Description      string                 `json:"description"`
+	Priority         int                    `json:"priority"`
+	Role             pm.AgentRole           `json:"role"`
+	EstimatedMinutes int                    `json:"estimated_minutes"`
+	Requirements     requirements.LooseRefs `json:"requirements"`
 }
 
 // extractSubtaskItems finds the first parseable JSON array of sub-task objects
@@ -106,6 +132,13 @@ func extractSubtaskItems(response string) ([]decomposeItem, error) {
 // The first sub-task's DependsOn is set to []int{parentID}.
 // Subsequent sub-tasks depend on the previous sub-task sequentially.
 func ParseSubTasks(response string, parent *pm.Task) ([]*pm.Task, error) {
+	return parseSubTasks(response, parent, nil)
+}
+
+// parseSubTasks is ParseSubTasks keeping, of the requirements each sub-task
+// says it makes hold, the ones in allowed — the parent's approved links
+// (Task 20463). Any other id is the model's mistake, and dropped.
+func parseSubTasks(response string, parent *pm.Task, allowed []int) ([]*pm.Task, error) {
 	items, err := extractSubtaskItems(response)
 	if err != nil {
 		return nil, err
@@ -138,6 +171,12 @@ func ParseSubTasks(response string, parent *pm.Task) ([]*pm.Task, error) {
 			Assignee:         parent.Assignee,
 			EstimatedMinutes: item.EstimatedMinutes,
 		}
+		for _, id := range item.Requirements {
+			if slices.Contains(allowed, id) && !slices.Contains(t.Requirements, id) {
+				t.Requirements = append(t.Requirements, id)
+			}
+		}
+		slices.Sort(t.Requirements)
 
 		// First kept sub-task depends on the parent (which will be marked
 		// skipped). Sequential dep wiring for the rest (sub[i] depends on
@@ -177,6 +216,15 @@ type DecomposeResult struct {
 // retry with a firmer instruction; provider transport errors are returned
 // immediately.
 func Decompose(ctx context.Context, p provider.Provider, opts provider.Options, plan *pm.Plan, taskID int) (*DecomposeResult, error) {
+	return DecomposeWith(ctx, p, opts, plan, taskID, nil)
+}
+
+// DecomposeWith is Decompose for a project whose requirements are reqs (Task
+// 20463): the task's approved links are put to the model, and each sub-task
+// keeps the ones it says it makes hold — so a split does not quietly lose the
+// contract its task was held to. Drafts and deprecated requirements are
+// neither shown nor kept.
+func DecomposeWith(ctx context.Context, p provider.Provider, opts provider.Options, plan *pm.Plan, taskID int, reqs []requirements.Requirement) (*DecomposeResult, error) {
 	var task *pm.Task
 	for _, t := range plan.Tasks {
 		if t.ID == taskID {
@@ -188,17 +236,22 @@ func Decompose(ctx context.Context, p provider.Provider, opts provider.Options, 
 		return nil, fmt.Errorf("task %d not found in plan", taskID)
 	}
 
-	prompt := DecomposePrompt(task, 1)
+	linked := ApprovedLinks(task, reqs)
+	allowed := make([]int, len(linked))
+	for i, r := range linked {
+		allowed[i] = r.ID
+	}
+	prompt := DecomposePromptWith(task, 1, linked)
 	result, err := p.Complete(ctx, prompt, opts)
 	if err != nil {
 		return nil, fmt.Errorf("decompose: provider error: %w", err)
 	}
 
-	subTasks, parseErr := ParseSubTasks(result.Output, task)
+	subTasks, parseErr := parseSubTasks(result.Output, task, allowed)
 	if parseErr != nil || len(subTasks) < 2 {
 		retryResult, retryErr := p.Complete(ctx, prompt+retryInstruction, opts)
 		if retryErr == nil {
-			retryTasks, retryParseErr := ParseSubTasks(retryResult.Output, task)
+			retryTasks, retryParseErr := parseSubTasks(retryResult.Output, task, allowed)
 			if retryParseErr == nil && len(retryTasks) > len(subTasks) {
 				subTasks = retryTasks
 				parseErr = nil
@@ -213,6 +266,15 @@ func Decompose(ctx context.Context, p provider.Provider, opts provider.Options, 
 	}
 
 	return &DecomposeResult{Parent: task, SubTasks: subTasks}, nil
+}
+
+// ApprovedLinks are the approved requirements of reqs that task implements,
+// in its order: what a split of it must cover.
+func ApprovedLinks(task *pm.Task, reqs []requirements.Requirement) []requirements.Requirement {
+	linked, _ := requirements.Resolve(task.Requirements, reqs)
+	return slices.DeleteFunc(linked, func(r requirements.Requirement) bool {
+		return r.CurrentStatus() != requirements.StatusApproved
+	})
 }
 
 // InjectSubTasks applies a DecomposeResult to the plan:

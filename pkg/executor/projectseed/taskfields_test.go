@@ -3,8 +3,10 @@ package projectseed
 // The seed and the way back carry every task field (Task 20361).
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blechschmidt/cloop/internal/taskfill"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -306,5 +308,122 @@ func TestLinkedRequirementsAreBounded(t *testing.T) {
 	}
 	if size > maxSeedRequirementBytes {
 		t.Errorf("the seed carries %d bytes of requirements, over %d", size, maxSeedRequirementBytes)
+	}
+}
+
+// TestASeedCarriesWhereTheRequirementsStand: a device's auto-evolve plans from
+// the requirement status summary (Task 20463), and the device's database holds
+// neither every approved requirement nor any check. The seed carries the hub's
+// facts — never a draft's or a deprecated requirement's — and the run there
+// lays its own newer checks over them and assesses them against its own plan.
+func TestASeedCarriesWhereTheRequirementsStand(t *testing.T) {
+	isolateHome(t)
+	hub := hubProject(t, &state.ProjectState{Goal: "g", Plan: &pm.Plan{Goal: "g", Tasks: []*pm.Task{
+		{ID: 1, Title: "pending", Status: pm.TaskPending, Requirements: []int{2}},
+	}}})
+	db, err := statedb.Open(state.DBPath(hub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []requirements.Requirement{
+		{Title: "fails", Priority: requirements.PriorityMust, Tests: []requirements.Test{{Command: "false"}}},
+		{Title: "linked", Priority: requirements.PriorityShould, Tests: []requirements.Test{{Command: "true"}}},
+		{Title: "a draft", Priority: requirements.PriorityMust, Status: requirements.StatusDraft},
+		{Title: "retired", Priority: requirements.PriorityMust, Status: requirements.StatusDeprecated},
+	} {
+		if _, err := db.AddRequirement(r, "alice@example.com"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.RecordRequirementVerdict(1, requirements.VerdictUnfulfilled, "exit 1", "alice@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	facts, _, err := db.RequirementFacts()
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.LoadLite(hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := requirements.Summarize(facts, pm.TaskViews(st.Plan))
+	if len(sum.Requirements) != 2 || sum.Requirements[0].Action != requirements.ActionFix ||
+		sum.Requirements[1].Action != requirements.ActionCovered {
+		t.Fatalf("the hub's summary %+v", sum.Requirements)
+	}
+	seed, err := BuildFull(st, nil, sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDevice(t, seed, func(dir string, st *state.ProjectState) {
+		ddb, err := statedb.Open(state.DBPath(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ddb.Close()
+		facts, _, err := ddb.AsProject().RequirementFacts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The device's plan moved on: task 1 finished there.
+		done := st.Plan.TaskByID(1)
+		done.Status = pm.TaskDone
+		at := sum.Requirements[0].CheckedAt.Add(time.Hour)
+		done.CompletedAt = &at
+		got := requirements.Summarize(facts, pm.TaskViews(st.Plan))
+		if len(got.Requirements) != 2 || got.Requirements[0].ID != 1 || got.Requirements[0].Action != requirements.ActionFix ||
+			got.Requirements[1].ID != 2 || got.Requirements[1].Action != requirements.ActionCheck {
+			t.Errorf("the device's summary %+v", got.Requirements)
+		}
+		if strings.Contains(got.Section(), "a draft") || strings.Contains(got.Section(), "retired") {
+			t.Errorf("a draft or a deprecated requirement reached the device:\n%s", got.Section())
+		}
+	})
+}
+
+// TestACreatedTaskKeepsTheHubsApprovedLinks: a device's auto-evolve links the
+// tasks it adds to what they close (Task 20463). The hub keeps those links —
+// else the requirement stays a gap on the hub and every dispatch's evolve adds
+// the task again — but only to requirements it holds as approved.
+func TestACreatedTaskKeepsTheHubsApprovedLinks(t *testing.T) {
+	isolateHome(t)
+	hub := hubProject(t, &state.ProjectState{Goal: "g", Plan: &pm.Plan{Goal: "g", Tasks: []*pm.Task{
+		{ID: 1, Title: "a", Status: pm.TaskDone},
+	}}})
+	db, err := statedb.Open(state.DBPath(hub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []requirements.Requirement{
+		{Title: "approved"},
+		{Title: "a draft", Status: requirements.StatusDraft},
+		{Title: "retired", Status: requirements.StatusDeprecated},
+	} {
+		if _, err := db.AddRequirement(r, "alice@example.com"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	r := &Result{Format: ResultFormat, Tasks: []TaskChange{
+		{After: &pm.Task{ID: 2, Title: "Restore R-1", Status: pm.TaskDone, Requirements: []int{1, 2, 3, 99, 1, -4}}},
+		{After: &pm.Task{ID: 3, Title: "Dark mode", Status: pm.TaskPending}},
+	}}
+	rep, err := Apply(hub, r, Provenance{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Added) != 2 {
+		t.Fatalf("added %v", rep.Added)
+	}
+	st, err := state.LoadLite(hub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Plan.TaskByID(rep.Added[0]).Requirements; fmt.Sprint(got) != "[1]" {
+		t.Errorf("the created task implements %v on the hub, want [1]", got)
+	}
+	if got := st.Plan.TaskByID(rep.Added[1]).Requirements; got != nil {
+		t.Errorf("an unlinked created task implements %v", got)
 	}
 }

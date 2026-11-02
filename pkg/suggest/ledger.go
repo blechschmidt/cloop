@@ -1,10 +1,12 @@
 package suggest
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 )
 
 // Ledger turns reviewed suggestions into tasks and remembers which ones it
@@ -102,6 +104,16 @@ func (l *Ledger) Clone() *Ledger {
 	return c
 }
 
+// Added returns the IDs of the suggestions that have become tasks, in order.
+func (l *Ledger) Added() []int {
+	ids := make([]int, 0, len(l.added))
+	for sid := range l.added {
+		ids = append(ids, sid)
+	}
+	sort.Ints(ids)
+	return ids
+}
+
 // Pending returns the suggestions in all that have not become tasks yet.
 func (l *Ledger) Pending(all []*Suggestion) []*Suggestion {
 	out := make([]*Suggestion, 0, len(all))
@@ -153,22 +165,31 @@ func (l *Ledger) Apply(plan *pm.Plan, picked []*Suggestion) []*pm.Task {
 		}
 		maxID++
 		t := &pm.Task{
-			ID:          maxID,
-			Title:       s.Title,
-			Description: s.Description,
-			Priority:    PriorityFor(s.Effort),
-			Status:      pm.TaskPending,
-			Role:        RoleFor(s.Category),
+			ID:           maxID,
+			Title:        s.Title,
+			Description:  s.Description,
+			Priority:     PriorityFor(s.Effort),
+			Status:       pm.TaskPending,
+			Role:         RoleFor(s.Category),
+			Requirements: slices.Clone([]int(s.Requirements)),
+		}
+		markRequirementTask(t, s.Kind)
+		if s.Priority > 0 {
+			// What its requirements ask for (ApplyRequirements).
+			t.Priority = s.Priority
 		}
 		if l.plan {
 			// The queue's tail, not an effort guess: sizing a plan's tasks
 			// independently would let a small late step jump the large
 			// early step it builds on. One priority for all of them keeps
 			// that true too: equal priorities run in ID order, which is
-			// plan order.
-			if l.priority > 0 {
+			// plan order. A priority the person placed the plan at comes
+			// first, then one its requirements ask for.
+			switch {
+			case l.priority > 0:
 				t.Priority = l.priority
-			} else {
+			case s.Priority > 0:
+			default:
 				maxPri++
 				t.Priority = maxPri
 			}
@@ -266,6 +287,20 @@ func reaches(byID map[int]*pm.Task, from, target int) bool {
 		}
 	}
 	return false
+}
+
+// markRequirementTask tags a task that closes a requirement's gap, and makes
+// one whose kind is test a test task: the testing role, and the tag that says
+// its whole job is the test.
+func markRequirementTask(t *pm.Task, kind string) {
+	if kind == "" || len(t.Requirements) == 0 {
+		return
+	}
+	t.Tags = append(t.Tags, pm.TagRequirement)
+	if kind == requirements.ActionTest {
+		t.Tags = append(t.Tags, pm.TagTestOnly)
+		t.Role = pm.RoleTesting
+	}
 }
 
 // RoleFor maps a suggestion's category to the agent role best suited to it.

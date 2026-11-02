@@ -43,6 +43,7 @@ import (
 	"math"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -51,6 +52,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -521,6 +523,7 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 			workDir, st.WorkDir)
 	}
 	rep, rec := Merge(st, r, prov, scrub, time.Now())
+	keepApprovedLinks(workDir, st.Plan, rep.Added)
 	// Before the plan is saved, so the trail reads dispatch, then outcome:
 	// the tasks were dispatched whatever becomes of the save.
 	auditDispatches(workDir, st, rep.Dispatched, prov)
@@ -878,6 +881,39 @@ func appendAnnotations(h, before, after *pm.Task, scrub func(string) string) boo
 	return added > 0
 }
 
+// keepApprovedLinks holds the links of the tasks a run created — added, as
+// the hub numbers them — to the hub's approved requirements: a requirement the
+// run linked that the hub has deleted, deprecated or made a draft since, or an
+// id it never had, is not one a new task may implement here. A database that
+// cannot be read keeps none: a link nobody could check is not stored.
+func keepApprovedLinks(workDir string, plan *pm.Plan, added []int) {
+	var tasks []*pm.Task
+	for _, id := range added {
+		if t := plan.TaskByID(id); t != nil && len(t.Requirements) > 0 {
+			tasks = append(tasks, t)
+		}
+	}
+	if len(tasks) == 0 {
+		return
+	}
+	approved := map[int]bool{}
+	if db, err := statedb.Open(state.DBPath(workDir)); err == nil {
+		reqs, rerr := db.AsProject().Requirements()
+		db.Close()
+		if rerr == nil {
+			for _, r := range reqs {
+				approved[r.ID] = r.CurrentStatus() == requirements.StatusApproved
+			}
+		}
+	}
+	for _, t := range tasks {
+		t.Requirements = slices.DeleteFunc(t.Requirements, func(id int) bool { return !approved[id] })
+		if len(t.Requirements) == 0 {
+			t.Requirements = nil
+		}
+	}
+}
+
 // created builds the hub's copy of a task the run created, from the fields a
 // plan entry needs and nothing else.
 func created(t *pm.Task, id int, assigned map[int]int, known map[int]*pm.Task, scrub func(string) string) *pm.Task {
@@ -912,6 +948,18 @@ func created(t *pm.Task, id int, assigned map[int]int, known map[int]*pm.Task, s
 			c.Tags = append(c.Tags, tag)
 		}
 	}
+	// The requirements it implements — an auto-evolve round links what it
+	// closes (Task 20463). Bounded here, and held to the hub's approved
+	// requirements by Apply, which can read them.
+	for _, id := range t.Requirements {
+		if len(c.Requirements) >= requirements.MaxTaskLinks {
+			break
+		}
+		if id > 0 && !slices.Contains(c.Requirements, id) {
+			c.Requirements = append(c.Requirements, id)
+		}
+	}
+	slices.Sort(c.Requirements)
 	if validStatus(t.Status) {
 		applyOutcome(c, t, scrub)
 	}

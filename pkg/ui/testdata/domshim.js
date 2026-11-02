@@ -331,6 +331,17 @@ function stateFor(idx) {
 // ── fetch ───────────────────────────────────────────────────────────────────
 
 function jsonResponse(body, status, headers) {
+  // A route whose value is {__sse: '…'} answers as an event stream — the plan
+  // assistant's — delivered whole in one read.
+  if (body && typeof body.__sse === 'string') {
+    const bytes = new TextEncoder().encode(body.__sse);
+    let sent = false;
+    return Promise.resolve({
+      ok: true, status: 200, headers: {get: () => 'text/event-stream'},
+      body: {getReader: () => ({read: () => Promise.resolve(sent ? {done: true} : (sent = true, {done: false, value: bytes}))})},
+      text: () => Promise.resolve(body.__sse),
+    });
+  }
   const text = JSON.stringify(body);
   const h = {};
   for (const [k, v] of Object.entries(headers || {})) h[k.toLowerCase()] = String(v);

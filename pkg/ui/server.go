@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -4312,6 +4313,9 @@ type decomposeSubtaskWire struct {
 	Description      string `json:"description"`
 	Role             string `json:"role,omitempty"`
 	EstimatedMinutes int    `json:"estimated_minutes,omitempty"`
+	// Requirements are the parent's approved requirements the sub-task
+	// makes hold (Task 20463): what it implements once applied.
+	Requirements []int `json:"requirements,omitempty"`
 }
 
 // decomposePreviewTimeout bounds the synchronous decompose preview call.
@@ -4390,12 +4394,43 @@ func (s *Server) handleTaskDecompose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The requirements the task implements (Task 20463): each sub-task keeps
+	// the approved ones it says it makes hold, and the dialog warns of an
+	// approved must one no sub-task covers — once the task is split, nothing
+	// open would implement it.
+	linked := splitRequirements(workDir, task)
+	allowed := make([]int, len(linked))
+	refs := make([]suggestReqRef, len(linked))
+	for i, q := range linked {
+		allowed[i] = q.ID
+		refs[i] = suggestReqRef{ID: q.ID, Title: q.Title, Priority: q.Priority, Gap: q.Priority == requirements.PriorityMust}
+	}
 	jsonOK(w, map[string]interface{}{
 		"ok":           true,
 		"parent_id":    task.ID,
 		"parent_title": task.Title,
-		"subtasks":     cleanDecomposeProposal(res.SubTasks),
+		"subtasks":     cleanDecomposeProposal(res.SubTasks, allowed),
+		"requirements": refs,
 	})
+}
+
+// splitRequirements are the approved requirements task implements, in its
+// order: what a split of it must cover. A database that cannot be read
+// gives none, and the dialog shows no coverage.
+func splitRequirements(workDir string, task *pm.Task) []requirements.Requirement {
+	if len(task.Requirements) == 0 {
+		return nil
+	}
+	db, err := statedb.Open(state.DBPath(workDir))
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	all, err := db.AsProject().Requirements()
+	if err != nil {
+		return nil
+	}
+	return decompose.ApprovedLinks(task, all)
 }
 
 // cleanDecomposeProposal keeps what a proposal from an executor may carry into
@@ -4403,7 +4438,7 @@ func (s *Server) handleTaskDecompose(w http.ResponseWriter, r *http.Request) {
 // role the plan knows, no negative estimate and text of a task's size — the
 // checks apply makes, made before the dialog shows them, since the proposal
 // came from whatever cloop the executor runs.
-func cleanDecomposeProposal(in []decomposeSubtaskWire) []decomposeSubtaskWire {
+func cleanDecomposeProposal(in []decomposeSubtaskWire, allowed []int) []decomposeSubtaskWire {
 	validRoles := make(map[string]bool, len(pm.ValidRoles()))
 	for _, role := range pm.ValidRoles() {
 		validRoles[role] = true
@@ -4419,11 +4454,25 @@ func cleanDecomposeProposal(in []decomposeSubtaskWire) []decomposeSubtaskWire {
 			st.Role = ""
 		}
 		st.EstimatedMinutes = max(st.EstimatedMinutes, 0)
+		st.Requirements = keepAllowed(st.Requirements, allowed)
 		out = append(out, st)
 		if len(out) == decomposeMaxSubtasks {
 			break
 		}
 	}
+	return out
+}
+
+// keepAllowed is ids without repeats, keeping only those in allowed, sorted;
+// nil when none is left.
+func keepAllowed(ids, allowed []int) []int {
+	var out []int
+	for _, id := range ids {
+		if slices.Contains(allowed, id) && !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
 	return out
 }
 
@@ -4492,6 +4541,14 @@ func (s *Server) handleTaskDecomposeApply(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// A sub-task implements only the parent's approved requirements it was
+	// proposed for (Task 20463): what the client sends is held to them as
+	// they are now.
+	var allowed []int
+	for _, q := range splitRequirements(workDir, parent) {
+		allowed = append(allowed, q.ID)
+	}
+
 	// Rebuild pm.Tasks from the reviewed wire proposals, inheriting parent
 	// tags/assignee exactly like decompose.ParseSubTasks does.
 	subTasks := make([]*pm.Task, 0, len(kept))
@@ -4509,6 +4566,7 @@ func (s *Server) handleTaskDecomposeApply(w http.ResponseWriter, r *http.Request
 			Tags:             tags,
 			Assignee:         parent.Assignee,
 			EstimatedMinutes: st.EstimatedMinutes,
+			Requirements:     keepAllowed(st.Requirements, allowed),
 		}
 		if i == 0 {
 			t.DependsOn = []int{parent.ID}
@@ -5746,6 +5804,13 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 	if s.refuseModelCallDispatch(w, clear) {
 		return
 	}
+	// Where the requirements stand (Task 20463): the assistant names the
+	// requirements each task it proposes covers, and the answer's end says
+	// which must gaps the proposal leaves open. Best effort.
+	reqs, rerr := requirementStatusFor(workDir)
+	if rerr != nil {
+		fmt.Fprintf(os.Stderr, "ui: plan chat for %s goes without the requirement status: %v\n", workDir, rerr)
+	}
 
 	// Start SSE response.
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -5766,9 +5831,16 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 			cancel()
 		}
 	}}
+	args := append([]string{"plan", "chat", "--message=" + msg, "--history=" + string(history),
+		"--timeout", planChatCallTimeout.String(), "--json"}, requirementsStatusArgs(reqs)...)
 	out, callErr := streamCloopSubcommandFor(ctx, s.selfExe(), workDir, planChatDispatchTimeout,
-		s.claudeEnvResolver(r), clear, relay.write, "plan", "chat", "--message="+msg,
-		"--history="+string(history), "--timeout", planChatCallTimeout.String(), "--json")
+		s.claudeEnvResolver(r), clear, relay.write, args...)
+	if callErr != nil && ctx.Err() == nil && relay.sent.Len() == 0 && refusedStatusArg(out, args) {
+		// A cloop older than the requirement status refused it before
+		// answering: asked again without it.
+		out, callErr = streamCloopSubcommandFor(ctx, s.selfExe(), workDir, planChatDispatchTimeout,
+			s.claudeEnvResolver(r), clear, relay.write, args[:len(args)-1]...)
+	}
 	if ctx.Err() != nil {
 		return // the client went away, or stopped reading: nobody is there to tell
 	}
@@ -5784,7 +5856,50 @@ func (s *Server) handlePlanChat(w http.ResponseWriter, r *http.Request) {
 	if rest, ok := strings.CutPrefix(answer, relay.sent.String()); ok && rest != "" {
 		relay.send(rest)
 	}
-	_ = writeSSE(w, flusher, "event: done\ndata: {}\n\n")
+	done, _ := json.Marshal(planChatProposals(answer, reqs))
+	_ = writeSSE(w, flusher, "event: done\ndata: %s\n\n", done)
+}
+
+// planChatDone is what the end of a plan-assistant answer says beyond its
+// text (Task 20463): the tasks it proposed, each with the requirements it
+// covers, and the approved must requirements with an open gap that none of
+// them — and no open task — closes. Text is the answer without the block
+// that listed the proposals. Empty when the answer proposed nothing.
+type planChatDone struct {
+	Text      string             `json:"text,omitempty"`
+	Proposals []planChatProposal `json:"proposals,omitempty"`
+	Uncovered []suggestReqRef    `json:"uncovered,omitempty"`
+}
+
+type planChatProposal struct {
+	Title        string          `json:"title"`
+	Requirements []suggestReqRef `json:"requirements"`
+}
+
+// planChatProposals reads the tasks answer proposes (requirements.
+// ParseProposedTasks) and holds what each says it covers to reqs: approved
+// requirements only, never a draft or a deprecated one.
+func planChatProposals(answer string, reqs requirements.StatusSummary) planChatDone {
+	text, proposed := requirements.ParseProposedTasks(answer)
+	if len(proposed) == 0 {
+		return planChatDone{}
+	}
+	out := planChatDone{Text: text, Proposals: make([]planChatProposal, 0, len(proposed)), Uncovered: []suggestReqRef{}}
+	var links [][]int
+	for _, p := range proposed {
+		ids := reqs.KeepLinks(p.Requirements, false)
+		links = append(links, ids)
+		cp := planChatProposal{Title: p.Title, Requirements: []suggestReqRef{}}
+		for _, id := range ids {
+			st, _ := reqs.Lookup(id)
+			cp.Requirements = append(cp.Requirements, suggestReqRef{ID: id, Title: st.Title, Priority: st.Priority})
+		}
+		out.Proposals = append(out.Proposals, cp)
+	}
+	for _, st := range reqs.UncoveredMusts(links...) {
+		out.Uncovered = append(out.Uncovered, suggestReqRef{ID: st.ID, Title: st.Title, Priority: st.Priority, Gap: true})
+	}
+	return out
 }
 
 // planChatRelay turns the subcommand's output, as the executor delivers it,

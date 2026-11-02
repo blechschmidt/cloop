@@ -163,6 +163,32 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **The planners plan from the requirements: open gaps first, every task
+  linked to what it closes.** `cloop requirements plan` and the Requirements
+  tab's *Plan from requirements* have the model plan the tasks that close the
+  open gaps of the approved requirements — the ones that fail, that nothing
+  shows to hold, that changed since they held, or that lack only a test — on
+  the project's executor with the caller's account. The plan is reviewed where
+  every plan is, in the suggestions panel, task by task or all at once. What
+  the model proposes is held to the requirements, on the executor and again on
+  the hub. A task links only requirements with an open gap, never a draft or a
+  deprecated one. A task that links only requirements lacking nothing but a
+  test is a *test only* task. A task repeating what an open task implements is
+  left out. Every must gap gets a task, by template if the model left it open.
+  The tasks run by the priority of what they close, must first. Auto-evolve and
+  the panel's brainstorm are shown the same requirement status summary — a
+  device's run gets it in its seed — and with an open must gap close it before
+  proposing anything new. Every task an evolve round adds links the
+  requirements it addresses, and the semantic dedup also drops a proposal that
+  links only requirements an open task implements. A requirement's card says
+  what is open about it and what closes it. The plan assistant shows which
+  requirements each task it proposes covers, and Split which of the task's
+  requirements each sub-task covers, which applying links. Both warn when an
+  approved must requirement is left uncovered. Once a task linked to a gap
+  finishes, fails or is skipped, no planner plans for the gap again until the
+  requirement changes, a check finds it holding, or a person resets the task,
+  so auto-evolve cannot loop on one (Task 20463).
+
 - **Draft requirements with the model, then review and approve them.** `cloop
   requirements draft` (`--from-goal`, `--from-file spec.md`, or stdin) and the
   Requirements tab's *Draft requirements* dialog turn free text into atomic,

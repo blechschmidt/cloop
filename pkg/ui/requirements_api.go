@@ -99,6 +99,11 @@ type requirementView struct {
 	// Tasks are the ids of the tasks that implement it (Task 20460); its
 	// details list them with their titles.
 	Tasks []int `json:"tasks,omitempty"`
+	// Gaps and Action are what is open about an approved requirement, and
+	// what closes it (Task 20463; requirements.Assess): a planner plans for
+	// it when the action is fix, implement, verify or test.
+	Gaps   []string `json:"gaps,omitempty"`
+	Action string   `json:"action,omitempty"`
 }
 
 // requirementsList is GET /api/requirements's answer.
@@ -113,6 +118,11 @@ type requirementsList struct {
 	// Spec is the project's spec file as last read, and how it merges with
 	// the requirements here (Task 20459).
 	Spec *specView `json:"spec,omitempty"`
+	// Targets counts the approved requirements with an open gap a task
+	// closes, and MustGaps the must ones among them: what "Plan from
+	// requirements" would plan for (Task 20463).
+	Targets  int `json:"targets"`
+	MustGaps int `json:"must_gaps"`
 }
 
 // requirementInput is what a client sends to add or change a requirement. A
@@ -218,10 +228,20 @@ func (s *Server) handleRequirementsList(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	implementing := tasksImplementing(plan)
+	// Where each approved requirement stands against the plan (Task 20463),
+	// as every planner reads it. Best effort: the list without it is the list.
+	var standing requirements.StatusSummary
+	if facts, err := db.RequirementStandings(); err == nil {
+		standing = requirements.Summarize(facts, pm.TaskViews(plan))
+	}
+	out.Targets, out.MustGaps = len(standing.Targets()), len(standing.MustGaps())
 	for _, req := range reqs {
 		v := requirementView{Requirement: req, Fingerprint: req.Fingerprint()}
 		for _, t := range implementing[req.ID] {
 			v.Tasks = append(v.Tasks, t.ID)
+		}
+		if st, ok := standing.Lookup(req.ID); ok {
+			v.Gaps, v.Action = st.Gaps, st.Action
 		}
 		c, checked := latest[req.ID]
 		if !checked {
@@ -469,8 +489,13 @@ func (s *Server) handleRequirementTask(w http.ResponseWriter, r *http.Request) {
 	}
 	task := &pm.Task{
 		ID: maxID + 1, Title: title, Description: desc, Priority: requirementTaskPriority(req.Priority),
-		Status: pm.TaskPending, Tags: []string{"requirement", strings.ToLower(requirements.Key(req.ID))},
+		Status: pm.TaskPending, Tags: []string{pm.TagRequirement, strings.ToLower(requirements.Key(req.ID))},
 		Requirements: links,
+	}
+	if strings.TrimSpace(in.Kind) == "test" {
+		// A test task, as a plan from the requirements makes one (Task 20463).
+		task.Tags = append(task.Tags, pm.TagTestOnly)
+		task.Role = pm.RoleTesting
 	}
 	ps.Plan.Tasks = append(ps.Plan.Tasks, task)
 	if err := ps.SaveDirect(); err != nil {
@@ -544,15 +569,7 @@ func clipRequirementTask(s string) string {
 
 // requirementTaskPriority places a task made from a requirement: a must
 // before the plan's usual work, a could after it.
-func requirementTaskPriority(p string) int {
-	switch p {
-	case requirements.PriorityMust:
-		return 1
-	case requirements.PriorityCould:
-		return 4
-	}
-	return 2
-}
+func requirementTaskPriority(p string) int { return requirements.TaskPriority(p) }
 
 // ── check runs ──────────────────────────────────────────────────────────────
 

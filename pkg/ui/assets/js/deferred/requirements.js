@@ -24,6 +24,13 @@
 // them, or opens one in the form to edit first. Everything in it came from a
 // model, so every string is escaped like the rest of the tab.
 //
+// Plan from requirements (Task 20463) has the model plan the tasks that close
+// the open gaps — the approved requirements that fail, that nothing shows to
+// hold, that changed since they held, or that lack only a test — on the
+// project's executor. The plan is a suggest job, reviewed in the Tasks tab's
+// suggestions panel, which the button opens. Each card says what is open
+// about its requirement and what closes it.
+//
 // It runs outside the dashboard's IIFE, so it is handed the helpers it calls,
 // and the only name it puts on window is the factory.
 (function () {
@@ -49,6 +56,9 @@
     const badge = v => '<span class="sec-status ' + (VERDICT[v] || 'expired') + '">' + esc(v || 'never checked') + '</span>';
     const when = t => t ? relTime(new Date(t)) : '';
     const wrap = 'overflow-wrap:anywhere;word-break:break-word';
+    // What closes a requirement's gap (requirements.Assess), as its card says.
+    const ACTION = {fix: 'needs a fix', implement: 'needs implementing', verify: 'changed: needs verifying', test: 'needs a test',
+      check: 'needs a check', attach_test: 'needs the test a task wrote', stuck: 'a task meant to close it failed'};
 
     function load() {
       return api(pUrl('/api/requirements')).then(d => {
@@ -95,7 +105,10 @@
       if (c.error) parts.push(c.error + ' could not be checked');
       if (data.never) parts.push(data.never + ' never checked');
       if (data.stale) parts.push(data.stale + ' stale');
+      if (data.targets) parts.push(data.targets + ' open gap' + (data.targets === 1 ? '' : 's') + ' to plan' +
+        (data.must_gaps ? ' (' + data.must_gaps + ' must)' : ''));
       el('reqSummary').textContent = reqs.length ? parts.join(' · ') : '';
+      el('reqPlan').textContent = 'Plan from requirements' + (data.targets ? ' (' + data.targets + ')' : '');
       renderRun();
       renderSpec();
 
@@ -347,6 +360,8 @@
       chips.push('<span class="exec-chip">' + (tests ? tests + ' test' + (tests === 1 ? '' : 's') : 'no tests') + '</span>');
       const impl = (r.tasks || []).length;
       if (impl) chips.push('<span class="exec-chip" title="Tasks that implement it — its details list them">' + impl + ' task' + (impl === 1 ? '' : 's') + '</span>');
+      if (ACTION[r.action]) chips.push('<span class="exec-chip" style="color:var(--yellow,#d29922)" title="' +
+        esc('Open: ' + (r.gaps || []).join(', ')) + '">' + ACTION[r.action] + '</span>');
       (r.tags || []).forEach(t => chips.push('<span class="exec-chip">' + esc(t) + '</span>'));
       let meta = status === 'draft' ? 'A draft: nothing checks it until a person approves it.' : 'Never checked.';
       if (lc) {
@@ -396,6 +411,18 @@
         if (d && d.active) load();
       }).catch(() => toast('The check did not start', 'err'));
     }
+    // planGaps has the model plan the tasks that close the open gaps. A plan
+    // that starts arrives in the Tasks tab's suggestions panel, to review.
+    function planGaps() {
+      return api(pUrl('/api/requirements/plan'), {}).then(d => {
+        if (h.harnessRefused(d)) return;
+        if (!d || !d.ok) { toast((d && d.error) || 'Planning did not start', 'err'); return; }
+        if (!d.started) { toast(d.message || 'Nothing to plan', 'ok'); return; }
+        toast('Planning ' + d.targets + ' open gap' + (d.targets === 1 ? '' : 's') + ' with the model: review the plan in the suggestions panel', 'ok');
+        window.showSuggestions();
+      }).catch(() => toast('Planning did not start', 'err'));
+    }
+
     function checkAll() { return start([]); }
     function checkOne(arg) { return start([+arg]); }
     function assessOne(arg) { return start([+arg], true); }
@@ -765,7 +792,7 @@
       }).catch(() => toast('Discard failed', 'err'));
     }
 
-    return h.mount({open, load, pushed, filter, checkAll, checkOne, assessOne, stop, add, edit, cancelForm, save, del,
+    return h.mount({open, load, pushed, filter, planGaps, checkAll, checkOne, assessOne, stop, add, edit, cancelForm, save, del,
       details, show, openTask, verdict, makeTask, readSpec, reviewSpec, settleOne, importSpec, download,
       draftOpen, draftClose, draftSource, draftFile, draftGo, draftLintModel, draftApproveOne, draftApproveAll, draftEdit,
       draftDiscard}, 'requirements', `
@@ -781,6 +808,8 @@
       <button class="btn" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" data-act="add">+ Add requirement</button>
       <button class="btn" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" data-act="draftOpen"
         title="The model drafts testable requirements from the goal or a specification; you approve them">Draft requirements</button>
+      <button class="btn" id="reqPlan" data-perm="task.mutate" style="padding:4px 12px;font-size:12px" data-act="planGaps"
+        title="The model plans the tasks that close the open gaps — must first — each linked to what it closes; you review the plan in the Tasks tab">Plan from requirements</button>
       <button class="btn" style="padding:4px 10px;font-size:12px" data-act="load">Refresh</button>
     </div>
     <div id="reqSummary" class="form-hint" style="margin-bottom:6px"></div>

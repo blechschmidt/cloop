@@ -746,7 +746,7 @@ func TestWhatAnExecutorSendsBackIsBounded(t *testing.T) {
 
 	subs := cleanDecomposeProposal([]decomposeSubtaskWire{
 		{Title: strings.Repeat("t", maxProposedTitleRunes+1), Description: strings.Repeat("d", pm.MaxReviseDescriptionRunes+1)},
-	})
+	}, nil)
 	if len(subs) != 1 || len(subs[0].Title) != maxProposedTitleRunes || len(subs[0].Description) != pm.MaxReviseDescriptionRunes {
 		t.Errorf("an oversized proposal reached the dialog: %d-rune title, %d-rune description",
 			len(subs[0].Title), len(subs[0].Description))
@@ -755,7 +755,7 @@ func TestWhatAnExecutorSendsBackIsBounded(t *testing.T) {
 	for i := 0; i < decomposeMaxSubtasks+5; i++ {
 		many = append(many, decomposeSubtaskWire{Title: fmt.Sprint("step ", i)})
 	}
-	if n := len(cleanDecomposeProposal(many)); n != decomposeMaxSubtasks {
+	if n := len(cleanDecomposeProposal(many, nil)); n != decomposeMaxSubtasks {
 		t.Errorf("%d sub-tasks reached the dialog, want at most %d", n, decomposeMaxSubtasks)
 	}
 }
