@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,8 +44,27 @@ func TestServer_Run_GracefulShutdown_OnContextCancel(t *testing.T) {
 			t.Fatalf("Run returned error after ctx cancel: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return within 5s of ctx cancel — graceful shutdown is hung")
+		t.Fatalf("Run did not return within 5s of ctx cancel — graceful shutdown is hung; where it is:\n%s", shutdownStacks())
 	}
+}
+
+// shutdownStacks returns the stacks of the goroutines running a Server's Run
+// or Shutdown, so that a shutdown that outlived a test's wait names the step
+// it was still in. Only those: every parallel test's goroutines would bury
+// them, and a CI annotation shows the first lines of a failure.
+func shutdownStacks() string {
+	buf := make([]byte, 8<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	var out []string
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "ui.(*Server).Shutdown(") || strings.Contains(g, "ui.(*Server).Run(") {
+			out = append(out, g)
+		}
+	}
+	if len(out) == 0 {
+		return "(no goroutine in Run or Shutdown)"
+	}
+	return strings.Join(out, "\n\n")
 }
 
 // TestServer_Shutdown_StopsRun verifies the explicit Shutdown method also
@@ -72,7 +93,7 @@ func TestServer_Shutdown_StopsRun(t *testing.T) {
 			t.Fatalf("Run returned unexpected error after Shutdown: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return within 5s of Shutdown — graceful shutdown is hung")
+		t.Fatalf("Run did not return within 5s of Shutdown — graceful shutdown is hung; where it is:\n%s", shutdownStacks())
 	}
 }
 
