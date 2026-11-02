@@ -132,6 +132,9 @@ type RequirementRun struct {
 	// TaskID is the task whose completion the run gated (Task 20461); 0 for
 	// a run that gated none.
 	TaskID int `json:"task_id,omitempty"`
+	// Kind is check, or prove for a run of red-green proofs (Task 20464):
+	// both take the project's one check slot. Empty reads as check.
+	Kind string `json:"kind,omitempty"`
 }
 
 // CheckRecord is what recording one check run's results needs besides the
@@ -666,6 +669,7 @@ func (d *DB) DeleteRequirement(id int, actor string) (requirements.Requirement, 
 	var (
 		gone     requirements.Requirement
 		checks   int64
+		proofs   int64
 		unlinked []*pm.Task
 	)
 	err = func() error {
@@ -685,6 +689,9 @@ func (d *DB) DeleteRequirement(id int, actor string) (requirements.Requirement, 
 			return fmt.Errorf("statedb: delete requirement checks: %w", classifyDriverErr(err))
 		}
 		checks, _ = res.RowsAffected()
+		if proofs, err = deleteRequirementProofsTx(tx, id); err != nil {
+			return err
+		}
 		if unlinked, err = unlinkRequirementTx(tx, id); err != nil {
 			return err
 		}
@@ -705,7 +712,7 @@ func (d *DB) DeleteRequirement(id int, actor string) (requirements.Requirement, 
 		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionRequirementDelete),
 		EntityType: "requirement", EntityID: fmt.Sprint(id),
 		Payload: MarshalAuditPayload(map[string]any{"id": id, "title": gone.Title, "checks": checks,
-			"unlinked_tasks": taskIDs}),
+			"proofs": proofs, "unlinked_tasks": taskIDs}),
 	})
 	for _, t := range unlinked {
 		auditTaskUpsert(d, t, actorOrSystem(actor))
@@ -1106,7 +1113,7 @@ func (d *DB) RequirementRegressionsSince(since time.Time, limit int) ([]Requirem
 // ── check runs ──────────────────────────────────────────────────────────────
 
 const requirementRunColumns = `run_id, state, source, started_by, started_at, deadline, finished_at, executor_id,
-	assess, requirement_ids, fulfilled, unfulfilled, unverified, errored, error, cancel_requested, heartbeat, task_id`
+	assess, requirement_ids, fulfilled, unfulfilled, unverified, errored, error, cancel_requested, heartbeat, task_id, kind`
 
 // liveRunSQL selects the runs still holding their project's one check: running,
 // inside their deadline, and heard from lately. Its two arguments are now and
@@ -1130,9 +1137,10 @@ func scanRequirementRuns(rows *sql.Rows, now time.Time) ([]RequirementRun, error
 		)
 		if err := rows.Scan(&r.RunID, &r.State, &r.Source, &startedBy, &started, &deadline, &finish, &executor,
 			&assess, &ids, &r.Counts.Fulfilled, &r.Counts.Unfulfilled, &r.Counts.Unverified, &r.Counts.Error,
-			&errTx, &cancel, &heartbeat, &r.TaskID); err != nil {
+			&errTx, &cancel, &heartbeat, &r.TaskID, &r.Kind); err != nil {
 			return nil, fmt.Errorf("statedb: read requirement runs: %w", classifyDriverErr(err))
 		}
+		r.Kind = runKind(r.Kind)
 		r.StartedBy, r.ExecutorID, r.Error = clipText(startedBy, 4*requirements.MaxActorRunes), clipText(executor, 256), clipText(errTx, 2048)
 		r.StartedAt, r.Deadline, r.FinishedAt = parseReqTime(started), parseReqTime(deadline), parseReqTime(finish)
 		r.Assess, r.CancelRequested = assess != 0, cancel != 0
@@ -1187,12 +1195,13 @@ func (d *DB) StartRequirementRun(run RequirementRun) (RequirementRun, error) {
 	if ids == nil {
 		ids = []int{}
 	}
+	run.Kind = runKind(run.Kind)
 	if _, err := tx.Exec(`INSERT INTO requirement_runs
-		(run_id, state, source, started_by, started_at, deadline, executor_id, assess, requirement_ids, heartbeat)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(run_id, state, source, started_by, started_at, deadline, executor_id, assess, requirement_ids, heartbeat, kind)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.RunID, run.State, clipText(run.Source, 32), clipActor(run.StartedBy), formatReqTime(run.StartedAt),
 		formatReqTime(run.Deadline), clipText(run.ExecutorID, 256), boolInt(run.Assess), marshalJSONColumn(ids, "[]"),
-		formatReqTime(now)); err != nil {
+		formatReqTime(now), run.Kind); err != nil {
 		return RequirementRun{}, fmt.Errorf("statedb: start requirement check: %w", classifyDriverErr(err))
 	}
 	if err := trimRequirementRunsTx(tx); err != nil {
@@ -1233,12 +1242,12 @@ func (d *DB) RecordFinishedRequirementRun(run RequirementRun) error {
 	defer tx.Rollback() //nolint:errcheck // a no-op after a commit
 	if _, err := tx.Exec(`INSERT INTO requirement_runs
 		(run_id, state, source, started_by, started_at, deadline, finished_at, executor_id, assess, requirement_ids,
-		 fulfilled, unfulfilled, unverified, errored, error, task_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 fulfilled, unfulfilled, unverified, errored, error, task_id, kind)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.RunID, run.State, clipText(run.Source, 32), clipActor(run.StartedBy), formatReqTime(run.StartedAt),
 		formatReqTime(run.FinishedAt), formatReqTime(run.FinishedAt), clipText(run.ExecutorID, 256), boolInt(run.Assess),
 		marshalJSONColumn(ids, "[]"), run.Counts.Fulfilled, run.Counts.Unfulfilled, run.Counts.Unverified,
-		run.Counts.Error, clipText(run.Error, 2048), max(run.TaskID, 0)); err != nil {
+		run.Counts.Error, clipText(run.Error, 2048), max(run.TaskID, 0), runKind(run.Kind)); err != nil {
 		return fmt.Errorf("statedb: record requirement check: %w", classifyDriverErr(err))
 	}
 	if err := trimRequirementRunsTx(tx); err != nil {
@@ -1392,6 +1401,14 @@ func testCommands(ts []requirements.Test) []string {
 		out = append(out, t.Command)
 	}
 	return out
+}
+
+// runKind is a run's kind as stored: prove, or check for anything else.
+func runKind(k string) string {
+	if k == RequirementRunKindProve {
+		return k
+	}
+	return RequirementRunKindCheck
 }
 
 func clipActor(a string) string {

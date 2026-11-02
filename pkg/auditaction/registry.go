@@ -260,8 +260,8 @@ var registry = []Entry{
 		Action:    ActionRequirementDelete,
 		Home:      HomeProject,
 		Entity:    "requirement",
-		Trigger:   "A requirement, and the history of its checks, is deleted.",
-		Payload:   []string{"id", "title", "checks", "unlinked_tasks"},
+		Trigger:   "A requirement, and the history of its checks and proofs, is deleted.",
+		Payload:   []string{"id", "title", "checks", "proofs", "unlinked_tasks"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "`unlinked_tasks` are the tasks that implemented it, from which the deletion took it in the " +
@@ -282,6 +282,21 @@ var registry = []Entry{
 			"requirement_checks. `assess` is true when the model was asked about the requirements with no tests. " +
 			"A check the requirements gate ran when a task's agent reported it done has `source` `gate` and the " +
 			"task in `task_id`; it is 0 for every other check.",
+	},
+	{
+		Action:  ActionRequirementProve,
+		Home:    HomeProject,
+		Entity:  "requirement",
+		Trigger: "A run of red-green proofs ends — the requirements' tests ran at the base and on the change, on the project's executor, or the run failed or was cancelled.",
+		Payload: []string{
+			"run_id", "state", "source", "requirement_ids", "executor_id", "base", "commit", "outcomes", "reason", "task_id",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "One row per run: `outcomes` maps each requirement (`R-<n>`) to proven, vacuous, broken, inconclusive " +
+			"or error, and each proof is a row of requirement_proofs. `base` is the commit the tests ran at before the " +
+			"change, `commit` the change's. The requirements gate's proof of a task's new or changed tests has `source` " +
+			"`gate` and the task in `task_id`.",
 	},
 	{
 		Action: ActionRequirementImport,

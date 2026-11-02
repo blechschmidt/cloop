@@ -107,6 +107,11 @@ var requirementsShowCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// Its latest red-green proof (Task 20464).
+		proofs, err := p.db.RequirementProofs(id, 1)
+		if err != nil {
+			return err
+		}
 		// The tasks that implement it (Task 20460).
 		var implementing []*pm.Task
 		if p.state != nil && p.state.Plan != nil {
@@ -120,6 +125,9 @@ var requirementsShowCmd = &cobra.Command{
 			out := map[string]any{"requirement": r}
 			if len(checks) > 0 {
 				out["last_check"] = checks[0]
+			}
+			if len(proofs) > 0 {
+				out["last_proof"] = proofs[0]
 			}
 			tasks := make([]int, 0, len(implementing))
 			for _, t := range implementing {
@@ -135,6 +143,19 @@ var requirementsShowCmd = &cobra.Command{
 				fmt.Printf("  #%d %s (%s)\n", t.ID, t.Title, t.Status)
 			}
 		}
+		if len(proofs) > 0 {
+			pr := proofs[0]
+			fmt.Println()
+			proofColor(pr.Outcome).Printf("Proof: %s", pr.Outcome)
+			stale := ""
+			if pr.Fingerprint != r.Fingerprint() {
+				stale = " — of tests it no longer has"
+			}
+			fmt.Printf("  %s by %s, base %s%s\n  %s\n", pr.ProvedAt.Local().Format("2006-01-02 15:04"), pr.ProvedBy,
+				shortSHA(pr.Before.Commit), stale, pr.Summary)
+		} else if r.Tested() {
+			color.New(color.Faint).Println("\nNever proved: cloop requirements prove " + requirements.Key(r.ID))
+		}
 		if len(checks) == 0 {
 			color.New(color.Faint).Println("\nNever checked.")
 			return nil
@@ -143,6 +164,13 @@ var requirementsShowCmd = &cobra.Command{
 		printCheck(r, checks[0], true)
 		return nil
 	},
+}
+
+func shortSHA(c string) string {
+	if c == "" {
+		return "(unknown)"
+	}
+	return c[:min(12, len(c))]
 }
 
 var requirementsAddCmd = &cobra.Command{

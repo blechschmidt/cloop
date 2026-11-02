@@ -1073,6 +1073,19 @@ func sanitizeRequirementsCheck(c *pm.TaskRequirementsCheck, scrub func(string) s
 			t := &v.Tests[j]
 			t.Name, t.Command, t.Error, t.Output = scrub(t.Name), scrub(t.Command), scrub(t.Error), scrub(t.Output)
 		}
+		if p := v.Proof; p != nil {
+			p.Summary = scrub(p.Summary)
+			for _, side := range []*requirements.ProofSide{&p.Before, &p.After} {
+				side.Summary, side.Skipped = scrub(side.Summary), scrub(side.Skipped)
+				for j := range side.Tests {
+					t := &side.Tests[j]
+					t.Name, t.Command, t.Error, t.Output = scrub(t.Name), scrub(t.Command), scrub(t.Error), scrub(t.Output)
+				}
+			}
+			for j := range p.TestFiles {
+				p.TestFiles[j].Path = scrub(p.TestFiles[j].Path)
+			}
+		}
 	}
 	return out
 }

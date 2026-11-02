@@ -54,6 +54,9 @@ var nilEnvCallers = map[string]string{
 		"withholds other people's personal credentials",
 	"(*Server).handleRequirementSpecRead → runCloopSubcommandFor": "`cloop requirements validate --json` reads a " +
 		"file and calls no model; its lease clearance only withholds other people's personal credentials",
+	"(*Server).handleRequirementProve → runCloopSubcommandFor": "`cloop requirements prove --json` runs a " +
+		"requirement's tests and git, and calls no model; its lease clearance only withholds other people's personal " +
+		"credentials",
 }
 
 // resumeClearanceConstructor builds the clearance of a dispatch acting for a

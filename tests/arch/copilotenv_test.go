@@ -76,6 +76,8 @@ var leaseClearanceCallers = map[string]string{
 	"(*Server).handleProjectNew → runWorkloadEnvFor": "`cloop init --skip-clarify` calls no model",
 	"(*Server).handleRequirementSpecRead → runCloopSubcommandFor": "`cloop requirements validate --json` reads " +
 		"the project's spec file; it calls no model",
+	"(*Server).handleRequirementProve → runCloopSubcommandFor": "`cloop requirements prove --json` runs a " +
+		"requirement's tests at their base and on the change; it calls no model",
 }
 
 func TestEveryLeaseTakesTheCopilotPin(t *testing.T) {

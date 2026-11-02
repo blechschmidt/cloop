@@ -133,3 +133,68 @@ func TestApplyRecordsTheDevicesGateChecks(t *testing.T) {
 		t.Errorf("run = %+v, %v", run, err)
 	}
 }
+
+// A device's gate proof of the tests a task added (Task 20464) comes back on
+// the task's verdict, and the hub records it as its own requirement proof:
+// the outcome recomputed from the evidence with the hub's definitions,
+// whatever the device concluded, and its output scrubbed.
+func TestApplyRecordsTheDevicesGateProofs(t *testing.T) {
+	isolateHome(t)
+	hub := hubProject(t, &state.ProjectState{
+		Goal: "g", Status: "initialized", RequirementsGate: &pm.RequirementsGate{Mode: pm.RequirementsGateLinked},
+		Plan: &pm.Plan{Goal: "g", Tasks: []*pm.Task{{ID: 1, Title: "greet", Status: pm.TaskPending, Requirements: []int{1}}}},
+	})
+	db := hubDB(t, hub)
+	r1, err := db.AddRequirement(requirements.Requirement{Title: "greets", Tests: []requirements.Test{{Command: "sh t.sh"}}}, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := seedFromHub(t, hub)
+	base, commit := strings.Repeat("b", 40), strings.Repeat("c", 40)
+	pass := []requirements.TestResult{{Command: "sh t.sh", Outcome: requirements.OutcomePass}}
+	dev := onDevice(t, seed, func(dir string, st *state.ProjectState) {
+		task := st.Plan.TaskByID(1)
+		task.Status = pm.TaskDone
+		task.RequirementsCheck = &pm.TaskRequirementsCheck{
+			Mode: "linked", Outcome: pm.RequirementsMet, Decision: "met", RunID: "device-run-2", Commit: commit,
+			CheckedAt: time.Now().UTC(), Base: base,
+			Requirements: []pm.RequirementVerdict{{Linked: true,
+				Result: requirements.Result{RequirementID: r1.ID, Fingerprint: r1.Fingerprint(),
+					Method: requirements.MethodTests, Verdict: requirements.VerdictFulfilled, Tests: pass},
+				// The device calls it proven; its evidence says the test
+				// passed at the base too.
+				Proof: &requirements.Proof{RequirementID: r1.ID, Fingerprint: r1.Fingerprint(), Outcome: requirements.ProofProven,
+					BaseFrom: requirements.BaseFromTask, CodeChanged: true, NewTests: true, Fallback: true,
+					Before: requirements.ProofSide{Commit: base, Tests: []requirements.TestResult{{Command: "sh t.sh",
+						Outcome: requirements.OutcomePass, Output: "ghp_" + strings.Repeat("A", 36)}}},
+					After: requirements.ProofSide{Commit: commit, Tests: pass}},
+			}},
+		}
+		if err := st.Save(); err != nil {
+			t.Fatalf("device save: %v", err)
+		}
+	})
+	data, err := Harvest(dev, seed, nil)
+	if err != nil {
+		t.Fatalf("Harvest: %v", err)
+	}
+	res, err := DecodeResult(data)
+	if err != nil {
+		t.Fatalf("DecodeResult: %v", err)
+	}
+	if _, err := Apply(hub, res, Provenance{ExecutorID: "edge-1", ExecutorKind: "remote", Isolation: "remote"}, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	proofs, err := db.RequirementProofs(r1.ID, 10)
+	if err != nil || len(proofs) != 1 {
+		t.Fatalf("R-1 proofs = %+v, %v", proofs, err)
+	}
+	p := proofs[0]
+	if p.Outcome != requirements.ProofVacuous || p.TaskID != 1 || p.ExecutorID != "edge-1" || p.RunID != "device-run-2" ||
+		p.Before.Commit != base || p.After.Commit != commit {
+		t.Errorf("recorded proof = %+v", p)
+	}
+	if strings.Contains(p.Before.Tests[0].Output, strings.Repeat("A", 36)) {
+		t.Errorf("a credential the device's test printed was recorded: %q", p.Before.Tests[0].Output)
+	}
+}

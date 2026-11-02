@@ -609,6 +609,9 @@ func applySpecStepsTx(tx *sql.Tx, steps []requirements.Step, actor string, now t
 			return nil, nil, fmt.Errorf("statedb: import: delete the checks of %s: %w", requirements.Key(id), classifyDriverErr(err))
 		}
 		deleted[id], _ = res.RowsAffected()
+		if _, err := deleteRequirementProofsTx(tx, id); err != nil {
+			return nil, nil, err
+		}
 		tasks, err := unlinkRequirementTx(tx, id)
 		if err != nil {
 			return nil, nil, err

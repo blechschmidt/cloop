@@ -179,6 +179,11 @@ type TaskRequirementsCheck struct {
 	Note string `json:"note,omitempty"`
 	// Requirements are the verdicts, linked requirements first.
 	Requirements []RequirementVerdict `json:"requirements,omitempty"`
+	// Base is the commit the task's work started from: what a red-green
+	// proof of the tests the task added or changed runs them at (Task
+	// 20464). Carried over the attempts the gate sends back, so a later
+	// attempt's proof does not start from an earlier attempt's work.
+	Base string `json:"base,omitempty"`
 }
 
 // RequirementVerdict is one requirement's result in a gate check: the result
@@ -200,6 +205,16 @@ type RequirementVerdict struct {
 	Regression bool   `json:"regression,omitempty"`
 	Was        string `json:"was,omitempty"`
 	WasCommit  string `json:"was_commit,omitempty"`
+	// Proof is the red-green proof of the requirement's tests, when the task
+	// added or changed them (Task 20464): whether they fail without its
+	// change. A vacuous proof of a new test is Blocking in linked+must mode.
+	Proof *requirements.Proof `json:"proof,omitempty"`
+}
+
+// Vacuous reports whether v was kept from passing because its new tests pass
+// without the task's change.
+func (v RequirementVerdict) Vacuous() bool {
+	return v.Blocking && v.Proof != nil && v.Proof.Outcome == requirements.ProofVacuous
 }
 
 // Met reports whether the check let the task be done.
@@ -272,6 +287,8 @@ func (c *TaskRequirementsCheck) Headline() string {
 	for _, v := range c.Requirements {
 		key := requirements.Key(v.RequirementID)
 		switch {
+		case v.Vacuous():
+			failed = append(failed, key+" vacuous (its new test passes without the change)")
 		case v.Blocking && v.Regression:
 			failed = append(failed, key+" "+v.Verdict+" (regression)")
 		case v.Blocking:
@@ -294,6 +311,15 @@ func (c *TaskRequirementsCheck) Headline() string {
 	}
 	if len(unverified) > 0 {
 		b.WriteString("; " + strings.Join(unverified, ", ") + " unverified (no tests)")
+	}
+	var proofs []string
+	for _, v := range c.Requirements {
+		if v.Proof != nil && !v.Vacuous() {
+			proofs = append(proofs, requirements.Key(v.RequirementID)+" "+v.Proof.Outcome)
+		}
+	}
+	if len(proofs) > 0 {
+		b.WriteString("; tests proved red-green: " + strings.Join(proofs, ", "))
 	}
 	if c.Commit != "" {
 		short := c.Commit
@@ -326,6 +352,10 @@ func (c *TaskRequirementsCheck) Clone() *TaskRequirementsCheck {
 	for i, v := range c.Requirements {
 		v.Tests = append([]requirements.TestResult(nil), v.Tests...)
 		v.Evidence = append([]string(nil), v.Evidence...)
+		if v.Proof != nil {
+			p := v.Proof.Clone()
+			v.Proof = &p
+		}
 		out.Requirements[i] = v
 	}
 	if c.Requirements == nil {
@@ -349,6 +379,7 @@ func (c *TaskRequirementsCheck) Bound() {
 	c.Commit = requirements.CleanCommit(c.Commit)
 	c.Note = clipRunes(c.Note, maxTaskRequirementNoteBytes)
 	c.Decision = clipRunes(c.Decision, 16)
+	c.Base = requirements.CleanCommit(c.Base)
 	if c.Consecutive < 0 {
 		c.Consecutive = 0
 	}
@@ -370,6 +401,7 @@ func (c *TaskRequirementsCheck) Bound() {
 		for j := range v.Evidence {
 			v.Evidence[j] = clipRunes(v.Evidence[j], requirements.MaxEvidenceRunes)
 		}
+		requirements.BoundProof(v.Proof, MaxTaskRequirementOutputBytes)
 		if len(v.Tests) > requirements.MaxTests {
 			v.Tests = v.Tests[:requirements.MaxTests]
 		}

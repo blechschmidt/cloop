@@ -84,6 +84,9 @@ const (
 	// maxRequirementTaskContext bounds what a task made from a requirement
 	// quotes of its last check.
 	maxRequirementTaskContext = 6000
+	// requirementProofsListed is how many proofs a requirement's details
+	// carry.
+	requirementProofsListed = 5
 )
 
 // requirementView is one requirement as the tab draws it.
@@ -104,6 +107,11 @@ type requirementView struct {
 	// it when the action is fix, implement, verify or test.
 	Gaps   []string `json:"gaps,omitempty"`
 	Action string   `json:"action,omitempty"`
+	// LastProof is its newest red-green proof (Task 20464), without the
+	// tests' output; ProofStale says it was of tests the requirement no
+	// longer has.
+	LastProof  *statedb.RequirementProof `json:"last_proof,omitempty"`
+	ProofStale bool                      `json:"proof_stale,omitempty"`
 }
 
 // requirementsList is GET /api/requirements's answer.
@@ -207,6 +215,8 @@ func (s *Server) handleRequirementsList(w http.ResponseWriter, r *http.Request) 
 		requirementErr(w, err)
 		return
 	}
+	// Best effort: the list without the proofs is still the list.
+	proofs, _ := db.LatestRequirementProofs()
 	out := requirementsList{OK: true, Requirements: make([]requirementView, 0, len(reqs)), Runs: runs}
 	if active, found, err := db.ActiveRequirementRun(); err == nil && found {
 		out.Active = &active
@@ -242,6 +252,10 @@ func (s *Server) handleRequirementsList(w http.ResponseWriter, r *http.Request) 
 		}
 		if st, ok := standing.Lookup(req.ID); ok {
 			v.Gaps, v.Action = st.Gaps, st.Action
+		}
+		if p, ok := proofs[req.ID]; ok {
+			p.Before.Tests, p.After.Tests = withoutOutput(p.Before.Tests), withoutOutput(p.After.Tests)
+			v.LastProof, v.ProofStale = &p, p.Fingerprint != v.Fingerprint
 		}
 		c, checked := latest[req.ID]
 		if !checked {
@@ -395,8 +409,17 @@ func (s *Server) handleRequirementChecks(w http.ResponseWriter, r *http.Request)
 	if tasks == nil {
 		tasks = []implementingTask{}
 	}
+	// Its recent red-green proofs (Task 20464), output included.
+	proofs, err := db.RequirementProofs(id, requirementProofsListed)
+	if err != nil {
+		requirementErr(w, err)
+		return
+	}
+	if proofs == nil {
+		proofs = []statedb.RequirementProof{}
+	}
 	jsonOK(w, map[string]any{"ok": true, "requirement": req, "fingerprint": req.Fingerprint(), "checks": checks,
-		"tasks": tasks})
+		"tasks": tasks, "proofs": proofs})
 }
 
 // handleRequirementVerdict answers POST /api/requirements/{id}/verdict.

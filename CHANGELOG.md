@@ -163,6 +163,27 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Red-green proofs: a requirement's tests are shown to fail without the
+  change and pass with it.** A test that always passes made a requirement look
+  fulfilled when it was not, and a check could not tell. `cloop requirements
+  prove R-n` and the Requirements tab's *Prove* run the requirement's tests on
+  the project's executor twice: on the code before the change, in a locked,
+  throwaway checkout of the base commit, and on the change. The outcome is
+  proven (red before, green after), vacuous (green before), broken (red after),
+  inconclusive (the test does not exist at the base, and the base code with the
+  change's test files laid over it could not settle it) or error. The base is
+  the commit before the test's implementation, or one named with `--base`. The
+  project's checkout is never touched, and the base's checkout is removed
+  however the proof ends — what a killed proof leaves, the next one sweeps.
+  Each run is bounded by the tests' own timeouts. Proofs are stored in a new
+  table, the newest 20 per requirement, audited as `requirement.prove`, and
+  each tested requirement's card shows a badge with its latest one. With the
+  requirements gate on, the tests a task added or changed are proved against
+  where the task's work started; in linked+must mode a vacuous proof of a test
+  the task added keeps the task from being done, with the reason in its next
+  prompt. Proofs a device's gate made come back with the task and are read
+  again by the hub (Task 20464).
+
 - **The planners plan from the requirements: open gaps first, every task
   linked to what it closes.** `cloop requirements plan` and the Requirements
   tab's *Plan from requirements* have the model plan the tasks that close the

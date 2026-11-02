@@ -1142,6 +1142,30 @@ func seedLayoutRequirements(t *testing.T, primary string, s sweepStrings) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
+	// Two red-green proofs of its test (Task 20464): one broken on the change,
+	// the long output shown; the newest vacuous, its test files — long paths —
+	// laid over the base. The card's badge and the details' proofs are
+	// measured with the fixture's names.
+	file := requirements.ProofFile{Path: layoutLong(s.RepoPath, "/tests/", s.Tag) + "_test.go", Status: requirements.FileAdded}
+	side := func(outcome string, code int, output string) requirements.ProofSide {
+		return requirements.ProofSide{Commit: "a1b2c3d4e5f6a7b8c9d0", Tests: []requirements.TestResult{{Name: s.Tag, Command: cmd,
+			Outcome: outcome, ExitCode: code, DurationMS: 987, Output: output}}}
+	}
+	for _, p := range []requirements.Proof{
+		{RequirementID: failed.ID, Fingerprint: failed.Fingerprint(), BaseFrom: requirements.BaseFromTest, CodeChanged: true,
+			Before: requirements.ProofSide{Commit: "a1b2c3d4e5f6a7b8c9d0", Skipped: layoutLong("not run:", s.FailedTaskTitle)},
+			After:  side(requirements.OutcomeFail, 1, out), StartedAt: time.Now().Add(-2 * time.Hour)},
+		{RequirementID: failed.ID, Fingerprint: failed.Fingerprint(), BaseFrom: requirements.BaseFromTask, CodeChanged: true,
+			Fallback: true, NewTests: true, TestFiles: []requirements.ProofFile{file, {Path: file.Path + ".golden", Status: "D"}},
+			Before: side(requirements.OutcomePass, 0, ""), After: side(requirements.OutcomePass, 0, ""),
+			StartedAt: time.Now().Add(-90 * time.Minute)},
+	} {
+		p.Outcome, p.Summary = requirements.DecideProof(p)
+		if _, err := db.RecordRequirementProofs(statedb.ProofRecord{RunID: "run_layout_proof", ExecutorID: s.Device,
+			ProvedBy: s.Email, TaskID: 7}, []requirements.Proof{p}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	manual, err := db.AddRequirement(requirements.Requirement{Title: s.RiskTaskTitle, Priority: requirements.PriorityMust,
 		Description: layoutLong("Reviewed against", s.URL)}, s.Email)
 	if err != nil {

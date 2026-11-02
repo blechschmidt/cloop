@@ -627,6 +627,103 @@ notifications:
       events: [requirement.regression]
 ```
 
+## Red-green proofs
+
+A check says whether a requirement's tests pass. It cannot say whether they
+test anything: a test that always passes makes a requirement look fulfilled
+when it is not, and a test an agent wrote to pass passes. A **proof** runs the
+requirement's tests twice, on the project's executor: once on the code before
+the change, in a throwaway checkout of the base commit, and once on the change
+itself. What the two runs add up to is recorded as the proof's outcome:
+
+| Outcome | Meaning |
+| --- | --- |
+| **proven** | Red before, green after: the tests fail without the change and pass with it. |
+| **vacuous** | Green before: they pass without the change too, so they do not show it. |
+| **broken** | Red after: they do not pass on the change itself. |
+| **inconclusive** | The test does not exist at the base, so the proof fell back to the base code plus the change's test files only, and that could not settle it: the command still does not run there (exit 127, or a test runner that found no test to run), or the change holds nothing but test files, so there is nothing for them to fail without. |
+| **error** | The proof itself did not run: the base is not in the checkout, a run could not start, or it was stopped. Not a statement about the tests. |
+
+```bash
+cloop requirements prove R-3                  # against the commit before its test's implementation
+cloop requirements prove 3 4 --base v1.2.0~1  # against a commit you name
+```
+
+`prove` exits 1 when a proof is vacuous, broken or could not run, so it can
+gate CI too. In the dashboard each tested requirement's card carries a badge
+with its latest proof — **unproven** until it has one — and a **Prove**
+button; its details list the recent proofs with both runs of each test.
+
+### The base, and the fallback
+
+For a task the base is the commit the task's work started from. Asked for by
+hand, it is the commit before the test's implementation: the parent of the
+newest commit that changed the test's files — or of the newest that changed a
+test the command names, such as `TestX` in `go test -run TestX` — or the
+checkout's `HEAD` while those files have uncommitted changes. A test committed
+on its own, in a commit that changed nothing but tests, is proved from that
+commit: written first, its implementation came after, so the commit holds the
+test and not yet the code; written for what the code already did, nothing
+after it changed what it tests, and the proof is inconclusive. `--base` (or the
+API's `base`) names another.
+
+A test the change added or changed does not exist at the base as it reads in
+the change, and running the base as it is would run the old test, or none:
+`go test -run TestNew` at a commit without `TestNew` passes with "no tests to
+run". So the proof lays the change's test files over the base code — the new
+test against the old code, which is the experiment red-green asks for — and
+says so ("the base run used the base code with the change's test files laid
+over it"). A requirement's test files are the scripts its commands run
+(`./scripts/check.sh`, `sh tests/r3.sh`) and the test files (`*_test.go`,
+`test_*.py`, `*.test.ts`, anything under `tests/` or `testdata/`, …) at or
+under the paths they name — a `cd dir &&` and a shell's `-c` line are followed.
+A file a command only reads, as in `grep -q done feature.txt`, is what the test
+looks at, not the test, and is never laid over the base. A command that names
+no path at all, such as `npm test`, owns every test file the change touched. A
+test that needs more of the change than its test files — a helper the change
+added, say — still does not run at the base, and the proof is inconclusive.
+
+The base run happens in a fresh checkout: files git ignores, such as
+`node_modules`, are not there. A test command that needs them should install
+them (`npm ci && npm test`). A test that only fails to compile without the
+change counts as red, as it does in test-driven development.
+
+### The project's checkout is never touched
+
+The base's checkout is a detached linked worktree in the repository's
+`.cloop/worktrees/proof-<random>`, beside the parallel tasks' worktrees. The
+project's own checkout — its files, its index, its `HEAD` — is exactly as it
+was; the change's run is in place, as a check's is. The worktree is locked
+while the proof runs, so the hub's worktree sweep leaves it alone, and it is
+removed however the proof ends: done, failed, cancelled, or panicked. A proof
+killed outright cannot remove it; the next proof in the repository does, once
+the process that held it is gone or its deadline has passed. Each run is
+bounded by the tests' own timeouts, and the whole proof by twice their sum.
+
+### Proofs in the requirements gate
+
+With the [requirements gate](#requirement-gated-completion) on, a check that
+finds a task's work meets its requirements is followed by a proof of every
+requirement in its scope whose tests the task added or changed — a test file
+of theirs, or their test commands. The base is where the task's work started;
+an attempt the gate sent back keeps the first attempt's base, so the second
+attempt's test is not measured against the first attempt's implementation. The
+check that just passed is the run on the change, so only the base run is
+added. A task that leaves its requirements' tests alone has nothing proved.
+
+In `linked+must` mode a **vacuous** proof of a test the task **added** — a new
+test file, a test declared in one it changed, or a new test command — keeps the
+task from being done: it goes back to pending, its next prompt naming the test,
+the base and the test files, and asking for a test that fails on the old code.
+A test only changed, as a refactoring does, is proved and recorded but never
+blocks; neither does a proof that is broken, inconclusive or could not run. In
+`linked` mode proofs are recorded and shown, and decide nothing.
+
+Every proof is recorded as the project's requirement proofs — the gate's tied
+to the task — and audited as `requirement.prove`; the task's verdict keeps the
+proof, which is how a proof made on a device comes back to the hub, which reads
+it again through its own rules.
+
 ## Requirements as code
 
 The requirements in the hub's database are where the dashboard keeps them and
@@ -791,8 +888,8 @@ minutes old (hourly for a checkout that had none), for somebody who may import;
 | Link a task to the requirements it implements | `task.mutate` |
 | Set the requirements gate | `config.write` |
 | Read the spec file again, and import it | `task.mutate` |
-| Check them | `run.start` |
-| Stop a check | `run.stop` |
+| Check them, prove their tests | `run.start` |
+| Stop a check or a proof | `run.stop` |
 
 A test is a command that runs in the project's sandbox, which is what a task
 already is; it runs only when somebody who may start the fleet asks. A spec
@@ -800,8 +897,8 @@ file can add tests, so importing one is `task.mutate`, as adding them is, and
 reading it again starts a workload on the project's executor. Every change to
 a requirement, every import and every check run is in the project's audit
 trail: `requirement.create`, `requirement.update`, `requirement.delete`,
-`requirement.import`, `requirement.check`, `requirement.verdict`,
-`requirement.draft` and `requirement.approve` — see
+`requirement.import`, `requirement.check`, `requirement.prove`,
+`requirement.verdict`, `requirement.draft` and `requirement.approve` — see
 [Audit events](../reference/audit-events.md). The HTTP endpoints are under
 `/api/requirements` and `/api/requirement-runs` in the
 [HTTP API reference](../reference/http-api.md).
@@ -818,6 +915,8 @@ trail: `requirement.create`, `requirement.update`, `requirement.delete`,
 | A test's run | 10 minutes by default, at most 2 hours |
 | Output kept per test | its last 16 KiB |
 | Checks kept per requirement | the newest 50 |
+| Proofs kept per requirement | the newest 20 |
+| A proof | each test's own timeout on each side; the change's test files laid over the base at most 256 MiB |
 | Check runs kept per project | the newest 200 |
 | A whole check | 6 hours |
 | A spec file | 2 MiB, one YAML document of at most 1,000 requirements, each held to the bounds above |

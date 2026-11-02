@@ -109,6 +109,11 @@ func readsOnlyItsFiles(cmd *cobra.Command) bool {
 		f := cmd.Flags()
 		noRecord, _ := f.GetBool("no-record")
 		return f.Changed("file") || (f.Changed("spec") && noRecord)
+	case requirementsProveCmd:
+		// As the hub and the requirements gate dispatch it (Task 20464).
+		f := cmd.Flags()
+		noRecord, _ := f.GetBool("no-record")
+		return f.Changed("spec") && noRecord
 	case requirementsDraftCmd:
 		// As the hub dispatches it (Task 20462): the existing requirements
 		// given, nothing stored.

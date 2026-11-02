@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -96,6 +97,42 @@ func recordGateChecks(workDir string, assess bool, checks []gateCheck, prov Prov
 			continue
 		}
 		statedb.AuditRequirementCheck(db, run, clean.Commit, clean.Dirty, gateCheckActor)
+		if err := recordGateProofs(db, c, byID, gc.taskID, prov, scrub, now); err != nil {
+			errs = append(errs, fmt.Errorf("projectseed: record task #%d's requirement proofs: %w", gc.taskID, err))
+		}
 	}
 	return stored, errors.Join(errs...)
+}
+
+// recordGateProofs stores the red-green proofs a device's gate made of the
+// tests a task added or changed (Task 20464), read like its checks: through
+// requirements.SanitizeProof with the hub's own definitions, and only for a
+// requirement whose definition is still the one proved.
+func recordGateProofs(db *statedb.DB, c *pm.TaskRequirementsCheck, byID map[int]requirements.Requirement, taskID int,
+	prov Provenance, scrub func(string) string, now time.Time) error {
+	var proofs []requirements.Proof
+	for _, v := range c.Requirements {
+		if v.Proof == nil {
+			continue
+		}
+		hub, ok := byID[v.RequirementID]
+		if !ok || hub.Fingerprint() != v.Fingerprint || v.Proof.RequirementID != v.RequirementID {
+			continue
+		}
+		proofs = append(proofs, requirements.SanitizeProof(*v.Proof, hub, scrub, now))
+	}
+	if len(proofs) == 0 {
+		return nil
+	}
+	if _, err := db.RecordRequirementProofs(statedb.ProofRecord{RunID: c.RunID, ExecutorID: prov.ExecutorID,
+		ProvedBy: gateCheckActor, TaskID: taskID}, proofs); err != nil {
+		return err
+	}
+	run := statedb.RequirementRun{RunID: c.RunID, State: statedb.RequirementRunDone, Source: "gate",
+		ExecutorID: prov.ExecutorID, TaskID: taskID, Kind: statedb.RequirementRunKindProve}
+	for _, p := range proofs {
+		run.RequirementIDs = append(run.RequirementIDs, p.RequirementID)
+	}
+	statedb.AuditRequirementProof(db, run, proofs, gateCheckActor)
+	return nil
 }

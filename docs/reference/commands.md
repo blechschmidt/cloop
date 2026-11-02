@@ -331,6 +331,7 @@ cloop requirements show <id> [--json]
 cloop requirements edit <id> [--title …] [-d …] [--test …]... [--clear-tests] [--priority …] [--status …] [--tag …]
 cloop requirements remove <id>
 cloop requirements check [id...] [--ai] [--status <s>,…|--all] [--file <spec>] [--timeout <d>]
+cloop requirements prove <id>... [--base <commit>] [--timeout <d>]
 cloop requirements verdict <id> fulfilled|unfulfilled [--note <text>]
 cloop requirements history <id> [--limit N] [--json]
 cloop requirements export [--file <path>|-] [--force]
@@ -352,6 +353,13 @@ cloop requirements plan [--count N] [--dry-run|--yes] [--json]
 | `--ai-timeout` | `5m` | How long the model may take over one requirement |
 | `--timeout` | none | Stop the whole check after this long |
 | `--json`, `--no-record`, `--spec` | off | How the hub runs it on a project's executor: a framed report, nothing recorded, the requirements it sends |
+
+`prove` runs each named requirement's tests at the commit before their
+implementation (or `--base`) and on the project's tree, and says whether they
+fail without the change and pass with it: proven, vacuous, broken or
+inconclusive. It never touches the project's checkout, and exits 1 when a proof
+is vacuous, broken or could not run. See
+[Red-green proofs](../guides/requirements.md#red-green-proofs).
 
 `plan` has the model plan the tasks that close the open gaps of the approved
 requirements — must first — each linked to the requirements it closes, and

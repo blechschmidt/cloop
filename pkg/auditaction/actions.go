@@ -88,6 +88,10 @@ const (
 	// ActionRequirementApprove records a requirement becoming approved: a
 	// draft approved, or one reinstated.
 	ActionRequirementApprove Action = "requirement.approve"
+	// ActionRequirementProve records a run of red-green proofs of
+	// requirements' tests ending (Task 20464): where it ran, against which
+	// base, and what each proof found.
+	ActionRequirementProve Action = "requirement.prove"
 
 	// ── step ───────────────────────────────────────────────────────────────
 

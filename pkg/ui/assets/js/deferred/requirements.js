@@ -31,6 +31,12 @@
 // suggestions panel, which the button opens. Each card says what is open
 // about its requirement and what closes it.
 //
+// Prove (Task 20464) runs a requirement's tests red-green on the project's
+// executor (requirements_prove_api.go): at the base — the commit before the
+// test's implementation — and on the change. Each tested requirement's card
+// carries a badge with its latest proof — proven, vacuous, broken,
+// inconclusive — and its details the recent proofs, each side's tests.
+//
 // It runs outside the dashboard's IIFE, so it is handed the helpers it calls,
 // and the only name it puts on window is the factory.
 (function () {
@@ -54,6 +60,15 @@
     const el = id => document.getElementById(id);
     const VERDICT = {fulfilled: 'approved', unfulfilled: 'denied', error: 'pending', unverified: 'expired'};
     const badge = v => '<span class="sec-status ' + (VERDICT[v] || 'expired') + '">' + esc(v || 'never checked') + '</span>';
+    // A proof's outcome as its badge shows it (Task 20464).
+    const PROOF = {proven: 'approved', vacuous: 'denied', broken: 'denied', inconclusive: 'expired', error: 'pending'};
+    const proofBadge = (p, stale) => {
+      if (!p) return '<span class="sec-status expired" title="Prove shows whether its tests fail without the change">unproven</span>';
+      const o = p.outcome || 'error';
+      const word = o === 'error' ? 'proof failed' : o;
+      return '<span class="sec-status ' + (PROOF[o] || 'expired') + '" title="' + esc('Red-green proof: ' + (p.summary || o) +
+        (stale ? ' — of tests it no longer has' : '')) + '">' + esc(word + (stale ? ' (stale)' : '')) + '</span>';
+    };
     const when = t => t ? relTime(new Date(t)) : '';
     const wrap = 'overflow-wrap:anywhere;word-break:break-word';
     // What closes a requirement's gap (requirements.Assess), as its card says.
@@ -134,9 +149,12 @@
       if (a) {
         const n = (a.requirement_ids || []).length;
         const done = (data.requirements || []).filter(r => r.last_check && r.last_check.run_id === a.run_id).length;
-        box.innerHTML = '<span class="badge running"><span class="badge-dot"></span>Checking</span> ' +
-          esc(done + ' of ' + n + ' checked on ' + (a.executor_id || 'the project\'s executor') +
-            ', started ' + when(a.started_at) + (a.started_by ? ' by ' + a.started_by : '')) +
+        const where = ' on ' + (a.executor_id || 'the project\'s executor') + ', started ' + when(a.started_at) +
+          (a.started_by ? ' by ' + a.started_by : '');
+        const proving = a.kind === 'prove';
+        box.innerHTML = '<span class="badge running"><span class="badge-dot"></span>' + (proving ? 'Proving' : 'Checking') + '</span> ' +
+          esc(proving ? (a.requirement_ids || []).map(i => 'R-' + (+i)).join(', ') + ': its tests at the base, then on the change' + where
+            : done + ' of ' + n + ' checked' + where) +
           ' <button class="btn" data-perm="run.stop" data-act="stop" data-arg="' + esc(a.run_id) + '">Stop</button>';
         box.style.display = '';
         el('reqCheckAll').disabled = true;
@@ -146,11 +164,15 @@
       const last = (data.runs || [])[0];
       if (!last) { box.style.display = 'none'; return; }
       const k = last.counts || {};
-      const how = last.state === 'done'
-        ? k.fulfilled + ' fulfilled, ' + k.unfulfilled + ' unfulfilled, ' + k.unverified + ' unverified, ' + k.error + ' errors'
-        : last.state + (last.error ? ': ' + last.error : '');
-      box.innerHTML = '<span class="form-hint" style="' + wrap + '">' + esc('Last check ' + when(last.finished_at || last.started_at) +
-        (last.started_by ? ' by ' + last.started_by : '') + (last.source === 'cli' ? ' (cloop requirements check)' : '') +
+      const proved = last.kind === 'prove';
+      const outcomes = (data.requirements || []).filter(r => r.last_proof && r.last_proof.run_id === last.run_id)
+        .map(r => 'R-' + r.id + ' ' + r.last_proof.outcome).join(', ');
+      const how = last.state !== 'done' ? last.state + (last.error ? ': ' + last.error : '')
+        : proved ? (outcomes || 'done')
+        : k.fulfilled + ' fulfilled, ' + k.unfulfilled + ' unfulfilled, ' + k.unverified + ' unverified, ' + k.error + ' errors';
+      box.innerHTML = '<span class="form-hint" style="' + wrap + '">' + esc((proved ? 'Last proof ' : 'Last check ') +
+        when(last.finished_at || last.started_at) + (last.started_by ? ' by ' + last.started_by : '') +
+        (last.source === 'cli' ? (proved ? ' (cloop requirements prove)' : ' (cloop requirements check)') : '') +
         ' — ' + how) + '</span>';
       box.style.display = '';
     }
@@ -376,7 +398,8 @@
       else if (r.stale === 'tasks') stale = 'Stale: ' + r.tasks_done_since + ' task' + (r.tasks_done_since === 1 ? '' : 's') + ' done since it was checked.';
       return '<div class="exec-card" data-req="' + r.id + '"' + (status === 'deprecated' ? ' style="opacity:.6"' : '') + '>' +
         '<div class="exec-card-head"><span class="exec-id">R-' + r.id + '</span>' +
-        '<span class="exec-name" style="' + wrap + '">' + esc(r.title) + '</span>' + badge(lc && lc.verdict) + '</div>' +
+        '<span class="exec-name" style="' + wrap + '">' + esc(r.title) + '</span>' + badge(lc && lc.verdict) +
+        (tests && status !== 'draft' ? ' ' + proofBadge(r.last_proof, r.proof_stale) : '') + '</div>' +
         '<div class="exec-chips">' + chips.join('') + '</div>' +
         (r.description ? '<div class="form-hint" style="white-space:pre-wrap;' + wrap + '">' + esc(r.description.length > 400 ? r.description.slice(0, 400) + '…' : r.description) + '</div>' : '') +
         '<div class="exec-meta"><span style="' + wrap + '">' + esc(meta) + '</span>' +
@@ -385,7 +408,9 @@
         (stale ? '<span style="color:var(--yellow,#d29922)">' + esc(stale) + '</span>' : '') + '</div>' +
         '<div class="exec-actions">' +
         (status === 'draft' ? '<button class="btn" data-perm="task.mutate" data-act="draftApproveOne" data-arg="' + r.id + '">Approve</button>'
-          : tests ? '<button class="btn" data-perm="run.start" data-act="checkOne" data-arg="' + r.id + '">Check</button>'
+          : tests ? '<button class="btn" data-perm="run.start" data-act="checkOne" data-arg="' + r.id + '">Check</button>' +
+            '<button class="btn" data-perm="run.start" data-act="prove" data-arg="' + r.id + '" title="Runs its tests at the commit before ' +
+            'their implementation and on the change: they should fail there and pass here">Prove</button>'
           : '<button class="btn" data-perm="run.start" data-act="assessOne" data-arg="' + r.id + '" title="It has no tests: the model reads the code">Ask the model</button>') +
         '<button class="btn" data-act="details" data-arg="' + r.id + '">' + (openID === r.id ? 'Hide details' : 'Details') + '</button>' +
         '<button class="btn" data-perm="task.mutate" data-act="edit" data-arg="' + r.id + '">Edit</button>' +
@@ -423,6 +448,16 @@
       }).catch(() => toast('Planning did not start', 'err'));
     }
 
+    // prove runs one requirement's tests red-green on the project's executor.
+    // It answers at once; the proof's end arrives as a push.
+    function prove(arg) {
+      return api(pUrl('/api/requirements/' + (+arg) + '/prove'), {}).then(d => {
+        if (h.harnessRefused(d)) return;
+        if (d && d.ok) { toast('Proving R-' + (+arg) + ': its tests run at their base, then on the change…', 'ok'); return load(); }
+        toast((d && d.error) || 'The proof did not start', 'err');
+        if (d && d.active) load();
+      }).catch(() => toast('The proof did not start', 'err'));
+    }
     function checkAll() { return start([]); }
     function checkOne(arg) { return start([+arg]); }
     function assessOne(arg) { return start([+arg], true); }
@@ -572,6 +607,7 @@
         '<button class="btn" data-perm="task.mutate" data-act="makeTask" data-arg="' + r.id + ':fix">Add a task to restore it</button>' +
         ((r.tests || []).length ? '' : '<button class="btn" data-perm="task.mutate" data-act="makeTask" data-arg="' + r.id + ':test">Add a task to test it</button>') +
         '</div>');
+      html += proofsHTML(d);
       const checks = d.checks || [];
       if (!checks.length) return html + '<p class="form-hint">Never checked.</p>';
       html += '<div class="section-title" style="margin:10px 0 4px">Recent checks</div>';
@@ -592,6 +628,43 @@
               'border:1px solid var(--border);border-radius:6px;padding:6px;margin:4px 0">' + esc((t.truncated ? '…' : '') + t.output) + '</pre>';
           }
         });
+        return s + '</div>';
+      }).join('');
+    }
+
+    // proofsHTML lists a requirement's recent red-green proofs: what each
+    // decided, at which base, and each side's tests.
+    const FROM = {task: 'where the task started', test: 'the commit before the test\'s implementation',
+      worktree: 'HEAD: the test is uncommitted', given: 'the commit asked for'};
+    function proofsHTML(d) {
+      const proofs = d.proofs || [];
+      if (!proofs.length) return '';
+      const testLine = (t, side) => {
+        let s = '<div class="form-hint" style="' + wrap + '">' + esc('[' + t.outcome + ' ' + side + '] ' + (t.name || t.command) +
+          ' — exit ' + t.exit_code + ', ' + t.duration_ms + ' ms' + (t.error ? ' — ' + t.error : '')) + '</div>';
+        if (t.output && t.outcome !== 'pass') {
+          s += '<pre style="max-height:180px;overflow:auto;white-space:pre-wrap;' + wrap + ';font-size:11px;background:var(--bg);' +
+            'border:1px solid var(--border);border-radius:6px;padding:6px;margin:4px 0">' + esc((t.truncated ? '…' : '') + t.output) + '</pre>';
+        }
+        return s;
+      };
+      return '<div class="section-title" style="margin:10px 0 4px">Recent proofs</div>' + proofs.map(p => {
+        const b = p.before || {}, a = p.after || {};
+        const stale = p.fingerprint && p.fingerprint !== d.fingerprint ? ' · of tests it no longer has' : '';
+        let s = '<div style="border-top:1px solid var(--border);padding:6px 0">' + proofBadge(p, false) +
+          ' <span class="form-hint" style="' + wrap + '">' + esc(when(p.proved_at) + (p.proved_by ? ' · ' + p.proved_by : '') +
+            (p.task_id ? ' · task #' + p.task_id : '') + (p.executor_id ? ' · ' + p.executor_id : '') +
+            (b.commit ? ' · base ' + b.commit.slice(0, 10) + (FROM[p.base_from] ? ' (' + FROM[p.base_from] + ')' : '') : '') +
+            (a.commit ? ' · change ' + a.commit.slice(0, 10) + (a.dirty ? '+' : '') : '') + stale) + '</span>';
+        if (p.summary) s += '<div style="font-size:12px;' + wrap + '">' + esc(p.summary) + '</div>';
+        if (p.fallback && (p.test_files || []).length) {
+          s += '<div class="form-hint" style="' + wrap + '">' + esc('Laid over the base: ' + p.test_files.map(f => f.path +
+            (f.status === 'D' ? ' (removed)' : '')).join(', ')) + '</div>';
+        }
+        (b.tests || []).forEach(t => { s += testLine(t, 'at the base'); });
+        if (b.skipped) s += '<div class="form-hint" style="' + wrap + '">' + esc('At the base: ' + b.skipped) + '</div>';
+        (a.tests || []).forEach(t => { s += testLine(t, 'on the change'); });
+        if (a.skipped) s += '<div class="form-hint" style="' + wrap + '">' + esc('On the change: ' + a.skipped) + '</div>';
         return s + '</div>';
       }).join('');
     }
@@ -792,7 +865,7 @@
       }).catch(() => toast('Discard failed', 'err'));
     }
 
-    return h.mount({open, load, pushed, filter, planGaps, checkAll, checkOne, assessOne, stop, add, edit, cancelForm, save, del,
+    return h.mount({open, load, pushed, filter, planGaps, checkAll, checkOne, assessOne, prove, stop, add, edit, cancelForm, save, del,
       details, show, openTask, verdict, makeTask, readSpec, reviewSpec, settleOne, importSpec, download,
       draftOpen, draftClose, draftSource, draftFile, draftGo, draftLintModel, draftApproveOne, draftApproveAll, draftEdit,
       draftDiscard}, 'requirements', `

@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 228 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 229 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -77,10 +77,10 @@ whichever one happened to be opened.
 | Home | Meaning | Actions |
 | --- | --- | --- |
 | `control-plane` | the hub's own state.db | 197 |
-| `project` | the project's .cloop/state.db | 27 |
+| `project` | the project's .cloop/state.db | 28 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
-Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `requirement.approve`, `requirement.check`, `requirement.create`, `requirement.delete`, `requirement.draft`, `requirement.import`, `requirement.update`, `requirement.verdict`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.firewall_denied`, `run.reexecuted`, `state.save`, `step.append`, `task.attachment_delete`, `task.delete`, `task.dispatch`, `task.finish`, `task.quarantine`, `task.quarantine_release`, `task.status`, `task.upsert`.
+Recorded in the project's .cloop/state.db: `config.set`, `feature.create`, `feature.pr_open`, `feature.remove`, `requirement.approve`, `requirement.check`, `requirement.create`, `requirement.delete`, `requirement.draft`, `requirement.import`, `requirement.prove`, `requirement.update`, `requirement.verdict`, `run.adopt_requested`, `run.cap_paused`, `run.cap_resumed`, `run.firewall_denied`, `run.reexecuted`, `state.save`, `step.append`, `task.attachment_delete`, `task.delete`, `task.dispatch`, `task.finish`, `task.quarantine`, `task.quarantine_release`, `task.status`, `task.upsert`.
 
 Recorded in whichever chain the decision was scoped to: `audit.gap`, `audit.restored`, `authz.denied`, `authz.granted`.
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-228 actions in 49 families. Every action is listed: this section is the whole
+229 actions in 49 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (8) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -172,9 +172,10 @@ Payload keys:
 | `requirement.approve` | `requirement` | project | stable | A requirement becomes approved: a draft approved in the dashboard or with `cloop requirements approve`, a requirement edited to approved, or a spec file import that approves it. |
 | `requirement.check` | `requirement` | project | stable | A check run ends — its tests ran on the project's executor, or it failed or was cancelled. |
 | `requirement.create` | `requirement` | project | stable | A requirement is added to the project, from the dashboard or with `cloop requirements add`. |
-| `requirement.delete` | `requirement` | project | stable | A requirement, and the history of its checks, is deleted. |
+| `requirement.delete` | `requirement` | project | stable | A requirement, and the history of its checks and proofs, is deleted. |
 | `requirement.draft` | `requirement` | project | stable | The model drafts requirements from the project's goal or a specification, at a person's request — the dashboard's Draft requirements, or `cloop requirements draft`. |
 | `requirement.import` | `requirement` | project | stable | The project's requirements spec file (`.cloop/requirements.yaml`) is merged into the hub — from the dashboard's Import, or with `cloop requirements import`. |
+| `requirement.prove` | `requirement` | project | stable | A run of red-green proofs ends — the requirements' tests ran at the base and on the change, on the project's executor, or the run failed or was cancelled. |
 | `requirement.update` | `requirement` | project | stable | A requirement's title, description, priority, tags, tests or status change. |
 | `requirement.verdict` | `requirement` | project | stable | A person records a requirement's verdict by hand — fulfilled or unfulfilled, with a note. |
 
@@ -183,9 +184,10 @@ Payload keys:
 - `requirement.approve` — `id`, `title`, `previous_status`, `via`, `priority`, `tests`, `fingerprint`, `approved_by`
 - `requirement.check` — `run_id`, `state`, `source`, `requirement_ids`, `assess`, `executor_id`, `commit`, `dirty`, `fulfilled`, `unfulfilled`, `unverified`, `error`, `reason`, `task_id`
 - `requirement.create` — `id`, `title`, `priority`, `status`, `tests`, `fingerprint`, `drafted`
-- `requirement.delete` — `id`, `title`, `checks`, `unlinked_tasks`
+- `requirement.delete` — `id`, `title`, `checks`, `proofs`, `unlinked_tasks`
 - `requirement.draft` — `source`, `sha256`, `bytes`, `ids`, `refused`, `executor_id`, `via`
 - `requirement.import` — `source`, `path`, `sha256`, `commit`, `added`, `restored`, `updated`, `deleted`, `resolved`, `in_sync`, `exports_pending`
+- `requirement.prove` — `run_id`, `state`, `source`, `requirement_ids`, `executor_id`, `base`, `commit`, `outcomes`, `reason`, `task_id`
 - `requirement.update` — `id`, `title`, `changed`, `status`, `tests`, `fingerprint`, `previous_fingerprint`
 - `requirement.verdict` — `id`, `verdict`, `note`, `fingerprint`
 
@@ -195,6 +197,7 @@ Payload keys:
 - `requirement.delete` — `unlinked_tasks` are the tasks that implemented it, from which the deletion took it in the same transaction; each also gets a `task.upsert` row under the same actor.
 - `requirement.draft` — One row per draft, its entity id `draft`, its actor the person who asked. `source` is `goal`, `text` (pasted), `file` or `stdin`; `sha256` and `bytes` describe that text, not its content. `ids` are the requirements stored, every one with the status draft — each also a `requirement.create` row naming the source in `drafted`. `refused` counts the proposals that broke a bound or asked for another status.
 - `requirement.import` — One row per import, its entity id `spec`. `updated` lists each changed requirement with the fields that changed and its new and previous fingerprints; `deleted` how many recorded checks went with each, and the tasks it was taken out of (`unlinked_tasks`, each also a `task.upsert` row); `resolved` how each conflict was settled (`file` or `hub`). An import applies nothing unless every conflict is settled, so a row is a whole import. `sha256` is the file's; a dashboard import was read from the project's checkout on its executor at `commit`.
+- `requirement.prove` — One row per run: `outcomes` maps each requirement (`R-<n>`) to proven, vacuous, broken, inconclusive or error, and each proof is a row of requirement_proofs. `base` is the commit the tests ran at before the change, `commit` the change's. The requirements gate's proof of a task's new or changed tests has `source` `gate` and the task in `task_id`.
 - `requirement.update` — `changed` names the fields that differ. A new `fingerprint` means the verdicts recorded before it are about a requirement that no longer reads that way, and the dashboard shows them stale.
 
 ### step.*

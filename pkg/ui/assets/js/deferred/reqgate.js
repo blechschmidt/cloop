@@ -7,6 +7,9 @@
 // the empty section and calls show() through panelAct the first time a task
 // with a verdict is opened (static.go, deferredScripts).
 //
+// A verdict carries the red-green proof of the tests the task added or changed
+// (Task 20464); one whose new test passed without the change is "vacuous".
+//
 // Everything shown came from a test's output or the record a run wrote, so all
 // of it goes through esc, and output only ever as text in a <pre>.
 (function () {
@@ -23,12 +26,14 @@
 
     function verdictRow(v) {
       const bad = v.blocking;
+      const p = v.proof;
+      const vacuous = bad && p && p.outcome === 'vacuous';
       const tags = [];
       if (v.linked) tags.push('implements');
       if (v.must) tags.push('must');
       if (v.regression) tags.push('regression: ' + (v.was || 'fulfilled') + (v.was_commit ? ' at ' + short(v.was_commit) : '') + ' before');
       let row = '<li' + (bad ? ' style="color:var(--red)"' : '') + '><strong>R-' + (+v.requirement_id) + '</strong> ' +
-        esc(v.title || '') + ' — <strong>' + esc(v.verdict) + '</strong>' +
+        esc(v.title || '') + ' — <strong>' + esc(vacuous ? 'vacuous' : v.verdict) + '</strong>' +
         (tags.length ? ' <span class="td-empty">(' + esc(tags.join(', ')) + ')</span>' : '') +
         (v.summary ? '<div class="td-text">' + esc(v.summary) + '</div>' : '');
       (v.tests || []).filter(t => t.outcome !== 'pass').forEach(t => {
@@ -40,6 +45,11 @@
         }
       });
       (v.evidence || []).forEach(e => { row += '<div class="td-text">· ' + esc(e) + '</div>'; });
+      if (p) {
+        row += '<div class="td-text">Red-green proof: <strong>' + esc(p.outcome || 'error') + '</strong>' +
+          (p.before && p.before.commit ? ' at base ' + esc(short(p.before.commit)) : '') +
+          (p.summary ? ' — ' + esc(p.summary) : '') + '</div>';
+      }
       return row + '</li>';
     }
 

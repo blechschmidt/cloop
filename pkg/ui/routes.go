@@ -809,6 +809,9 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/requirements/{id}/checks", Handler: s.handleRequirementChecks, Perm: read, Scope: scopeProject},
 		{Pattern: "POST /api/requirements/{id}/verdict", Handler: s.handleRequirementVerdict, Perm: task, Scope: scopeProject},
 		{Pattern: "POST /api/requirements/{id}/task", Handler: s.handleRequirementTask, Perm: task, Scope: scopeProject},
+		// A red-green proof of its tests (Task 20464): run.start, like a check,
+		// and dispatched like one. See requirements_prove_api.go.
+		{Pattern: "POST /api/requirements/{id}/prove", Handler: s.handleRequirementProve, Perm: start, Scope: scopeProject},
 		{Pattern: "POST /api/requirement-runs", Handler: s.handleRequirementRunStart, Perm: start, Scope: scopeProject},
 		{Pattern: "GET /api/requirement-runs/{run}", Handler: s.handleRequirementRunGet, Perm: read, Scope: scopeProject},
 		{Pattern: "POST /api/requirement-runs/{run}/cancel", Handler: s.handleRequirementRunCancel, Perm: stop, Scope: scopeProject},
