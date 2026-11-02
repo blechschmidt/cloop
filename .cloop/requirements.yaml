@@ -429,3 +429,20 @@ requirements:
         command: go test ./pkg/knowledge/confluence -run '^(TestAuthentication|TestTheTokenNeverLeaves|TestAFailedSyncRecordsNoToken)$'
       - name: the scope reaches the connector
         command: go test ./pkg/knowledge -run '^TestRequestsCarryTheSourceScope$'
+  - id: R-24
+    title: A knowledge connector shall read what a remote sends within fixed bounds of memory and time.
+    status: approved
+    priority: should
+    tags: [robustness, knowledge]
+    details: |-
+      A Confluence answer is read up to 48 MiB; a larger one is asked for again in
+      smaller pages, and a page too large to read alone is indexed by its title. A
+      page's storage format is cut at 8 MiB and rendered without recursion, in time
+      linear in its elements, however malformed. A site that answers 429 or 503 is
+      waited out at most two minutes at a time and five retries a request. A
+      hostile or broken site can slow a sync; it cannot stall the hub or exhaust
+      its memory. The linearity check is a timing comparison the race detector
+      would drown, so it runs here, without it.
+    tests:
+      - name: answers, pages and retries
+        command: go test ./pkg/knowledge/confluence -run '^(TestALargeAnswerIsAskedForInSmallerPages|TestRenderStorageMalformed|TestRenderStorageIsBounded|TestRateLimits)$'

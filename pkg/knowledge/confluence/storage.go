@@ -39,15 +39,15 @@ import (
 	"golang.org/x/net/html"
 )
 
-const (
-	// maxStorageBytes bounds the storage-format body read. The index keeps
-	// pkg/knowledge.MaxBodyBytes of text; markup is rarely less than half a
-	// page's bytes, so this is past what any page that fits needs.
-	maxStorageBytes = 8 << 20
-	// maxDepth bounds element nesting. Elements past it are read as if
-	// their tags were not there: their text is kept.
-	maxDepth = 128
-)
+// maxStorageBytes bounds the storage-format body read. The index keeps
+// pkg/knowledge.MaxBodyBytes of text; markup is rarely less than half a page's
+// bytes, so this is past what any page that fits needs. A variable only so
+// that a test can show the cut without rendering megabytes.
+var maxStorageBytes = 8 << 20
+
+// maxDepth bounds element nesting. Elements past it are read as if their tags
+// were not there: their text is kept.
+const maxDepth = 128
 
 // renderStorage returns the text of a storage-format body.
 func renderStorage(src string) string {

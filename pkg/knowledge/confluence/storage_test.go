@@ -185,25 +185,55 @@ func TestRenderStorageMalformed(t *testing.T) {
 	}
 }
 
-// TestRenderStorageIsBounded: an enormous body is cut before it is read, and
-// a hostile one — a tag per byte, end tags with nothing open — renders in
-// time linear in its size.
+// TestRenderStorageIsBounded: an enormous body is cut before it is read, and a
+// hostile one — a tag per few bytes, end tags with nothing open, every
+// paragraph deep in inline elements, items never closed — renders in time
+// linear in its size. Linear is measured, not assumed from a wall clock: each
+// input is rendered at n and at 8n elements, and eight times the elements may
+// take at most 24 times as long — a quadratic renderer takes 64. Comparing two
+// runs on one machine holds on a slow runner as on a fast one. Not under the
+// race detector: it slows every element twentyfold, which buries the signal at
+// any size a test can afford — R-24 runs this without it, in CI's
+// requirements job.
 func TestRenderStorageIsBounded(t *testing.T) {
-	big := strings.Repeat("<p>"+strings.Repeat("word ", 200)+"</p>", 20000) // ~20 MiB
-	start := time.Now()
-	out := renderStorage(big)
-	if len(out) > maxStorageBytes {
+	saved := maxStorageBytes
+	t.Cleanup(func() { maxStorageBytes = saved })
+	maxStorageBytes = 256 << 10
+	big := strings.Repeat("<p>"+strings.Repeat("word ", 200)+"</p>", 1000) // ~1 MiB
+	if out := renderStorage(big); len(out) > maxStorageBytes || len(out) < maxStorageBytes/2 {
 		t.Fatalf("rendered %d bytes from a body cut at %d", len(out), maxStorageBytes)
 	}
-	for _, in := range []string{
-		strings.Repeat("<b>", 1<<20),
-		strings.Repeat("</td>", 1<<20),
-		strings.Repeat("<span>", 120) + strings.Repeat("<p>x</p>", 1<<18),
-		strings.Repeat("<li>", 1<<19),
-	} {
-		renderStorage(in)
+	maxStorageBytes = saved
+
+	// fastest is the best of three renders: the least disturbed by the rest
+	// of the machine.
+	fastest := func(in string) time.Duration {
+		best := time.Duration(1<<63 - 1)
+		for i := 0; i < 3; i++ {
+			start := time.Now()
+			renderStorage(in)
+			best = min(best, time.Since(start))
+		}
+		return best
 	}
-	if d := time.Since(start); d > 20*time.Second {
-		t.Fatalf("rendering took %s", d)
+	if raceDetector {
+		t.Skip("timings under -race measure the detector; R-24 runs this without it")
+	}
+	const n = 1 << 12
+	for name, build := range map[string]func(int) string{
+		"unclosed inline elements": func(k int) string { return strings.Repeat("<b>", k) },
+		"end tags closing nothing": func(k int) string { return strings.Repeat("</td>", k) },
+		"paragraphs at depth": func(k int) string {
+			return strings.Repeat("<span>", 32) + strings.Repeat("<p>x</p>", k)
+		},
+		"items never closed":     func(k int) string { return strings.Repeat("<li>x", k) },
+		"cells never closed":     func(k int) string { return "<table><tr>" + strings.Repeat("<td>x", k) },
+		"nesting past the bound": func(k int) string { return strings.Repeat("<div>", k) + "x" },
+		"text between tags":      func(k int) string { return strings.Repeat("<i>a</i> b ", k) },
+	} {
+		small, large := fastest(build(n)), fastest(build(8*n))
+		if large > 24*small+5*time.Millisecond {
+			t.Errorf("%s: %d elements took %v, eight times as many %v: not linear in its elements", name, n, small, large)
+		}
 	}
 }
