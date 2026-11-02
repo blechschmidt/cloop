@@ -200,7 +200,7 @@ schema and the hub's HTTP API may change in any release.
   and the keys of the issues it links to, then its description and its
   comments, each under a heading of its own so that chunks fall at them.
   Comments a search did not embed are read from the issue's comment pages, up
-  to 1,000. Cloud's Atlassian Document Format becomes text, keeping nested
+  to 1,000 and 8 MiB of them. Cloud's Atlassian Document Format becomes text, keeping nested
   lists, code blocks with their language, mentions, tables, panels, expands and
   task lists, without recursion and in time linear in its nodes; a document
   past 4 MiB, or one that is not valid, is scanned for its text instead. Data

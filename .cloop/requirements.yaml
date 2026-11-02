@@ -447,16 +447,17 @@ requirements:
       cut at 8 MiB and rendered without recursion, in time linear in its elements,
       however malformed; so is an issue's rich text — Atlassian Document Format
       decoded as a tree up to 4 MiB and scanned for its text beyond, wiki markup
-      cut at 8 MiB. A site that answers 429 or 503 is waited out at most two
-      minutes at a time and five retries a request. A hostile or broken site can
-      slow a sync; it cannot stall the hub or exhaust its memory. The linearity
-      checks are timing comparisons the race detector would drown, so they run
-      here, without it.
+      cut at 8 MiB. An issue's comments past what a search embedded are read up
+      to 8 MiB of their bodies. A site that answers 429 or 503 is waited out at
+      most two minutes at a time and five retries a request. A hostile or broken
+      site can slow a sync; it cannot stall the hub or exhaust its memory. The
+      linearity checks are timing comparisons the race detector would drown, so
+      they run here, without it.
     tests:
       - name: Confluence's answers, pages and retries
         command: go test ./pkg/knowledge/confluence -run '^(TestALargeAnswerIsAskedForInSmallerPages|TestRenderStorageMalformed|TestRenderStorageIsBounded|TestRateLimits)$'
       - name: Jira's answers, rich text and retries
-        command: go test ./pkg/knowledge/jira -run '^(TestALargeAnswerIsAskedForInSmallerPages|TestRenderADFMalformed|TestRenderADFIsBounded|TestRenderWikiIsBounded|TestRateLimits)$'
+        command: go test ./pkg/knowledge/jira -run '^(TestALargeAnswerIsAskedForInSmallerPages|TestAnIssuesCommentsAreReadWithinABudget|TestRenderADFMalformed|TestRenderADFIsBounded|TestRenderWikiIsBounded|TestRateLimits)$'
   - id: R-25
     title: A Jira source shall not index an issue with a security level, nor a restricted comment, unless the source says to.
     status: approved

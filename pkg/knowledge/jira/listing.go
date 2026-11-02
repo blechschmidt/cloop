@@ -38,6 +38,13 @@ const (
 	maxComments      = 1000
 )
 
+// maxCommentBytes bounds the comment bodies read for one issue: past it, no
+// further comment page is read. The index keeps knowledge.MaxBodyBytes of an
+// issue's text whatever is read, so this only stops a site that answers with
+// pages of enormous comments from making the hub hold them all. A variable
+// only so that a test can reach it without megabytes of comments.
+var maxCommentBytes = 4 * knowledge.MaxBodyBytes
+
 // Paths below the REST API's root (settings.api).
 const (
 	pathCloudSearch = "/search/jql"
@@ -385,17 +392,18 @@ func (ss *session) documents(ctx context.Context, issues []*issue, web string, b
 var errGone = errors.New("the issue is gone")
 
 // completeComments reads the comments of an issue whose search answer
-// embedded only some of them, from the comment endpoint, up to maxComments.
-// An answer too large is asked for in smaller pages, and a single comment too
-// large to read ends the reading: the issue keeps the comments it has.
+// embedded only some of them, from the comment endpoint, up to maxComments
+// and maxCommentBytes of their bodies. An answer too large is asked for in
+// smaller pages, and a single comment too large to read ends the reading: the
+// issue keeps the comments it has.
 func (ss *session) completeComments(ctx context.Context, is *issue) error {
 	page := is.Fields.Comment
 	if page == nil || page.Total <= len(page.Comments) {
 		return nil
 	}
 	var all []comment
-	limit := commentPageLimit
-	for start := 0; len(all) < maxComments; {
+	limit, size := commentPageLimit, 0
+	for start := 0; len(all) < maxComments && size < maxCommentBytes; {
 		var answer commentPage
 		ref := fmt.Sprintf("%s/issue/%s/comment?startAt=%d&maxResults=%d&orderBy=created", ss.s.api(), is.ID, start,
 			min(limit, maxComments-len(all)))
@@ -413,6 +421,9 @@ func (ss *session) completeComments(ctx context.Context, is *issue) error {
 			return fmt.Errorf("read the comments of %s: %w", is.Key, err)
 		}
 		all = append(all, answer.Comments...)
+		for _, c := range answer.Comments {
+			size += len(c.Body)
+		}
 		start += len(answer.Comments)
 		if len(answer.Comments) == 0 || start >= answer.Total {
 			break

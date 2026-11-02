@@ -566,6 +566,38 @@ func TestCommentsBeyondWhatTheSearchEmbeds(t *testing.T) {
 	}
 }
 
+// TestAnIssuesCommentsAreReadWithinABudget: past maxCommentBytes of an
+// issue's comment bodies, no further comment page is read — the index keeps
+// a bounded amount of an issue's text, and a site sending page after page of
+// enormous comments does not make the hub hold them all.
+func TestAnIssuesCommentsAreReadWithinABudget(t *testing.T) {
+	saved := maxCommentBytes
+	t.Cleanup(func() { maxCommentBytes = saved })
+	maxCommentBytes = 64 << 10
+	m := modes[0]
+	f := m.site(t)
+	f.embed = 1
+	is := f.add("ENG", "Flood", m.rich("start"))
+	for i := 0; i < 250; i++ {
+		f.comment(is, "Bot", m.rich(fmt.Sprintf("comment %d %s", i, strings.Repeat("x", 1000))), "")
+	}
+	c, _ := m.connector(t, f)
+	docs, _, _ := pass(t, c, m.config(f, nil), knowledge.ScopeOrg, cred(f), "", 10)
+	body := byID(docs)[is.ID].Body
+	if !strings.Contains(body, "comment 99 ") || strings.Contains(body, "comment 100 ") {
+		t.Fatalf("the flooded issue kept %d comments, want the first page's 100", strings.Count(body, "\n## Bot"))
+	}
+	var reads int
+	for _, r := range f.requestLog() {
+		if strings.Contains(r, "/comment?") {
+			reads++
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("%d comment pages were read past the budget, want 1", reads)
+	}
+}
+
 // TestRateLimits: a site that answers 429 or 503 is retried after the wait it
 // names — seconds or a date — or after a bounded backoff when it names none;
 // a site that asks for longer than a sync waits fails the call instead.
