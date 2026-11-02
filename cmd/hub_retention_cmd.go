@@ -169,6 +169,7 @@ func renderRetention(rep *janitor.Report, pol janitor.Policy) {
 		{"events", rep.Events, "row"},
 		{"costs", rep.Costs, "row"},
 		{"telemetry", rep.Telemetry, "row"},
+		{"knowledge", rep.Knowledge, "row"},
 		{"vacuum", rep.Vacuum, "file"},
 		{"wal", rep.WAL, "file"},
 	}

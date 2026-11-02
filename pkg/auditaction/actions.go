@@ -109,6 +109,9 @@ const (
 	ActionKnowledgeSourceBind Action = "knowledge.source.bind"
 	// ActionKnowledgeSourceUnbind records a project losing a knowledge source.
 	ActionKnowledgeSourceUnbind Action = "knowledge.source.unbind"
+	// ActionKnowledgeSourceSync records a person asking the hub to sync a
+	// knowledge source now (Task 20470).
+	ActionKnowledgeSourceSync Action = "knowledge.source.sync"
 
 	// ── step ───────────────────────────────────────────────────────────────
 

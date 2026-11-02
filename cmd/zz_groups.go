@@ -147,6 +147,8 @@ var rootCommandGroups = map[string]string{
 	"logout": groupHub,
 	"whoami": groupHub,
 	"remote": groupHub,
+	// A hub's knowledge sources, from that terminal (Task 20470).
+	"knowledge": groupHub,
 
 	// Secrets, access and spend — credentials, the audit trail, and budgets.
 	"secret":    groupAccess,

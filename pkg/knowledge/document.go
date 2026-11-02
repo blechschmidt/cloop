@@ -169,7 +169,14 @@ func (s *Service) index(sourceID int64, doc Document, listedAt time.Time) (state
 		return "", err
 	}
 	p.row.ListedAt = listedAt
-	return s.db.IndexKnowledgeDocument(p.row, func() ([]statedb.KnowledgeChunk, bool) {
+	return s.db.IndexKnowledgeDocument(p.row, s.chunker(p))
+}
+
+// chunker returns what cuts a prepared document into chunks, for statedb to
+// call inside the transaction that writes it — and only when its content hash
+// differs from the one stored.
+func (s *Service) chunker(p prepared) func() ([]statedb.KnowledgeChunk, bool) {
+	return func() ([]statedb.KnowledgeChunk, bool) {
 		if s.onChunk != nil {
 			s.onChunk()
 		}
@@ -179,5 +186,5 @@ func (s *Service) index(sourceID int64, doc Document, listedAt time.Time) (state
 			out[i] = statedb.KnowledgeChunk{Heading: c.Heading, Text: c.Text, Tokens: c.Tokens}
 		}
 		return out, capped
-	})
+	}
 }

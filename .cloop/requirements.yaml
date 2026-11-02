@@ -480,3 +480,70 @@ requirements:
         command: go test ./pkg/knowledge/jira -run '^(TestSecuredIssues|TestASecurityFieldWithoutANameIsALevel|TestListingReadsEverythingInScope|TestFetch|TestReconcileAndNarrow|TestADataCenterIDListingThatMissesIssuesFails)$'
       - name: through the sync
         command: go test ./pkg/knowledge/jira -run '^(TestAnIssueSecuredWithAnEditLeavesAtOnce|TestReconciliationRemovesWhatTheListingCannotSee)$'
+  - id: R-26
+    title: A knowledge source shall be synced by one hub process at a time, on the hub-cluster leader's schedule.
+    status: approved
+    priority: must
+    tags: [correctness, knowledge, cluster]
+    details: |-
+      The knowledge sync schedule is a leader duty: a follower's connector is never
+      asked, and the member that takes over leadership syncs what is due next. A
+      sync a person asks for runs on the member they asked, and every sync —
+      scheduled or manual — first takes its source's lease in the control plane,
+      so a second is refused and told which member holds the source; of many
+      asking at once exactly one starts. A sync that lost its lease writes nothing
+      more: every write that moves it forward checks the lease in its own
+      transaction. Only an administrator, or a personal source's owner, may ask for
+      a sync, and each request that starts one is audited as knowledge.source.sync.
+      Promised in docs/security/model.md, "Knowledge sources".
+    tests:
+      - name: the lease and the runner
+        command: go test ./pkg/knowledge -run '^(TestOneSyncPerSourceAtATime|TestASyncThatLosesItsLeaseWritesNothingMore|TestOnlyAdminsAndOwnersAskForASync|TestNextSync)$'
+      - name: the lease's storage
+        command: go test ./pkg/statedb -run '^TestKnowledgeSyncLease$'
+      - name: two hub members, and the route
+        command: go test ./pkg/ui -run '^(TestKnowledgeSyncRunsOnTheLeaderOnly|TestKnowledgeSyncAPI)$'
+        timeout: 20m
+  - id: R-27
+    title: A knowledge sync that stops part-way shall leave no document half-indexed and no cursor ahead of what it committed.
+    status: approved
+    priority: must
+    tags: [correctness, knowledge]
+    details: |-
+      A sync writes each page in bounded transactions, each document whole in one —
+      its row, its chunks and their full-text entries — and the page's cursor in
+      the same transaction as the last of them. A hub process killed with SIGKILL
+      inside a page's transaction leaves every document whole or absent, the cursor
+      where the last committed page left it and a database that passes SQLite's
+      integrity check; the next sync resumes there and ends with exactly what an
+      uninterrupted sync indexes. A connector that panics fails its own source's
+      sync — recorded with the credential scrubbed, its lease released — and the
+      schedule syncs every other source; a hub that stops, or a leader that steps
+      down, records its syncs interrupted and releases their leases. Promised in
+      docs/security/model.md, "Knowledge sources".
+    tests:
+      - name: a crash, a panic, a stop
+        command: go test ./pkg/knowledge -run '^(TestACrashMidSyncLeavesNoHalfIndexedDocument|TestAPanickingConnectorFailsOnlyItsOwnSync|TestStoppingInterruptsSyncsCleanly|TestStopReachesEverySyncItRuns)$'
+      - name: the batches, and a sweep cut short
+        command: go test ./pkg/statedb -run '^(TestKnowledgeBatchCommitsWithItsCursor|TestASweepTakesSeveralTransactions)$'
+      - name: a stopping hub
+        command: go test ./pkg/ui -run '^TestAStoppingHubStartsNoSync$'
+        timeout: 20m
+  - id: R-28
+    title: Knowledge rows shall not outlive their retention.
+    status: approved
+    priority: should
+    tags: [robustness, knowledge, retention]
+    details: |-
+      A document its source deleted leaves the index at once — its chunks,
+      full-text entries and binding matches, and what it said — keeping a tombstone
+      of its ids for retention.knowledge_deleted_days (30; -1 keeps them), after
+      which the janitor purges it. A deleted source stops being searchable in the
+      transaction that deletes it; its documents and chunks are purged after it in
+      bounded transactions, and whatever a purge cut short left is removed by the
+      next pass of the knowledge sync loop and of the janitor.
+    tests:
+      - name: the storage
+        command: go test ./pkg/statedb -run '^(TestKnowledgeTombstones|TestPurgeKnowledge|TestDeletingASourceStopsItsSearchAtOnce)$'
+      - name: the janitor
+        command: go test ./pkg/janitor -run '^TestRunOnce_PurgesKnowledgeTombstonesAndDeletedSources$'

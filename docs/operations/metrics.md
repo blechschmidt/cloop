@@ -167,6 +167,8 @@ cloop_statedb_wal_bytes                   cloop_audit_forward_lag_seconds
 cloop_audit_forward_backlog_rows          cloop_hub_ca_not_after_timestamp_seconds
 cloop_hub_ca_rotation_phase               cloop_hub_ca_rotation_step_age_seconds
 cloop_hub_ca_runs_blocking                cloop_hub_ca_members_behind
+cloop_knowledge_index_documents           cloop_knowledge_index_chunks
+cloop_knowledge_index_bytes
 ```
 
 `sum()` and `max()` over the cluster therefore both give the right answer. A
@@ -1339,6 +1341,63 @@ increase(cloop_approval_notifications_total{outcome="dropped"}[1h]) > 0
 
 A dropped notice is an approver who was not told. Settings → Notifications shows
 each webhook's last error.
+
+## Knowledge syncs
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_knowledge_sync_duration_seconds` | histogram | `kind`, `outcome` |
+| `cloop_knowledge_documents_indexed_total` | counter | `kind`, `change` |
+| `cloop_knowledge_sync_errors_total` | counter | `kind`, `reason` |
+| `cloop_knowledge_index_documents` | gauge | `kind` |
+| `cloop_knowledge_index_chunks` | gauge | `kind` |
+| `cloop_knowledge_index_bytes` | gauge | `kind` |
+
+The hub-cluster leader syncs every enabled knowledge source on the source's
+interval (30 minutes unless the source sets 5 minutes to 24 hours), and any
+member runs a sync a person asks for with `cloop knowledge sync` or
+`POST /api/knowledge/sources/{id}/sync` (Task 20470). Each sync holds the
+source's lease, so two never run at once, wherever they were asked for.
+`kind` is the connector — `confluence`, `jira`, or `unknown` for a source of a
+kind this build has no connector for.
+
+`cloop_knowledge_sync_duration_seconds` times every sync by `outcome`: `ok`,
+`error`, or `interrupted` — the process running it stopped, or stopped leading,
+and the sync resumes from its cursor at the next one. Its `_count` is the number
+of syncs.
+
+`cloop_knowledge_documents_indexed_total` counts what syncs did with each
+document they listed, by `change`: `created` and `updated` (chunked and
+indexed), `unchanged` (listed again with the same content, not chunked again),
+`deleted` (the source reported it deleted), `removed` (a full listing's sweep
+or a reconciliation found it gone) and `rejected` (malformed, left out).
+
+`cloop_knowledge_sync_errors_total` counts failed syncs by `reason`:
+
+| `reason` | Meaning |
+| --- | --- |
+| `connector` | the remote answered an error, could not be reached, or sent what the sync refuses |
+| `credential` | the source's secret could not be opened — deleted, or the wrong owner's |
+| `panic` | the connector, or the sync, panicked; that sync failed and no other |
+| `lease` | the sync could not renew its source's lease, and stopped |
+| `unavailable` | the hub has no connector of the source's kind, or no secret store |
+| `storage` | the hub's database failed a read or a write |
+
+A sync overtaken by a change to its source — reconfigured, renamed, its
+interval changed — is not a failure: it is recorded `interrupted`, and the next
+sync, within a minute, takes the change up.
+
+The three index gauges describe the shared database, so only the leader exports
+them: the documents the index holds (deleted documents' tombstones not among
+them), its chunks, and the bytes of document text they were made from.
+
+```promql
+increase(cloop_knowledge_sync_errors_total[1h]) > 0
+histogram_quantile(0.95, sum by (le, kind) (rate(cloop_knowledge_sync_duration_seconds_bucket[1h])))
+```
+
+A source that keeps failing shows why on the source itself — `cloop knowledge
+sources` prints each one's status and last error, scrubbed of credentials.
 
 ## Registry self-monitoring
 

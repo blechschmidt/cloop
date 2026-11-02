@@ -97,15 +97,37 @@ func (a *Access) visible(id int64) (statedb.KnowledgeSourceRow, error) {
 }
 
 func sourceFromRow(row statedb.KnowledgeSourceRow) Source {
+	var counts SyncCounts
+	// A report this build cannot read is shown as none: it says what a sync
+	// did, and decides nothing.
+	_ = json.Unmarshal([]byte(row.SyncReport), &counts)
 	return Source{
 		ID: row.ID, Kind: row.Kind, Name: row.Name, Scope: row.Scope, Owner: row.Owner,
 		Config: json.RawMessage(row.Config), SecretRef: row.SecretRef, Enabled: row.Enabled,
+		SyncInterval: time.Duration(row.SyncIntervalMin) * time.Minute,
 		Sync: SyncState{
 			Status: row.SyncStatus, Error: row.SyncError, At: row.SyncedAt, Resumes: row.SyncCursor != "",
-			ReconciledAt: row.ReconciledAt,
+			ReconciledAt: row.ReconciledAt, StartedAt: row.SyncStartedAt, Duration: row.SyncDuration,
+			Origin: row.SyncOrigin, Counts: counts, More: row.SyncMore, OKAt: row.SyncedOKAt, NextAt: nextSync(row),
 		},
 		CreatedAt: row.CreatedAt, CreatedBy: row.CreatedBy, UpdatedAt: row.UpdatedAt, UpdatedBy: row.UpdatedBy,
 	}
+}
+
+// cleanSyncInterval checks a source's sync interval: zero for the default,
+// or a whole number of minutes from MinSyncInterval to MaxSyncInterval. It
+// returns the interval in minutes, as it is stored.
+func cleanSyncInterval(d time.Duration) (int, error) {
+	switch {
+	case d == 0:
+		return 0, nil
+	case d%time.Minute != 0:
+		return 0, invalid("a source's sync interval is a whole number of minutes")
+	case d < MinSyncInterval || d > MaxSyncInterval:
+		return 0, invalid("a source's sync interval is from %d minutes to %d hours (%d minutes)",
+			int(MinSyncInterval/time.Minute), int(MaxSyncInterval/time.Hour), int(MaxSyncInterval/time.Minute))
+	}
+	return int(d / time.Minute), nil
 }
 
 func bindingFromRow(row statedb.KnowledgeBindingRow) Binding {
@@ -138,6 +160,10 @@ func (a *Access) Sources(ctx context.Context) ([]Source, error) {
 	if err != nil {
 		return nil, err
 	}
+	leases, err := a.s.db.LiveKnowledgeSyncLeases(a.s.now())
+	if err != nil {
+		return nil, err
+	}
 	out := []Source{}
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
@@ -146,12 +172,20 @@ func (a *Access) Sources(ctx context.Context) ([]Source, error) {
 		if !a.canSee(row) {
 			continue
 		}
-		src := sourceFromRow(row)
+		src := withSchedule(sourceFromRow(row), row, leases)
 		c := counts[row.ID]
 		src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings}
 		out = append(out, src)
 	}
 	return out, nil
+}
+
+// withSchedule fills in the sync src's lease says is running, if any.
+func withSchedule(src Source, row statedb.KnowledgeSourceRow, leases map[int64]statedb.KnowledgeSyncLease) Source {
+	if l, ok := leases[row.ID]; ok {
+		src.Sync.Running = &RunningSync{Member: l.Member, Origin: l.Origin, Actor: l.Actor, Since: l.AcquiredAt}
+	}
+	return src
 }
 
 // Source returns one source, and — to a caller who may manage it — its
@@ -164,7 +198,11 @@ func (a *Access) Source(ctx context.Context, id int64) (Source, []Binding, error
 	if err != nil {
 		return Source{}, nil, err
 	}
-	src := sourceFromRow(row)
+	leases, err := a.s.db.LiveKnowledgeSyncLeases(a.s.now())
+	if err != nil {
+		return Source{}, nil, err
+	}
+	src := withSchedule(sourceFromRow(row), row, leases)
 	counts, err := a.s.db.CountKnowledge(row.ID)
 	if err != nil {
 		return Source{}, nil, err
@@ -199,6 +237,9 @@ type SourceInput struct {
 	SecretRef string
 	// Enabled defaults to true.
 	Enabled *bool
+	// SyncInterval is how often the hub syncs the source; zero takes
+	// DefaultSyncInterval.
+	SyncInterval time.Duration
 }
 
 // CreateSource connects a new source.
@@ -245,12 +286,17 @@ func (a *Access) CreateSource(ctx context.Context, in SourceInput) (Source, erro
 	if err != nil {
 		return Source{}, err
 	}
+	interval, err := cleanSyncInterval(in.SyncInterval)
+	if err != nil {
+		return Source{}, err
+	}
 	enabled := in.Enabled == nil || *in.Enabled
 	if err := ctx.Err(); err != nil {
 		return Source{}, err
 	}
 	row, err := a.s.db.CreateKnowledgeSource(statedb.KnowledgeSourceRow{
 		Kind: kind, Name: name, Scope: scope, Owner: owner, Config: string(config), SecretRef: ref, Enabled: enabled,
+		SyncIntervalMin: interval,
 	}, a.p.Actor)
 	if errors.Is(err, statedb.ErrKnowledgeSourceNameTaken) {
 		return Source{}, fmt.Errorf("%w: a source named %q already exists", ErrConflict, name)
@@ -309,6 +355,9 @@ type SourceUpdate struct {
 	Config    json.RawMessage
 	SecretRef *string
 	Enabled   *bool
+	// SyncInterval, when set, is the source's new sync interval; zero
+	// returns it to the default.
+	SyncInterval *time.Duration
 }
 
 // UpdateSource changes a source. A new configuration makes the next sync list
@@ -325,7 +374,7 @@ func (a *Access) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (S
 		return Source{}, a.manageDenied(row, "change")
 	}
 	u := statedb.KnowledgeSourceUpdate{Name: row.Name, Config: row.Config, SecretRef: row.SecretRef, Enabled: row.Enabled,
-		ExpectUpdatedAt: row.UpdatedAt}
+		SyncIntervalMin: row.SyncIntervalMin, ExpectUpdatedAt: row.UpdatedAt}
 	if in.Name != nil {
 		name, err := cleanName(*in.Name)
 		if err != nil {
@@ -368,6 +417,16 @@ func (a *Access) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (S
 		u.Enabled = *in.Enabled
 		u.Changed = append(u.Changed, "enabled")
 	}
+	if in.SyncInterval != nil {
+		interval, err := cleanSyncInterval(*in.SyncInterval)
+		if err != nil {
+			return Source{}, err
+		}
+		if interval != row.SyncIntervalMin {
+			u.SyncIntervalMin = interval
+			u.Changed = append(u.Changed, "sync_interval")
+		}
+	}
 	if len(u.Changed) == 0 {
 		return sourceFromRow(row), nil
 	}
@@ -387,6 +446,27 @@ func (a *Access) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (S
 		return Source{}, err
 	}
 	return sourceFromRow(updated), nil
+}
+
+// MaySync returns source id when the caller may ask the hub to sync it now:
+// an administrator any source, a person their own personal one. A source the
+// caller cannot see is not found; one an administrator disabled is
+// ErrDisabled.
+func (a *Access) MaySync(ctx context.Context, id int64) (Source, error) {
+	if err := a.requireListing(); err != nil {
+		return Source{}, err
+	}
+	row, err := a.visible(id)
+	if err != nil {
+		return Source{}, err
+	}
+	if !a.isAdmin() && !a.owns(row) {
+		return Source{}, a.manageDenied(row, "sync")
+	}
+	if !row.Enabled {
+		return Source{}, fmt.Errorf("%w: %s; enable it to sync it", ErrDisabled, row.Name)
+	}
+	return sourceFromRow(row), ctx.Err()
 }
 
 // DeleteSource removes a source and everything it indexed.
@@ -543,6 +623,10 @@ func (a *Access) ProjectSources(ctx context.Context, project Project) ([]BoundSo
 			return nil, err
 		}
 	}
+	leases, err := a.s.db.LiveKnowledgeSyncLeases(a.s.now())
+	if err != nil {
+		return nil, err
+	}
 	out := []BoundSource{}
 	for _, b := range rows {
 		if err := ctx.Err(); err != nil {
@@ -555,8 +639,12 @@ func (a *Access) ProjectSources(ctx context.Context, project Project) ([]BoundSo
 		if err != nil {
 			return nil, err
 		}
-		src := sourceFromRow(row)
+		src := withSchedule(sourceFromRow(row), row, leases)
 		src.Config, src.SecretRef = nil, ""
+		if src.Sync.Running != nil {
+			// Who asked for a sync is the source's managers' to know.
+			src.Sync.Running.Actor = ""
+		}
 		c := counts[row.ID]
 		src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings}
 		out = append(out, BoundSource{Source: src, Binding: bindingFromRow(b)})

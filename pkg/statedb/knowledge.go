@@ -12,6 +12,9 @@ package statedb
 //   - Nothing replaces a row (tests/arch/rowreplace_test.go). A document and
 //     its chunks are upserted in place, and only the chunks it no longer has
 //     are deleted, after the upsert. A binding's narrowing is updated in place.
+//     A document the source no longer holds keeps its row as a tombstone,
+//     without its chunks or what it said, until retention purges it
+//     (knowledge_sync.go).
 //   - A chunk's text lives in knowledge_chunks_fts under the chunk's id, and
 //     every write that touches one touches both, in one transaction. FTS5 owns
 //     its copy of the text, so SQLite keeps the index consistent with it — an
@@ -79,14 +82,29 @@ type KnowledgeSourceRow struct {
 	// against what its remote holds (ReconcileKnowledgeDocuments), or a full
 	// listing last reached its end; zero for never.
 	ReconciledAt time.Time
-	CreatedAt    time.Time
-	CreatedBy    string
-	UpdatedAt    time.Time
-	UpdatedBy    string
+	// SyncIntervalMin is how often the hub syncs the source, in minutes; 0
+	// means pkg/knowledge's default.
+	SyncIntervalMin int
+	// SyncStartedAt, SyncDuration and SyncOrigin describe the last sync:
+	// when it began, how long it ran, and what started it (schedule or
+	// manual). SyncReport is what it did, a JSON object of counts, and
+	// SyncMore whether it stopped before its listing's end. SyncedOKAt is
+	// when a sync last ended ok.
+	SyncStartedAt time.Time
+	SyncDuration  time.Duration
+	SyncOrigin    string
+	SyncReport    string
+	SyncMore      bool
+	SyncedOKAt    time.Time
+	CreatedAt     time.Time
+	CreatedBy     string
+	UpdatedAt     time.Time
+	UpdatedBy     string
 }
 
 const knowledgeSourceCols = `id, kind, name, scope, owner, config, secret_ref, enabled,
 	sync_cursor, sync_status, sync_error, synced_at, listing_started_ns, full_listing_ns, reconciled_ns,
+	sync_interval_min, sync_started_ns, sync_duration_ms, sync_origin, sync_report, sync_more, synced_ok_ns,
 	created_at, created_by, updated_at, updated_by`
 
 // nanos is t as the knowledge tables' *_ns columns hold it: Unix nanoseconds,
@@ -143,12 +161,14 @@ func (d *DB) CreateKnowledgeSource(row KnowledgeSourceRow, actor string) (Knowle
 	row.CreatedAt, row.UpdatedAt = now, now
 	row.CreatedBy, row.UpdatedBy = actor, actor
 	row.SyncCursor, row.SyncStatus, row.SyncError, row.SyncedAt = "", "", "", time.Time{}
+	row.SyncReport = "{}"
 
 	d.mu.Lock()
 	res, err := d.conn.Exec(`INSERT INTO knowledge_sources
-		(kind, name, scope, owner, config, secret_ref, enabled, created_at, created_by, updated_at, updated_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.Kind, row.Name, row.Scope, row.Owner, row.Config, row.SecretRef, boolInt(row.Enabled),
+		(kind, name, scope, owner, config, secret_ref, enabled, sync_interval_min,
+		 created_at, created_by, updated_at, updated_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.Kind, row.Name, row.Scope, row.Owner, row.Config, row.SecretRef, boolInt(row.Enabled), row.SyncIntervalMin,
 		formatOptionalTime(row.CreatedAt), row.CreatedBy, formatOptionalTime(row.UpdatedAt), row.UpdatedBy)
 	var id int64
 	if err == nil {
@@ -168,6 +188,7 @@ func (d *DB) CreateKnowledgeSource(row KnowledgeSourceRow, actor string) (Knowle
 	payload["config"] = configForAudit(row.Config)
 	payload["signs_in_with"] = row.SecretRef
 	payload["enabled"] = row.Enabled
+	payload["sync_interval_minutes"] = row.SyncIntervalMin
 	emit(d, &AuditEvent{
 		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionKnowledgeSourceCreate),
 		EntityType: "knowledge_source", EntityID: fmt.Sprint(row.ID), Payload: MarshalAuditPayload(payload),
@@ -183,7 +204,10 @@ type KnowledgeSourceUpdate struct {
 	Config    string
 	SecretRef string
 	Enabled   bool
-	Changed   []string
+	// SyncIntervalMin is how often the hub syncs the source, in minutes; 0
+	// for the default.
+	SyncIntervalMin int
+	Changed         []string
 	// Resync clears the sync cursor and any full listing in progress, so the
 	// next sync lists the source from the beginning — and, reaching the end,
 	// removes what the old configuration brought and the new one does not.
@@ -206,11 +230,11 @@ func (d *DB) UpdateKnowledgeSource(id int64, u KnowledgeSourceUpdate, actor stri
 	now := time.Now().UTC()
 	d.mu.Lock()
 	res, err := d.conn.Exec(`UPDATE knowledge_sources SET
-		name = ?, config = ?, secret_ref = ?, enabled = ?, updated_at = ?, updated_by = ?,
+		name = ?, config = ?, secret_ref = ?, enabled = ?, sync_interval_min = ?, updated_at = ?, updated_by = ?,
 		sync_cursor = CASE WHEN ? THEN '' ELSE sync_cursor END,
 		listing_started_ns = CASE WHEN ? THEN 0 ELSE listing_started_ns END
 		WHERE id = ? AND updated_at = ?`,
-		u.Name, u.Config, u.SecretRef, boolInt(u.Enabled), formatOptionalTime(now), actor,
+		u.Name, u.Config, u.SecretRef, boolInt(u.Enabled), u.SyncIntervalMin, formatOptionalTime(now), actor,
 		boolInt(u.Resync), boolInt(u.Resync), id, formatOptionalTime(u.ExpectUpdatedAt))
 	var n int64
 	if err == nil {
@@ -243,6 +267,7 @@ func (d *DB) UpdateKnowledgeSource(id int64, u KnowledgeSourceUpdate, actor stri
 	payload["config"] = configForAudit(row.Config)
 	payload["signs_in_with"] = row.SecretRef
 	payload["enabled"] = row.Enabled
+	payload["sync_interval_minutes"] = row.SyncIntervalMin
 	payload["resync"] = u.Resync
 	emit(d, &AuditEvent{
 		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionKnowledgeSourceUpdate),
@@ -291,12 +316,14 @@ func (d *DB) ListKnowledgeSources() ([]KnowledgeSourceRow, error) {
 func scanKnowledgeSource(s rowScanner) (KnowledgeSourceRow, error) {
 	var (
 		row                                     KnowledgeSourceRow
-		enabled                                 int
+		enabled, more                           int
 		listingStarted, fullListing, reconciled int64
+		started, durationMS, okAt               int64
 		syncedAt, createdAt, updated            string
 	)
 	if err := s.Scan(&row.ID, &row.Kind, &row.Name, &row.Scope, &row.Owner, &row.Config, &row.SecretRef, &enabled,
 		&row.SyncCursor, &row.SyncStatus, &row.SyncError, &syncedAt, &listingStarted, &fullListing, &reconciled,
+		&row.SyncIntervalMin, &started, &durationMS, &row.SyncOrigin, &row.SyncReport, &more, &okAt,
 		&createdAt, &row.CreatedBy, &updated, &row.UpdatedBy); err != nil {
 		return row, err
 	}
@@ -304,6 +331,10 @@ func scanKnowledgeSource(s rowScanner) (KnowledgeSourceRow, error) {
 	row.ListingStartedAt = fromNanos(listingStarted)
 	row.FullListingAt = fromNanos(fullListing)
 	row.ReconciledAt = fromNanos(reconciled)
+	row.SyncStartedAt = fromNanos(started)
+	row.SyncDuration = time.Duration(durationMS) * time.Millisecond
+	row.SyncMore = more != 0
+	row.SyncedOKAt = fromNanos(okAt)
 	row.SyncedAt = parseOptionalTime(syncedAt)
 	row.CreatedAt = parseOptionalTime(createdAt)
 	row.UpdatedAt = parseOptionalTime(updated)
@@ -312,14 +343,22 @@ func scanKnowledgeSource(s rowScanner) (KnowledgeSourceRow, error) {
 
 // KnowledgeSourceCounts is how much one source holds.
 type KnowledgeSourceCounts struct {
+	// Documents counts the live documents, tombstones not among them.
 	Documents int
 	Chunks    int
 	Bindings  int
+	// Tombstones counts the documents the source no longer holds whose rows
+	// are kept until retention purges them (see 0094_knowledge_sync.sql).
+	Tombstones int
+	// BodyBytes is the text of the live documents, in bytes: what their
+	// chunks were made from.
+	BodyBytes int64
 }
 
 // CountKnowledge returns, per source id, its documents, chunks and bindings —
 // of the sources ids names, or of every source when it names none. A source
-// with none is absent from the map.
+// with none is absent from the map; rows of a source that no longer exists,
+// which a deletion leaves for its purge to finish, are not counted.
 func (d *DB) CountKnowledge(ids ...int64) (map[int64]KnowledgeSourceCounts, error) {
 	where, arg := "", "[]"
 	if len(ids) > 0 {
@@ -334,11 +373,18 @@ func (d *DB) CountKnowledge(ids ...int64) (map[int64]KnowledgeSourceCounts, erro
 	out := map[int64]KnowledgeSourceCounts{}
 	for _, q := range []struct {
 		sql string
-		set func(*KnowledgeSourceCounts, int)
+		set func(c *KnowledgeSourceCounts, n, m, b int64)
 	}{
-		{`SELECT source_id, COUNT(*) FROM knowledge_documents` + where + ` GROUP BY source_id`, func(c *KnowledgeSourceCounts, n int) { c.Documents = n }},
-		{`SELECT source_id, COUNT(*) FROM knowledge_chunks` + where + ` GROUP BY source_id`, func(c *KnowledgeSourceCounts, n int) { c.Chunks = n }},
-		{`SELECT source_id, COUNT(*) FROM knowledge_bindings` + where + ` GROUP BY source_id`, func(c *KnowledgeSourceCounts, n int) { c.Bindings = n }},
+		{`SELECT source_id, COALESCE(SUM(deleted_ns = 0), 0), COALESCE(SUM(deleted_ns > 0), 0),
+			COALESCE(SUM(CASE WHEN deleted_ns = 0 THEN body_bytes ELSE 0 END), 0)
+			FROM knowledge_documents` + where + ` GROUP BY source_id`,
+			func(c *KnowledgeSourceCounts, n, m, b int64) {
+				c.Documents, c.Tombstones, c.BodyBytes = int(n), int(m), b
+			}},
+		{`SELECT source_id, COUNT(*), 0, 0 FROM knowledge_chunks` + where + ` GROUP BY source_id`,
+			func(c *KnowledgeSourceCounts, n, _, _ int64) { c.Chunks = int(n) }},
+		{`SELECT source_id, COUNT(*), 0, 0 FROM knowledge_bindings` + where + ` GROUP BY source_id`,
+			func(c *KnowledgeSourceCounts, n, _, _ int64) { c.Bindings = int(n) }},
 	} {
 		var args []any
 		if where != "" {
@@ -349,14 +395,13 @@ func (d *DB) CountKnowledge(ids ...int64) (map[int64]KnowledgeSourceCounts, erro
 			return nil, fmt.Errorf("statedb: count knowledge: %w", classifyDriverErr(err))
 		}
 		for rows.Next() {
-			var id int64
-			var n int
-			if err := rows.Scan(&id, &n); err != nil {
+			var id, n, m, b int64
+			if err := rows.Scan(&id, &n, &m, &b); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("statedb: count knowledge: %w", classifyDriverErr(err))
 			}
 			c := out[id]
-			q.set(&c, n)
+			q.set(&c, n, m, b)
 			out[id] = c
 		}
 		err = rows.Err()
@@ -365,13 +410,53 @@ func (d *DB) CountKnowledge(ids ...int64) (map[int64]KnowledgeSourceCounts, erro
 			return nil, fmt.Errorf("statedb: count knowledge: %w", classifyDriverErr(err))
 		}
 	}
+	// Rows a deleted source left behind: its purge removes them, and until
+	// it has they are nobody's.
+	var live map[int64]bool
+	if len(out) > 0 {
+		live = map[int64]bool{}
+		rows, err := d.conn.Query(`SELECT id FROM knowledge_sources`)
+		if err != nil {
+			return nil, fmt.Errorf("statedb: count knowledge: %w", classifyDriverErr(err))
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("statedb: count knowledge: %w", classifyDriverErr(err))
+			}
+			live[id] = true
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("statedb: count knowledge: %w", classifyDriverErr(err))
+		}
+	}
+	for id := range out {
+		if !live[id] {
+			delete(out, id)
+		}
+	}
 	return out, nil
 }
 
 // DeleteKnowledgeSource removes a source and everything it brought — its
 // documents, their chunks and index entries, its bindings and their matches —
-// in one transaction, records it as actor, and returns the source and what
-// went with it.
+// records it as actor, and returns the source and what went with it.
+//
+// In two steps. One transaction removes the source, its bindings, their
+// matches and its sync lease: from its commit nothing of the source is
+// searchable — every search joins through the source and its bindings — and
+// no sync can write to it, since every write checks the source is there. Then
+// its documents and chunks are purged in bounded transactions
+// (purgeKnowledgeOfSource), so a source of a million chunks does not hold the
+// database's write lock — and every other hub member's heartbeat behind it —
+// for as long as deleting them all takes. A purge cut short, by
+// inlineKnowledgePurgeBudget or by the process stopping, leaves the rest to
+// the next one: the knowledge sync loop's, or the janitor's (PurgeKnowledge).
+// Ids are never reused, so what is left can only ever be the deleted
+// source's.
 func (d *DB) DeleteKnowledgeSource(id int64, actor string) (KnowledgeSourceRow, KnowledgeSourceCounts, error) {
 	d.mu.Lock()
 	row, counts, err := d.deleteKnowledgeSourceLocked(id)
@@ -388,14 +473,23 @@ func (d *DB) DeleteKnowledgeSource(id int64, actor string) (KnowledgeSourceRow, 
 		Actor: actorOrSystem(actor), EventType: string(auditaction.ActionKnowledgeSourceDelete),
 		EntityType: "knowledge_source", EntityID: fmt.Sprint(row.ID), Payload: MarshalAuditPayload(payload),
 	})
+	// The source is gone whatever happens here: a purge that fails leaves
+	// rows nothing can reach for the next purge, and is no reason to report
+	// the deletion failed.
+	ctx, cancel := context.WithTimeout(context.Background(), inlineKnowledgePurgeBudget)
+	defer cancel()
+	_, _ = d.purgeKnowledgeOfSource(ctx, id, false)
 	return row, counts, nil
 }
 
 func (d *DB) deleteKnowledgeSourceLocked(id int64) (KnowledgeSourceRow, KnowledgeSourceCounts, error) {
 	var counts KnowledgeSourceCounts
+	wrapErr := func(err error) error {
+		return fmt.Errorf("statedb: delete knowledge source %d: %w", id, classifyDriverErr(err))
+	}
 	tx, err := d.conn.Begin()
 	if err != nil {
-		return KnowledgeSourceRow{}, counts, fmt.Errorf("statedb: delete knowledge source %d: %w", id, classifyDriverErr(err))
+		return KnowledgeSourceRow{}, counts, wrapErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
 	row, err := scanKnowledgeSource(tx.QueryRow(`SELECT `+knowledgeSourceCols+` FROM knowledge_sources WHERE id = ?`, id))
@@ -403,34 +497,41 @@ func (d *DB) deleteKnowledgeSourceLocked(id int64) (KnowledgeSourceRow, Knowledg
 		return KnowledgeSourceRow{}, counts, fmt.Errorf("%w: %d", ErrKnowledgeSourceNotFound, id)
 	}
 	if err != nil {
-		return KnowledgeSourceRow{}, counts, fmt.Errorf("statedb: delete knowledge source %d: %w", id, classifyDriverErr(err))
+		return KnowledgeSourceRow{}, counts, wrapErr(err)
+	}
+	// What goes with it, counted before anything goes: the documents and
+	// chunks are purged after this transaction.
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM knowledge_documents WHERE source_id = ? AND deleted_ns = 0`, id).
+		Scan(&counts.Documents); err != nil {
+		return row, counts, wrapErr(err)
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM knowledge_chunks WHERE source_id = ?`, id).Scan(&counts.Chunks); err != nil {
+		return row, counts, wrapErr(err)
 	}
 	steps := []struct {
 		sql string
 		n   *int
 	}{
-		{`DELETE FROM knowledge_chunks_fts WHERE rowid IN (SELECT id FROM knowledge_chunks WHERE source_id = ?)`, nil},
-		{`DELETE FROM knowledge_chunks WHERE source_id = ?`, &counts.Chunks},
 		{`DELETE FROM knowledge_binding_documents WHERE binding_id IN (SELECT id FROM knowledge_bindings WHERE source_id = ?)`, nil},
-		{`DELETE FROM knowledge_documents WHERE source_id = ?`, &counts.Documents},
 		{`DELETE FROM knowledge_bindings WHERE source_id = ?`, &counts.Bindings},
+		{`DELETE FROM knowledge_sync_leases WHERE source_id = ?`, nil},
 		{`DELETE FROM knowledge_sources WHERE id = ?`, nil},
 	}
 	for _, st := range steps {
 		res, err := tx.Exec(st.sql, id)
 		if err != nil {
-			return row, counts, fmt.Errorf("statedb: delete knowledge source %d: %w", id, classifyDriverErr(err))
+			return row, counts, wrapErr(err)
 		}
 		if st.n != nil {
 			n, err := res.RowsAffected()
 			if err != nil {
-				return row, counts, fmt.Errorf("statedb: delete knowledge source %d: %w", id, classifyDriverErr(err))
+				return row, counts, wrapErr(err)
 			}
 			*st.n = int(n)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return row, counts, fmt.Errorf("statedb: delete knowledge source %d: %w", id, classifyDriverErr(err))
+		return row, counts, wrapErr(err)
 	}
 	return row, counts, nil
 }
@@ -462,28 +563,76 @@ func (d *DB) SetKnowledgeSyncCursor(id int64, updatedAt time.Time, cursor string
 // in this sync or a later one that resumes it. Written only while the source
 // is the one the sync read (updatedAt), like SetKnowledgeSyncCursor.
 func (d *DB) StartKnowledgeListing(id int64, updatedAt, at time.Time) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	res, err := d.conn.Exec(`UPDATE knowledge_sources SET listing_started_ns = ?, sync_cursor = ''
-		WHERE id = ? AND updated_at = ?`, nanos(at), id, formatOptionalTime(updatedAt))
-	if err != nil {
+	return d.StartKnowledgeListingFenced(KnowledgeSyncFence{}, id, updatedAt, at)
+}
+
+// StartKnowledgeListingFenced is StartKnowledgeListing for a sync holding
+// f's lease: refused with ErrKnowledgeSyncLeaseLost once it does not.
+func (d *DB) StartKnowledgeListingFenced(f KnowledgeSyncFence, id int64, updatedAt, at time.Time) error {
+	wrapErr := func(err error) error {
 		return fmt.Errorf("statedb: start knowledge listing: %w", classifyDriverErr(err))
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return wrapErr(err)
+	}
+	defer tx.Rollback() //nolint:errcheck // a no-op once committed
+	if err := f.checkTx(tx, id); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`UPDATE knowledge_sources SET listing_started_ns = ?, sync_cursor = ''
+		WHERE id = ? AND updated_at = ?`, nanos(at), id, formatOptionalTime(updatedAt))
+	if err != nil {
+		return wrapErr(err)
+	}
 	if n, err := res.RowsAffected(); err != nil {
-		return fmt.Errorf("statedb: start knowledge listing: %w", classifyDriverErr(err))
+		return wrapErr(err)
 	} else if n == 0 {
 		return fmt.Errorf("%w: source %d", ErrKnowledgeSourceChanged, id)
+	}
+	if err := tx.Commit(); err != nil {
+		return wrapErr(err)
 	}
 	return nil
 }
 
 // FinishKnowledgeListing ends the full listing of source id that began at
 // started, at at: every document of the source no sync has listed since
-// started — what the source no longer holds, or no longer shows — is removed
-// with its chunks and matches, and the listing is recorded complete, and as a
-// reconciliation, since its sweep is one. One transaction, written only while
-// the source is the one the sync read; it returns how many documents went.
+// started — what the source no longer holds, or no longer shows — leaves the
+// index, its chunks and matches with it and its row kept as a tombstone, and
+// the listing is recorded complete, and as a reconciliation, since its sweep
+// is one. Written only while the source is the one the sync read; it returns
+// how many documents went.
+//
+// The sweep takes knowledgeTombstoneBatch documents out per transaction, the
+// last of them recording the listing complete, so a sweep that removes most of
+// a large source does not hold the write lock until it is done. One cut short
+// — the process stopped, the source changed — has removed some of what it
+// would have and left the listing in progress, and the next sync, resuming it
+// at its end, sweeps the rest.
 func (d *DB) FinishKnowledgeListing(id int64, updatedAt, started, at time.Time) (int, error) {
+	return d.FinishKnowledgeListingFenced(KnowledgeSyncFence{}, id, updatedAt, started, at)
+}
+
+// FinishKnowledgeListingFenced is FinishKnowledgeListing for a sync holding
+// f's lease: refused with ErrKnowledgeSyncLeaseLost once it does not.
+func (d *DB) FinishKnowledgeListingFenced(f KnowledgeSyncFence, id int64, updatedAt, started, at time.Time) (int, error) {
+	total := 0
+	for {
+		n, done, err := d.finishKnowledgeListingBatch(f, id, updatedAt, started, at)
+		total += n
+		if err != nil || done {
+			return total, err
+		}
+	}
+}
+
+// finishKnowledgeListingBatch is one transaction of FinishKnowledgeListing:
+// up to knowledgeTombstoneBatch documents out, and — when they were the last
+// — the listing recorded complete.
+func (d *DB) finishKnowledgeListingBatch(f KnowledgeSyncFence, id int64, updatedAt, started, at time.Time) (int, bool, error) {
 	wrapErr := func(err error) error {
 		return fmt.Errorf("statedb: finish knowledge listing of source %d: %w", id, classifyDriverErr(err))
 	}
@@ -491,42 +640,70 @@ func (d *DB) FinishKnowledgeListing(id int64, updatedAt, started, at time.Time) 
 	defer d.mu.Unlock()
 	tx, err := d.conn.Begin()
 	if err != nil {
-		return 0, wrapErr(err)
+		return 0, false, wrapErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
-	res, err := tx.Exec(`UPDATE knowledge_sources SET listing_started_ns = 0, full_listing_ns = ?, reconciled_ns = ?
-		WHERE id = ? AND updated_at = ? AND listing_started_ns = ?`,
-		nanos(at), nanos(at), id, formatOptionalTime(updatedAt), nanos(started))
-	if err != nil {
-		return 0, wrapErr(err)
+	if err := f.checkTx(tx, id); err != nil {
+		return 0, false, err
 	}
-	if n, err := res.RowsAffected(); err != nil {
-		return 0, wrapErr(err)
-	} else if n == 0 {
-		return 0, fmt.Errorf("%w: source %d", ErrKnowledgeSourceChanged, id)
+	var one int
+	err = tx.QueryRow(`SELECT 1 FROM knowledge_sources WHERE id = ? AND updated_at = ? AND listing_started_ns = ?`,
+		id, formatOptionalTime(updatedAt), nanos(started)).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, fmt.Errorf("%w: source %d", ErrKnowledgeSourceChanged, id)
 	}
-	n, err := deleteKnowledgeDocumentsTx(tx, id, `listed_ns < ?`, nanos(started))
 	if err != nil {
-		return 0, wrapErr(err)
+		return 0, false, wrapErr(err)
+	}
+	ids, err := idsTx(tx, `SELECT id FROM knowledge_documents WHERE source_id = ? AND deleted_ns = 0 AND listed_ns < ?
+		LIMIT ?`, id, nanos(started), knowledgeTombstoneBatch)
+	if err != nil {
+		return 0, false, wrapErr(err)
+	}
+	n := 0
+	if len(ids) > 0 {
+		if n, err = tombstoneKnowledgeDocumentsTx(tx, id, at, `id IN (SELECT value FROM json_each(?))`, jsonIDs(ids)); err != nil {
+			return 0, false, wrapErr(err)
+		}
+	}
+	done := len(ids) < knowledgeTombstoneBatch
+	if done {
+		if _, err := tx.Exec(`UPDATE knowledge_sources SET listing_started_ns = 0, full_listing_ns = ?, reconciled_ns = ?
+			WHERE id = ?`, nanos(at), nanos(at), id); err != nil {
+			return 0, false, wrapErr(err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, wrapErr(err)
+		return 0, false, wrapErr(err)
 	}
-	return n, nil
+	return n, done, nil
 }
 
 // ReconcileKnowledgeDocuments reconciles source id's documents with present,
 // the external ids of every document its remote holds in scope now, as its
 // connector reported them at at: each document of the source that present
-// does not name is removed with its chunks and matches — unless a sync listed
-// it at or after listedBefore, which keeps a document a listing just indexed
-// from being removed by an answer older than it (a search index that has not
-// caught up yet). The reconciliation is recorded at at. One transaction,
-// written only while the source is the one the sync read and no full listing
-// of it is in progress, whose own sweep is the one to remove what it did not
-// reach; ErrKnowledgeSourceChanged reports either. It returns how many
-// documents went.
+// does not name leaves the index, its chunks and matches with it and its row
+// kept as a tombstone — unless a sync listed it at or after listedBefore,
+// which keeps a document a listing just indexed from being removed by an
+// answer older than it (a search index that has not caught up yet). The
+// reconciliation is recorded at at. Written only while the source is the one
+// the sync read and no full listing of it is in progress, whose own sweep is
+// the one to remove what it did not reach; ErrKnowledgeSourceChanged reports
+// either. It returns how many documents went.
+//
+// Which documents go is read once; they are then taken out
+// knowledgeTombstoneBatch per transaction, each checking again that the
+// source has not changed and that the document still qualifies, and the last
+// recording the reconciliation. One cut short records nothing, so the next
+// sync reconciles again.
 func (d *DB) ReconcileKnowledgeDocuments(id int64, updatedAt time.Time, present []string, listedBefore, at time.Time) (int, error) {
+	return d.ReconcileKnowledgeDocumentsFenced(KnowledgeSyncFence{}, id, updatedAt, present, listedBefore, at)
+}
+
+// ReconcileKnowledgeDocumentsFenced is ReconcileKnowledgeDocuments for a sync
+// holding f's lease: refused with ErrKnowledgeSyncLeaseLost once it does not.
+func (d *DB) ReconcileKnowledgeDocumentsFenced(f KnowledgeSyncFence, id int64, updatedAt time.Time, present []string,
+	listedBefore, at time.Time) (int, error) {
 	ids, err := json.Marshal(present)
 	if err != nil {
 		return 0, fmt.Errorf("statedb: reconcile knowledge documents of source %d: %w", id, err)
@@ -534,6 +711,46 @@ func (d *DB) ReconcileKnowledgeDocuments(id int64, updatedAt time.Time, present 
 	if present == nil {
 		ids = []byte("[]")
 	}
+	d.mu.Lock()
+	doomed, err := func() ([]int64, error) {
+		rows, err := d.conn.Query(`SELECT id FROM knowledge_documents
+			WHERE source_id = ? AND deleted_ns = 0 AND listed_ns < ?
+			  AND external_id NOT IN (SELECT value FROM json_each(?))`, id, nanos(listedBefore), string(ids))
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []int64
+		for rows.Next() {
+			var doc int64
+			if err := rows.Scan(&doc); err != nil {
+				return nil, err
+			}
+			out = append(out, doc)
+		}
+		return out, rows.Err()
+	}()
+	d.mu.Unlock()
+	if err != nil {
+		return 0, fmt.Errorf("statedb: reconcile knowledge documents of source %d: %w", id, classifyDriverErr(err))
+	}
+	total := 0
+	for start := 0; ; start += knowledgeTombstoneBatch {
+		end := min(start+knowledgeTombstoneBatch, len(doomed))
+		last := end == len(doomed)
+		n, err := d.reconcileKnowledgeBatch(f, id, updatedAt, doomed[start:end], listedBefore, at, last)
+		total += n
+		if err != nil || last {
+			return total, err
+		}
+	}
+}
+
+// reconcileKnowledgeBatch is one transaction of a reconciliation: docs out —
+// those still live and listed before listedBefore — and, when last, the
+// reconciliation recorded.
+func (d *DB) reconcileKnowledgeBatch(f KnowledgeSyncFence, id int64, updatedAt time.Time, docs []int64,
+	listedBefore, at time.Time, last bool) (int, error) {
 	wrapErr := func(err error) error {
 		return fmt.Errorf("statedb: reconcile knowledge documents of source %d: %w", id, classifyDriverErr(err))
 	}
@@ -544,21 +761,29 @@ func (d *DB) ReconcileKnowledgeDocuments(id int64, updatedAt time.Time, present 
 		return 0, wrapErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
-	res, err := tx.Exec(`UPDATE knowledge_sources SET reconciled_ns = ?
-		WHERE id = ? AND updated_at = ? AND listing_started_ns = 0`,
-		nanos(at), id, formatOptionalTime(updatedAt))
-	if err != nil {
-		return 0, wrapErr(err)
+	if err := f.checkTx(tx, id); err != nil {
+		return 0, err
 	}
-	if n, err := res.RowsAffected(); err != nil {
-		return 0, wrapErr(err)
-	} else if n == 0 {
+	var one int
+	err = tx.QueryRow(`SELECT 1 FROM knowledge_sources WHERE id = ? AND updated_at = ? AND listing_started_ns = 0`,
+		id, formatOptionalTime(updatedAt)).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("%w: source %d", ErrKnowledgeSourceChanged, id)
 	}
-	n, err := deleteKnowledgeDocumentsTx(tx, id,
-		`listed_ns < ? AND external_id NOT IN (SELECT value FROM json_each(?))`, nanos(listedBefore), string(ids))
 	if err != nil {
 		return 0, wrapErr(err)
+	}
+	n := 0
+	if len(docs) > 0 {
+		if n, err = tombstoneKnowledgeDocumentsTx(tx, id, at, `listed_ns < ? AND id IN (SELECT value FROM json_each(?))`,
+			nanos(listedBefore), jsonIDs(docs)); err != nil {
+			return 0, wrapErr(err)
+		}
+	}
+	if last {
+		if _, err := tx.Exec(`UPDATE knowledge_sources SET reconciled_ns = ? WHERE id = ?`, nanos(at), id); err != nil {
+			return 0, wrapErr(err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, wrapErr(err)
@@ -943,6 +1168,15 @@ func (d *DB) deleteKnowledgeBindingsOfProjectLocked(projectPath string) ([]Knowl
 // returned and nothing is written, so a sync never attaches an old query's
 // matches to a new one.
 func (d *DB) SetKnowledgeBindingDocuments(bindingID int64, query string, externalIDs []string, at time.Time) error {
+	return d.SetKnowledgeBindingDocumentsFenced(KnowledgeSyncFence{}, bindingID, query, externalIDs, at)
+}
+
+// SetKnowledgeBindingDocumentsFenced is SetKnowledgeBindingDocuments for a
+// sync holding f's lease of the binding's source: refused once it does not,
+// so a sync that stalled past its lease cannot put back the matches the one
+// that took over cleared.
+func (d *DB) SetKnowledgeBindingDocumentsFenced(f KnowledgeSyncFence, bindingID int64, query string, externalIDs []string,
+	at time.Time) error {
 	ids, err := json.Marshal(externalIDs)
 	if err != nil {
 		return fmt.Errorf("statedb: record knowledge binding matches: %w", err)
@@ -971,20 +1205,23 @@ func (d *DB) SetKnowledgeBindingDocuments(bindingID int64, query string, externa
 	if err != nil {
 		return wrapErr(err)
 	}
+	if err := f.checkTx(tx, sourceID); err != nil {
+		return err
+	}
 	if current != query {
 		return fmt.Errorf("%w: binding %d", ErrKnowledgeBindingChanged, bindingID)
 	}
 	// The new answer first, then whatever the old one had that it does not.
 	if _, err := tx.Exec(`INSERT INTO knowledge_binding_documents (binding_id, document_id)
 		SELECT ?, id FROM knowledge_documents
-		WHERE source_id = ? AND external_id IN (SELECT value FROM json_each(?))
+		WHERE source_id = ? AND deleted_ns = 0 AND external_id IN (SELECT value FROM json_each(?))
 		ON CONFLICT(binding_id, document_id) DO NOTHING`, bindingID, sourceID, string(ids)); err != nil {
 		return wrapErr(err)
 	}
 	if _, err := tx.Exec(`DELETE FROM knowledge_binding_documents
 		WHERE binding_id = ? AND document_id NOT IN (
 		  SELECT id FROM knowledge_documents
-		  WHERE source_id = ? AND external_id IN (SELECT value FROM json_each(?)))`,
+		  WHERE source_id = ? AND deleted_ns = 0 AND external_id IN (SELECT value FROM json_each(?)))`,
 		bindingID, sourceID, string(ids)); err != nil {
 		return wrapErr(err)
 	}
@@ -1003,6 +1240,14 @@ func (d *DB) SetKnowledgeBindingDocuments(bindingID int64, query string, externa
 // what a sync does when it could not ask the connector, rather than keep an
 // answer it can no longer vouch for.
 func (d *DB) ClearKnowledgeBindingDocuments(id int64) error {
+	return d.ClearKnowledgeBindingDocumentsFenced(KnowledgeSyncFence{}, id)
+}
+
+// ClearKnowledgeBindingDocumentsFenced is ClearKnowledgeBindingDocuments for
+// a sync holding f's lease of the binding's source: refused once it does not,
+// so a sync that stalled past its lease cannot clear the answer the one that
+// took over recorded.
+func (d *DB) ClearKnowledgeBindingDocumentsFenced(f KnowledgeSyncFence, id int64) error {
 	wrapErr := func(err error) error {
 		return fmt.Errorf("statedb: clear knowledge binding %d matches: %w", id, classifyDriverErr(err))
 	}
@@ -1013,6 +1258,20 @@ func (d *DB) ClearKnowledgeBindingDocuments(id int64) error {
 		return wrapErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
+	if f.Holder != "" || !f.Version.IsZero() {
+		var sourceID int64
+		err := tx.QueryRow(`SELECT source_id FROM knowledge_bindings WHERE id = ?`, id).Scan(&sourceID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Gone since it was read: nothing of it to clear.
+			return nil
+		}
+		if err != nil {
+			return wrapErr(err)
+		}
+		if err := f.checkTx(tx, sourceID); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(`DELETE FROM knowledge_binding_documents WHERE binding_id = ?`, id); err != nil {
 		return wrapErr(err)
 	}
@@ -1085,12 +1344,13 @@ const (
 // two writers index it at once. It returns the chunks and whether they stop
 // short of the document, which marks it truncated. It must not use this DB:
 // the handle's lock is held while it runs.
+//
+// A document that comes back after it was deleted — its tombstone still kept
+// — is indexed in its tombstone's row, keeping its id, and counts as created.
 func (d *DB) IndexKnowledgeDocument(doc KnowledgeDocumentRow, chunk func() ([]KnowledgeChunk, bool)) (KnowledgeIndexOutcome, error) {
 	if strings.TrimSpace(doc.ExternalID) == "" {
 		return "", errors.New("statedb: a knowledge document needs an external id")
 	}
-	acl := jsonStrings(doc.ACL)
-	ancestors := jsonStrings(doc.Ancestors)
 	wrapErr := func(err error) error {
 		return fmt.Errorf("statedb: index knowledge document %q: %w", doc.ExternalID, classifyDriverErr(err))
 	}
@@ -1109,25 +1369,46 @@ func (d *DB) IndexKnowledgeDocument(doc KnowledgeDocumentRow, chunk func() ([]Kn
 		}
 		return "", wrapErr(err)
 	}
+	outcome, err := indexKnowledgeDocumentTx(tx, doc, chunk)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", wrapErr(err)
+	}
+	return outcome, nil
+}
+
+// indexKnowledgeDocumentTx is IndexKnowledgeDocument's work inside tx, for a
+// source the caller has checked exists.
+func indexKnowledgeDocumentTx(tx *sql.Tx, doc KnowledgeDocumentRow, chunk func() ([]KnowledgeChunk, bool)) (KnowledgeIndexOutcome, error) {
+	if strings.TrimSpace(doc.ExternalID) == "" {
+		return "", errors.New("statedb: a knowledge document needs an external id")
+	}
+	acl := jsonStrings(doc.ACL)
+	ancestors := jsonStrings(doc.Ancestors)
+	wrapErr := func(err error) error {
+		return fmt.Errorf("statedb: index knowledge document %q: %w", doc.ExternalID, classifyDriverErr(err))
+	}
 	var (
 		docID    int64
 		prevHash string
+		prevGone int64
 	)
-	err = tx.QueryRow(`SELECT id, content_hash FROM knowledge_documents WHERE source_id = ? AND external_id = ?`,
-		doc.SourceID, doc.ExternalID).Scan(&docID, &prevHash)
+	err := tx.QueryRow(`SELECT id, content_hash, deleted_ns FROM knowledge_documents WHERE source_id = ? AND external_id = ?`,
+		doc.SourceID, doc.ExternalID).Scan(&docID, &prevHash, &prevGone)
 	existed := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", wrapErr(err)
 	}
-	if existed && prevHash == doc.ContentHash {
+	// A tombstone has no content hash, so it never matches one; compared all
+	// the same, since an empty hash is a caller's to pass.
+	if existed && prevGone == 0 && prevHash == doc.ContentHash {
 		if _, err := tx.Exec(`UPDATE knowledge_documents SET
 			url = ?, space_key = ?, remote_updated_at = ?, acl = ?, ancestors = ?, listed_ns = ?
 			WHERE id = ?`,
 			doc.URL, doc.SpaceKey, formatOptionalTime(doc.RemoteUpdatedAt), acl, ancestors, nanos(doc.ListedAt),
 			docID); err != nil {
-			return "", wrapErr(err)
-		}
-		if err := tx.Commit(); err != nil {
 			return "", wrapErr(err)
 		}
 		return KnowledgeIndexUnchanged, nil
@@ -1160,7 +1441,8 @@ func (d *DB) IndexKnowledgeDocument(doc KnowledgeDocumentRow, chunk func() ([]Kn
 		  truncated         = excluded.truncated,
 		  chunk_count       = excluded.chunk_count,
 		  indexed_at        = excluded.indexed_at,
-		  listed_ns         = excluded.listed_ns
+		  listed_ns         = excluded.listed_ns,
+		  deleted_ns        = 0
 		RETURNING id`,
 		doc.SourceID, doc.ExternalID, doc.Title, doc.URL, doc.SpaceKey, formatOptionalTime(doc.RemoteUpdatedAt),
 		acl, ancestors, doc.ContentHash, doc.BodyBytes, boolInt(doc.Truncated), len(chunks), now,
@@ -1184,10 +1466,7 @@ func (d *DB) IndexKnowledgeDocument(doc KnowledgeDocumentRow, chunk func() ([]Kn
 			return "", wrapErr(err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return "", wrapErr(err)
-	}
-	if existed {
+	if existed && prevGone == 0 {
 		return KnowledgeIndexUpdated, nil
 	}
 	return KnowledgeIndexCreated, nil
@@ -1260,7 +1539,7 @@ func stringsFromJSON(s string) []string {
 }
 
 // GetKnowledgeDocument returns one document of a source; found is false when
-// the source does not hold it.
+// the source does not hold it — a tombstone included.
 func (d *DB) GetKnowledgeDocument(sourceID int64, externalID string) (row KnowledgeDocumentRow, found bool, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1271,7 +1550,7 @@ func (d *DB) GetKnowledgeDocument(sourceID int64, externalID string) (row Knowle
 	var listed int64
 	err = d.conn.QueryRow(`SELECT id, source_id, external_id, title, url, space_key, remote_updated_at, acl,
 		ancestors, content_hash, body_bytes, truncated, chunk_count, indexed_at, listed_ns
-		FROM knowledge_documents WHERE source_id = ? AND external_id = ?`, sourceID, externalID).Scan(
+		FROM knowledge_documents WHERE source_id = ? AND external_id = ? AND deleted_ns = 0`, sourceID, externalID).Scan(
 		&row.ID, &row.SourceID, &row.ExternalID, &row.Title, &row.URL, &row.SpaceKey, &remote, &acl,
 		&ancestors, &row.ContentHash, &row.BodyBytes, &truncated, &row.ChunkCount, &indexed, &listed)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1289,42 +1568,42 @@ func (d *DB) GetKnowledgeDocument(sourceID int64, externalID string) (row Knowle
 	return row, true, nil
 }
 
-// DeleteKnowledgeDocument removes one document of a source with its chunks,
-// their full-text entries and the bindings' matches of it. found is false when
-// the source did not hold it.
+// DeleteKnowledgeDocument takes one document out of a source's index: its
+// chunks, their full-text entries and the bindings' matches of it go, and its
+// row is kept as a tombstone (see tombstoneKnowledgeDocumentsTx). found is
+// false when the source did not hold it, or held only its tombstone.
 func (d *DB) DeleteKnowledgeDocument(sourceID int64, externalID string) (bool, error) {
-	n, err := d.deleteKnowledgeDocuments(sourceID, `external_id = ?`, externalID)
-	return n > 0, err
-}
-
-// deleteKnowledgeDocuments removes the documents of sourceID that match, a
-// predicate over knowledge_documents taking args, in a transaction of its own.
-func (d *DB) deleteKnowledgeDocuments(sourceID int64, match string, args ...any) (int, error) {
 	wrapErr := func(err error) error {
-		return fmt.Errorf("statedb: delete knowledge documents of source %d: %w", sourceID, classifyDriverErr(err))
+		return fmt.Errorf("statedb: delete knowledge document %q of source %d: %w", externalID, sourceID, classifyDriverErr(err))
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	tx, err := d.conn.Begin()
 	if err != nil {
-		return 0, wrapErr(err)
+		return false, wrapErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
-	n, err := deleteKnowledgeDocumentsTx(tx, sourceID, match, args...)
+	n, err := tombstoneKnowledgeDocumentsTx(tx, sourceID, time.Now(), `external_id = ?`, externalID)
 	if err != nil {
-		return 0, wrapErr(err)
+		return false, wrapErr(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, wrapErr(err)
+		return false, wrapErr(err)
 	}
-	return n, nil
+	return n > 0, nil
 }
 
-// deleteKnowledgeDocumentsTx removes, in tx, the documents of sourceID that
-// match — with their chunks, full-text entries and bindings' matches. match is
-// one of this file's own predicates over knowledge_documents, taking args.
-func deleteKnowledgeDocumentsTx(tx *sql.Tx, sourceID int64, match string, args ...any) (int, error) {
-	docs := `SELECT id FROM knowledge_documents WHERE source_id = ? AND ` + match
+// tombstoneKnowledgeDocumentsTx takes, in tx, the live documents of sourceID
+// that match out of the index at at: their chunks, full-text entries and
+// bindings' matches go, and each row is blanked to a tombstone — deleted_ns
+// set, its title, URL, space, access hints, ancestors and content hash
+// cleared — keeping only its id and external id until retention purges it.
+// What a document said is gone at once; that it was here is kept a while, so
+// a citation made before it went still resolves, and a document that comes
+// back keeps its id. match is one of this file's own predicates over
+// knowledge_documents, taking args; it returns how many documents went.
+func tombstoneKnowledgeDocumentsTx(tx *sql.Tx, sourceID int64, at time.Time, match string, args ...any) (int, error) {
+	docs := `SELECT id FROM knowledge_documents WHERE source_id = ? AND deleted_ns = 0 AND ` + match
 	all := append([]any{sourceID}, args...)
 	if err := dropKnowledgeChunksTx(tx, `document_id IN (`+docs+`)`, all...); err != nil {
 		return 0, err
@@ -1332,12 +1611,24 @@ func deleteKnowledgeDocumentsTx(tx *sql.Tx, sourceID int64, match string, args .
 	if _, err := tx.Exec(`DELETE FROM knowledge_binding_documents WHERE document_id IN (`+docs+`)`, all...); err != nil {
 		return 0, err
 	}
-	res, err := tx.Exec(`DELETE FROM knowledge_documents WHERE source_id = ? AND `+match, all...)
+	res, err := tx.Exec(`UPDATE knowledge_documents SET
+		deleted_ns = ?, title = '', url = '', space_key = '', remote_updated_at = '', acl = '[]', ancestors = '[]',
+		content_hash = '', body_bytes = 0, truncated = 0, chunk_count = 0
+		WHERE source_id = ? AND deleted_ns = 0 AND `+match, append([]any{tombstoneNanos(at)}, all...)...)
 	if err != nil {
 		return 0, err
 	}
 	n, err := res.RowsAffected()
 	return int(n), err
+}
+
+// tombstoneNanos is at as a tombstone's deleted_ns: never 0, which would
+// read as a live document.
+func tombstoneNanos(at time.Time) int64 {
+	if n := nanos(at); n > 0 {
+		return n
+	}
+	return time.Now().UnixNano()
 }
 
 // ── Search ──────────────────────────────────────────────────────────────────
@@ -1384,6 +1675,7 @@ type KnowledgeHit struct {
 // twice. Each join is what keeps a project inside its own knowledge:
 //
 //	knowledge_bindings  only sources bound to this project path,
+//	deleted_ns          never a tombstone, which has no chunks anyway,
 //	spaces              only documents in the binding's space keys, if any,
 //	query               only documents a sync recorded as matching the
 //	                    binding's query, if it has one,
@@ -1407,6 +1699,7 @@ const knowledgeSearchSQL = `WITH top AS (
     JOIN knowledge_sources AS s ON s.id = c.source_id AND s.enabled = 1
     JOIN knowledge_bindings AS b ON b.source_id = c.source_id AND b.project_path = ?
    WHERE knowledge_chunks_fts MATCH ?
+     AND d.deleted_ns = 0
      AND (b.spaces = '[]' OR d.space_key IN (SELECT value FROM json_each(b.spaces)))
      AND (b.query = '' OR EXISTS (SELECT 1 FROM knowledge_binding_documents AS m
                                    WHERE m.binding_id = b.id AND m.document_id = d.id))

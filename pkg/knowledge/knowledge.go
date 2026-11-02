@@ -92,6 +92,32 @@ const (
 	MaxSyncErrorBytes = 1024
 )
 
+// How often a source is synced (Task 20470). A source sets its own interval,
+// in whole minutes within these bounds, or takes the default.
+const (
+	DefaultSyncInterval = 30 * time.Minute
+	MinSyncInterval     = 5 * time.Minute
+	MaxSyncInterval     = 24 * time.Hour
+)
+
+// What started a sync.
+const (
+	// OriginSchedule is the hub-cluster leader's scheduler.
+	OriginSchedule = "schedule"
+	// OriginManual is a person asking for a sync now.
+	OriginManual = "manual"
+)
+
+// How a sync ended, as SyncState.Status records it.
+const (
+	StatusOK    = "ok"
+	StatusError = "error"
+	// StatusInterrupted is a sync stopped because the hub process running it
+	// stopped, or stopped leading its cluster: it resumes from its cursor at
+	// the next one, and is due at once.
+	StatusInterrupted = "interrupted"
+)
+
 // Snippet markers: a search result's snippet surrounds each matched term with
 // these, and marks text left out with SnippetEllipsis. Characters rather than
 // markup, so a snippet is safe to show as text and readable to a person or a
@@ -191,21 +217,35 @@ type Source struct {
 	// "name#KEY"; empty for a source that needs none.
 	SecretRef string
 	Enabled   bool
-	Sync      SyncState
-	CreatedAt time.Time
-	CreatedBy string
-	UpdatedAt time.Time
-	UpdatedBy string
+	// SyncInterval is how often the hub syncs the source, as it was set;
+	// zero takes DefaultSyncInterval (see Interval).
+	SyncInterval time.Duration
+	Sync         SyncState
+	CreatedAt    time.Time
+	CreatedBy    string
+	UpdatedAt    time.Time
+	UpdatedBy    string
 	// Counts is what the source holds. Filled where it was asked for.
 	Counts Counts
 }
 
+// Interval is how often the hub syncs the source.
+func (s Source) Interval() time.Duration {
+	if s.SyncInterval <= 0 {
+		return DefaultSyncInterval
+	}
+	return s.SyncInterval
+}
+
 // SyncState is how a source's last sync went.
 type SyncState struct {
-	// Status is "" (never synced), "ok" or "error".
+	// Status is "" (never synced), StatusOK, StatusError or
+	// StatusInterrupted.
 	Status string
-	Error  string
-	At     time.Time
+	// Error is the last sync's error, scrubbed of credentials.
+	Error string
+	// At is when the last sync ended.
+	At time.Time
 	// Resumes reports whether the next sync continues from a cursor rather
 	// than listing the source from the beginning.
 	Resumes bool
@@ -213,6 +253,55 @@ type SyncState struct {
 	// the source holds — by a Reconciler's answer, or a full listing's
 	// sweep; zero for never.
 	ReconciledAt time.Time
+	// StartedAt, Duration and Origin describe the last sync: when it began,
+	// how long it ran, and what started it (OriginSchedule or OriginManual).
+	StartedAt time.Time
+	Duration  time.Duration
+	Origin    string
+	// Counts is what the last sync did.
+	Counts SyncCounts
+	// More reports a last sync that stopped before its listing's end; the
+	// next one is due at once.
+	More bool
+	// OKAt is when a sync last ended ok; zero for never.
+	OKAt time.Time
+	// Running is the sync in progress, if one is, and NextAt when the
+	// schedule next syncs the source — zero for a disabled one. Filled where
+	// a source is read through Access.
+	Running *RunningSync
+	NextAt  time.Time
+}
+
+// SyncCounts is what one sync did, as its source records it: never a
+// document's content.
+type SyncCounts struct {
+	Pages     int `json:"pages"`
+	Listed    int `json:"listed"`
+	Created   int `json:"created"`
+	Updated   int `json:"updated"`
+	Unchanged int `json:"unchanged"`
+	// Deleted counts the documents the source reported deleted.
+	Deleted  int `json:"deleted"`
+	Rejected int `json:"rejected"`
+	// Removed counts the documents a full listing's sweep or a
+	// reconciliation found gone.
+	Removed int `json:"removed"`
+	// Narrowed counts the bindings whose query matches were recorded.
+	Narrowed int `json:"narrowed"`
+	// Complete reports that the listing reached its end.
+	Complete bool `json:"complete"`
+	// Full reports a sync that took part in a full listing.
+	Full bool `json:"full,omitempty"`
+}
+
+// RunningSync is a sync in progress, as its lease says.
+type RunningSync struct {
+	// Member is the hub process running it.
+	Member string
+	Origin string
+	// Actor is who asked for a manual sync.
+	Actor string
+	Since time.Time
 }
 
 // Counts is how much a source holds.

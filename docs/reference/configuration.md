@@ -2334,6 +2334,7 @@ retention:
   event_max_rows: 20000
   cost_max_rows: 50000
   telemetry_max_age_days: 30
+  knowledge_deleted_days: 30
 ```
 
 | Key | Default | Range | What it does |
@@ -2344,6 +2345,7 @@ retention:
 | `event_max_rows` | `20000` | `100`–`100000000`, or `-1` | Row ceiling for the unified event journal. |
 | `cost_max_rows` | `50000` | `100`–`100000000`, or `-1` | Row ceiling for the cost ledger. Deliberately the loosest — a cost row is tiny, `cloop cost report` aggregates over the whole table, and the ledger is mirrored to `.cloop/costs.jsonl`. It exists so the table is bounded, not so it is pruned. |
 | `telemetry_max_age_days` | `30` | `1`–`3650`, or `-1` | Ages out browser telemetry. There is no row key because the write path already caps that table: a public ingest endpoint must not be able to fill a disk between two passes. |
+| `knowledge_deleted_days` | `30` | `1`–`3650`, or `-1` | Purges the tombstone a knowledge document leaves when its source deletes it. What the document said — its chunks, full-text entries and matches — leaves the index at once; the tombstone keeps only its id and external id, so a citation made before still resolves to "deleted" and a document that comes back keeps its id. Every pass also purges the documents and chunks of a deleted knowledge source, whatever this says: a source's deletion removes them itself, and only one cut short leaves any. |
 
 `-1` keeps a table in full while leaving the rest of the policy in force — the
 opt-out these need and the archive keys do not, because these default to on. A

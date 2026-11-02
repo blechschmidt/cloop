@@ -366,7 +366,7 @@ var registry = []Entry{
 		Entity:  "knowledge_source",
 		Trigger: "An administrator connects an organisation knowledge source, or a person connects a personal one.",
 		Payload: []string{
-			"id", "kind", "name", "scope", "owner", "config", "signs_in_with", "enabled",
+			"id", "kind", "name", "scope", "owner", "config", "signs_in_with", "enabled", "sync_interval_minutes",
 		},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
@@ -376,11 +376,12 @@ var registry = []Entry{
 			"reference the hub signs in to the source with — a name, never the secret.",
 	},
 	{
-		Action:    ActionKnowledgeSourceUpdate,
-		Home:      HomeControlPlane,
-		Entity:    "knowledge_source",
-		Trigger:   "A knowledge source's name, configuration, credential reference or enabled state changes.",
-		Payload:   []string{"id", "kind", "name", "scope", "owner", "changed", "config", "signs_in_with", "enabled", "resync"},
+		Action:  ActionKnowledgeSourceUpdate,
+		Home:    HomeControlPlane,
+		Entity:  "knowledge_source",
+		Trigger: "A knowledge source's name, configuration, credential reference, sync interval or enabled state changes.",
+		Payload: []string{"id", "kind", "name", "scope", "owner", "changed", "config", "signs_in_with", "enabled",
+			"sync_interval_minutes", "resync"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "`changed` lists the fields the request changed. `resync` is true when a new configuration made the " +
@@ -394,8 +395,9 @@ var registry = []Entry{
 		Payload:   []string{"id", "kind", "name", "scope", "owner", "documents", "chunks", "bindings"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note: "The counts are what was deleted with it. Its bindings end here too: no " +
-			"`knowledge.source.unbind` row is written for each.",
+		Note: "The counts are what goes with it. Its bindings end here too: no `knowledge.source.unbind` row is " +
+			"written for each. The source stops being searchable at this row; its documents and chunks are purged " +
+			"right after in bounded transactions, and what a purge cut short leaves is removed by the next one.",
 	},
 	{
 		Action:  ActionKnowledgeSourceBind,
@@ -422,6 +424,20 @@ var registry = []Entry{
 		Read:      authz.PermAuditRead,
 		Note: "A project removed from the hub takes its bindings with it — they are keyed by its path, and " +
 			"would otherwise serve whatever is registered there next — one row each, `reason` saying so.",
+	},
+	{
+		Action: ActionKnowledgeSourceSync,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_source",
+		Trigger: "A person asks the hub to sync a knowledge source now — `cloop knowledge sync`, or " +
+			"POST /api/knowledge/sources/{id}/sync — and the sync starts.",
+		Payload:   []string{"id", "kind", "name", "scope", "owner", "origin", "member"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "Written when the sync takes the source's sync lease, so a request refused because another sync of the " +
+			"source is running writes none. `origin` is `manual`; `member` is the hub process that runs it. The " +
+			"syncs the hub-cluster leader schedules are its own routine work and are not audited: how each went is " +
+			"on the source (status, counts, duration and the last error, scrubbed of credentials).",
 	},
 
 	// ── step ───────────────────────────────────────────────────────────────

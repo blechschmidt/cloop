@@ -56,6 +56,9 @@ var sudoExempt = map[string]string{
 	"POST /api/ci/rules/test":                  "evaluates a rule against a sample token and stores nothing",
 	"POST /api/config/oidc/test":               "contacts an issuer and saves nothing",
 	"POST /api/config/notifications/test":      "sends one fixed message to an already configured webhook",
+
+	// Work the hub does on its own schedule anyway.
+	"POST /api/knowledge/sources/{id}/sync": "syncs a source now, which the schedule syncs on its interval anyway; it changes no configuration and reads with the credential the source already names",
 }
 
 // TestPrivilegedRoutesAskForARecentSignIn is the gate the task asks for: every

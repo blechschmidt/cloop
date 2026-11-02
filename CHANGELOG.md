@@ -179,6 +179,43 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **The hub syncs its knowledge sources itself: on the cluster leader, one sync
+  per source at a time, with a manual sync, status, metrics and retention.**
+  Until now nothing called a source's sync. `cloop ui` now runs a sync
+  scheduler as a hub-cluster leader duty, so a cluster syncs each enabled source
+  once per interval, not once per member: every 30 minutes, or 5 minutes to 24
+  hours as the source sets (`sync_interval_minutes`), and within a minute when
+  a sync stopped short. `POST /api/knowledge/sources/{id}/sync` syncs a source
+  now, on the member asked: an administrator any source, a person their own
+  personal one, audited as `knowledge.source.sync`. Every sync first takes its
+  source's lease in the control plane, so a manual sync and the leader's, or
+  two manual ones on different members, never run at once; the second is
+  answered 409, naming the member running it. The lease is renewed while the
+  sync runs, and every write that moves it forward checks the lease in the same
+  transaction, so a process that stalled past its lease writes nothing more.
+  The credential is opened through the secret broker for that one call, and
+  wiped when the sync ends. A page is written in bounded transactions (50 documents or 4 MiB
+  of text), each document whole in one and the page's cursor with the last: a
+  hub killed mid-sync leaves no document half-indexed and no cursor ahead of
+  what it committed, and the next sync resumes there. A full listing's sweep
+  and a reconciliation take documents out 200 per transaction. A sync records
+  its status (`ok`, `error`, or `interrupted` — by a stopping hub, a leader
+  stepping down, or a change to the source, all resumed within a minute), what
+  it did, how long it took and its last error scrubbed of credentials. A connector that panics fails its own
+  source's sync and no other, and a hub that stops records its syncs
+  interrupted and releases their leases. A document its source deleted now
+  leaves the index at once but keeps a tombstone of its ids, which the janitor
+  purges after `retention.knowledge_deleted_days` (30). A deleted source stops
+  being searchable at once; its rows are purged in bounded transactions, no
+  longer in one that held the database for as long as a large source took. New
+  metrics: `cloop_knowledge_sync_duration_seconds`,
+  `cloop_knowledge_documents_indexed_total`, `cloop_knowledge_sync_errors_total`
+  and, from the leader only, `cloop_knowledge_index_documents`, `_chunks` and
+  `_bytes`. `cloop knowledge sources`, `cloop knowledge sync <source> [--wait]`
+  and `cloop knowledge search <project> <query>` do the same from a terminal
+  signed in with `cloop login` or holding an API token. Migration 0094 is
+  additive (Task 20470).
+
 - **Jira connector: Jira Cloud and Data Center issues as knowledge sources.**
   The hub can now connect a Jira site and search its issues from the projects
   it is bound to, as kind `jira` (`pkg/knowledge/jira`). Cloud signs in with an

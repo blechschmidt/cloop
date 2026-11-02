@@ -205,6 +205,12 @@ func TestSyncStopsWhenTheSourceIsReconfigured(t *testing.T) {
 	if row.SyncCursor != "" {
 		t.Fatalf("the old sync wrote its cursor %q over the reconfiguration", row.SyncCursor)
 	}
+	// Overtaken, not failed: it is interrupted, and the next sync is due at
+	// once to take the change up.
+	if row.SyncStatus != StatusInterrupted || !row.SyncMore || SyncStatusOf(err) != StatusInterrupted ||
+		FailureReason(err) != "" {
+		t.Fatalf("a sync overtaken by a reconfiguration recorded %q %q more=%v", row.SyncStatus, row.SyncError, row.SyncMore)
+	}
 }
 
 // reconfiguringConnector changes its source during its first List.

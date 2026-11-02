@@ -168,6 +168,15 @@ const (
 	// endpoint must not be able to fill a disk between two passes — so this is
 	// the half no write-time cap can express: a trail nobody came back for.
 	DefaultTelemetryMaxAge = 30 * 24 * time.Hour
+
+	// DefaultKnowledgeDeletedMaxAge is how long the tombstone of a knowledge
+	// document its source deleted is kept (Task 20470). The document's
+	// chunks and what it said went when it was deleted; the tombstone holds
+	// its id and external id, so a citation made before still resolves to
+	// "deleted", and a document that comes back keeps its id. A month covers
+	// a page restored from a wiki's trash and the citations in a sprint's
+	// task history.
+	DefaultKnowledgeDeletedMaxAge = 30 * 24 * time.Hour
 )
 
 // Policy is the retention configuration for one pass.
@@ -244,6 +253,13 @@ type Policy struct {
 	// lacks is a way for a quiet trail to expire.
 	TelemetryMaxAge time.Duration
 
+	// KnowledgeDeletedMaxAge purges the tombstones of knowledge documents
+	// deleted longer ago than this. Every pass also purges what a deleted
+	// knowledge source left — its documents and chunks, which its deletion
+	// purges itself unless it was cut short — whatever this says: rows
+	// nothing can reach are no history worth keeping.
+	KnowledgeDeletedMaxAge time.Duration
+
 	// ArchiveDir is the directory holding sealed audit exports. Empty means
 	// <workDir>/.cloop/audit-archive, which is auditretention's default — but
 	// a real deployment is advised to point audit.export_dir at storage the
@@ -267,6 +283,7 @@ func DefaultPolicy() Policy {
 		EventMaxRows:           DefaultEventMaxRows,
 		CostMaxRows:            DefaultCostMaxRows,
 		TelemetryMaxAge:        DefaultTelemetryMaxAge,
+		KnowledgeDeletedMaxAge: DefaultKnowledgeDeletedMaxAge,
 	}
 }
 
@@ -327,6 +344,9 @@ func PolicyFromConfig(cfg *config.Config) Policy {
 	if rc.TelemetryMaxAgeDays != 0 {
 		p.TelemetryMaxAge = days(rc.TelemetryMaxAgeDays)
 	}
+	if rc.KnowledgeDeletedDays != 0 {
+		p.KnowledgeDeletedMaxAge = days(rc.KnowledgeDeletedDays)
+	}
 	// Seals follow audit.export_dir when the operator moved them. Without
 	// this the janitor bounds .cloop/audit-archive — which in that
 	// configuration is empty — while the directory actually filling up is
@@ -358,6 +378,7 @@ func (p Policy) normalise() Policy {
 	// every call site having to know the convention.
 	p.ProviderCallBodyMaxAge = normaliseDuration(p.ProviderCallBodyMaxAge, DefaultProviderCallBodyMaxAge)
 	p.TelemetryMaxAge = normaliseDuration(p.TelemetryMaxAge, DefaultTelemetryMaxAge)
+	p.KnowledgeDeletedMaxAge = normaliseDuration(p.KnowledgeDeletedMaxAge, DefaultKnowledgeDeletedMaxAge)
 	p.ProviderCallMaxRows = normaliseLimit(p.ProviderCallMaxRows, DefaultProviderCallMaxRows)
 	p.StepMaxRows = normaliseLimit(p.StepMaxRows, DefaultStepMaxRows)
 	p.EventMaxRows = normaliseLimit(p.EventMaxRows, DefaultEventMaxRows)
@@ -509,7 +530,10 @@ type Report struct {
 	Events        StepResult `json:"events"`
 	Costs         StepResult `json:"costs"`
 	Telemetry     StepResult `json:"telemetry"`
-	Vacuum        StepResult `json:"vacuum"`
+	// Knowledge is the knowledge index's tombstones and what deleted
+	// sources left (Task 20470).
+	Knowledge StepResult `json:"knowledge"`
+	Vacuum    StepResult `json:"vacuum"`
 	// WAL is the TRUNCATE checkpoint that ends the pass (Task 20392).
 	WAL StepResult `json:"wal"`
 	// Before and After are the .cloop breakdowns either side of the pass.
@@ -523,7 +547,7 @@ func (r *Report) rowSteps() []StepResult {
 	if r == nil {
 		return nil
 	}
-	return []StepResult{r.ProviderCalls, r.Steps, r.Events, r.Costs, r.Telemetry}
+	return []StepResult{r.ProviderCalls, r.Steps, r.Events, r.Costs, r.Telemetry, r.Knowledge}
 }
 
 // BytesFreed totals what the pass returned to the filesystem.

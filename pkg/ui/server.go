@@ -738,6 +738,10 @@ type Server struct {
 	// The requirements checks this member is running (Task 20458), so
 	// shutdown can stop them. See requirements_api.go.
 	reqChecks requirementChecks
+	// knowledgeSync is this member's knowledge sync runner (Task 20470):
+	// the leader's schedule and the syncs people ask this member for. See
+	// knowledge_sync.go.
+	knowledgeSync knowledgeSyncState
 	// The spec-file reads this member is running, one per project, and the
 	// parses of what they read (Task 20459). See requirements_spec_api.go.
 	specReads  specReadJobs
@@ -1591,6 +1595,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// mint two tokens — and every member hands the new token to its own live
 	// monitor sessions. See kubeshare.go.
 	s.runLeaderDuty(watcherCtx, "kube-share-renewal", s.watchKubeShareRenewals)
+	// Syncs every enabled knowledge source on its interval (Task 20470). A
+	// leader duty, so a cluster syncs each source once; a sync someone asks
+	// a member for runs on that member, and the source's lease keeps the two
+	// from overlapping. See knowledge_sync.go.
+	s.runLeaderDuty(watcherCtx, "knowledge-sync", s.watchKnowledgeSync)
 	go s.watchKubeGuardUpstreams(watcherCtx)
 	// The daily isolation probe of every executor's runtime (Task 20439), on
 	// every member: each probes the devices whose sockets it holds, and the
@@ -1791,6 +1800,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// And the spec-file reads (Task 20459): a read cut short records only
 	// that it got nothing.
 	s.specReads.stop(5 * time.Second)
+	// And the knowledge syncs (Task 20470): each records itself interrupted
+	// and releases its source's lease, so whichever member syncs next
+	// resumes from its cursor without waiting the lease out.
+	s.stopKnowledgeSyncs(5 * time.Second)
 	// Kill any parked `claude auth login` children. Each one is a subprocess
 	// blocked on stdin waiting for a pasted code, so on a multi-user hub an
 	// unclean stop could otherwise leave one per half-finished login.

@@ -220,6 +220,12 @@ func registerHubCollectors() {
 			Families: []*hubmetrics.Metric{hubmetrics.AuditForwardLag, hubmetrics.AuditForwardBacklog},
 			Collect:  withScrape(collectAuditForward),
 		},
+		hubmetrics.CollectorSpec{
+			Name: "knowledge_index",
+			Families: []*hubmetrics.Metric{hubmetrics.KnowledgeIndexDocuments, hubmetrics.KnowledgeIndexChunks,
+				hubmetrics.KnowledgeIndexBytes},
+			Collect: withScrape(collectKnowledgeIndex),
+		},
 	)
 }
 

@@ -3168,6 +3168,45 @@ kept whatever the answer says, so an answer read from a search index that lags
 the listing cannot undo it (`TestSyncReconcilesWhenDue`,
 `TestReconcileKnowledgeDocuments`).
 
+**Syncs: one at a time, on the leader.** The hub-cluster leader syncs every
+enabled source on the source's interval — 30 minutes, or 5 minutes to 24 hours
+as the source sets — and only the leader: a cluster syncs each source once, not
+once per member (Task 20470, `TestKnowledgeSyncRunsOnTheLeaderOnly`). A person
+may ask for a sync now (`POST /api/knowledge/sources/{id}/sync`, `cloop
+knowledge sync`) — an administrator for any source, its owner for a personal
+one — and it runs on the member they asked, audited as
+[`knowledge.source.sync`](../reference/audit-events.md#knowledgesource)
+(`TestKnowledgeSyncAPI`, `TestOnlyAdminsAndOwnersAskForASync`). Every sync
+first takes its source's lease in the control plane, so a manual sync and the
+leader's, or two manual ones on different members, never run at once: the
+second is answered 409, naming the member that holds the source
+(`TestOneSyncPerSourceAtATime`). The lease is renewed while the sync runs, and
+every write that moves it forward — a batch of documents and the cursor after
+them, the start and end of a full listing, a reconciliation, its outcome —
+checks it in the same transaction, so a process that stalled past its lease
+writes nothing more once another sync has taken over
+(`TestASyncThatLosesItsLeaseWritesNothingMore`, `TestKnowledgeSyncLease`). A
+page is written in bounded transactions, each document whole in one, the
+page's cursor with the last: a hub killed mid-sync leaves no document
+half-indexed and no cursor ahead of what it committed, and the next sync
+resumes from that cursor (`TestACrashMidSyncLeavesNoHalfIndexedDocument`,
+`TestKnowledgeBatchCommitsWithItsCursor`). A full listing's sweep and a
+reconciliation take documents out in bounded transactions too, so removing
+most of a large source never holds the database's write lock — and every other
+member's heartbeat behind it — for long (`TestASweepTakesSeveralTransactions`). A connector that panics fails its
+own source's sync, recorded with the credential scrubbed from it, and no other
+(`TestAPanickingConnectorFailsOnlyItsOwnSync`); a hub that stops, or a leader
+that steps down, records its syncs as interrupted and releases their leases,
+and a hub that has begun to stop starts none (`TestStoppingInterruptsSyncsCleanly`,
+`TestStopReachesEverySyncItRuns`, `TestAStoppingHubStartsNoSync`). A source the connector reports deleted,
+or a sweep or reconciliation finds gone, leaves the index at once — chunks,
+matches and what it said — keeping a tombstone of its ids for
+`retention.knowledge_deleted_days` (30) so a citation still resolves; a deleted
+source stops being searchable in the transaction that deletes it, and its rows
+are purged in bounded batches after, the janitor removing whatever a purge cut
+short left (`TestKnowledgeTombstones`, `TestDeletingASourceStopsItsSearchAtOnce`,
+`TestPurgeKnowledge`, `TestRunOnce_PurgesKnowledgeTombstonesAndDeletedSources`).
+
 **Confluence: pages their readers restricted.** A Confluence page with a view
 restriction — its own, or one on a page above it, which Confluence applies to
 the pages below — is one some of the site's readers cannot see. The hub's
@@ -3241,8 +3280,10 @@ Every change is on the trail:
 [`knowledge.source.create`](../reference/audit-events.md#knowledgesource),
 [`knowledge.source.update`](../reference/audit-events.md#knowledgesource),
 [`knowledge.source.delete`](../reference/audit-events.md#knowledgesource),
-[`knowledge.source.bind`](../reference/audit-events.md#knowledgesource) and
-[`knowledge.source.unbind`](../reference/audit-events.md#knowledgesource).
+[`knowledge.source.bind`](../reference/audit-events.md#knowledgesource),
+[`knowledge.source.unbind`](../reference/audit-events.md#knowledgesource) and,
+for a sync a person asked for,
+[`knowledge.source.sync`](../reference/audit-events.md#knowledgesource).
 
 ### Configuring role mappings
 

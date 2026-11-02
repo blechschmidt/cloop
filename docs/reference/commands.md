@@ -13,7 +13,7 @@ groups, and what belongs in each:
 |-------|---------------|
 | **Core workflow** | `init`, `run`, `status`, `log`, `goal`, `queue`, `watch`, `reset`, `clean` |
 | **Plan and tasks** | `task`, `plan`, `requirements`, `milestone`, `sprint`, `suggest`, `scope`, and the rest of the plan-shaping commands |
-| **Hub, executors and serving** | `ui`, `serve`, `hub`, `executor`, `egress`, `agent`, `daemon`, `workspace`, `session` |
+| **Hub, executors and serving** | `ui`, `serve`, `hub`, `executor`, `egress`, `agent`, `daemon`, `workspace`, `session`, and a terminal's `login`, `remote` and `knowledge` |
 | **Secrets, access and spend** | `secret`, `env`, `config`, `budget`, `cost`, `audit`, `audit-log`, `events`, `project` |
 | **Insight and reporting** | `report`, `retro`, `standup`, `insights`, `metrics`, `search`, `trace`, and other read-only views |
 | **AI assistants** | `ask`, `chat`, `shell`, `do`, `ai-pair`, `kb`, `memory`, `skill`, `recipe`, `flow` |
@@ -1441,6 +1441,45 @@ cloop remote kube revoke <name> [--force] [--context <ctx>] [--kubeconfig <file>
   and `revoke` refuse. `renew` mints only for the share's own ServiceAccount, read
   back the same way, and the hub sends the token only to the server that minted
   it.
+
+### `cloop knowledge`
+
+```bash
+cloop knowledge sources [--json]
+cloop knowledge sync <source> [--wait] [--json]
+cloop knowledge search <project> <query...> [-k N] [--json]
+```
+
+A hub's knowledge sources — Confluence spaces, Jira projects — from a terminal
+signed in with `cloop login`, or with `--token` / `CLOOP_API_TOKEN` (Task 20470).
+Like `cloop remote`, every subcommand is one of the dashboard's own calls, and
+`--hub` names the hub. A `<source>` is an id or a name, as `sources` lists them;
+a `<project>` a name, an index or a path, as `cloop remote projects` lists them.
+
+| Subcommand | Calls | Permission |
+|------------|-------|------------|
+| `sources` | `GET /api/knowledge/sources` | `secret.own` (an administrator sees every source; anyone else the organisation's and their own) |
+| `sync` | `POST /api/knowledge/sources/{id}/sync`, then with `--wait` `GET /api/knowledge/sources/{id}` until the sync ends | `knowledge.admin`, or ownership of a personal source |
+| `search` | `GET /api/projects/{idx}/knowledge/search` | `project.read` on the project |
+
+`sources` prints each source's status — `never synced`, `syncing`, `ok`, `error`,
+`interrupted`, `disabled` — its documents, when it last synced and when the
+schedule syncs it next, and below the table the last error of each that failed,
+scrubbed of credentials by the hub. The hub-cluster leader syncs every enabled
+source on its interval — 30 minutes, or 5 minutes to 24 hours as the source sets
+(`sync_interval_minutes`) — and a sync that stopped short continues within a
+minute.
+
+`sync` starts a sync now, on the hub member the request reached, and returns at
+once; `--wait` follows it to its end, says what it listed, created, updated and
+removed, and exits non-zero if it failed. One sync of a source runs at a time
+across every member: asked while another runs, the hub answers 409 naming the
+member running it, and `--wait` follows that one instead. The request is audited
+as [`knowledge.source.sync`](audit-events.md#knowledgesource).
+
+`search` prints the best chunks of the knowledge bound to the project — where
+each sits at its source, its link, and the passage that matched with the terms
+marked « » — at most `-k` of them (10 by default, at most 50).
 
 ### `cloop hub grant`
 

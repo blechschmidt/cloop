@@ -981,6 +981,76 @@ var ApprovalNotifications = Default.MustRegister(Definition{
 	Labels: []string{"sink", "event", "outcome"},
 })
 
+// Knowledge syncs (Task 20470): the hub-cluster leader syncs every enabled
+// knowledge source on the source's interval, and any member runs a sync a
+// person asks for — each under the source's lease, so never two at once.
+//
+// `kind` is the connector's kind: one of the connectors this build registers
+// (pkg/knowledge's registry, populated from source code: confluence, jira),
+// or KnowledgeKindUnknown for a source of a kind it has none for. `outcome`
+// is knowledge.Status* (ok, error, interrupted), `change` KnowledgeChange*
+// below, `reason` knowledge.Reason* (6 values). The histogram and the
+// counters are per process — each member counts the syncs it ran, and the sum
+// is the cluster's. The index gauges describe the shared database, so only the
+// leader exports them.
+var (
+	KnowledgeSyncDuration = Default.MustRegister(Definition{
+		Name:    "cloop_knowledge_sync_duration_seconds",
+		Help:    "How long each knowledge source sync ran, by connector kind and outcome: ok, error, or interrupted (the hub process running it stopped, or stopped leading its cluster; the sync resumes from its cursor).",
+		Type:    TypeHistogram,
+		Labels:  []string{"kind", "outcome"},
+		Buckets: []float64{0.1, 0.5, 1, 5, 15, 60, 300, 900, 1800, 3600},
+	})
+
+	KnowledgeDocumentsIndexed = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_documents_indexed_total",
+		Help:   "Documents knowledge syncs handled, by connector kind and change: created and updated (chunked and indexed), unchanged (listed again, its content the same, not chunked again), deleted (the source reported it deleted), removed (a full listing's sweep or a reconciliation found it gone), rejected (malformed, left out).",
+		Type:   TypeCounter,
+		Labels: []string{"kind", "change"},
+	})
+
+	KnowledgeSyncErrors = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_sync_errors_total",
+		Help:   "Knowledge source syncs that failed, by connector kind and reason: connector (the remote failed or sent what the sync refuses), credential (the source's secret could not be opened), panic, lease (the sync lost its source's lease), unavailable (no connector of its kind, or no secret store), storage (the hub's database). A sync overtaken by a change to its source is interrupted, not failed.",
+		Type:   TypeCounter,
+		Labels: []string{"kind", "reason"},
+	})
+
+	KnowledgeIndexDocuments = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_index_documents",
+		Help:   "Documents the hub's knowledge index holds, by connector kind; the tombstones of deleted documents are not among them. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"kind"},
+	})
+
+	KnowledgeIndexChunks = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_index_chunks",
+		Help:   "Chunks — full-text index entries — the hub's knowledge index holds, by connector kind. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"kind"},
+	})
+
+	KnowledgeIndexBytes = Default.MustRegister(Definition{
+		Name:   "cloop_knowledge_index_bytes",
+		Help:   "Text the hub's knowledge index was made from, in bytes of the documents' bodies, by connector kind. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"kind"},
+	})
+)
+
+// What a knowledge sync did with one document, and the kind of a source this
+// build has no connector for.
+const (
+	KnowledgeChangeCreated   = "created"
+	KnowledgeChangeUpdated   = "updated"
+	KnowledgeChangeUnchanged = "unchanged"
+	KnowledgeChangeDeleted   = "deleted"
+	KnowledgeChangeRemoved   = "removed"
+	KnowledgeChangeRejected  = "rejected"
+
+	KnowledgeKindUnknown = "unknown"
+)
+
 // What became of one approval notice at one webhook.
 const (
 	ApprovalNotifyDelivered  = "delivered"

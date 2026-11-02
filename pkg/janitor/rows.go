@@ -16,6 +16,7 @@ package janitor
 // separate passes, a day apart, and the first would appear to reclaim nothing.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,6 +38,9 @@ type rowRetention struct {
 	events        statedb.RowRetention
 	costs         statedb.RowRetention
 	telemetry     statedb.RowRetention
+	// knowledgeDeleted is how long knowledge tombstones are kept; zero keeps
+	// them all.
+	knowledgeDeleted time.Duration
 }
 
 func (p Policy) rowRetention() rowRetention {
@@ -45,10 +49,11 @@ func (p Policy) rowRetention() rowRetention {
 			BodyMaxAge: p.ProviderCallBodyMaxAge,
 			Rows:       statedb.RowRetention{MaxRows: p.ProviderCallMaxRows},
 		},
-		steps:     statedb.RowRetention{MaxRows: p.StepMaxRows},
-		events:    statedb.RowRetention{MaxRows: p.EventMaxRows},
-		costs:     statedb.RowRetention{MaxRows: p.CostMaxRows},
-		telemetry: statedb.RowRetention{MaxAge: p.TelemetryMaxAge},
+		steps:            statedb.RowRetention{MaxRows: p.StepMaxRows},
+		events:           statedb.RowRetention{MaxRows: p.EventMaxRows},
+		costs:            statedb.RowRetention{MaxRows: p.CostMaxRows},
+		telemetry:        statedb.RowRetention{MaxAge: p.TelemetryMaxAge},
+		knowledgeDeleted: p.KnowledgeDeletedMaxAge,
 	}
 }
 
@@ -60,14 +65,12 @@ func (r rowRetention) active() bool {
 // pruneRowTables applies row retention to every covered table, writing the
 // per-table outcomes into rep.
 //
-// It opens the database once for all five: opening runs the migration check and
-// is the expensive part, so five opens would cost more than the pruning.
+// It opens the database once for all of them: opening runs the migration check
+// and is the expensive part, so one open per table would cost more than the
+// pruning. It opens it even when every row limit is off, for the knowledge step:
+// what a deleted knowledge source left is purged whatever the limits say.
 func pruneRowTables(opts Options, pol Policy, rep *Report) {
 	ret := pol.rowRetention()
-	if !ret.active() {
-		setRowSteps(rep, StepResult{Reason: "disabled (no row limits set)"})
-		return
-	}
 
 	dbPath := filepath.Join(opts.WorkDir, ".cloop", "state.db")
 	if _, err := os.Stat(dbPath); err != nil {
@@ -90,18 +93,51 @@ func pruneRowTables(opts Options, pol Policy, rep *Report) {
 	defer db.Close() //nolint:errcheck // a failed close on a prune-only handle changes nothing already committed
 
 	now := opts.now()
-	rep.ProviderCalls = pruneProviderCalls(db, ret.providerCalls, now, opts.DryRun)
-	rep.Steps = pruneSteps(db, ret.steps, now, opts)
-	rep.Events = pruneRowTable(db.PruneEvents, "event", ret.events, now, opts.DryRun)
-	rep.Costs = pruneRowTable(db.PruneCosts, "cost row", ret.costs, now, opts.DryRun)
-	rep.Telemetry = pruneRowTable(db.PruneTelemetryRows, "telemetry event", ret.telemetry, now, opts.DryRun)
+	if ret.active() {
+		rep.ProviderCalls = pruneProviderCalls(db, ret.providerCalls, now, opts.DryRun)
+		rep.Steps = pruneSteps(db, ret.steps, now, opts)
+		rep.Events = pruneRowTable(db.PruneEvents, "event", ret.events, now, opts.DryRun)
+		rep.Costs = pruneRowTable(db.PruneCosts, "cost row", ret.costs, now, opts.DryRun)
+		rep.Telemetry = pruneRowTable(db.PruneTelemetryRows, "telemetry event", ret.telemetry, now, opts.DryRun)
+	} else {
+		setRowSteps(rep, StepResult{Reason: "disabled (no row limits set)"})
+	}
+	rep.Knowledge = pruneKnowledge(db, ret.knowledgeDeleted, now, opts.DryRun)
+}
+
+// pruneKnowledge purges the knowledge index's tombstones older than maxAge —
+// none when it is zero — and everything a deleted knowledge source left.
+func pruneKnowledge(db *statedb.DB, maxAge time.Duration, now time.Time, dryRun bool) StepResult {
+	var cut time.Time
+	if maxAge > 0 {
+		cut = now.Add(-maxAge)
+	}
+	res, err := db.PurgeKnowledge(context.Background(), cut, dryRun)
+	out := StepResult{Ran: true, Deleted: int(res.Rows()), BytesReleased: res.BodyBytes}
+	verb := "purged"
+	if dryRun {
+		verb = "would purge"
+	}
+	switch {
+	case res.Rows() == 0 && maxAge <= 0:
+		out.Reason = "no deleted source left rows; tombstones are kept (no limit set)"
+	case res.Rows() == 0:
+		out.Reason = "no tombstones older than the limit, and no deleted source left rows"
+	default:
+		out.Reason = fmt.Sprintf("%s %d tombstone(s), and %d document(s) and %d chunk(s) %d deleted source(s) left",
+			verb, res.Tombstones, res.Documents, res.Chunks, res.Sources)
+	}
+	if err != nil {
+		out.Err = fmt.Errorf("janitor: purge knowledge rows: %w", err)
+	}
+	return out
 }
 
 // setRowSteps gives every row step the same outcome, for the cases where the
 // group as a whole could not run.
 func setRowSteps(rep *Report, res StepResult) {
 	rep.ProviderCalls, rep.Steps, rep.Events = res, res, res
-	rep.Costs, rep.Telemetry = res, res
+	rep.Costs, rep.Telemetry, rep.Knowledge = res, res, res
 }
 
 // setRowGroupError records a failure of the whole group: the error once, on the

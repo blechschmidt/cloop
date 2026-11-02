@@ -112,6 +112,11 @@ const (
 	// written to the tamper-evident audit log; these entries exist so an
 	// operator tailing logs sees them without querying the database.
 	EventAuthz Event = "authz"
+
+	// EventKnowledge tags the hub's knowledge syncs (Task 20470): a sync
+	// that failed and why, scrubbed of credentials, a lease it lost, and
+	// what a pass purged.
+	EventKnowledge Event = "knowledge"
 )
 
 // Entry is the legacy JSON schema for a log line. Kept for callers that

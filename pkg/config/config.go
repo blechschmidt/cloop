@@ -154,6 +154,8 @@ const (
 	RetentionProviderCallBodyAgeDaysUpper = 3650
 	RetentionTelemetryMaxAgeDaysLower     = 1
 	RetentionTelemetryMaxAgeDaysUpper     = 3650
+	RetentionKnowledgeDeletedDaysLower    = 1
+	RetentionKnowledgeDeletedDaysUpper    = 3650
 
 	// RetentionRowsLower is the floor every row ceiling shares. Below a
 	// hundred, a ceiling stops bounding a table and starts emptying it, and a
@@ -509,6 +511,13 @@ type RetentionConfig struct {
 	// between two passes — leaving only the question a write-time cap cannot
 	// answer: when does a trail nobody returned to expire. Default 30.
 	TelemetryMaxAgeDays int `yaml:"telemetry_max_age_days,omitempty"`
+
+	// KnowledgeDeletedDays purges the tombstone a knowledge document leaves
+	// when its source deletes it, this many days on (Task 20470). What the
+	// document said leaves the index at once; the tombstone keeps only its id
+	// and external id, so a citation made before still resolves and a
+	// document that comes back keeps its id. Default 30.
+	KnowledgeDeletedDays int `yaml:"knowledge_deleted_days,omitempty"`
 }
 
 // RetentionEnabled reports whether the janitor should run, resolving the
@@ -537,6 +546,8 @@ func (r *RetentionConfig) rowLimitFields() []rowLimitField {
 			RetentionProviderCallBodyAgeDaysLower, RetentionProviderCallBodyAgeDaysUpper},
 		{"retention.telemetry_max_age_days", &r.TelemetryMaxAgeDays,
 			RetentionTelemetryMaxAgeDaysLower, RetentionTelemetryMaxAgeDaysUpper},
+		{"retention.knowledge_deleted_days", &r.KnowledgeDeletedDays,
+			RetentionKnowledgeDeletedDaysLower, RetentionKnowledgeDeletedDaysUpper},
 		{"retention.provider_call_max_rows", &r.ProviderCallMaxRows, RetentionRowsLower, RetentionRowsUpper},
 		{"retention.step_max_rows", &r.StepMaxRows, RetentionRowsLower, RetentionRowsUpper},
 		{"retention.event_max_rows", &r.EventMaxRows, RetentionRowsLower, RetentionRowsUpper},

@@ -50,6 +50,7 @@ func (s *Server) knowledgeRoutes() []routeSpec {
 		{Pattern: "GET /api/knowledge/sources/{id}", Handler: s.handleKnowledgeSource, Perm: authz.PermSecretOwn, Scope: scopeGlobal},
 		{Pattern: "PATCH /api/knowledge/sources/{id}", Handler: s.handleKnowledgeSourceUpdate, Perm: authz.PermSecretOwn, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "DELETE /api/knowledge/sources/{id}", Handler: s.handleKnowledgeSourceDelete, Perm: authz.PermSecretOwn, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/knowledge/sources/{id}/sync", Handler: s.handleKnowledgeSourceSync, Perm: authz.PermSecretOwn, Scope: scopeGlobal},
 		{Pattern: "GET /api/projects/{idx}/knowledge/sources", Handler: s.handleProjectKnowledgeSources, Perm: authz.PermProjectRead, Scope: scopeProjectIdx},
 		{Pattern: "POST /api/projects/{idx}/knowledge/bindings", Handler: s.handleProjectKnowledgeBind, Perm: authz.PermProjectWrite, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		{Pattern: "DELETE /api/projects/{idx}/knowledge/bindings/{bid}", Handler: s.handleProjectKnowledgeUnbind, Perm: authz.PermProjectWrite, Scope: scopeProjectIdx},
@@ -59,11 +60,69 @@ func (s *Server) knowledgeRoutes() []routeSpec {
 
 // ── Views ───────────────────────────────────────────────────────────────────
 
+// knowledgeSyncView is how a source's syncs are going: the last one, the one
+// running, and the next.
 type knowledgeSyncView struct {
+	// Status is "" (never synced), ok, error or interrupted; Error the last
+	// sync's error, scrubbed of credentials; At when it ended.
 	Status  string `json:"status"`
 	Error   string `json:"error,omitempty"`
 	At      string `json:"at,omitempty"`
 	Resumes bool   `json:"resumes"`
+	// IntervalMinutes is how often the hub syncs the source; DefaultInterval
+	// says the source takes the hub's default rather than setting its own.
+	IntervalMinutes int  `json:"interval_minutes"`
+	DefaultInterval bool `json:"default_interval"`
+	// StartedAt, DurationMS, Origin and Counts describe the last sync, and
+	// More says it stopped before its listing's end.
+	StartedAt  string                `json:"started_at,omitempty"`
+	DurationMS int64                 `json:"duration_ms,omitempty"`
+	Origin     string                `json:"origin,omitempty"`
+	Counts     *knowledge.SyncCounts `json:"counts,omitempty"`
+	More       bool                  `json:"more,omitempty"`
+	LastOKAt   string                `json:"last_ok_at,omitempty"`
+	// NextAt is when the schedule next syncs the source; absent for a
+	// disabled one.
+	NextAt  string                `json:"next_at,omitempty"`
+	Running *knowledgeRunningView `json:"running,omitempty"`
+}
+
+// knowledgeRunningView is a sync in progress.
+type knowledgeRunningView struct {
+	// Member is the hub process running it.
+	Member string `json:"member"`
+	Origin string `json:"origin"`
+	// Actor is who asked for a manual sync, shown to whoever may manage the
+	// source.
+	Actor string `json:"actor,omitempty"`
+	Since string `json:"since"`
+}
+
+func knowledgeRunningViewOf(r *knowledge.RunningSync, withActor bool) *knowledgeRunningView {
+	if r == nil {
+		return nil
+	}
+	v := &knowledgeRunningView{Member: r.Member, Origin: r.Origin, Since: knowledgeTime(r.Since)}
+	if withActor {
+		v.Actor = r.Actor
+	}
+	return v
+}
+
+func knowledgeSyncViewOf(src knowledge.Source, manageable bool) knowledgeSyncView {
+	st := src.Sync
+	v := knowledgeSyncView{
+		Status: st.Status, Error: st.Error, At: knowledgeTime(st.At), Resumes: st.Resumes,
+		IntervalMinutes: int(src.Interval() / time.Minute), DefaultInterval: src.SyncInterval == 0,
+		StartedAt: knowledgeTime(st.StartedAt), DurationMS: st.Duration.Milliseconds(), Origin: st.Origin,
+		More: st.More, LastOKAt: knowledgeTime(st.OKAt), NextAt: knowledgeTime(st.NextAt),
+		Running: knowledgeRunningViewOf(st.Running, manageable),
+	}
+	if !st.StartedAt.IsZero() {
+		counts := st.Counts
+		v.Counts = &counts
+	}
+	return v
 }
 
 // knowledgeSourceView is a source as the dashboard shows it. The secret
@@ -140,9 +199,7 @@ func knowledgeSourceViewOf(acc *knowledge.Access, src knowledge.Source) knowledg
 		ID: src.ID, Kind: src.Kind, Name: src.Name, Scope: src.Scope, Owner: src.Owner,
 		Mine:       src.Owner != "" && src.Owner == acc.Principal().Identity,
 		Manageable: manageable, Config: src.Config, HasCredential: src.SecretRef != "", Enabled: src.Enabled,
-		Sync: knowledgeSyncView{
-			Status: src.Sync.Status, Error: src.Sync.Error, At: knowledgeTime(src.Sync.At), Resumes: src.Sync.Resumes,
-		},
+		Sync:      knowledgeSyncViewOf(src, manageable),
 		Documents: src.Counts.Documents, Chunks: src.Counts.Chunks, Bindings: src.Counts.Bindings,
 		CreatedAt: knowledgeTime(src.CreatedAt), CreatedBy: src.CreatedBy,
 		UpdatedAt: knowledgeTime(src.UpdatedAt), UpdatedBy: src.UpdatedBy,
@@ -256,6 +313,8 @@ func (s *Server) writeKnowledgeError(w http.ResponseWriter, err error, what stri
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, knowledgeMessage(err)))
 	case errors.Is(err, knowledge.ErrConflict):
 		apierror.WriteError(w, apierror.New(apierror.CodeConflict, knowledgeMessage(err)))
+	case errors.Is(err, knowledge.ErrDisabled):
+		apierror.WriteError(w, apierror.New(apierror.CodeConflict, knowledgeMessage(err)))
 	case errors.Is(err, knowledge.ErrUnavailable):
 		apierror.WriteError(w, apierror.New(apierror.CodeUnavailable, knowledgeMessage(err)))
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -270,7 +329,8 @@ func (s *Server) writeKnowledgeError(w http.ResponseWriter, err error, what stri
 // "knowledge: <kind>:" lead, which says nothing to the person reading it.
 func knowledgeMessage(err error) string {
 	msg := err.Error()
-	for _, lead := range []string{"knowledge: invalid: ", "knowledge: conflict: ", "knowledge: unavailable: "} {
+	for _, lead := range []string{"knowledge: invalid: ", "knowledge: conflict: ", "knowledge: unavailable: ",
+		"knowledge: "} {
 		if strings.HasPrefix(msg, lead) {
 			return strings.TrimPrefix(msg, lead)
 		}
@@ -344,6 +404,24 @@ type knowledgeSourceRequest struct {
 	Config    json.RawMessage `json:"config"`
 	SecretRef *string         `json:"secret_ref"`
 	Enabled   *bool           `json:"enabled"`
+	// SyncIntervalMinutes is how often the hub syncs the source: 5 to 1440,
+	// or 0 for the hub's default (30).
+	SyncIntervalMinutes *int `json:"sync_interval_minutes"`
+}
+
+// syncInterval is the request's interval, or nil when it names none. A value
+// beyond any interval's bounds is passed on as one, for pkg/knowledge to
+// refuse with its bounds.
+func (req knowledgeSourceRequest) syncInterval() *time.Duration {
+	if req.SyncIntervalMinutes == nil {
+		return nil
+	}
+	m := *req.SyncIntervalMinutes
+	if m > int(knowledge.MaxSyncInterval/time.Minute)*2 || m < -1 {
+		m = -1
+	}
+	d := time.Duration(m) * time.Minute
+	return &d
 }
 
 // handleKnowledgeSourceCreate serves POST /api/knowledge/sources.
@@ -367,6 +445,9 @@ func (s *Server) handleKnowledgeSourceCreate(w http.ResponseWriter, r *http.Requ
 	in := knowledge.SourceInput{Kind: req.Kind, Scope: req.Scope, Config: req.Config, Enabled: req.Enabled}
 	if req.Name != nil {
 		in.Name = *req.Name
+	}
+	if d := req.syncInterval(); d != nil {
+		in.SyncInterval = *d
 	}
 	if req.SecretRef != nil {
 		in.SecretRef = *req.SecretRef
@@ -418,6 +499,7 @@ func (s *Server) handleKnowledgeSourceUpdate(w http.ResponseWriter, r *http.Requ
 	defer done()
 	updated, err := acc.UpdateSource(r.Context(), id, knowledge.SourceUpdate{
 		Name: req.Name, Config: req.Config, SecretRef: req.SecretRef, Enabled: req.Enabled,
+		SyncInterval: req.syncInterval(),
 	})
 	if err != nil {
 		s.writeKnowledgeError(w, err, "change the knowledge source")
