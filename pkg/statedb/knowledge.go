@@ -75,14 +75,18 @@ type KnowledgeSourceRow struct {
 	// none is. FullListingAt is when one last reached its end.
 	ListingStartedAt time.Time
 	FullListingAt    time.Time
-	CreatedAt        time.Time
-	CreatedBy        string
-	UpdatedAt        time.Time
-	UpdatedBy        string
+	// ReconciledAt is when the source's documents were last reconciled
+	// against what its remote holds (ReconcileKnowledgeDocuments), or a full
+	// listing last reached its end; zero for never.
+	ReconciledAt time.Time
+	CreatedAt    time.Time
+	CreatedBy    string
+	UpdatedAt    time.Time
+	UpdatedBy    string
 }
 
 const knowledgeSourceCols = `id, kind, name, scope, owner, config, secret_ref, enabled,
-	sync_cursor, sync_status, sync_error, synced_at, listing_started_ns, full_listing_ns,
+	sync_cursor, sync_status, sync_error, synced_at, listing_started_ns, full_listing_ns, reconciled_ns,
 	created_at, created_by, updated_at, updated_by`
 
 // nanos is t as the knowledge tables' *_ns columns hold it: Unix nanoseconds,
@@ -286,19 +290,20 @@ func (d *DB) ListKnowledgeSources() ([]KnowledgeSourceRow, error) {
 
 func scanKnowledgeSource(s rowScanner) (KnowledgeSourceRow, error) {
 	var (
-		row                          KnowledgeSourceRow
-		enabled                      int
-		listingStarted, fullListing  int64
-		syncedAt, createdAt, updated string
+		row                                     KnowledgeSourceRow
+		enabled                                 int
+		listingStarted, fullListing, reconciled int64
+		syncedAt, createdAt, updated            string
 	)
 	if err := s.Scan(&row.ID, &row.Kind, &row.Name, &row.Scope, &row.Owner, &row.Config, &row.SecretRef, &enabled,
-		&row.SyncCursor, &row.SyncStatus, &row.SyncError, &syncedAt, &listingStarted, &fullListing,
+		&row.SyncCursor, &row.SyncStatus, &row.SyncError, &syncedAt, &listingStarted, &fullListing, &reconciled,
 		&createdAt, &row.CreatedBy, &updated, &row.UpdatedBy); err != nil {
 		return row, err
 	}
 	row.Enabled = enabled != 0
 	row.ListingStartedAt = fromNanos(listingStarted)
 	row.FullListingAt = fromNanos(fullListing)
+	row.ReconciledAt = fromNanos(reconciled)
 	row.SyncedAt = parseOptionalTime(syncedAt)
 	row.CreatedAt = parseOptionalTime(createdAt)
 	row.UpdatedAt = parseOptionalTime(updated)
@@ -475,9 +480,9 @@ func (d *DB) StartKnowledgeListing(id int64, updatedAt, at time.Time) error {
 // FinishKnowledgeListing ends the full listing of source id that began at
 // started, at at: every document of the source no sync has listed since
 // started — what the source no longer holds, or no longer shows — is removed
-// with its chunks and matches, and the listing is recorded complete. One
-// transaction, written only while the source is the one the sync read; it
-// returns how many documents went.
+// with its chunks and matches, and the listing is recorded complete, and as a
+// reconciliation, since its sweep is one. One transaction, written only while
+// the source is the one the sync read; it returns how many documents went.
 func (d *DB) FinishKnowledgeListing(id int64, updatedAt, started, at time.Time) (int, error) {
 	wrapErr := func(err error) error {
 		return fmt.Errorf("statedb: finish knowledge listing of source %d: %w", id, classifyDriverErr(err))
@@ -489,9 +494,9 @@ func (d *DB) FinishKnowledgeListing(id int64, updatedAt, started, at time.Time) 
 		return 0, wrapErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
-	res, err := tx.Exec(`UPDATE knowledge_sources SET listing_started_ns = 0, full_listing_ns = ?
+	res, err := tx.Exec(`UPDATE knowledge_sources SET listing_started_ns = 0, full_listing_ns = ?, reconciled_ns = ?
 		WHERE id = ? AND updated_at = ? AND listing_started_ns = ?`,
-		nanos(at), id, formatOptionalTime(updatedAt), nanos(started))
+		nanos(at), nanos(at), id, formatOptionalTime(updatedAt), nanos(started))
 	if err != nil {
 		return 0, wrapErr(err)
 	}
@@ -501,6 +506,57 @@ func (d *DB) FinishKnowledgeListing(id int64, updatedAt, started, at time.Time) 
 		return 0, fmt.Errorf("%w: source %d", ErrKnowledgeSourceChanged, id)
 	}
 	n, err := deleteKnowledgeDocumentsTx(tx, id, `listed_ns < ?`, nanos(started))
+	if err != nil {
+		return 0, wrapErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, wrapErr(err)
+	}
+	return n, nil
+}
+
+// ReconcileKnowledgeDocuments reconciles source id's documents with present,
+// the external ids of every document its remote holds in scope now, as its
+// connector reported them at at: each document of the source that present
+// does not name is removed with its chunks and matches — unless a sync listed
+// it at or after listedBefore, which keeps a document a listing just indexed
+// from being removed by an answer older than it (a search index that has not
+// caught up yet). The reconciliation is recorded at at. One transaction,
+// written only while the source is the one the sync read and no full listing
+// of it is in progress, whose own sweep is the one to remove what it did not
+// reach; ErrKnowledgeSourceChanged reports either. It returns how many
+// documents went.
+func (d *DB) ReconcileKnowledgeDocuments(id int64, updatedAt time.Time, present []string, listedBefore, at time.Time) (int, error) {
+	ids, err := json.Marshal(present)
+	if err != nil {
+		return 0, fmt.Errorf("statedb: reconcile knowledge documents of source %d: %w", id, err)
+	}
+	if present == nil {
+		ids = []byte("[]")
+	}
+	wrapErr := func(err error) error {
+		return fmt.Errorf("statedb: reconcile knowledge documents of source %d: %w", id, classifyDriverErr(err))
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return 0, wrapErr(err)
+	}
+	defer tx.Rollback() //nolint:errcheck // a no-op once committed
+	res, err := tx.Exec(`UPDATE knowledge_sources SET reconciled_ns = ?
+		WHERE id = ? AND updated_at = ? AND listing_started_ns = 0`,
+		nanos(at), id, formatOptionalTime(updatedAt))
+	if err != nil {
+		return 0, wrapErr(err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, wrapErr(err)
+	} else if n == 0 {
+		return 0, fmt.Errorf("%w: source %d", ErrKnowledgeSourceChanged, id)
+	}
+	n, err := deleteKnowledgeDocumentsTx(tx, id,
+		`listed_ns < ? AND external_id NOT IN (SELECT value FROM json_each(?))`, nanos(listedBefore), string(ids))
 	if err != nil {
 		return 0, wrapErr(err)
 	}
@@ -983,6 +1039,9 @@ type KnowledgeDocumentRow struct {
 	// ACL is the source's access hints for the document, as the connector
 	// reported them.
 	ACL []string
+	// Ancestors are the titles of what holds the document at its source,
+	// outermost first, for a citation to place it by.
+	Ancestors []string
 	// ContentHash identifies what the chunks were made from; a document
 	// indexed again with the same hash keeps its chunks.
 	ContentHash string
@@ -1012,7 +1071,7 @@ const (
 	// rewritten.
 	KnowledgeIndexUpdated KnowledgeIndexOutcome = "updated"
 	// KnowledgeIndexUnchanged: its content hash matched; only its metadata
-	// (URL, space, ACL hints, the remote's timestamp) was written.
+	// (URL, space, ACL hints, ancestors, the remote's timestamp) was written.
 	KnowledgeIndexUnchanged KnowledgeIndexOutcome = "unchanged"
 )
 
@@ -1030,10 +1089,8 @@ func (d *DB) IndexKnowledgeDocument(doc KnowledgeDocumentRow, chunk func() ([]Kn
 	if strings.TrimSpace(doc.ExternalID) == "" {
 		return "", errors.New("statedb: a knowledge document needs an external id")
 	}
-	acl, err := json.Marshal(doc.ACL)
-	if err != nil || doc.ACL == nil {
-		acl = []byte("[]")
-	}
+	acl := jsonStrings(doc.ACL)
+	ancestors := jsonStrings(doc.Ancestors)
 	wrapErr := func(err error) error {
 		return fmt.Errorf("statedb: index knowledge document %q: %w", doc.ExternalID, classifyDriverErr(err))
 	}
@@ -1064,9 +1121,9 @@ func (d *DB) IndexKnowledgeDocument(doc KnowledgeDocumentRow, chunk func() ([]Kn
 	}
 	if existed && prevHash == doc.ContentHash {
 		if _, err := tx.Exec(`UPDATE knowledge_documents SET
-			url = ?, space_key = ?, remote_updated_at = ?, acl = ?, listed_ns = ?
+			url = ?, space_key = ?, remote_updated_at = ?, acl = ?, ancestors = ?, listed_ns = ?
 			WHERE id = ?`,
-			doc.URL, doc.SpaceKey, formatOptionalTime(doc.RemoteUpdatedAt), string(acl), nanos(doc.ListedAt),
+			doc.URL, doc.SpaceKey, formatOptionalTime(doc.RemoteUpdatedAt), acl, ancestors, nanos(doc.ListedAt),
 			docID); err != nil {
 			return "", wrapErr(err)
 		}
@@ -1088,15 +1145,16 @@ func (d *DB) IndexKnowledgeDocument(doc KnowledgeDocumentRow, chunk func() ([]Kn
 	}
 	now := formatOptionalTime(time.Now().UTC())
 	err = tx.QueryRow(`INSERT INTO knowledge_documents
-		(source_id, external_id, title, url, space_key, remote_updated_at, acl, content_hash,
+		(source_id, external_id, title, url, space_key, remote_updated_at, acl, ancestors, content_hash,
 		 body_bytes, truncated, chunk_count, indexed_at, listed_ns)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_id, external_id) DO UPDATE SET
 		  title             = excluded.title,
 		  url               = excluded.url,
 		  space_key         = excluded.space_key,
 		  remote_updated_at = excluded.remote_updated_at,
 		  acl               = excluded.acl,
+		  ancestors         = excluded.ancestors,
 		  content_hash      = excluded.content_hash,
 		  body_bytes        = excluded.body_bytes,
 		  truncated         = excluded.truncated,
@@ -1105,7 +1163,7 @@ func (d *DB) IndexKnowledgeDocument(doc KnowledgeDocumentRow, chunk func() ([]Kn
 		  listed_ns         = excluded.listed_ns
 		RETURNING id`,
 		doc.SourceID, doc.ExternalID, doc.Title, doc.URL, doc.SpaceKey, formatOptionalTime(doc.RemoteUpdatedAt),
-		string(acl), doc.ContentHash, doc.BodyBytes, boolInt(doc.Truncated), len(chunks), now,
+		acl, ancestors, doc.ContentHash, doc.BodyBytes, boolInt(doc.Truncated), len(chunks), now,
 		nanos(doc.ListedAt)).Scan(&docID)
 	if err != nil {
 		return "", wrapErr(err)
@@ -1178,30 +1236,52 @@ func dropKnowledgeChunksTx(tx *sql.Tx, where string, args ...any) error {
 	return err
 }
 
+// jsonStrings is a list of strings as the knowledge tables' JSON array
+// columns hold it: "[]" for none.
+func jsonStrings(v []string) string {
+	if len(v) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// stringsFromJSON is jsonStrings reversed: nil for a column that is empty or
+// does not decode.
+func stringsFromJSON(s string) []string {
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // GetKnowledgeDocument returns one document of a source; found is false when
 // the source does not hold it.
 func (d *DB) GetKnowledgeDocument(sourceID int64, externalID string) (row KnowledgeDocumentRow, found bool, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	var (
-		remote, acl, indexed string
-		truncated            int
+		remote, acl, ancestors, indexed string
+		truncated                       int
 	)
 	var listed int64
 	err = d.conn.QueryRow(`SELECT id, source_id, external_id, title, url, space_key, remote_updated_at, acl,
-		content_hash, body_bytes, truncated, chunk_count, indexed_at, listed_ns
+		ancestors, content_hash, body_bytes, truncated, chunk_count, indexed_at, listed_ns
 		FROM knowledge_documents WHERE source_id = ? AND external_id = ?`, sourceID, externalID).Scan(
 		&row.ID, &row.SourceID, &row.ExternalID, &row.Title, &row.URL, &row.SpaceKey, &remote, &acl,
-		&row.ContentHash, &row.BodyBytes, &truncated, &row.ChunkCount, &indexed, &listed)
+		&ancestors, &row.ContentHash, &row.BodyBytes, &truncated, &row.ChunkCount, &indexed, &listed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return KnowledgeDocumentRow{}, false, nil
 	}
 	if err != nil {
 		return KnowledgeDocumentRow{}, false, fmt.Errorf("statedb: get knowledge document %q: %w", externalID, classifyDriverErr(err))
 	}
-	if err := json.Unmarshal([]byte(acl), &row.ACL); err != nil {
-		row.ACL = nil
-	}
+	row.ACL = stringsFromJSON(acl)
+	row.Ancestors = stringsFromJSON(ancestors)
 	row.RemoteUpdatedAt = parseOptionalTime(remote)
 	row.IndexedAt = parseOptionalTime(indexed)
 	row.ListedAt = fromNanos(listed)
@@ -1218,8 +1298,8 @@ func (d *DB) DeleteKnowledgeDocument(sourceID int64, externalID string) (bool, e
 }
 
 // deleteKnowledgeDocuments removes the documents of sourceID that match, a
-// predicate over knowledge_documents taking arg, in a transaction of its own.
-func (d *DB) deleteKnowledgeDocuments(sourceID int64, match string, arg any) (int, error) {
+// predicate over knowledge_documents taking args, in a transaction of its own.
+func (d *DB) deleteKnowledgeDocuments(sourceID int64, match string, args ...any) (int, error) {
 	wrapErr := func(err error) error {
 		return fmt.Errorf("statedb: delete knowledge documents of source %d: %w", sourceID, classifyDriverErr(err))
 	}
@@ -1230,7 +1310,7 @@ func (d *DB) deleteKnowledgeDocuments(sourceID int64, match string, arg any) (in
 		return 0, wrapErr(err)
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
-	n, err := deleteKnowledgeDocumentsTx(tx, sourceID, match, arg)
+	n, err := deleteKnowledgeDocumentsTx(tx, sourceID, match, args...)
 	if err != nil {
 		return 0, wrapErr(err)
 	}
@@ -1241,16 +1321,18 @@ func (d *DB) deleteKnowledgeDocuments(sourceID int64, match string, arg any) (in
 }
 
 // deleteKnowledgeDocumentsTx removes, in tx, the documents of sourceID that
-// match — with their chunks, full-text entries and bindings' matches.
-func deleteKnowledgeDocumentsTx(tx *sql.Tx, sourceID int64, match string, arg any) (int, error) {
+// match — with their chunks, full-text entries and bindings' matches. match is
+// one of this file's own predicates over knowledge_documents, taking args.
+func deleteKnowledgeDocumentsTx(tx *sql.Tx, sourceID int64, match string, args ...any) (int, error) {
 	docs := `SELECT id FROM knowledge_documents WHERE source_id = ? AND ` + match
-	if err := dropKnowledgeChunksTx(tx, `document_id IN (`+docs+`)`, sourceID, arg); err != nil {
+	all := append([]any{sourceID}, args...)
+	if err := dropKnowledgeChunksTx(tx, `document_id IN (`+docs+`)`, all...); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(`DELETE FROM knowledge_binding_documents WHERE document_id IN (`+docs+`)`, sourceID, arg); err != nil {
+	if _, err := tx.Exec(`DELETE FROM knowledge_binding_documents WHERE document_id IN (`+docs+`)`, all...); err != nil {
 		return 0, err
 	}
-	res, err := tx.Exec(`DELETE FROM knowledge_documents WHERE source_id = ? AND `+match, sourceID, arg)
+	res, err := tx.Exec(`DELETE FROM knowledge_documents WHERE source_id = ? AND `+match, all...)
 	if err != nil {
 		return 0, err
 	}
@@ -1289,7 +1371,10 @@ type KnowledgeHit struct {
 	ExternalID string
 	SourceName string
 	SourceKind string
-	Snippet    string
+	// Ancestors are the titles of what holds the document at its source,
+	// outermost first.
+	Ancestors []string
+	Snippet   string
 	// Rank is FTS5's BM25 score: lower is a better match (it is negative).
 	Rank float64
 }
@@ -1329,7 +1414,7 @@ const knowledgeSearchSQL = `WITH top AS (
    LIMIT ?
 )
 SELECT c.id, c.document_id, c.source_id, c.ordinal, c.heading,
-       d.title, d.url, d.space_key, d.external_id, s.name, s.kind,
+       d.title, d.url, d.space_key, d.external_id, s.name, s.kind, d.ancestors,
        snippet(knowledge_chunks_fts, 2, ?, ?, ?, ?), top.score
   FROM top
  CROSS JOIN knowledge_chunks_fts ON knowledge_chunks_fts.rowid = top.id
@@ -1362,11 +1447,16 @@ func (d *DB) SearchKnowledge(ctx context.Context, q KnowledgeSearchQuery) ([]Kno
 	defer rows.Close()
 	var out []KnowledgeHit
 	for rows.Next() {
-		var h KnowledgeHit
+		var (
+			h         KnowledgeHit
+			ancestors string
+		)
 		if err := rows.Scan(&h.ChunkID, &h.DocumentID, &h.SourceID, &h.Ordinal, &h.Heading,
-			&h.Title, &h.URL, &h.SpaceKey, &h.ExternalID, &h.SourceName, &h.SourceKind, &h.Snippet, &h.Rank); err != nil {
+			&h.Title, &h.URL, &h.SpaceKey, &h.ExternalID, &h.SourceName, &h.SourceKind, &ancestors,
+			&h.Snippet, &h.Rank); err != nil {
 			return nil, knowledgeQueryErr(err)
 		}
+		h.Ancestors = stringsFromJSON(ancestors)
 		out = append(out, h)
 	}
 	if err := rows.Err(); err != nil {

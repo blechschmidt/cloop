@@ -40,11 +40,17 @@ type fakeConnector struct {
 	creds []string
 	// errWith, when set, is the error List returns, with the credential in it.
 	leakCredentialInError bool
+	// scopes records the source scope every request named.
+	scopes []string
 }
 
 func (f *fakeConnector) Kind() string { return f.kind }
 
-func (f *fakeConnector) Validate(config json.RawMessage) error {
+func (f *fakeConnector) Validate(req ValidateRequest) error {
+	f.mu.Lock()
+	f.scopes = append(f.scopes, "validate:"+req.Scope)
+	f.mu.Unlock()
+	config := req.Config
 	var c struct {
 		BaseURL string `json:"base_url"`
 	}
@@ -61,6 +67,7 @@ func (f *fakeConnector) List(_ context.Context, req ListRequest) (Page, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.creds = append(f.creds, string(req.Credential.Value()))
+	f.scopes = append(f.scopes, "list:"+req.Scope)
 	f.lists++
 	if f.failAfter > 0 && f.lists > f.failAfter {
 		if f.leakCredentialInError {
@@ -126,8 +133,8 @@ func (f *fakeConnector) Narrow(_ context.Context, req NarrowRequest) ([]string, 
 // Connector methods alone, so it does not pick up fakeConnector's Narrow.
 type plainConnector struct{ inner *fakeConnector }
 
-func (p *plainConnector) Kind() string                          { return p.inner.kind }
-func (p *plainConnector) Validate(config json.RawMessage) error { return p.inner.Validate(config) }
+func (p *plainConnector) Kind() string                       { return p.inner.kind }
+func (p *plainConnector) Validate(req ValidateRequest) error { return p.inner.Validate(req) }
 func (p *plainConnector) List(ctx context.Context, req ListRequest) (Page, error) {
 	return p.inner.List(ctx, req)
 }

@@ -63,6 +63,7 @@ func prepare(sourceID int64, doc Document, opts ChunkOptions) (prepared, error) 
 		SpaceKey:        clip(oneLine(doc.Space), MaxSpaceKeyBytes),
 		RemoteUpdatedAt: doc.UpdatedAt,
 		ACL:             cleanACL(doc.ACL),
+		Ancestors:       cleanAncestors(doc.Ancestors),
 		BodyBytes:       len(body),
 		Truncated:       truncated,
 	}
@@ -131,6 +132,23 @@ func cleanACL(hints []string) []string {
 	sort.Strings(out)
 	if len(out) > MaxACLHints {
 		out = out[:MaxACLHints]
+	}
+	return out
+}
+
+// cleanAncestors bounds a document's ancestors: each one line, at most
+// MaxTitleBytes and scrubbed like a title, the empty ones dropped, and at most
+// MaxAncestors of them — the innermost, which place it best. Order is kept and
+// repeats are too: two pages above this one may share a title.
+func cleanAncestors(titles []string) []string {
+	var out []string
+	for _, t := range titles {
+		if t = redact.Scrub(clip(oneLine(t), MaxTitleBytes)); t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) > MaxAncestors {
+		out = out[len(out)-MaxAncestors:]
 	}
 	return out
 }

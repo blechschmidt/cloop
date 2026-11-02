@@ -179,6 +179,7 @@ func TestScrubTimeIsLinearInRejectedCandidates(t *testing.T) {
 		"a://u:$x@h ",
 		"bearer abcdefghij ",
 		"xclet1.aaaa.aaaaaaaa",
+		"xATATT3aaaaaaaaaaaaaaaaaaaaaaaaa", // Atlassian, every candidate glued to a word
 	} {
 		in := strings.Repeat(unit, size/len(unit))
 		done := make(chan struct{})

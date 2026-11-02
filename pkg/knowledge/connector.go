@@ -27,15 +27,19 @@ import (
 // administration port. A connector refuses such addresses for a personal
 // source, and allows a private one for an organisation source only where its
 // remote really lives there (a Data Center install on the company network).
+// Every request a connector is handed says which scope its source has, so it
+// can apply that rule where it dials, after a name has been resolved.
 type Connector interface {
 	// Kind is the connector's stable name ("confluence"), what a source's
 	// kind column holds: lower case, digits, '-' and '_', at most 32 bytes.
 	Kind() string
 
 	// Validate checks a source's configuration, a JSON object, before it is
-	// stored. The framework has already refused anything shaped like a
-	// credential; this checks the connector's own fields.
-	Validate(config json.RawMessage) error
+	// stored, for a source of req.Scope. The framework has already refused
+	// anything shaped like a credential; this checks the connector's own
+	// fields — and what it can of the addresses they name without a lookup,
+	// which the scope decides.
+	Validate(req ValidateRequest) error
 
 	// List returns the documents that changed since req.Cursor — from the
 	// beginning when it is empty — a page at a time. Page.Cursor resumes
@@ -67,10 +71,39 @@ type QueryNarrower interface {
 	Narrow(ctx context.Context, req NarrowRequest) ([]string, error)
 }
 
+// Reconciler is what a connector implements to say, cheaply, which documents
+// its source holds now: the external IDs of every document in scope that the
+// connector would list — all of them, without their bodies. An incremental
+// listing reports what changed; it cannot report a document deleted, moved out
+// of scope or newly hidden from the hub's account, since the remote no longer
+// lists it at all. The sync asks a Reconciler once per the Service's
+// reconciliation interval and removes every indexed document of the source the
+// answer leaves out, which a full listing would otherwise do only by reading
+// every document again.
+//
+// The answer must be complete or an error: a document it leaves out leaves the
+// index. A document a sync listed shortly before the answer was had is kept
+// whatever the answer says (see Service.Sync), so an answer read from a search
+// index that lags the listing cannot remove what the listing just indexed.
+type Reconciler interface {
+	Reconcile(ctx context.Context, req ReconcileRequest) ([]string, error)
+}
+
+// ValidateRequest asks a connector to check a configuration.
+type ValidateRequest struct {
+	Config json.RawMessage
+	// Scope is the scope of the source the configuration is for: ScopeOrg
+	// or ScopePersonal.
+	Scope string
+}
+
 // ListRequest asks a connector for a page of changed documents.
 type ListRequest struct {
 	Config     json.RawMessage
 	Credential Credential
+	// Scope is the source's, ScopeOrg or ScopePersonal: what the source may
+	// reach follows it (see Connector).
+	Scope string
 	// Cursor is the opaque position the previous page returned; empty means
 	// from the beginning.
 	Cursor string
@@ -93,6 +126,7 @@ type Page struct {
 type FetchRequest struct {
 	Config     json.RawMessage
 	Credential Credential
+	Scope      string
 	ExternalID string
 }
 
@@ -100,7 +134,15 @@ type FetchRequest struct {
 type NarrowRequest struct {
 	Config     json.RawMessage
 	Credential Credential
+	Scope      string
 	Query      string
+}
+
+// ReconcileRequest asks a Reconciler which documents its source holds.
+type ReconcileRequest struct {
+	Config     json.RawMessage
+	Credential Credential
+	Scope      string
 }
 
 // Credential is a source's secret, opened on the hub for one sync and handed

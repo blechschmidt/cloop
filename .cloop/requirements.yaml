@@ -385,3 +385,47 @@ requirements:
         command: go test ./pkg/knowledge -run '^(TestConfigsNeverHoldCredentials|TestSyncKeepsTheCredentialOnTheHub|TestIndexBoundsAndCleans)$'
       - name: which secret a source may sign in with
         command: go test ./pkg/secretbroker -run '^TestSourceCredential$'
+  - id: R-22
+    title: A Confluence source shall not index a page with a view restriction unless the source says to.
+    status: approved
+    priority: must
+    tags: [security, knowledge]
+    details: |-
+      A page with a view restriction — its own, or one it inherits from a page
+      above it, for a person or a group — is reported deleted rather than indexed,
+      unless the source sets include_restricted; a restriction the connector could
+      not read counts as one. The hub's account can read such a page, and every
+      member of a project the source is bound to could then search it. A page
+      restricted after it was indexed leaves the index: at the next sync when it
+      was also edited, at the next reconciliation when it was not, which removes
+      pages deleted or moved out of scope the same way and keeps one a sync listed
+      within the hour. Promised in docs/security/model.md, "Knowledge sources".
+    tests:
+      - name: the connector's decision
+        command: go test ./pkg/knowledge/confluence -run '^(TestRestrictedPages|TestPlacementSurvivesASearchIndexThatLags|TestAnEditedPageThatBecameRestrictedLeavesAtOnce|TestReconciliationRemovesWhatTheListingCannotSee|TestReconciliationKeepsWhatAListingJustIndexed)$'
+      - name: the sync's reconciliation
+        command: go test ./pkg/knowledge -run '^(TestSyncReconcilesWhenDue|TestReconcileAnswersAreBounded)$'
+      - name: the storage
+        command: go test ./pkg/statedb -run '^TestReconcileKnowledgeDocuments$'
+  - id: R-23
+    title: A knowledge connector shall connect only where its source's scope allows, and keep its credential out of every error.
+    status: approved
+    priority: must
+    tags: [security, knowledge, secrets]
+    details: |-
+      The Confluence connector takes an https base URL with no credentials, query
+      or fragment in it, and checks every connection at the address it connects to,
+      after DNS: never loopback, link-local or a cloud metadata service, and a
+      private address only for an organisation's Data Center source — a personal
+      source is anyone's to point, and must not reach the hub's own network. It
+      follows no redirect, uses no proxy from the environment, and refuses a
+      next-page link that leaves the endpoint it is paging. Every error it returns
+      has the credential, in each form it is sent in, removed. Promised in
+      docs/security/model.md, "Knowledge sources".
+    tests:
+      - name: addresses, redirects and links
+        command: go test ./pkg/knowledge/confluence -run '^(TestConfigValidation|TestTheDialerChecksTheAddressItConnectsTo|TestRedirectsAreNotFollowed|TestNextLinksStayOnTheSite)$'
+      - name: the credential
+        command: go test ./pkg/knowledge/confluence -run '^(TestAuthentication|TestTheTokenNeverLeaves|TestAFailedSyncRecordsNoToken)$'
+      - name: the scope reaches the connector
+        command: go test ./pkg/knowledge -run '^TestRequestsCarryTheSourceScope$'

@@ -70,6 +70,7 @@ value that ends that way (`GITHUB_TOKEN=ghp_xxxx…`) or is a template
 | `anthropic-key` | Anthropic credential (other form) | Any other `sk-ant-…` credential with a body of 12 or more characters: admin keys, session keys, forms not yet issued. |
 | `openai-api-key` | OpenAI API key | `sk-proj-…`, `sk-svcacct-…`, `sk-admin-…` and `sk-None-…` keys, and legacy `sk-` followed by 20 or more letters and digits. Not when `sk-` ends a longer word: `task-…`, `risk-…`. |
 | `slack-token` | Slack token | `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-`, `xoxs-`, `xoxo-`, `xoxe-` (and rotating `xoxe.xox?-`) and app-level `xapp-` tokens. |
+| `atlassian-api-token` | Atlassian API token | `ATATT` followed by 24 or more letters, digits, `_`, `-` and `=` — the API token an Atlassian account signs in to Confluence and Jira Cloud with (`ATATT3` and 186 more in practice, the last nine an `=` and a hexadecimal checksum). Not when `ATATT` ends a longer word, nor a short run such as an issue key (`ATATT-1234`). |
 | `aws-access-key-id` | AWS access key ID | `AKIA`, `ASIA`, `ABIA` or `ACCA` followed by exactly 16 capitals and digits, standing alone. AWS's documentation keys, which end in `EXAMPLE`, are not matched. |
 | `google-api-key` | Google API key | `AIza` followed by 30 or more letters, digits, `_` and `-` (35 in practice). |
 | `jwt` | JSON Web Token | `eyJ…` header, payload and signature segments joined by dots (and the two further segments of a JWE). A lone base64 JSON blob, with no dots, is not matched. |

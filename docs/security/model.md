@@ -3159,7 +3159,43 @@ a configuration change, and weekly — records when it began and stamps each
 document it lists. When it reaches its end, in that sync or a later one that
 resumed it, every document it did not reach is removed, so un-publishing a
 space by narrowing the configuration takes effect even across a failed sync
-(`TestAnInterruptedFullListingStillSweeps`).
+(`TestAnInterruptedFullListingStillSweeps`). Between full listings, a connector
+that can say cheaply what its source holds — every id in scope, without the
+bodies — is asked every six hours, and the documents its answer leaves out are
+removed: deleted, moved out of scope, or hidden by a restriction, none of which
+an incremental listing reports. A document a sync listed within the hour is
+kept whatever the answer says, so an answer read from a search index that lags
+the listing cannot undo it (`TestSyncReconcilesWhenDue`,
+`TestReconcileKnowledgeDocuments`).
+
+**Confluence: pages their readers restricted.** A Confluence page with a view
+restriction — its own, or one on a page above it, which Confluence applies to
+the pages below — is one some of the site's readers cannot see. The hub's
+account can, and every member of a project the source is bound to could then
+search it. So the connector does not index a restricted page unless the source
+sets `include_restricted`, and counts a restriction it could not read — an
+answer without one, an ancestor the site does not return — as one
+(`TestRestrictedPages`, `TestPlacementSurvivesASearchIndexThatLags`). A page
+restricted after it was indexed leaves at the next sync when it was also
+edited (`TestAnEditedPageThatBecameRestrictedLeavesAtOnce`), and at the next
+reconciliation when it was not (`TestReconciliationRemovesWhatTheListingCannotSee`).
+That is the window: up to six hours in which a page restricted without an edit
+stays searchable from the projects the source is bound to.
+
+**Where a connector connects.** A personal source can be connected by any
+operator, so the address its configuration names is not trusted. The
+Confluence connector takes an `https` base URL with no credentials, query or
+fragment in it, and checks every connection at the address it is about to
+connect to, after DNS — so a name that resolves, or is rebound, somewhere it
+should not is refused all the same: never loopback, link-local or a cloud
+metadata service, and a private address only for an organisation's Data
+Center source (`TestConfigValidation`, `TestTheDialerChecksTheAddressItConnectsTo`).
+It follows no redirect and uses no proxy from the environment, so the
+credential goes to the address checked and nowhere else, and a next-page link
+that leaves the endpoint being paged is refused (`TestRedirectsAreNotFollowed`,
+`TestNextLinksStayOnTheSite`). Every error it returns has the credential, in
+each form it is sent in, removed (`TestTheTokenNeverLeaves`,
+`TestAFailedSyncRecordsNoToken`).
 
 **Credentials stay on the hub.** A source stores a secret store *reference*,
 never a credential: a configuration that names one, or holds anything shaped
@@ -3171,7 +3207,9 @@ printed or serialized, and a failed sync's recorded error is scrubbed of it
 (`TestSyncKeepsTheCredentialOnTheHub`). Document bodies are bounded at 2 MiB
 through `pkg/boundedread`, and anything shaped like a credential is scrubbed
 from a page before it is indexed, so a token pasted into a wiki page is not
-republished to the projects bound to the wiki (`TestIndexBoundsAndCleans`).
+republished to the projects bound to the wiki (`TestIndexBoundsAndCleans`) —
+an Atlassian API token among them, which pkg/redact recognises by its `ATATT`
+prefix.
 The ACL hints a connector reports for a document are stored with it but not
 enforced: a binding is what decides who may search a source.
 
@@ -4868,6 +4906,19 @@ and the hub still seals under its primary — by design, so that a change can be
 backed out and members not yet restarted keep working
 (`TestANewRootBesideThePreviousOpensEverythingAndChangesNothing`): finish the
 change promptly once every member holds the new root.
+
+**A Confluence page restricted without an edit stays searchable until the next
+reconciliation, and a space's permissions are not a page's restrictions.** The
+connector learns of a view restriction when it lists a page, and a restriction
+added without an edit changes nothing a listing sees: the page stays in the
+index, searchable from every project the source is bound to, until the next
+reconciliation — six hours by default
+(`TestReconciliationRemovesWhatTheListingCannotSee`, `TestSyncReconcilesWhenDue`).
+And only page restrictions are read: a space whose permissions admit some of
+the site's readers is indexed whole, for every member of every bound project
+(`TestListingReadsEverythingInScope`). What a source exposes is what the
+account it signs in as may read, in the spaces or the query it names; choosing
+both is the decision of whoever connects it.
 
 **A compromised device can fill its own budget, and enough of them the
 hub's.** Returned work is bounded per handle, per executor and per process

@@ -485,7 +485,28 @@ func positives(r *rand.Rand) []Positive {
 		Text:    "HTTPS_PROXY=http://sess_" + pick(r, hexChars, 24) + ":" + egressPass + "@hub.example.com:3129",
 		Secrets: []string{egressPass}, Keep: []string{"HTTPS_PROXY=http://", "@hub.example.com:3129"}})
 
+	// Atlassian Cloud API tokens (Task 20468), as a wiki page that documents
+	// a service account carries one — the text a knowledge source indexes —
+	// and as a curl line in a runbook.
+	wikiTok := AtlassianAPIToken(r)
+	add(Positive{Name: "atlassian-api-token/wiki-page", Detector: "atlassian-api-token",
+		Text: "## Service account\n\nThe nightly export signs in as wiki-bot@corp.example with the token " +
+			wikiTok + " until it is rotated in March.",
+		Secrets: []string{wikiTok},
+		Keep:    []string{"## Service account", "signs in as wiki-bot@corp.example with the token ", " until it is rotated in March."}})
+	curlTok := AtlassianAPIToken(r)
+	add(Positive{Name: "atlassian-api-token/curl-basic-auth", Detector: "atlassian-api-token",
+		Text:    "curl -s -u wiki-bot@corp.example:" + curlTok + " https://corp.atlassian.net/wiki/api/v2/spaces?keys=ENG",
+		Secrets: []string{curlTok}, Keep: []string{"curl -s -u wiki-bot@corp.example:", " https://corp.atlassian.net/wiki/api/v2/spaces?keys=ENG"}})
+
 	return out
+}
+
+// AtlassianAPIToken returns an Atlassian Cloud API token's shape: ATATT3, 177
+// base64url characters, "=" and an eight-digit hexadecimal checksum — 192
+// characters, as the tokens id.atlassian.com issues are.
+func AtlassianAPIToken(r *rand.Rand) string {
+	return "ATATT3" + generated(r, b64url, 177) + "=" + pick(r, "0123456789ABCDEF", 8)
 }
 
 func prefixLines(prefix, s string) string {
@@ -615,5 +636,7 @@ func negatives(r *rand.Rand) []Negative {
 	add("URL templates",
 		"postgres://cloop:${DB_PASSWORD}@db:5432/cloop https://deploy:$REGISTRY_PASSWORD@registry.example.com/v2/ "+
 			"http://u:%s@proxy:3128 https://ci:****@git.example.com/acme/x.git")
+	add("an Atlassian token's prefix, documented",
+		"Atlassian API tokens start with ATATT3xFfGF0 and end in a checksum; Jira issue ATATT-1234 tracks the rotation.")
 	return out
 }

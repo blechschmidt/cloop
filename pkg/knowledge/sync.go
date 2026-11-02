@@ -25,11 +25,27 @@ const (
 	// beginning even when nothing asked for it, so that what its remote
 	// removed or hid without saying so leaves the index.
 	DefaultFullListingEvery = 7 * 24 * time.Hour
+	// DefaultReconcileEvery is how often a Reconciler's source is reconciled:
+	// how long a document deleted, moved out of scope or newly restricted at
+	// the remote can stay searchable when nothing else about it changed.
+	DefaultReconcileEvery = 6 * time.Hour
+	// maxReconciledDocuments bounds a Reconciler's answer.
+	maxReconciledDocuments = 250_000
+	// reconcileGrace is how recently a sync must have listed a document for a
+	// reconciliation to keep it whatever its answer says: an answer read from a
+	// remote's search index can lag the listing that just indexed a document,
+	// and must not remove it.
+	reconcileGrace = time.Hour
 )
 
 // WithFullListingEvery sets how often a source is listed from the beginning
 // (DefaultFullListingEvery); zero or less never forces one.
 func WithFullListingEvery(d time.Duration) Option { return func(s *Service) { s.fullEvery = d } }
+
+// WithReconcileEvery sets how often a source whose connector is a Reconciler
+// is reconciled (DefaultReconcileEvery); zero or less never reconciles, which
+// leaves removing what the remote no longer holds to full listings.
+func WithReconcileEvery(d time.Duration) Option { return func(s *Service) { s.reconcileEvery = d } }
 
 // SyncReport says what one sync did.
 type SyncReport struct {
@@ -54,6 +70,11 @@ type SyncReport struct {
 	// Complete reports that the listing reached its end, rather than
 	// stopping at maxSyncPages to resume next time.
 	Complete bool
+	// Reconciled reports that the connector was asked which documents the
+	// source holds, and Removed counts the documents its answer left out,
+	// which the reconciliation removed.
+	Reconciled bool
+	Removed    int
 }
 
 // Sync brings source id's index up to date with its remote, on the hub.
@@ -72,6 +93,14 @@ type SyncReport struct {
 // listed is stamped. When the listing reaches its end, in this sync or in a
 // later one that resumed it, every document it did not reach is removed: what
 // the remote deleted without saying so, or stopped showing.
+//
+// A listing that reached its end without error is followed, when the
+// connector is a Reconciler and the source's last reconciliation is older than
+// the Service's interval, by a reconciliation: the connector reports every
+// document the source holds in scope now, and each indexed document it leaves
+// out is removed — unless a sync listed it within the last hour, which an
+// answer from a lagging search index must not undo. A full listing that ends
+// counts as one, its sweep having removed the same documents.
 //
 // Last, it asks the connector which documents match each binding's query —
 // even when the listing failed, since the documents it did index may have
@@ -105,6 +134,9 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncReport, error) {
 	defer cred.wipe()
 
 	listErr := s.listAll(ctx, conn, row, cred, &report)
+	if listErr == nil {
+		listErr = s.reconcile(ctx, conn, row, cred, &report)
+	}
 	if errors.Is(listErr, statedb.ErrKnowledgeSourceChanged) {
 		// Reconfigured or deleted mid-sync: the bindings are the new
 		// configuration's to answer for, at its own first sync.
@@ -153,7 +185,8 @@ func (s *Service) listAll(ctx context.Context, conn Connector, row statedb.Knowl
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		page, err := conn.List(ctx, ListRequest{Config: config, Credential: cred, Cursor: cursor, PageSize: syncPageSize})
+		page, err := conn.List(ctx, ListRequest{Config: config, Credential: cred, Scope: row.Scope, Cursor: cursor,
+			PageSize: syncPageSize})
 		if err != nil {
 			return fmt.Errorf("list: %w", err)
 		}
@@ -193,6 +226,38 @@ func (s *Service) listAll(ctx context.Context, conn Connector, row statedb.Knowl
 	return nil
 }
 
+// reconcile asks a Reconciler connector which documents the source holds and
+// removes the indexed ones its answer leaves out, when the source's last
+// reconciliation is older than the Service's interval. It is skipped for a
+// listing that has not reached its end, and for one that took part in a full
+// listing: a full listing's own sweep is the reconciliation, at its end.
+func (s *Service) reconcile(ctx context.Context, conn Connector, row statedb.KnowledgeSourceRow, cred Credential, report *SyncReport) error {
+	rec, ok := conn.(Reconciler)
+	if !ok || !report.Complete || report.Full || s.reconcileEvery <= 0 {
+		return nil
+	}
+	now := s.now()
+	if !row.ReconciledAt.IsZero() && now.Sub(row.ReconciledAt) < s.reconcileEvery {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ids, err := rec.Reconcile(ctx, ReconcileRequest{Config: json.RawMessage(row.Config), Credential: cred, Scope: row.Scope})
+	if err != nil {
+		return fmt.Errorf("reconcile: %w", err)
+	}
+	if len(ids) > maxReconciledDocuments {
+		return fmt.Errorf("the %s connector reported %d documents, more than %d", conn.Kind(), len(ids), maxReconciledDocuments)
+	}
+	n, err := s.db.ReconcileKnowledgeDocuments(row.ID, row.UpdatedAt, ids, now.Add(-reconcileGrace), now)
+	if err != nil {
+		return err
+	}
+	report.Reconciled, report.Removed = true, n
+	return nil
+}
+
 // fullListingDue reports whether the source's last full listing is older
 // than the Service's interval.
 func (s *Service) fullListingDue(row statedb.KnowledgeSourceRow, now time.Time) bool {
@@ -222,7 +287,8 @@ func (s *Service) syncDocument(ctx context.Context, conn Connector, row statedb.
 		return nil
 	}
 	if doc.Partial {
-		full, err := conn.Fetch(ctx, FetchRequest{Config: json.RawMessage(row.Config), Credential: cred, ExternalID: doc.ExternalID})
+		full, err := conn.Fetch(ctx, FetchRequest{Config: json.RawMessage(row.Config), Credential: cred, Scope: row.Scope,
+			ExternalID: doc.ExternalID})
 		if err != nil {
 			return fmt.Errorf("fetch %q: %w", doc.ExternalID, err)
 		}
@@ -276,7 +342,8 @@ func (s *Service) narrow(ctx context.Context, conn Connector, row statedb.Knowle
 		case !canNarrow:
 			err = fmt.Errorf("the %s connector cannot narrow by a query", conn.Kind())
 		default:
-			ids, err = narrower.Narrow(ctx, NarrowRequest{Config: json.RawMessage(row.Config), Credential: cred, Query: b.Query})
+			ids, err = narrower.Narrow(ctx, NarrowRequest{Config: json.RawMessage(row.Config), Credential: cred,
+				Scope: row.Scope, Query: b.Query})
 			if err == nil && len(ids) > maxNarrowedDocuments {
 				err = fmt.Errorf("the %s connector matched %d documents, more than %d", conn.Kind(), len(ids), maxNarrowedDocuments)
 			}

@@ -32,6 +32,8 @@ import (
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/knowledge"
+	// The connectors this build reads sources with register themselves.
+	_ "github.com/blechschmidt/cloop/pkg/knowledge/confluence"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -109,7 +111,10 @@ type knowledgeHitView struct {
 	Space      string             `json:"space,omitempty"`
 	ExternalID string             `json:"external_id"`
 	Heading    string             `json:"heading,omitempty"`
-	Snippet    string             `json:"snippet"`
+	// Ancestors place the document at its source, outermost first: the
+	// pages above a Confluence page, for a citation.
+	Ancestors []string `json:"ancestors,omitempty"`
+	Snippet   string   `json:"snippet"`
 	// Rank is the hit's place, from 1. Its BM25 score is not given out: it is
 	// weighed against every project's sources (see knowledge.Access.Search).
 	Rank int `json:"rank"`
@@ -633,7 +638,7 @@ func (s *Server) handleProjectKnowledgeSearch(w http.ResponseWriter, r *http.Req
 			ChunkID: h.ChunkID, DocumentID: h.DocumentID,
 			Source: knowledgeSourceRef{ID: h.Source.ID, Name: h.Source.Name, Kind: h.Source.Kind},
 			Title:  h.Title, URL: h.URL, Space: h.Space, ExternalID: h.ExternalID, Heading: h.Heading,
-			Snippet: h.Snippet, Rank: h.Rank,
+			Ancestors: h.Ancestors, Snippet: h.Snippet, Rank: h.Rank,
 		})
 	}
 	jsonOK(w, map[string]any{"query": q.Get("q"), "hits": views})

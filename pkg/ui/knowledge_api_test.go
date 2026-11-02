@@ -25,7 +25,8 @@ type uiTestConnector struct{}
 
 func (uiTestConnector) Kind() string { return "uitest" }
 
-func (uiTestConnector) Validate(config json.RawMessage) error {
+func (uiTestConnector) Validate(req knowledge.ValidateRequest) error {
+	config := req.Config
 	if strings.Contains(string(config), "refuse") {
 		return errors.New("refused by the connector")
 	}

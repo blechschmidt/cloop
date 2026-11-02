@@ -666,6 +666,21 @@ var specs = []spec{
 		keywords:   []string{"xox", "xapp-"},
 	},
 	{
+		name:  "atlassian-api-token",
+		label: "Atlassian API token",
+		recognises: "`ATATT` followed by 24 or more letters, digits, `_`, `-` and `=` — the API token an " +
+			"Atlassian account signs in to Confluence and Jira Cloud with (`ATATT3` and 186 more in " +
+			"practice, the last nine an `=` and a hexadecimal checksum). Not when `ATATT` ends a longer " +
+			"word, nor a short run such as an issue key (`ATATT-1234`).",
+		pattern:  `(?P<kind>ATATT)[0-9A-Za-z_\-=]{24,}`,
+		keywords: []string{"ATATT"},
+		before:   isWordByte,
+		// Rejected only by its boundary. A candidate starting inside a
+		// rejected one follows a byte of it — a word byte, or the "=" of a
+		// checksum — and is a fragment of the same run, not a token of its own.
+		skipRejected: true,
+	},
+	{
 		name:  "aws-access-key-id",
 		label: "AWS access key ID",
 		recognises: "`AKIA`, `ASIA`, `ABIA` or `ACCA` followed by exactly 16 capitals and digits, " +

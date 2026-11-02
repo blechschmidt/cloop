@@ -12,6 +12,22 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A knowledge source can no longer be pointed at the hub's own network, and
+  pasted Atlassian tokens are scrubbed.** The Confluence connector accepts only
+  an `https` base URL with no credentials, query or fragment in it. It checks
+  every connection at the address it is about to connect to, after DNS, so a
+  name that resolves or is rebound somewhere it should not is refused: never
+  loopback, link-local or a cloud metadata service, and a private address only
+  for an organisation's Data Center source. A personal source, which any
+  operator can connect, therefore cannot make the hub request its own internal
+  services. The connector follows no redirect, uses no proxy from the
+  environment, refuses a next-page link that leaves the endpoint it is paging,
+  and removes the credential, in every form it is sent in, from every error it
+  returns. pkg/redact's registry now recognises Atlassian API tokens
+  (`ATATT…`, detector `atlassian-api-token`), so a token pasted into a wiki page
+  is scrubbed before the page is indexed, and every other scanner in cloop
+  catches one too (Task 20468).
+
 - **A Kubernetes Pod runs the digest its image's tag resolved to, so it runs
   what the image policy evaluated.** The Kubernetes executor applied the image
   policy with no resolver: a tag a project named reached the kubelet as a tag
@@ -162,6 +178,38 @@ schema and the hub's HTTP API may change in any release.
   pulls it (`docker pull` of the digest the refusal names) (Task 20453).
 
 ### Added
+
+- **Confluence connector: Confluence Cloud and Data Center as knowledge
+  sources.** The hub can now connect a Confluence site and search it from the
+  projects it is bound to, as kind `confluence` (`pkg/knowledge/confluence`).
+  Cloud signs in with an email and API token, or an OAuth bearer token; Data
+  Center or Server with a personal access token. The credential is the
+  source's secret, never its configuration. A source is scoped by space keys
+  or by one CQL query. A Cloud source scoped by spaces is listed through REST
+  API v2, its pages and then its blog posts; every other source through
+  `/rest/api/content/search`. Each listing is newest change first and
+  incremental: the cursor keeps how far back the next pass needs to go, so a
+  sync reads only what changed. A page edited mid-listing is listed twice
+  rather than skipped. Pages and blog posts become clean text from their
+  storage-format XHTML, keeping headings (so chunks fall at them), lists, task
+  lists, tables and code blocks (with their language). Macros' own output and
+  parameters, images and attachments are left out, but the text an author wrote
+  inside a macro, such as an info panel or an expand, is kept. Malformed markup
+  is absorbed rather than refused. Each document records its web URL and the
+  titles of the pages above it, which search results now carry (`ancestors`)
+  for citations. Its view restrictions go into its ACL hints. A page with a
+  view restriction, its own or inherited from a page above it, is not indexed
+  unless the source sets `include_restricted`, and a restriction the connector
+  cannot read counts as one. 429 and 503 are retried after `Retry-After` or a
+  bounded, jittered exponential backoff. Requests are bounded in time and in
+  answer size, and a page too large to read is indexed by its title. Bindings
+  can narrow a source by CQL. pkg/knowledge gains a periodic reconciliation:
+  a connector that can list every id in scope cheaply is asked every six hours,
+  and the documents its answer leaves out are removed. That covers pages
+  deleted, moved out of scope or restricted without an edit, none of which an
+  incremental listing sees. Migration 0093 (additive) records documents'
+  ancestors and sources' last reconciliation. Connectors now learn their
+  source's scope with every request (Task 20468).
 
 - **Knowledge sources: the base layer for searching Confluence, Jira and other
   enterprise knowledge from a project.** A new `pkg/knowledge` defines the

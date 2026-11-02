@@ -29,6 +29,9 @@ type Service struct {
 	now         func() time.Time
 	// fullEvery is how often a source is listed from the beginning.
 	fullEvery time.Duration
+	// reconcileEvery is how often a Reconciler is asked what its source
+	// holds.
+	reconcileEvery time.Duration
 
 	// onChunk, when set, is called each time a document is chunked. Tests use
 	// it to prove an unchanged document is not.
@@ -56,11 +59,12 @@ func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = 
 // New returns a Service over db, the hub's control-plane database.
 func New(db *statedb.DB, opts ...Option) *Service {
 	s := &Service{
-		db:        db,
-		registry:  defaultRegistry,
-		chunking:  ChunkOptions{}.normalized(),
-		now:       time.Now,
-		fullEvery: DefaultFullListingEvery,
+		db:             db,
+		registry:       defaultRegistry,
+		chunking:       ChunkOptions{}.normalized(),
+		now:            time.Now,
+		fullEvery:      DefaultFullListingEvery,
+		reconcileEvery: DefaultReconcileEvery,
 	}
 	for _, o := range opts {
 		o(s)

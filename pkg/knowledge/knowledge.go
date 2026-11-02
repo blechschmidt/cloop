@@ -66,6 +66,9 @@ const (
 	// document.
 	MaxACLHints     = 64
 	MaxACLHintBytes = 256
+	// MaxAncestors bounds the ancestors kept per document: the innermost
+	// ones, which place it best. Each is a title, bounded by MaxTitleBytes.
+	MaxAncestors = 32
 	// MaxChunksPerDocument bounds one document's chunks.
 	MaxChunksPerDocument = 4096
 	// MaxPageDocuments bounds what one List call may return.
@@ -162,6 +165,11 @@ type Document struct {
 	// filter by them. A binding is what decides who may search a source; the
 	// hints are recorded, not enforced, by this package.
 	ACL []string
+	// Ancestors are the titles of what holds it at the source, outermost
+	// first — the pages above a Confluence page — so that a citation can say
+	// where it sits ("Runbooks › Deploys"). Metadata, like URL and ACL:
+	// changing them does not chunk the document again.
+	Ancestors []string
 	// Partial marks a document List returned without its body; the sync
 	// fetches it before indexing.
 	Partial bool
@@ -201,6 +209,10 @@ type SyncState struct {
 	// Resumes reports whether the next sync continues from a cursor rather
 	// than listing the source from the beginning.
 	Resumes bool
+	// ReconciledAt is when the documents were last reconciled against what
+	// the source holds — by a Reconciler's answer, or a full listing's
+	// sweep; zero for never.
+	ReconciledAt time.Time
 }
 
 // Counts is how much a source holds.
@@ -261,6 +273,8 @@ type Hit struct {
 	ExternalID string
 	// Heading is the chunk's heading path within its document.
 	Heading string
+	// Ancestors place the document at its source, outermost first.
+	Ancestors []string
 	// Snippet is the chunk's best-matching passage, terms marked with
 	// SnippetOpen and SnippetClose.
 	Snippet string

@@ -102,6 +102,7 @@ func sourceFromRow(row statedb.KnowledgeSourceRow) Source {
 		Config: json.RawMessage(row.Config), SecretRef: row.SecretRef, Enabled: row.Enabled,
 		Sync: SyncState{
 			Status: row.SyncStatus, Error: row.SyncError, At: row.SyncedAt, Resumes: row.SyncCursor != "",
+			ReconciledAt: row.ReconciledAt,
 		},
 		CreatedAt: row.CreatedAt, CreatedBy: row.CreatedBy, UpdatedAt: row.UpdatedAt, UpdatedBy: row.UpdatedBy,
 	}
@@ -236,7 +237,7 @@ func (a *Access) CreateSource(ctx context.Context, in SourceInput) (Source, erro
 	if !ok {
 		return Source{}, a.unknownKind(kind)
 	}
-	config, err := a.s.validateConfig(conn, in.Config)
+	config, err := a.s.validateConfig(conn, scope, in.Config)
 	if err != nil {
 		return Source{}, err
 	}
@@ -269,13 +270,14 @@ func (a *Access) unknownKind(kind string) error {
 	return invalid("there is no connector of kind %q; this build has %s", kind, strings.Join(kinds, ", "))
 }
 
-// validateConfig runs the framework's checks, then the connector's.
-func (s *Service) validateConfig(conn Connector, raw json.RawMessage) (json.RawMessage, error) {
+// validateConfig runs the framework's checks, then the connector's, for a
+// source of scope.
+func (s *Service) validateConfig(conn Connector, scope string, raw json.RawMessage) (json.RawMessage, error) {
 	config, err := cleanConfig(raw)
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.Validate(config); err != nil {
+	if err := conn.Validate(ValidateRequest{Config: config, Scope: scope}); err != nil {
 		if errors.Is(err, ErrInvalid) {
 			return nil, err
 		}
@@ -339,7 +341,7 @@ func (a *Access) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (S
 		if !ok {
 			return Source{}, a.unknownKind(row.Kind)
 		}
-		config, err := a.s.validateConfig(conn, in.Config)
+		config, err := a.s.validateConfig(conn, row.Scope, in.Config)
 		if err != nil {
 			return Source{}, err
 		}
@@ -623,7 +625,7 @@ func (a *Access) Search(ctx context.Context, project Project, query string, k in
 			ChunkID: r.ChunkID, DocumentID: r.DocumentID,
 			Source: SourceRef{ID: r.SourceID, Name: r.SourceName, Kind: r.SourceKind},
 			Title:  r.Title, URL: r.URL, Space: r.SpaceKey, ExternalID: r.ExternalID, Heading: r.Heading,
-			Snippet: snippet, Rank: i + 1, Ordinal: r.Ordinal,
+			Ancestors: r.Ancestors, Snippet: snippet, Rank: i + 1, Ordinal: r.Ordinal,
 		})
 	}
 	return out, nil
