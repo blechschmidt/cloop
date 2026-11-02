@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/knowledge"
+	"github.com/blechschmidt/cloop/pkg/knowledge/internal/atlassian"
 )
 
 // Listing bounds.
@@ -74,7 +75,7 @@ func (s settings) streams() []stream {
 // session is one call's settings and client.
 type session struct {
 	s  settings
-	cl *client
+	cl *atlassian.Client
 }
 
 // item is a document as a listing returned it, before it is decided on.
@@ -353,7 +354,7 @@ func (ss *session) nextRef(next, path string) (string, error) {
 // it is a URL the connector would itself connect to, else the base URL.
 func (ss *session) webBase(answered string) string {
 	if u, err := url.Parse(strings.TrimSpace(answered)); err == nil && u.Host != "" && u.User == nil &&
-		(u.Scheme == "https" || (u.Scheme == "http" && ss.cl.insecure)) {
+		(u.Scheme == "https" || (u.Scheme == "http" && ss.cl.Insecure())) {
 		return strings.TrimRight(u.Scheme+"://"+u.Host+u.EscapedPath(), "/")
 	}
 	return strings.TrimRight(ss.s.base.String(), "/")
@@ -406,7 +407,7 @@ func (ss *session) resolveSpaces(ctx context.Context) ([]spaceRef, error) {
 			} `json:"results"`
 			Links links `json:"_links"`
 		}
-		if err := ss.cl.get(ctx, ref, &answer); err != nil {
+		if err := ss.cl.Get(ctx, ref, &answer); err != nil {
 			return nil, fmt.Errorf("look up the spaces %s: %w", strings.Join(ss.s.spaces, ", "), err)
 		}
 		for _, r := range answer.Results {
@@ -488,7 +489,7 @@ func (ss *session) fetchListing(ctx context.Context, strm stream, ref string, li
 	for {
 		r := withBodies(strm, setParam(ref, "limit", strconv.Itoa(limit)), bodies)
 		page, err := ss.readListing(ctx, strm, r, bodies, spaces)
-		if errors.Is(err, errTooLarge) {
+		if errors.Is(err, atlassian.ErrTooLarge) {
 			switch {
 			case limit > 1:
 				limit /= 2
@@ -508,7 +509,7 @@ func (ss *session) readListing(ctx context.Context, strm stream, ref string, bod
 	var answered links
 	if strm.path == pathSearch {
 		var answer v1List
-		if err := ss.cl.get(ctx, ref, &answer); err != nil {
+		if err := ss.cl.Get(ctx, ref, &answer); err != nil {
 			return page, err
 		}
 		for _, c := range answer.Results {
@@ -517,7 +518,7 @@ func (ss *session) readListing(ctx context.Context, strm stream, ref string, bod
 		answered = answer.Links
 	} else {
 		var answer v2List
-		if err := ss.cl.get(ctx, ref, &answer); err != nil {
+		if err := ss.cl.Get(ctx, ref, &answer); err != nil {
 			return page, err
 		}
 		keys := map[string]string{}
@@ -727,9 +728,9 @@ func (ss *session) place(ctx context.Context, items []*item) error {
 				"the next sync tries them again", maxFallbacks)
 		}
 		var c v1Content
-		err := ss.cl.get(ctx, "/rest/api/content/"+id+"?expand="+url.QueryEscape(expandPlacement), &c)
+		err := ss.cl.Get(ctx, "/rest/api/content/"+id+"?expand="+url.QueryEscape(expandPlacement), &c)
 		switch {
-		case isStatus(err, http.StatusNotFound):
+		case atlassian.IsStatus(err, http.StatusNotFound):
 			it.gone = true
 		case err != nil:
 			return fmt.Errorf("look up page %s: %w", id, err)
@@ -789,9 +790,9 @@ func (ss *session) ancestorRestrictions(ctx context.Context, items []*item) (map
 		var answer struct {
 			Restrictions *readRestrictions `json:"restrictions"`
 		}
-		err := ss.cl.get(ctx, "/rest/api/content/"+id+"/restriction/byOperation/read", &answer)
+		err := ss.cl.Get(ctx, "/rest/api/content/"+id+"/restriction/byOperation/read", &answer)
 		switch {
-		case isStatus(err, http.StatusNotFound):
+		case atlassian.IsStatus(err, http.StatusNotFound):
 			// Left unknown: restricted.
 		case err != nil:
 			return nil, fmt.Errorf("look up the restrictions of page %s: %w", id, err)
@@ -833,7 +834,7 @@ func (ss *session) search(ctx context.Context, cql, expand string, limit, most i
 			return "", fmt.Errorf("the search did not end after %d pages", pages)
 		}
 		var answer v1List
-		if err := ss.cl.get(ctx, ref, &answer); err != nil {
+		if err := ss.cl.Get(ctx, ref, &answer); err != nil {
 			return "", err
 		}
 		if webBase == "" {

@@ -51,7 +51,7 @@
 //
 // Every connection is checked at the address it connects to, after DNS: never
 // loopback, link-local or a cloud metadata service, and a private address only
-// for an organisation's Data Center source (see addressPolicy). A request is
+// for an organisation's Data Center source (see atlassian.Policy). A request is
 // bounded in time (Options.RequestTimeout) and its answer in size; a 429 or
 // 503 is retried after the site's Retry-After, or a bounded exponential backoff
 // with jitter; a redirect is not followed. The credential is sent as a header
@@ -173,10 +173,10 @@ func (c *Connector) List(ctx context.Context, req knowledge.ListRequest) (knowle
 	if err != nil {
 		return knowledge.Page{}, err
 	}
-	defer ss.cl.close()
+	defer ss.cl.Close()
 	page, err := ss.list(ctx, req.Cursor, req.PageSize)
 	if err != nil {
-		return knowledge.Page{}, ss.cl.clean(err)
+		return knowledge.Page{}, ss.cl.Clean(err)
 	}
 	return page, nil
 }
@@ -190,10 +190,10 @@ func (c *Connector) Fetch(ctx context.Context, req knowledge.FetchRequest) (know
 	if err != nil {
 		return knowledge.Document{}, err
 	}
-	defer ss.cl.close()
+	defer ss.cl.Close()
 	doc, err := ss.fetch(ctx, req.ExternalID)
 	if err != nil {
-		return knowledge.Document{}, ss.cl.clean(err)
+		return knowledge.Document{}, ss.cl.Clean(err)
 	}
 	return doc, nil
 }
@@ -205,10 +205,10 @@ func (c *Connector) Narrow(ctx context.Context, req knowledge.NarrowRequest) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer ss.cl.close()
+	defer ss.cl.Close()
 	ids, err := ss.narrow(ctx, req.Query)
 	if err != nil {
-		return nil, ss.cl.clean(err)
+		return nil, ss.cl.Clean(err)
 	}
 	return ids, nil
 }
@@ -219,10 +219,10 @@ func (c *Connector) Reconcile(ctx context.Context, req knowledge.ReconcileReques
 	if err != nil {
 		return nil, err
 	}
-	defer ss.cl.close()
+	defer ss.cl.Close()
 	ids, err := ss.reconcile(ctx)
 	if err != nil {
-		return nil, ss.cl.clean(err)
+		return nil, ss.cl.Clean(err)
 	}
 	return ids, nil
 }

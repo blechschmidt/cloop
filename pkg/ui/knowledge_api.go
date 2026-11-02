@@ -34,6 +34,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/knowledge"
 	// The connectors this build reads sources with register themselves.
 	_ "github.com/blechschmidt/cloop/pkg/knowledge/confluence"
+	_ "github.com/blechschmidt/cloop/pkg/knowledge/jira"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"

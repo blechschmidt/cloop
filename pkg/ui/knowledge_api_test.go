@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -110,6 +111,12 @@ func TestKnowledgeAPIEnforcesRoles(t *testing.T) {
 	decodeBody(t, expect(engineer, "GET", "/api/knowledge/sources", nil, http.StatusOK), &list)
 	if list.CanCreateOrg || !list.CanCreatePersonal || !strings.Contains(strings.Join(list.Connectors, ","), "uitest") {
 		t.Fatalf("an engineer's listing = %+v", list)
+	}
+	// The hub build registers the connectors it ships.
+	for _, kind := range []string{"confluence", "jira"} {
+		if !slices.Contains(list.Connectors, kind) {
+			t.Fatalf("the hub offers connectors %v, without %s", list.Connectors, kind)
+		}
 	}
 
 	// An organisation source takes knowledge.admin.

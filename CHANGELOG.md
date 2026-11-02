@@ -179,6 +179,46 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Jira connector: Jira Cloud and Data Center issues as knowledge sources.**
+  The hub can now connect a Jira site and search its issues from the projects
+  it is bound to, as kind `jira` (`pkg/knowledge/jira`). Cloud signs in with an
+  email and API token, or an OAuth bearer token, also through
+  `https://api.atlassian.com/ex/jira/<cloud id>`; Data Center or Server with a
+  personal access token. A source is scoped by one JQL query or by project
+  keys, and a binding can narrow it by project keys or by JQL of its own. Cloud
+  is searched through `/rest/api/3/search/jql` by its page tokens, Data Center
+  through `/rest/api/2/search` by offsets, both as a POST so that a long query
+  fits. Each listing is incremental: it appends `updated >= <time>` to the
+  query, the time in milliseconds since the epoch, which JQL reads the same in
+  every time zone (a written date is read in the signed-in account's), with a
+  15-minute overlap for a search index that lags. A Data Center page starts a
+  few issues before where the last one ended, so issues leaving the results
+  between pages do not shift one past it. Each issue becomes one document: its
+  key and summary are the title, its browse URL the citation, its project the
+  space, and its project and parent the ancestors. Its body is a header of its
+  status, type, priority, resolution, labels, components, fix versions, parent
+  and the keys of the issues it links to, then its description and its
+  comments, each under a heading of its own so that chunks fall at them.
+  Comments a search did not embed are read from the issue's comment pages, up
+  to 1,000. Cloud's Atlassian Document Format becomes text, keeping nested
+  lists, code blocks with their language, mentions, tables, panels, expands and
+  task lists, without recursion and in time linear in its nodes; a document
+  past 4 MiB, or one that is not valid, is scanned for its text instead. Data
+  Center's wiki markup passes through, with its headings, numbered and bullet
+  lists, code and noformat blocks, quotes and tables made into structure. An
+  issue with a security level is not indexed, and a comment restricted to a
+  group or a project role is left out of its issue, unless the source sets
+  `include_secured`. An issue secured after it was indexed leaves at the next
+  sync; one deleted, moved out of the query's scope, or secured with no change
+  to its updated time leaves at the next six-hourly reconciliation, which on
+  Data Center fails rather than answer short when the results shrink under it.
+  A linked issue or a parent is named by its key alone, so a secured issue's
+  summary never reaches another issue's document. The connector makes its
+  requests through the same layer as the Confluence connector, now shared as
+  `pkg/knowledge/internal/atlassian`: the same address checks after DNS, no
+  redirect or proxy, the same time and size bounds, 429 and 503 retries, and
+  credential scrubbing (Task 20469).
+
 - **Confluence connector: Confluence Cloud and Data Center as knowledge
   sources.** The hub can now connect a Confluence site and search it from the
   projects it is bound to, as kind `confluence` (`pkg/knowledge/confluence`).

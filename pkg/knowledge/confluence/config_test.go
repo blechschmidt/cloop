@@ -1,13 +1,7 @@
 package confluence
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"net/http"
-	"net/http/httptest"
-	"net/netip"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -168,66 +162,4 @@ func TestValidateGoesThroughTheFramework(t *testing.T) {
 	if err := c.ValidateQuery(nil, `label = "kb" and space = ENG`); err != nil {
 		t.Fatalf("a binding query = %v", err)
 	}
-}
-
-// TestTheDialerChecksTheAddressItConnectsTo: whatever name a source
-// configured, the connection itself is refused at an address the policy
-// forbids — the defence against a name that resolves, or is rebound, to one.
-func TestTheDialerChecksTheAddressItConnectsTo(t *testing.T) {
-	cases := []struct {
-		addr   string
-		policy addressPolicy
-		want   string
-	}{
-		{addr: "127.0.0.1:443", want: "loopback"},
-		{addr: "[::1]:443", want: "loopback"},
-		{addr: "[::ffff:127.0.0.1]:443", want: "loopback"},
-		{addr: "[64:ff9b::7f00:1]:443", want: "loopback"},
-		{addr: "169.254.169.254:80", want: "metadata"},
-		{addr: "[fd00:ec2::254]:80", policy: addressPolicy{allowPrivate: true}, want: "metadata"},
-		{addr: "100.100.100.200:80", policy: addressPolicy{allowPrivate: true}, want: "metadata"},
-		{addr: "[fe80::1%25eth0]:443", want: "link-local"},
-		{addr: "0.0.0.0:443", want: "unspecified"},
-		{addr: "224.0.0.1:443", want: "multicast"},
-		{addr: "10.1.2.3:443", want: "private"},
-		{addr: "[fd12::1]:443", want: "private"},
-		{addr: "10.1.2.3:443", policy: addressPolicy{allowPrivate: true}},
-		{addr: "104.192.141.1:443"},
-		{addr: "wiki.corp.example:443", want: "not an IP address"},
-	}
-	for _, tc := range cases {
-		err := checkDialAddress(strings.Replace(tc.addr, "%25", "%", 1), tc.policy)
-		switch {
-		case tc.want == "" && err != nil:
-			t.Errorf("%s: %v", tc.addr, err)
-		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want) || !errors.Is(err, ErrBlockedAddress)):
-			t.Errorf("%s = %v, want a refusal naming %q", tc.addr, err, tc.want)
-		}
-	}
-
-	// And on a real connection: the production transport, asked to reach a
-	// server on loopback, refuses before a byte is sent.
-	hits := 0
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
-	t.Cleanup(srv.Close)
-	c := New(Options{})
-	cl := &client{base: mustURL(t, srv.URL), auth: "Bearer x", http: c.httpClient(addressPolicy{}), sleep: c.opts.Sleep,
-		now: c.opts.Now, timeout: c.opts.RequestTimeout, retries: 0}
-	var v any
-	err := cl.get(context.Background(), "/rest/api/space", &v)
-	if !errors.Is(err, ErrBlockedAddress) || !strings.Contains(err.Error(), "loopback") || hits != 0 {
-		t.Fatalf("a request to loopback = %v (%d reached the server)", err, hits)
-	}
-	if addr, perr := netip.ParseAddrPort(strings.TrimPrefix(srv.URL, "https://")); perr != nil || !addr.Addr().IsLoopback() {
-		t.Fatalf("the test server is not on loopback: %s", srv.URL)
-	}
-}
-
-func mustURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u
 }

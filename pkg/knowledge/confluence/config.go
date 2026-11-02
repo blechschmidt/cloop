@@ -5,15 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
-	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/knowledge"
+	"github.com/blechschmidt/cloop/pkg/knowledge/internal/atlassian"
 )
 
 // Deployments a source can name.
@@ -30,19 +27,17 @@ const (
 const (
 	// AuthBasic is Confluence Cloud's email and API token. The email is the
 	// configuration's; the token is the source's secret.
-	AuthBasic = "basic"
+	AuthBasic = atlassian.AuthBasic
 	// AuthBearer presents the secret as a bearer token: a Cloud OAuth 2.0
 	// access token, or a Data Center personal access token.
-	AuthBearer = "bearer"
+	AuthBearer = atlassian.AuthBearer
 )
 
 // Bounds on a configuration.
 const (
-	maxSpaces     = 100
-	maxSpaceKey   = 255
-	maxCQLBytes   = 2048
-	maxEmailBytes = 254
-	maxURLBytes   = 2048
+	maxSpaces   = 100
+	maxSpaceKey = 255
+	maxCQLBytes = 2048
 )
 
 // config is a source's configuration as stored: a JSON object. Unknown keys
@@ -85,7 +80,7 @@ type settings struct {
 	cql               string
 	includeRestricted bool
 	// policy is which addresses the source may connect to.
-	policy addressPolicy
+	policy atlassian.Policy
 }
 
 // cloud reports a Cloud site.
@@ -100,8 +95,6 @@ var (
 	// or a personal space's "~" and its owner's name or account id. Nothing
 	// in it can end a quoted CQL string.
 	spaceKeyPattern = regexp.MustCompile(`^~?[A-Za-z0-9][A-Za-z0-9_.:@\-]*$`)
-	// orderByPattern finds an ORDER BY, which the connector adds itself.
-	orderByPattern = regexp.MustCompile(`(?i)\border\s+by\b`)
 )
 
 // parseConfig checks raw for a source of scope and returns its settings.
@@ -150,7 +143,7 @@ func (c *Connector) parseConfig(raw json.RawMessage, scope string) (settings, er
 
 	s.email = strings.TrimSpace(cfg.Email)
 	if s.email != "" {
-		if err := checkEmail(s.email); err != nil {
+		if err := atlassian.CheckEmail(s.email); err != nil {
 			return settings{}, err
 		}
 	}
@@ -192,65 +185,23 @@ func (c *Connector) parseConfig(raw json.RawMessage, scope string) (settings, er
 		}
 	}
 
-	s.policy = addressPolicy{
+	s.policy = atlassian.Policy{
 		// A private address is a Data Center install on the organisation's
 		// own network — reachable for an organisation's source only. A
 		// personal source is anyone's, and a Cloud site is on the Internet.
-		allowPrivate: scope == knowledge.ScopeOrg && s.deployment == DeploymentDataCenter,
-		insecure:     c.opts.AllowInsecure,
+		AllowPrivate: scope == knowledge.ScopeOrg && s.deployment == DeploymentDataCenter,
+		Insecure:     c.opts.AllowInsecure,
 	}
-	if err := s.policy.checkHost(base.Hostname()); err != nil {
+	if err := s.policy.CheckHost(base.Hostname()); err != nil {
 		return settings{}, err
 	}
 	return s, nil
 }
 
-// parseBaseURL checks a base URL's shape: https (or http, under
-// Options.AllowInsecure), a host, no credentials, query or fragment, and a
-// path without "..", returned without its trailing slash.
+// parseBaseURL checks a base URL's shape (atlassian.ParseBaseURL): https, or
+// http under Options.AllowInsecure.
 func (c *Connector) parseBaseURL(raw string) (*url.URL, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil, errors.New("base_url is required: the site's address, such as https://corp.atlassian.net/wiki")
-	}
-	if len(raw) > maxURLBytes || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
-		return nil, errors.New("base_url is not a URL")
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Opaque != "" || u.Host == "" {
-		return nil, errors.New("base_url is not an absolute URL, such as https://corp.atlassian.net/wiki")
-	}
-	scheme := strings.ToLower(u.Scheme)
-	switch {
-	case scheme == "https":
-	case scheme == "http" && c.opts.AllowInsecure:
-	default:
-		return nil, fmt.Errorf("base_url must be https, not %s: the connector sends the source's credential with every request", u.Scheme)
-	}
-	if u.User != nil {
-		return nil, errors.New("base_url may not hold a user name or password: the credential is the source's secret")
-	}
-	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, errors.New("base_url may not have a query or a fragment")
-	}
-	path := strings.TrimRight(u.Path, "/")
-	for _, seg := range strings.Split(path, "/") {
-		if seg == "." || seg == ".." {
-			return nil, errors.New("base_url's path may not hold . or .. segments")
-		}
-	}
-	return &url.URL{Scheme: scheme, Host: strings.ToLower(u.Host), Path: path}, nil
-}
-
-// checkEmail checks an email's shape: one @, something on each side, no
-// spaces.
-func checkEmail(email string) error {
-	local, domain, ok := strings.Cut(email, "@")
-	if !ok || local == "" || domain == "" || strings.Contains(domain, "@") || len(email) > maxEmailBytes ||
-		strings.IndexFunc(email, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
-		return fmt.Errorf("email %q is not an email address", email)
-	}
-	return nil
+	return atlassian.ParseBaseURL(raw, c.opts.AllowInsecure, "https://corp.atlassian.net/wiki")
 }
 
 // cleanSpaces checks space keys, dropping duplicates.
@@ -274,128 +225,19 @@ func cleanSpaces(keys []string) ([]string, error) {
 	return out, nil
 }
 
-// checkCQL checks what can be checked of a CQL query without the site: its
-// size, that it is text, that its quotes and parentheses close — the
-// connector wraps it in parentheses of its own, and an unbalanced one would
-// change what the rest of the query means — and that it has no ORDER BY,
-// since the connector orders the listing itself. The site parses the rest,
-// and a sync reports what it refuses.
-func checkCQL(q string) error {
-	switch {
-	case len(q) > maxCQLBytes:
-		return fmt.Errorf("a query is at most %d bytes", maxCQLBytes)
-	case !utf8.ValidString(q):
-		return errors.New("a query is UTF-8 text")
-	case strings.IndexFunc(q, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' && r != '\r' }) >= 0:
-		return errors.New("a query may not hold control characters")
-	case orderByPattern.MatchString(q):
-		return errors.New("leave out ORDER BY: the connector orders the listing itself")
-	}
-	depth := 0
-	var quote rune
-	escaped := false
-	for _, r := range q {
-		switch {
-		case escaped:
-			escaped = false
-		case quote != 0 && r == '\\':
-			escaped = true
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			}
-		case r == '"' || r == '\'':
-			quote = r
-		case r == '(':
-			depth++
-		case r == ')':
-			depth--
-			if depth < 0 {
-				return errors.New("a ')' closes nothing")
-			}
-		}
-	}
-	switch {
-	case quote != 0:
-		return fmt.Errorf("a %c is never closed", quote)
-	case depth != 0:
-		return errors.New("a '(' is never closed")
-	}
-	return nil
-}
+// checkCQL checks what can be checked of a CQL query without the site
+// (atlassian.CheckQuery): its size, that it is text, that its quotes and
+// parentheses close — the connector wraps it in parentheses of its own, and an
+// unbalanced one would change what the rest of the query means — and that it
+// has no ORDER BY, since the connector orders the listing itself. The site
+// parses the rest, and a sync reports what it refuses.
+func checkCQL(q string) error { return atlassian.CheckQuery(q, maxCQLBytes) }
 
 // oneLineCQL is a checked query with its line breaks as spaces, for a URL.
-func oneLineCQL(q string) string {
-	return strings.Join(strings.FieldsFunc(q, func(r rune) bool { return r == '\n' || r == '\r' || r == '\t' }), " ")
-}
+func oneLineCQL(q string) string { return atlassian.OneLineQuery(q) }
 
-// addressPolicy is which addresses a source may connect to.
-//
-// Never a cloud metadata service, the machine itself (loopback), or the local
-// link — for any source: none of them is where a Confluence site lives, and
-// each is where the hub's network keeps something a request from inside it
-// should not reach. A private address (RFC 1918, ULA, carrier-grade NAT) only
-// for an organisation's Data Center source. The rule is applied twice: to the
-// host as written, when the configuration is checked, and to the address every
-// connection is about to be made to, after the name was resolved — so a name
-// that resolves somewhere it should not, now or after a rebinding, is refused
-// all the same.
-type addressPolicy struct {
-	allowPrivate bool
-	// insecure turns the policy off: Options.AllowInsecure, for tests.
-	insecure bool
-}
-
-// ErrBlockedAddress is the refusal to connect to an address the policy
-// forbids.
-var ErrBlockedAddress = errors.New("confluence: refusing to connect")
-
-// cgnat is RFC 6598 carrier-grade NAT space, which net/netip does not call
-// private, but which is not the public Internet either.
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
-
-// checkHost applies the policy to a host as written in a configuration: an
-// address literal, or a name that is this machine by definition.
-func (p addressPolicy) checkHost(host string) error {
-	if p.insecure {
-		return nil
-	}
-	h := strings.TrimSuffix(strings.ToLower(host), ".")
-	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
-		return fmt.Errorf("%w: %s is this machine", ErrBlockedAddress, host)
-	}
-	if ip, err := netip.ParseAddr(h); err == nil {
-		return p.checkAddr(ip)
-	}
-	return nil
-}
-
-// checkAddr applies the policy to an address.
-func (p addressPolicy) checkAddr(ip netip.Addr) error {
-	if p.insecure {
-		return nil
-	}
-	if svc, ok := cloudmeta.LookupDialed(ip); ok {
-		return fmt.Errorf("%w: %s is %s", ErrBlockedAddress, ip, svc.Reason())
-	}
-	a := cloudmeta.Unwrap(ip)
-	switch {
-	case !a.IsValid():
-		return fmt.Errorf("%w: %q is not an address", ErrBlockedAddress, ip)
-	case a.IsUnspecified():
-		return fmt.Errorf("%w: %s is the unspecified address", ErrBlockedAddress, ip)
-	case a.IsLoopback():
-		return fmt.Errorf("%w: %s is this machine (loopback)", ErrBlockedAddress, ip)
-	case a.IsMulticast() || a.IsInterfaceLocalMulticast() || a.IsLinkLocalMulticast():
-		return fmt.Errorf("%w: %s is a multicast address", ErrBlockedAddress, ip)
-	case a.IsLinkLocalUnicast():
-		return fmt.Errorf("%w: %s is link-local", ErrBlockedAddress, ip)
-	case a.IsPrivate() || (a.Is4() && cgnat.Contains(a)):
-		if p.allowPrivate {
-			return nil
-		}
-		return fmt.Errorf("%w: %s is a private address, which only an organisation's Data Center source may reach — "+
-			"a personal source, or a Cloud one, reaches public addresses only", ErrBlockedAddress, ip)
-	}
-	return nil
-}
+// ErrBlockedAddress is the refusal to connect to an address the source's
+// policy forbids (atlassian.Policy): never loopback, link-local or a cloud
+// metadata service, and a private address only for an organisation's Data
+// Center source.
+var ErrBlockedAddress = atlassian.ErrBlockedAddress

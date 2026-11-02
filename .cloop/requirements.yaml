@@ -413,20 +413,26 @@ requirements:
     priority: must
     tags: [security, knowledge, secrets]
     details: |-
-      The Confluence connector takes an https base URL with no credentials, query
-      or fragment in it, and checks every connection at the address it connects to,
-      after DNS: never loopback, link-local or a cloud metadata service, and a
-      private address only for an organisation's Data Center source — a personal
-      source is anyone's to point, and must not reach the hub's own network. It
-      follows no redirect, uses no proxy from the environment, and refuses a
-      next-page link that leaves the endpoint it is paging. Every error it returns
-      has the credential, in each form it is sent in, removed. Promised in
+      The Confluence and Jira connectors make their requests through one shared
+      layer, pkg/knowledge/internal/atlassian. Each takes an https base URL with no
+      credentials, query or fragment in it, and checks every connection at the
+      address it connects to, after DNS: never loopback, link-local or a cloud
+      metadata service, and a private address only for an organisation's Data
+      Center source — a personal source is anyone's to point, and must not reach
+      the hub's own network. Neither follows a redirect or uses a proxy from the
+      environment, and the Confluence connector refuses a next-page link that
+      leaves the endpoint it is paging. Every error either returns has the
+      credential, in each form it is sent in, removed. Promised in
       docs/security/model.md, "Knowledge sources".
     tests:
-      - name: addresses, redirects and links
-        command: go test ./pkg/knowledge/confluence -run '^(TestConfigValidation|TestTheDialerChecksTheAddressItConnectsTo|TestRedirectsAreNotFollowed|TestNextLinksStayOnTheSite)$'
-      - name: the credential
+      - name: the shared dialer and scrubbing
+        command: go test ./pkg/knowledge/internal/atlassian -run '^(TestTheDialerChecksTheAddressItConnectsTo|TestHostsAreCheckedAsWritten|TestCleanRemovesEveryFormOfTheCredential)$'
+      - name: Confluence's addresses, redirects and links
+        command: go test ./pkg/knowledge/confluence -run '^(TestConfigValidation|TestRedirectsAreNotFollowed|TestNextLinksStayOnTheSite)$'
+      - name: Confluence's credential
         command: go test ./pkg/knowledge/confluence -run '^(TestAuthentication|TestTheTokenNeverLeaves|TestAFailedSyncRecordsNoToken)$'
+      - name: Jira's addresses, redirects and credential
+        command: go test ./pkg/knowledge/jira -run '^(TestConfigValidation|TestRedirectsAreNotFollowed|TestAuthentication|TestTheTokenNeverLeaves|TestAFailedSyncRecordsNoToken)$'
       - name: the scope reaches the connector
         command: go test ./pkg/knowledge -run '^TestRequestsCarryTheSourceScope$'
   - id: R-24
@@ -435,14 +441,41 @@ requirements:
     priority: should
     tags: [robustness, knowledge]
     details: |-
-      A Confluence answer is read up to 48 MiB; a larger one is asked for again in
-      smaller pages, and a page too large to read alone is indexed by its title. A
-      page's storage format is cut at 8 MiB and rendered without recursion, in time
-      linear in its elements, however malformed. A site that answers 429 or 503 is
-      waited out at most two minutes at a time and five retries a request. A
-      hostile or broken site can slow a sync; it cannot stall the hub or exhaust
-      its memory. The linearity check is a timing comparison the race detector
-      would drown, so it runs here, without it.
+      A Confluence or Jira answer is read up to 48 MiB; a larger one is asked for
+      again in smaller pages, and a page or issue too large to read alone is
+      indexed by its title (an issue with its header). A page's storage format is
+      cut at 8 MiB and rendered without recursion, in time linear in its elements,
+      however malformed; so is an issue's rich text — Atlassian Document Format
+      decoded as a tree up to 4 MiB and scanned for its text beyond, wiki markup
+      cut at 8 MiB. A site that answers 429 or 503 is waited out at most two
+      minutes at a time and five retries a request. A hostile or broken site can
+      slow a sync; it cannot stall the hub or exhaust its memory. The linearity
+      checks are timing comparisons the race detector would drown, so they run
+      here, without it.
     tests:
-      - name: answers, pages and retries
+      - name: Confluence's answers, pages and retries
         command: go test ./pkg/knowledge/confluence -run '^(TestALargeAnswerIsAskedForInSmallerPages|TestRenderStorageMalformed|TestRenderStorageIsBounded|TestRateLimits)$'
+      - name: Jira's answers, rich text and retries
+        command: go test ./pkg/knowledge/jira -run '^(TestALargeAnswerIsAskedForInSmallerPages|TestRenderADFMalformed|TestRenderADFIsBounded|TestRenderWikiIsBounded|TestRateLimits)$'
+  - id: R-25
+    title: A Jira source shall not index an issue with a security level, nor a restricted comment, unless the source says to.
+    status: approved
+    priority: must
+    tags: [security, knowledge]
+    details: |-
+      An issue that carries a security level is reported deleted rather than
+      indexed, and a comment restricted to a group or a project role is left out of
+      its issue, unless the source sets include_secured. The hub's account can read
+      both, and every member of a project the source is bound to could then search
+      them. An issue given a level after it was indexed leaves the index at the
+      next sync, since setting one is an edit, and at the next reconciliation when
+      nothing else said so — which removes issues deleted or moved out of the
+      query's scope the same way, and fails rather than answer short when a Data
+      Center search's results shrink under it. A linked issue or a parent is named
+      by its key alone, so a secured issue's summary never reaches another issue's
+      document. Promised in docs/security/model.md, "Knowledge sources".
+    tests:
+      - name: the connector's decision
+        command: go test ./pkg/knowledge/jira -run '^(TestSecuredIssues|TestASecurityFieldWithoutANameIsALevel|TestListingReadsEverythingInScope|TestFetch|TestReconcileAndNarrow|TestADataCenterIDListingThatMissesIssuesFails)$'
+      - name: through the sync
+        command: go test ./pkg/knowledge/jira -run '^(TestAnIssueSecuredWithAnEditLeavesAtOnce|TestReconciliationRemovesWhatTheListingCannotSee)$'

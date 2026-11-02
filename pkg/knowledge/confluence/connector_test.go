@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/knowledge"
+	"github.com/blechschmidt/cloop/pkg/knowledge/internal/atlassian"
 )
 
 // sleeps records the waits a connector asked for, and waits none of them.
@@ -195,7 +196,7 @@ func TestAuthentication(t *testing.T) {
 			if strings.Contains(err.Error(), wrong) {
 				t.Fatalf("the refusal carries the token: %v", err)
 			}
-			if !isStatus(err, http.StatusUnauthorized) {
+			if !atlassian.IsStatus(err, http.StatusUnauthorized) {
 				t.Fatalf("the refusal does not report its status: %v", err)
 			}
 		})
@@ -520,7 +521,7 @@ func TestRateLimits(t *testing.T) {
 					t.Fatalf("waited %v for %d refusals", waits, len(c.faults))
 				}
 				for i, w := range waits {
-					top := min(backoffBase<<i, backoffMax)
+					top := min(atlassian.BackoffBase<<i, atlassian.BackoffMax)
 					if w < top/2 || w > top {
 						t.Fatalf("backoff %d waited %v, want within [%v, %v]", i, w, top/2, top)
 					}

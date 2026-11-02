@@ -3182,20 +3182,44 @@ reconciliation when it was not (`TestReconciliationRemovesWhatTheListingCannotSe
 That is the window: up to six hours in which a page restricted without an edit
 stays searchable from the projects the source is bound to.
 
+**Jira: issues their readers secured.** A Jira issue with a security level is
+one only some of the site's users may see, and a comment restricted to a group
+or a project role is one only some of the issue's readers may see. The hub's
+account can read both, and every member of a project the source is bound to
+could then search them. So the Jira connector (Task 20469) indexes neither
+unless the source sets `include_secured`, and counts a security field it cannot
+read a name from as a level (`TestSecuredIssues`,
+`TestASecurityFieldWithoutANameIsALevel`). Setting a level is an edit,
+so an issue secured after it was indexed leaves at the next sync
+(`TestAnIssueSecuredWithAnEditLeavesAtOnce`); one that left the source without
+the listing seeing it — deleted, moved out of the source's query, or secured
+with no change to its updated time — leaves at the next reconciliation
+(`TestReconciliationRemovesWhatTheListingCannotSee`). On Data Center, whose
+search pages by offset, a reconciliation whose results shrink by more than a
+page's overlap while it reads them fails rather than answer short
+(`TestADataCenterIDListingThatMissesIssuesFails`), since an issue it skipped
+would leave the index. A linked issue and a parent are named by their keys
+alone: Jira writes a linked issue's summary into the issues that link to it,
+and a secured issue's summary must not reach another issue's document
+(`TestListingReadsEverythingInScope`).
+
 **Where a connector connects.** A personal source can be connected by any
 operator, so the address its configuration names is not trusted. The
-Confluence connector takes an `https` base URL with no credentials, query or
-fragment in it, and checks every connection at the address it is about to
-connect to, after DNS — so a name that resolves, or is rebound, somewhere it
-should not is refused all the same: never loopback, link-local or a cloud
-metadata service, and a private address only for an organisation's Data
-Center source (`TestConfigValidation`, `TestTheDialerChecksTheAddressItConnectsTo`).
-It follows no redirect and uses no proxy from the environment, so the
-credential goes to the address checked and nowhere else, and a next-page link
-that leaves the endpoint being paged is refused (`TestRedirectsAreNotFollowed`,
-`TestNextLinksStayOnTheSite`). Every error it returns has the credential, in
-each form it is sent in, removed (`TestTheTokenNeverLeaves`,
-`TestAFailedSyncRecordsNoToken`).
+Confluence and Jira connectors make every request through one shared layer,
+`pkg/knowledge/internal/atlassian`, so a rule checked for one holds for both.
+Each takes an `https` base URL with no credentials, query or fragment in it,
+and checks every connection at the address it is about to connect to, after
+DNS — so a name that resolves, or is rebound, somewhere it should not is
+refused all the same: never loopback, link-local or a cloud metadata service,
+and a private address only for an organisation's Data Center source
+(`TestConfigValidation`, `TestTheDialerChecksTheAddressItConnectsTo`,
+`TestHostsAreCheckedAsWritten`). Neither follows a redirect or uses a proxy
+from the environment, so the credential goes to the address checked and
+nowhere else, and the Confluence connector refuses a next-page link that
+leaves the endpoint being paged (`TestRedirectsAreNotFollowed`,
+`TestNextLinksStayOnTheSite`). Every error either returns has the credential,
+in each form it is sent in, removed (`TestTheTokenNeverLeaves`,
+`TestCleanRemovesEveryFormOfTheCredential`, `TestAFailedSyncRecordsNoToken`).
 
 **Credentials stay on the hub.** A source stores a secret store *reference*,
 never a credential: a configuration that names one, or holds anything shaped
