@@ -1487,6 +1487,7 @@ func (s *Server) routeTable() []routeSpec {
 	// launcher rendering a saved app — sends a credential. See icons.go.
 	table = append(table, s.executorUpgradeRoutes()...)
 	table = append(table, s.forwarderRoutes()...)
+	table = append(table, s.knowledgeRoutes()...)
 	// Terminal sign-in (Task 20412): `cloop login`'s two endpoints and the
 	// approval page a signed-in browser decides on.
 	table = append(table, s.deviceRoutes()...)

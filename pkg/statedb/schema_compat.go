@@ -80,8 +80,9 @@ const (
 	CompatUnknown MigrationCompat = ""
 
 	// CompatAdditive means the migration only introduced objects that did not
-	// exist before — new tables, new non-unique indexes, new views, and
-	// columns appended to tables no shipped build rewrites. An older binary
+	// exist before — new tables, new FTS5 full-text tables, new non-unique
+	// indexes, new views, and columns appended to tables no shipped build
+	// rewrites. An older binary
 	// cannot read or write them because it does not know their names, and
 	// their presence changes nothing about the statements it does issue.
 	CompatAdditive MigrationCompat = "additive"
@@ -249,6 +250,9 @@ func additiveCreate(f []string, created map[string]bool) bool {
 	}
 
 	kind := strings.ToUpper(f[i])
+	if kind == "VIRTUAL" {
+		return additiveVirtualTable(f[i+1:], created)
+	}
 	rest := skipIfNotExists(f[i+1:])
 	if len(rest) == 0 {
 		return false
@@ -277,6 +281,37 @@ func additiveCreate(f []string, created map[string]bool) bool {
 		return onlyTouchesNewTable(rest, created)
 	}
 	return false
+}
+
+// additiveVirtualTable reports whether a CREATE VIRTUAL TABLE — f starts after
+// VIRTUAL — only adds a new full-text index, recording the table it creates.
+//
+// A virtual table is as invisible to an older binary as a plain one: it has a
+// name that binary never issues, and so do the shadow tables its module keeps
+// beside it. What a plain table does not have is a dependency on code: the
+// module has to exist in whichever build opens the database, and an integrity
+// check reaches into every virtual table the schema declares. So the one
+// module admitted is fts5, which every build of the SQLite driver cloop ships
+// has compiled in (Task 20467's knowledge index); any other module — or a
+// statement this does not parse as `TABLE [IF NOT EXISTS] name USING module` —
+// is not known to be safe and classifies as breaking.
+func additiveVirtualTable(f []string, created map[string]bool) bool {
+	if len(f) == 0 || !strings.EqualFold(f[0], "TABLE") {
+		return false
+	}
+	rest := skipIfNotExists(f[1:])
+	if len(rest) < 3 || !strings.EqualFold(rest[1], "USING") {
+		return false
+	}
+	module := rest[2]
+	if i := strings.IndexByte(module, '('); i >= 0 {
+		module = module[:i]
+	}
+	if !strings.EqualFold(module, "fts5") {
+		return false
+	}
+	created[identifier(rest[0])] = true
+	return true
 }
 
 // alterVerdict classifies an ALTER TABLE: additive when it only appends a

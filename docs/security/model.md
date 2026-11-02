@@ -1680,13 +1680,18 @@ with single sign-on and no policy at all runs with RBAC **off** — see
 | `viewer` | `project.read`, `executor.read`, `view.prefs` |
 | `operator` | `run.start`, `run.stop`, `task.mutate`, `secret.request`, `secret.own` |
 | `maintainer` | `project.write`, `project.share`, `config.write`, `secret.grant`, `secret.revoke` |
-| `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin`, `session.admin` |
+| `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin`, `session.admin`, `knowledge.admin` |
 
 **Permissions** (`AllPermissions`): `project.read`, `project.write`, `run.start`,
 `run.stop`, `task.mutate`, `executor.read`, `executor.manage`, `secret.grant`,
 `secret.revoke`, `config.write`, `audit.read`, `user.manage`, `token.admin`,
 `session.admin`, `view.prefs`, `sandbox.attach`, `sandbox.attach.write`,
-`secret.request`, `secret.own`, `project.share`.
+`secret.request`, `secret.own`, `project.share`, `knowledge.admin`.
+`knowledge.admin` is the right to connect the organisation's knowledge sources
+(a Confluence site, a Jira project) and to bind them to projects; it is held by
+`admin` alone. A personal source — read with its owner's own secret — needs
+only `secret.own` to connect, and `project.write` on a project to bind there.
+See [knowledge sources](#knowledge-sources).
 `project.share` is the right to change who else may reach a project — its
 [members](#project-members) — and sits with `maintainer`. It is its own
 permission rather than a reuse of `project.write`, which is on the same rung:
@@ -2296,7 +2301,8 @@ enforcement is proportional:
 
 The second row covers `secret.grant`, `secret.revoke`, `user.manage`,
 `token.admin`, `session.admin`, `executor.manage`, `config.write`,
-`project.write`, `project.share`, `audit.read` and `sandbox.attach`. The set is
+`project.write`, `project.share`, `audit.read`, `sandbox.attach` and
+`knowledge.admin`. The set is
 **derived from the role ladder** rather than listed — it is exactly the
 permissions an operator does not hold — so a permission added above that tier is
 covered the day it is added, instead of being omitted until an incident reveals
@@ -3106,6 +3112,75 @@ cloop project members list payments
 cloop project members add payments bob@example.com --role operator --reason "pairing on the ledger"
 cloop project members remove payments bob@example.com --reason "moved teams"
 ```
+
+### Knowledge sources
+
+A **knowledge source** connects the hub to an enterprise system — a Confluence
+site, a Jira project — and makes what it holds searchable from the projects it
+is bound to (Task 20467, `pkg/knowledge`). The hub syncs a source itself and
+keeps a full-text index of it in its own database (SQLite FTS5, ranked by
+BM25): no search service, and nothing about it runs on an executor.
+
+**Who may do what.** An *organisation* source is connected, changed, deleted
+and bound by `knowledge.admin`, which only `admin` holds. A *personal* source
+belongs to the person who connected it (`secret.own`) and reads with their own
+secret; only they change or bind it, and only to a project where they hold
+`project.write`. An admin may delete someone's personal source but not change
+it, since changing where it points would send its owner's credential somewhere
+else. Taking a source off a project needs only `project.write` on that project.
+Searching, and listing a project's sources, need `project.read`. A source the
+caller may not see is answered 404, never 403, so whether someone has a
+personal source is not an answer. Creating, changing, deleting and binding ask
+a session for a recent sign-in ([sudo mode](#recent-sign-in-for-privileged-actions)); unbinding does not
+(`TestBindingRules`, `TestWhoSeesAndManagesWhat`, `TestKnowledgeAPIEnforcesRoles`,
+`TestKnowledgeAPIAsksForARecentSignIn`).
+
+**A project reads only what is bound to it.** Every search joins through the
+project's bindings, and through each binding's narrowing: a list of space keys,
+or a connector-native query (JQL, CQL) that the hub cannot evaluate itself, so
+a binding with a query admits only the documents a sync recorded as matching
+it, and nothing before the first one (`TestKnowledgeSearchIsolatesProjects`,
+`TestSearchNeverCrossesProjects`, `TestKnowledgeBindingNarrowing`). Bindings
+are keyed by the project's path, so removing a project from the hub drops
+them, as it drops the project's members: otherwise whatever is registered at
+that path next would search the old project's knowledge
+(`TestRemovingAProjectDropsItsKnowledgeBindings`). A document whose content
+changes leaves every query binding until a sync matches it again, and a sync
+that cannot get a binding's answer clears it (`TestNarrowingThatFailsClearsItsBinding`).
+The index is one FTS5 table, so BM25 weighs a word by how rare it is across
+every project's sources: a search result therefore carries its rank and never
+its score, which read against a chunk the caller can see would say how often a
+word occurs in knowledge bound to other projects. The order of a project's own
+results can still lean on those hub-wide statistics. A search is bounded (10 s,
+eight at once per hub process, 32 words, prefixes of three letters or more).
+
+**Removing what a source no longer shows.** A full listing — the first, after
+a configuration change, and weekly — records when it began and stamps each
+document it lists. When it reaches its end, in that sync or a later one that
+resumed it, every document it did not reach is removed, so un-publishing a
+space by narrowing the configuration takes effect even across a failed sync
+(`TestAnInterruptedFullListingStillSweeps`).
+
+**Credentials stay on the hub.** A source stores a secret store *reference*,
+never a credential: a configuration that names one, or holds anything shaped
+like one, is refused (`TestConfigsNeverHoldCredentials`). An organisation
+source may only reference a shared secret, and a personal source only its
+owner's own (`TestSourceCredential`). The hub opens the secret for one sync,
+hands it to the connector in-process and wipes it afterwards. It cannot be
+printed or serialized, and a failed sync's recorded error is scrubbed of it
+(`TestSyncKeepsTheCredentialOnTheHub`). Document bodies are bounded at 2 MiB
+through `pkg/boundedread`, and anything shaped like a credential is scrubbed
+from a page before it is indexed, so a token pasted into a wiki page is not
+republished to the projects bound to the wiki (`TestIndexBoundsAndCleans`).
+The ACL hints a connector reports for a document are stored with it but not
+enforced: a binding is what decides who may search a source.
+
+Every change is on the trail:
+[`knowledge.source.create`](../reference/audit-events.md#knowledgesource),
+[`knowledge.source.update`](../reference/audit-events.md#knowledgesource),
+[`knowledge.source.delete`](../reference/audit-events.md#knowledgesource),
+[`knowledge.source.bind`](../reference/audit-events.md#knowledgesource) and
+[`knowledge.source.unbind`](../reference/audit-events.md#knowledgesource).
 
 ### Configuring role mappings
 

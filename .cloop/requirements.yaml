@@ -343,3 +343,45 @@ requirements:
       - name: the spec's citation gate
         command: go test ./tests/docs -run '^(TestRequirementsCiteOnlyRealTests|TestRequirementCitationGateCatchesAMissingTest)$'
         timeout: 20m
+  - id: R-20
+    title: A project shall search only the knowledge sources bound to it, through each binding's narrowing.
+    status: approved
+    priority: must
+    tags: [security, knowledge]
+    details: |-
+      Every knowledge search joins through knowledge_bindings for the exact path of
+      the project asking, skips disabled sources, admits only the binding's space keys
+      when it names some, and, for a binding narrowed by a connector-native query,
+      only the documents a sync recorded as matching it, none before the first; a
+      document whose content changed leaves the binding until a sync matches it again.
+      A project bound to nothing finds nothing, a project never reads a chunk of a
+      source bound only to another, and removing a project from the hub drops its
+      bindings. Binding takes project.write on the project and knowledge.admin for an
+      organisation source, or ownership of a personal one; searching takes
+      project.read. Promised in docs/security/model.md, "Knowledge sources".
+    tests:
+      - name: the search SQL
+        command: go test ./pkg/statedb -run '^(TestKnowledgeSearchIsolatesProjects|TestKnowledgeBindingNarrowing)$'
+      - name: the service and its rules
+        command: go test ./pkg/knowledge -run '^(TestSearchNeverCrossesProjects|TestNarrowedBindingServesOnlyItsMatches|TestNarrowingThatFailsClearsItsBinding|TestBindingRules|TestWhoSeesAndManagesWhat)$'
+      - name: the routes, and removing a project
+        command: go test ./pkg/ui -run '^(TestKnowledgeAPIEnforcesRoles|TestRemovingAProjectDropsItsKnowledgeBindings)$'
+        timeout: 20m
+  - id: R-21
+    title: A knowledge source's credential shall stay on the hub, stored only as a secret store reference.
+    status: approved
+    priority: must
+    tags: [security, knowledge, secrets]
+    details: |-
+      A source's configuration that names a credential, or holds anything shaped
+      like one, is refused before it is stored. The source keeps a secret store
+      reference: an organisation source may name only a shared secret, a personal
+      source only its owner's own. The hub opens it for one sync, hands it to the
+      connector in-process and wipes it afterwards; a Credential cannot be printed
+      or serialized, and a failed sync's recorded error is scrubbed of it. Promised
+      in docs/security/model.md, "Knowledge sources".
+    tests:
+      - name: configurations and syncs
+        command: go test ./pkg/knowledge -run '^(TestConfigsNeverHoldCredentials|TestSyncKeepsTheCredentialOnTheHub|TestIndexBoundsAndCleans)$'
+      - name: which secret a source may sign in with
+        command: go test ./pkg/secretbroker -run '^TestSourceCredential$'

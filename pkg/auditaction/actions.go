@@ -93,6 +93,23 @@ const (
 	// base, and what each proof found.
 	ActionRequirementProve Action = "requirement.prove"
 
+	// ── knowledge.source ───────────────────────────────────────────────────
+
+	// ActionKnowledgeSourceCreate records an enterprise knowledge source being
+	// connected to the hub (Task 20467).
+	ActionKnowledgeSourceCreate Action = "knowledge.source.create"
+	// ActionKnowledgeSourceUpdate records a knowledge source's name,
+	// configuration, credential reference or enabled state changing.
+	ActionKnowledgeSourceUpdate Action = "knowledge.source.update"
+	// ActionKnowledgeSourceDelete records a knowledge source being removed,
+	// together with everything it had indexed.
+	ActionKnowledgeSourceDelete Action = "knowledge.source.delete"
+	// ActionKnowledgeSourceBind records a knowledge source being made
+	// searchable from a project, or its binding's narrowing changing.
+	ActionKnowledgeSourceBind Action = "knowledge.source.bind"
+	// ActionKnowledgeSourceUnbind records a project losing a knowledge source.
+	ActionKnowledgeSourceUnbind Action = "knowledge.source.unbind"
+
 	// ── step ───────────────────────────────────────────────────────────────
 
 	// ActionStepAppend records one execution step's transcript.

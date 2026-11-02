@@ -114,6 +114,7 @@ func (a Action) Verb() string {
 // segments, and both are grouped by their first two.
 var multiSegmentFamilies = []string{
 	"sandbox.attach",
+	"knowledge.source",
 	"ci.rule",
 	"ci.session",
 	"ci.exchange",

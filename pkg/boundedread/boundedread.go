@@ -196,3 +196,49 @@ func ReadFileTail(path string, maxBytes int64) (data []byte, truncated bool, err
 	}
 	return buf, truncated, nil
 }
+
+// ReadAll reads r to its end, refusing a stream longer than maxBytes. Pass 0
+// for maxBytes to use DefaultMaxBytes. name says what the stream is in the
+// *SizeError (an HTTP body, a document) and plays the part a path plays for
+// ReadFile.
+//
+// The file helpers above guard a path a user points the process at. This and
+// ReadTruncated guard what arrives over a connection — a remote service's
+// response, a document a connector delivers (Task 20467) — where there is no
+// size to stat first, so the cap is enforced while reading: at most
+// maxBytes+1 bytes are ever buffered, whatever the peer sends.
+func ReadAll(r io.Reader, name string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	buf, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("boundedread: read %s: %w", name, err)
+	}
+	if int64(len(buf)) > maxBytes {
+		return nil, &SizeError{Path: name, Size: int64(len(buf)), Max: maxBytes}
+	}
+	return buf, nil
+}
+
+// ReadTruncated reads up to maxBytes of r and reports whether the stream had
+// more. Pass 0 for maxBytes to use DefaultMaxBytes. Like ReadFileTruncated it
+// suits a caller for which a prefix is still useful — indexing the first
+// megabytes of an enormous page beats indexing none of it — and it never
+// buffers more than maxBytes+1 bytes.
+//
+// The cut is at a byte offset, not a rune boundary; callers that keep text
+// trim the result to valid UTF-8 themselves.
+func ReadTruncated(r io.Reader, maxBytes int64) (data []byte, truncated bool, err error) {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxBytes
+	}
+	buf, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("boundedread: read stream: %w", err)
+	}
+	if int64(len(buf)) > maxBytes {
+		return buf[:maxBytes], true, nil
+	}
+	return buf, false, nil
+}

@@ -139,6 +139,27 @@ func TestClassifyMigration(t *testing.T) {
 		name: "a temporary object has no business in a migration",
 		sql:  `CREATE TEMP TABLE scratch (id INTEGER);`,
 		want: CompatBreaking,
+	}, {
+		// Task 20467. A full-text table and its shadow tables carry names no
+		// older binary issues, and every build of the driver has fts5.
+		name: "an FTS5 table is a new object an older binary cannot name",
+		sql:  `CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(title, body, tokenize = 'unicode61 remove_diacritics 2');`,
+		want: CompatAdditive,
+	}, {
+		name: "the module may be spelled apart from its arguments",
+		sql:  `CREATE VIRTUAL TABLE notes_fts USING FTS5 (body);`,
+		want: CompatAdditive,
+	}, {
+		// Another module may be missing from an older build's driver, and
+		// an integrity check reaches into every virtual table the schema
+		// declares.
+		name: "a virtual table of any other module is not assumed safe",
+		sql:  `CREATE VIRTUAL TABLE IF NOT EXISTS places USING rtree(id, minx, maxx);`,
+		want: CompatBreaking,
+	}, {
+		name: "a virtual table statement this does not parse is not assumed safe",
+		sql:  `CREATE VIRTUAL TABLE notes_fts fts5(body);`,
+		want: CompatBreaking,
 	}}
 
 	for _, tc := range cases {
@@ -598,8 +619,10 @@ func TestShippedMigrationsThatOnlyAppendAreAdditive(t *testing.T) {
 	// 0075 (the approval notices outbox and its cursors, Task 20427). 0077
 	// (device forwarders, Task 20429) adds two new tables a newer hub writes
 	// while an older one still serves the same control-plane database, and so
-	// does 0078 (forwarder bindings and their requests, Task 20430).
-	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73, 74, 75, 77, 78} {
+	// does 0078 (forwarder bindings and their requests, Task 20430). 0092
+	// (knowledge sources and their full-text index, Task 20467) is created
+	// beside the older stable hub that shares this control plane.
+	for _, v := range []int{35, 36, 41, 65, 66, 68, 69, 71, 72, 73, 74, 75, 77, 78, 92} {
 		m, ok := byVersion[v]
 		if !ok {
 			t.Fatalf("migration %04d is missing", v)

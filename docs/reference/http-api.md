@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-330 endpoints, by the permission each one requires:
+339 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -102,14 +102,14 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `config.write` | 19 |
 | `executor.manage` | 36 |
 | `executor.read` | 6 |
-| `project.read` | 63 |
+| `project.read` | 65 |
 | `project.share` | 3 |
-| `project.write` | 13 |
+| `project.write` | 15 |
 | `run.start` | 6 |
 | `run.stop` | 3 |
 | `sandbox.attach` | 2 |
 | `secret.grant` | 15 |
-| `secret.own` | 15 |
+| `secret.own` | 20 |
 | `secret.request` | 5 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
@@ -267,6 +267,11 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/kb` | `task.mutate` | project |
 | GET | `/api/kb/search` | `project.read` | project |
 | DELETE | `/api/kb/{id}` | `task.mutate` | project |
+| GET | `/api/knowledge/sources` | `secret.own` | global |
+| POST | `/api/knowledge/sources` | `secret.own` | global |
+| GET | `/api/knowledge/sources/{id}` | `secret.own` | global |
+| PATCH | `/api/knowledge/sources/{id}` | `secret.own` | global |
+| DELETE | `/api/knowledge/sources/{id}` | `secret.own` | global |
 | GET | `/api/leases` | `secret.grant` | global |
 | POST | `/api/leases/{id}/revoke` | `secret.revoke` | global |
 | GET | `/api/livelog` | `project.read` | project |
@@ -294,6 +299,10 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/projects/{idx}/harness-credential` | `project.read` | project-index |
 | POST | `/api/projects/{idx}/harness-credential` | `secret.own` | project-index |
 | POST | `/api/projects/{idx}/hidden` | `view.prefs` | project-index |
+| POST | `/api/projects/{idx}/knowledge/bindings` | `project.write` | project-index |
+| DELETE | `/api/projects/{idx}/knowledge/bindings/{bid}` | `project.write` | project-index |
+| GET | `/api/projects/{idx}/knowledge/search` | `project.read` | project-index |
+| GET | `/api/projects/{idx}/knowledge/sources` | `project.read` | project-index |
 | GET | `/api/projects/{idx}/members` | `project.read` | project-index |
 | POST | `/api/projects/{idx}/members` | `project.share` | project-index |
 | PATCH | `/api/projects/{idx}/members` | `project.share` | project-index |

@@ -354,6 +354,76 @@ var registry = []Entry{
 			"definition writes a `requirement.update` row for that beside this one.",
 	},
 
+	// ── knowledge.source ───────────────────────────────────────────────────
+	// Enterprise knowledge sources (Task 20467): a Confluence site, a Jira
+	// project, connected once on the hub and made searchable from the projects
+	// they are bound to. A source holds a reference to the credential the hub
+	// signs in to it with, never the credential, so these rows name the
+	// reference and nothing more.
+	{
+		Action:  ActionKnowledgeSourceCreate,
+		Home:    HomeControlPlane,
+		Entity:  "knowledge_source",
+		Trigger: "An administrator connects an organisation knowledge source, or a person connects a personal one.",
+		Payload: []string{
+			"id", "kind", "name", "scope", "owner", "config", "signs_in_with", "enabled",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The entity id is the source's id, which is never reused. `scope` is `org` or `personal`; a personal " +
+			"source's `owner` is the person whose credential it reads with. `config` is the connector's configuration, " +
+			"which is refused if it holds anything shaped like a credential; `signs_in_with` is the secret store " +
+			"reference the hub signs in to the source with — a name, never the secret.",
+	},
+	{
+		Action:    ActionKnowledgeSourceUpdate,
+		Home:      HomeControlPlane,
+		Entity:    "knowledge_source",
+		Trigger:   "A knowledge source's name, configuration, credential reference or enabled state changes.",
+		Payload:   []string{"id", "kind", "name", "scope", "owner", "changed", "config", "signs_in_with", "enabled", "resync"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`changed` lists the fields the request changed. `resync` is true when a new configuration made the " +
+			"next sync start over from the beginning.",
+	},
+	{
+		Action:    ActionKnowledgeSourceDelete,
+		Home:      HomeControlPlane,
+		Entity:    "knowledge_source",
+		Trigger:   "A knowledge source is removed, with every document, chunk and binding it had.",
+		Payload:   []string{"id", "kind", "name", "scope", "owner", "documents", "chunks", "bindings"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The counts are what was deleted with it. Its bindings end here too: no " +
+			"`knowledge.source.unbind` row is written for each.",
+	},
+	{
+		Action:  ActionKnowledgeSourceBind,
+		Home:    HomeControlPlane,
+		Entity:  "knowledge_source",
+		Trigger: "A knowledge source is made searchable from a project, or an existing binding's narrowing changes.",
+		Payload: []string{
+			"source_id", "binding_id", "project", "spaces", "query", "created", "kind", "name", "scope", "owner",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The entity id is the source's. `project` is the project's path. `spaces` and `query` narrow what the " +
+			"project can find: only documents in those space keys, and only documents the source's connector " +
+			"reported as matching the query at the last sync. `created` is false when the row replaced an " +
+			"existing binding's narrowing.",
+	},
+	{
+		Action:    ActionKnowledgeSourceUnbind,
+		Home:      HomeControlPlane,
+		Entity:    "knowledge_source",
+		Trigger:   "A project stops being able to search a knowledge source: the binding is removed, or the project is.",
+		Payload:   []string{"source_id", "binding_id", "project", "kind", "name", "scope", "owner", "reason"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "A project removed from the hub takes its bindings with it — they are keyed by its path, and " +
+			"would otherwise serve whatever is registered there next — one row each, `reason` saying so.",
+	},
+
 	// ── step ───────────────────────────────────────────────────────────────
 	{
 		Action:    ActionStepAppend,

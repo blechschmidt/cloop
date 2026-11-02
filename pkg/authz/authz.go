@@ -284,6 +284,23 @@ const (
 	// delegates authority and never mints it (see pkg/ui/members_api.go).
 	PermProjectShare Permission = "project.share"
 
+	// PermKnowledgeAdmin is the right to connect the organisation's enterprise
+	// knowledge sources — a Confluence site, a Jira project — to the hub, and
+	// to decide which projects may search them (Task 20467).
+	//
+	// Admin-only, and its own permission rather than a reuse of secret.grant.
+	// An organisation source is read with one of the organisation's shared
+	// credentials, which is secret.grant's territory, but what it publishes is
+	// the content behind that credential — every page the service account can
+	// read — to every member of every project it is bound to. Choosing which
+	// of the company's documents a project's people and agents get to read is
+	// a decision about the organisation's information, not about one
+	// project's work, and an index bound into a project's prompts is also a
+	// way to put words in front of its agents. Below admin there is still a
+	// path: anyone holding secret.own may connect a *personal* source, read
+	// with their own credential, and bind it to a project they may write.
+	PermKnowledgeAdmin Permission = "knowledge.admin"
+
 	// PermPublic is not a permission. It is the explicit marker a route
 	// declares when it must stay reachable before authorization can even be
 	// evaluated — the login machinery, the SPA shell, static assets, and
@@ -320,6 +337,7 @@ var AllPermissions = []Permission{
 	PermSecretRequest,
 	PermSecretOwn,
 	PermProjectShare,
+	PermKnowledgeAdmin,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a

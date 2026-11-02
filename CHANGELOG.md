@@ -163,6 +163,51 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Knowledge sources: the base layer for searching Confluence, Jira and other
+  enterprise knowledge from a project.** A new `pkg/knowledge` defines the
+  connector interface (validate a configuration; list what changed since an
+  opaque cursor; fetch a document, with its title, URL, space key, updated
+  time, plain-text body, deleted flag and the source's ACL hints) and a
+  registry connectors register into. Migration 0092 (additive) adds
+  `knowledge_sources`, `knowledge_bindings`, `knowledge_documents` and
+  `knowledge_chunks` to the hub's database, the chunks' text in an SQLite FTS5
+  table ranked by BM25, so search needs no external service. The schema-compat
+  classifier now admits an FTS5 virtual table as additive (any other module
+  still counts as breaking), so older hubs sharing the database keep opening
+  it. Documents are cut at headings, then paragraphs, into token-bounded
+  chunks that overlap. A content hash means an unchanged document is never
+  chunked again. Bodies are bounded at 2 MiB through `pkg/boundedread` (new
+  `ReadAll` and `ReadTruncated` for streams), and anything shaped like a
+  credential is scrubbed from a page before it is indexed. A sync engine pages
+  through a source from its stored cursor, fetches partial documents, applies
+  deletions. A full listing (the first one, after a configuration change, and
+  weekly) records when it began and, once it ends (in the same sync or a later
+  one that resumed it), removes every document it did not reach. A search
+  reads only the sources bound to the project, through each binding's
+  narrowing: space keys, or a connector-native query (JQL, CQL) that serves
+  only the documents a sync recorded as matching it. A document whose content
+  changes leaves query bindings until a sync matches it again. Results carry a
+  rank, not a BM25 score, since scores are weighed across every project's
+  sources. Searches are bounded: a 10 s timeout, 8 at once, snippets only for
+  the results. Connecting an organisation source, and binding one, take the
+  new admin-only permission `knowledge.admin`. Anyone holding `secret.own` may
+  connect a personal source that reads with their own secret, and bind it
+  where they hold `project.write`. Unbinding takes `project.write`, searching
+  `project.read`, and a source the caller may not see answers 404. Removing a
+  project from the hub drops its bindings, since they are keyed by its path. A
+  source stores only a secret store reference, opened on the hub for one sync
+  through the broker's new `SourceCredential` (shared secrets for org sources,
+  the owner's own for personal ones) and never handed to an executor; a
+  configuration holding a credential is refused. Routes:
+  `/api/knowledge/sources` (list, create, read, change, delete),
+  `/api/projects/{idx}/knowledge/bindings` and `…/bindings/{bid}`,
+  `/api/projects/{idx}/knowledge/sources` and
+  `/api/projects/{idx}/knowledge/search?q=&k=`. They sit behind the origin and
+  JSON guards, and create, change, delete and bind ask for a recent sign-in.
+  Audit actions: `knowledge.source.create`, `.update`, `.delete`, `.bind` and
+  `.unbind`. No connector ships yet: Confluence and Jira are next
+  (Task 20467).
+
 - **cloop's own guarantees are requirements, checked on every push.** The
   guarantees the documentation makes — the hub starts no process on its own
   host except through an executor, every mutating route enforces RBAC through

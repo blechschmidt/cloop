@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 229 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 234 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 197 |
+| `control-plane` | the hub's own state.db | 202 |
 | `project` | the project's .cloop/state.db | 28 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-229 actions in 49 families. Every action is listed: this section is the whole
+234 actions in 50 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (5) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -199,6 +199,30 @@ Payload keys:
 - `requirement.import` — One row per import, its entity id `spec`. `updated` lists each changed requirement with the fields that changed and its new and previous fingerprints; `deleted` how many recorded checks went with each, and the tasks it was taken out of (`unlinked_tasks`, each also a `task.upsert` row); `resolved` how each conflict was settled (`file` or `hub`). An import applies nothing unless every conflict is settled, so a row is a whole import. `sha256` is the file's; a dashboard import was read from the project's checkout on its executor at `commit`.
 - `requirement.prove` — One row per run: `outcomes` maps each requirement (`R-<n>`) to proven, vacuous, broken, inconclusive or error, and each proof is a row of requirement_proofs. `base` is the commit the tests ran at before the change, `commit` the change's. The requirements gate's proof of a task's new or changed tests has `source` `gate` and the task in `task_id`.
 - `requirement.update` — `changed` names the fields that differ. A new `fingerprint` means the verdicts recorded before it are about a requirement that no longer reads that way, and the dashboard shows them stale.
+
+### knowledge.source.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `knowledge.source.bind` | `knowledge_source` | control-plane | stable | A knowledge source is made searchable from a project, or an existing binding's narrowing changes. |
+| `knowledge.source.create` | `knowledge_source` | control-plane | stable | An administrator connects an organisation knowledge source, or a person connects a personal one. |
+| `knowledge.source.delete` | `knowledge_source` | control-plane | stable | A knowledge source is removed, with every document, chunk and binding it had. |
+| `knowledge.source.unbind` | `knowledge_source` | control-plane | stable | A project stops being able to search a knowledge source: the binding is removed, or the project is. |
+| `knowledge.source.update` | `knowledge_source` | control-plane | stable | A knowledge source's name, configuration, credential reference or enabled state changes. |
+
+Payload keys:
+
+- `knowledge.source.bind` — `source_id`, `binding_id`, `project`, `spaces`, `query`, `created`, `kind`, `name`, `scope`, `owner`
+- `knowledge.source.create` — `id`, `kind`, `name`, `scope`, `owner`, `config`, `signs_in_with`, `enabled`
+- `knowledge.source.delete` — `id`, `kind`, `name`, `scope`, `owner`, `documents`, `chunks`, `bindings`
+- `knowledge.source.unbind` — `source_id`, `binding_id`, `project`, `kind`, `name`, `scope`, `owner`, `reason`
+- `knowledge.source.update` — `id`, `kind`, `name`, `scope`, `owner`, `changed`, `config`, `signs_in_with`, `enabled`, `resync`
+
+- `knowledge.source.bind` — The entity id is the source's. `project` is the project's path. `spaces` and `query` narrow what the project can find: only documents in those space keys, and only documents the source's connector reported as matching the query at the last sync. `created` is false when the row replaced an existing binding's narrowing.
+- `knowledge.source.create` — The entity id is the source's id, which is never reused. `scope` is `org` or `personal`; a personal source's `owner` is the person whose credential it reads with. `config` is the connector's configuration, which is refused if it holds anything shaped like a credential; `signs_in_with` is the secret store reference the hub signs in to the source with — a name, never the secret.
+- `knowledge.source.delete` — The counts are what was deleted with it. Its bindings end here too: no `knowledge.source.unbind` row is written for each.
+- `knowledge.source.unbind` — A project removed from the hub takes its bindings with it — they are keyed by its path, and would otherwise serve whatever is registered there next — one row each, `reason` saying so.
+- `knowledge.source.update` — `changed` lists the fields the request changed. `resync` is true when a new configuration made the next sync start over from the beginning.
 
 ### step.*
 

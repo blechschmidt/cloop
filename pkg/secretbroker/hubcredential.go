@@ -52,6 +52,12 @@ func (b *Broker) HubCredential(ref string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %s is a %s secret; a credential the hub presents is stored as an env secret "+
 			"(cloop secret mint --kind env)", ErrInvalidKind, sec.Name, sec.Kind)
 	}
+	return b.openEnvValue(sec, key, keyed)
+}
+
+// openEnvValue opens an env secret and returns the one value ref named: the
+// value under key when keyed, else the secret's only value.
+func (b *Broker) openEnvValue(sec Secret, key string, keyed bool) ([]byte, error) {
 	plaintext, err := b.seal.OpenEnvelope(AADFor(SetSecrets, sec.ID), sec.Envelope())
 	if err != nil {
 		return nil, fmt.Errorf("%w: open payload for %s: %w", ErrSealFailed, sec.Name, err)
@@ -129,4 +135,69 @@ func (b *Broker) HubRegistryConfig(ref string) ([]byte, error) {
 			ErrInvalidSecret, sec.Name)
 	}
 	return plaintext, nil
+}
+
+// SourceCredential opens the credential a knowledge source signs in to its
+// remote with (Task 20467): ref is the source's secret reference, in
+// HubCredential's "name" or "name#KEY" form, and owner the source's owner —
+// empty for an organisation source.
+//
+// The hub uses it for the source, on the hub, to list and fetch documents; it
+// is never granted, leased or handed to an executor. Who the hub may sign in
+// as follows the ownership model: an organisation source signs in with a
+// shared secret, exactly as HubCredential allows, and a personal source with
+// a personal secret its owner owns — the hub reading its owner's pages on its
+// owner's behalf, which is the one way that person's credential is spent. A
+// personal source never signs in with a shared secret: the person who
+// connected it could then publish whatever the organisation's account reads
+// into the projects they bind it to.
+func (b *Broker) SourceCredential(ref, owner string) ([]byte, error) {
+	sec, key, keyed, err := b.sourceSecret(ref, owner)
+	if err != nil {
+		return nil, err
+	}
+	return b.openEnvValue(sec, key, keyed)
+}
+
+// CheckSourceCredential is SourceCredential without opening anything: whether
+// ref names a secret the source of that owner may sign in with. A key named
+// by "name#KEY" is checked only when the value is opened, since checking it
+// here would mean decrypting the secret to answer a question about its shape.
+func (b *Broker) CheckSourceCredential(ref, owner string) error {
+	_, _, _, err := b.sourceSecret(ref, owner)
+	return err
+}
+
+// sourceSecret resolves a knowledge source's secret reference and applies the
+// ownership rule SourceCredential documents.
+func (b *Broker) sourceSecret(ref, owner string) (Secret, string, bool, error) {
+	if b == nil {
+		return Secret{}, "", false, fmt.Errorf("%w: no broker", ErrSecretNotFound)
+	}
+	name, key, keyed := strings.Cut(strings.TrimSpace(ref), "#")
+	if name == "" || (keyed && key == "") {
+		return Secret{}, "", false, fmt.Errorf("%w: a secret reference is a name, or name#KEY", ErrInvalidSecret)
+	}
+	sec, err := b.DescribeSecret(name)
+	if err != nil {
+		return Secret{}, "", false, err
+	}
+	owner = NormalizeOwner(owner)
+	switch {
+	case owner == "" && sec.Personal():
+		return Secret{}, "", false, fmt.Errorf("%w: %s belongs to %s, and an organisation source signs in only "+
+			"with shared secrets", ErrNotOwner, sec.Name, sec.Owner)
+	case owner != "" && !sec.Personal():
+		return Secret{}, "", false, fmt.Errorf("%w: %s is a shared secret, and a personal source signs in only "+
+			"with its owner's own secrets", ErrNotOwner, sec.Name)
+	case owner != "" && !sec.SpendableBy(Viewer{Identity: owner}):
+		// Named as not found: someone else's personal secret is not one this
+		// owner may learn exists.
+		return Secret{}, "", false, fmt.Errorf("%w: %q", ErrSecretNotFound, name)
+	}
+	if sec.Kind != KindEnv {
+		return Secret{}, "", false, fmt.Errorf("%w: %s is a %s secret; a source signs in with an env secret "+
+			"(cloop secret mint --kind env)", ErrInvalidKind, sec.Name, sec.Kind)
+	}
+	return sec, key, keyed, nil
 }

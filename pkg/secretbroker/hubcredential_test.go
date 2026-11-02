@@ -87,3 +87,70 @@ func TestHubRegistryConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestSourceCredential: a knowledge source signs in with what its scope allows
+// (Task 20467) — an organisation source with a shared env secret, a personal
+// source only with its own owner's env secret — and the check answers the same
+// without opening anything.
+func TestSourceCredential(t *testing.T) {
+	b, _, _, _ := newTestBroker(t)
+	ctx := context.Background()
+	mint := func(req MintRequest) {
+		t.Helper()
+		if _, err := b.Mint(ctx, req); err != nil {
+			t.Fatalf("mint %s: %v", req.Name, err)
+		}
+	}
+	mint(MintRequest{Name: "wiki-bot", Kind: KindEnv, Payload: []byte("org-token\n"), Actor: "admin"})
+	mint(MintRequest{Name: "atlassian", Kind: KindEnv, Payload: []byte(`{"TOKEN":"t1","OTHER":"o"}`), Actor: "admin"})
+	mint(MintRequest{Name: "alice-wiki", Kind: KindEnv, Payload: []byte("alice-token"), Actor: "alice@corp",
+		Owner: "alice@corp", Personal: true})
+	mint(MintRequest{Name: "bob-wiki", Kind: KindEnv, Payload: []byte("bob-token"), Actor: "bob@corp",
+		Owner: "bob@corp", Personal: true})
+	mint(MintRequest{Name: "pat", Kind: KindGitHubPAT, Payload: []byte("ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"), Actor: "admin"})
+
+	for _, tc := range []struct {
+		ref, owner, want string
+	}{
+		{"wiki-bot", "", "org-token"},
+		{"atlassian#TOKEN", "", "t1"},
+		{"alice-wiki", "alice@corp", "alice-token"},
+		{"alice-wiki", "Alice@Corp", "alice-token"}, // owner keys fold their email
+	} {
+		got, err := b.SourceCredential(tc.ref, tc.owner)
+		if err != nil || string(got) != tc.want {
+			t.Errorf("SourceCredential(%q, %q) = %q, %v; want %q", tc.ref, tc.owner, got, err, tc.want)
+		}
+		if err := b.CheckSourceCredential(tc.ref, tc.owner); err != nil {
+			t.Errorf("CheckSourceCredential(%q, %q) = %v", tc.ref, tc.owner, err)
+		}
+	}
+	for _, tc := range []struct {
+		ref, owner string
+		want       error
+	}{
+		{"alice-wiki", "", ErrNotOwner},               // an org source never reads with a person's secret
+		{"wiki-bot", "alice@corp", ErrNotOwner},       // a personal source never reads with the organisation's
+		{"bob-wiki", "alice@corp", ErrSecretNotFound}, // nor with another person's — whose existence it is not told
+		{"pat", "", ErrInvalidKind},
+		{"atlassian", "", ErrInvalidSecret}, // two values and none named
+		{"atlassian#", "", ErrInvalidSecret},
+		{"", "", ErrInvalidSecret},
+		{"missing", "", ErrSecretNotFound},
+	} {
+		if _, err := b.SourceCredential(tc.ref, tc.owner); !errors.Is(err, tc.want) {
+			t.Errorf("SourceCredential(%q, %q) = %v, want %v", tc.ref, tc.owner, err, tc.want)
+		}
+		// The check opens nothing, so the ambiguous "atlassian" is a matter
+		// for the open: everything else is refused alike.
+		if tc.ref == "atlassian" {
+			continue
+		}
+		if err := b.CheckSourceCredential(tc.ref, tc.owner); !errors.Is(err, tc.want) {
+			t.Errorf("CheckSourceCredential(%q, %q) = %v, want %v", tc.ref, tc.owner, err, tc.want)
+		}
+	}
+	if err := b.CheckSourceCredential("bob-wiki", "alice@corp"); err == nil || strings.Contains(err.Error(), "bob@corp") {
+		t.Errorf("refusing another person's secret named its owner: %v", err)
+	}
+}

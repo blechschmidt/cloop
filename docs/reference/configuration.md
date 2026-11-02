@@ -2586,7 +2586,8 @@ its whole life.
 Before a permission **above the operator tier** — `secret.grant`,
 `secret.revoke`, `user.manage`, `token.admin`, `session.admin`,
 `executor.manage`, `config.write`, `project.write`, `project.share`,
-`audit.read`, `sandbox.attach` — cloop checks when the provider last asserted
+`audit.read`, `sandbox.attach`, `knowledge.admin` — cloop checks when the
+provider last asserted
 that session's claims. If it is longer ago than this bound, the provider is
 asked *synchronously*, the decision is made against whatever it now says, and
 the action is refused if it cannot be reached.
