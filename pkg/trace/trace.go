@@ -7,15 +7,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/atomicfile"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 )
 
 // Commit holds a parsed git log entry.
@@ -41,6 +46,40 @@ type TraceEntry struct {
 	MatchedTaskID    int        `json:"matched_task_id"`    // 0 = no match
 	MatchedTaskTitle string     `json:"matched_task_title"` // empty = no match
 	Confidence       Confidence `json:"confidence"`
+	// Tasks are every task the commit's subject names, MatchedTaskID first,
+	// when it names more than one: "(Tasks 12, 13)" (Task 20465).
+	Tasks []int `json:"tasks,omitempty"`
+}
+
+// subjectTaskList and subjectCloopTask find the tasks a commit subject names:
+// "(Task 12)" and "(Tasks 12, 13 and 14)", as cloop's own history writes them,
+// and "cloop(task-12): …", as its git workflow commits (pkg/git).
+var (
+	subjectTaskList  = regexp.MustCompile(`\(Tasks? #?(\d{1,9}(?:(?:,\s*|\s+and\s+)#?\d{1,9})*)\)`)
+	subjectCloopTask = regexp.MustCompile(`^cloop\(task-(\d{1,9})\):`)
+	subjectNumber    = regexp.MustCompile(`\d{1,9}`)
+)
+
+// SubjectTasks returns the ids of the tasks subject names, in the order it
+// names them, each once (Task 20465). A commit that names its task is linked
+// to it without asking a model.
+func SubjectTasks(subject string) []int {
+	var out []int
+	add := func(raw string) {
+		id, err := strconv.Atoi(raw)
+		if err == nil && id > 0 && !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	if m := subjectCloopTask.FindStringSubmatch(subject); m != nil {
+		add(m[1])
+	}
+	for _, m := range subjectTaskList.FindAllStringSubmatch(subject, -1) {
+		for _, n := range subjectNumber.FindAllString(m[1], -1) {
+			add(n)
+		}
+	}
+	return out
 }
 
 // TraceMap is the complete mapping for a run.
@@ -135,20 +174,12 @@ type aiEntry struct {
 	Confidence    string `json:"confidence"`
 }
 
-// Run orchestrates the full trace pipeline: collect commits, call AI, parse, return.
-func Run(ctx context.Context, prov provider.Provider, model string, workDir string, limit int, since string) (*TraceMap, error) {
-	// Load state for tasks (non-fatal if not in PM mode)
-	var tasks []*pm.Task
-	statePath := filepath.Join(workDir, ".cloop", "state.json")
-	if data, err := os.ReadFile(statePath); err == nil {
-		var raw struct {
-			Plan *pm.Plan `json:"plan"`
-		}
-		if err := json.Unmarshal(data, &raw); err == nil && raw.Plan != nil {
-			tasks = raw.Plan.Tasks
-		}
-	}
-
+// Run orchestrates the full trace pipeline: collect commits, link the ones
+// whose subject names their task, ask the model about the rest, and return
+// the mapping. tasks are the plan's (state.Load reads them from the project's
+// database). A nil prov asks no model: the commits no subject links stay
+// unmatched (Task 20465).
+func Run(ctx context.Context, prov provider.Provider, model string, workDir string, tasks []*pm.Task, limit int, since string) (*TraceMap, error) {
 	commits, err := GitLog(workDir, limit, since)
 	if err != nil {
 		return nil, err
@@ -160,10 +191,35 @@ func Run(ctx context.Context, prov provider.Provider, model string, workDir stri
 	// Build a lookup for tasks by ID.
 	taskByID := make(map[int]*pm.Task, len(tasks))
 	for _, t := range tasks {
-		taskByID[t.ID] = t
+		if t != nil {
+			taskByID[t.ID] = t
+		}
 	}
 
-	prompt := BuildPrompt(commits, tasks)
+	// A commit whose subject names its task needs no model: the link is the
+	// author's own. Only the rest are asked about.
+	entries := make([]TraceEntry, 0, len(commits))
+	var unmatched []Commit
+	for _, c := range commits {
+		entry := TraceEntry{Hash: c.Hash, Subject: c.Subject, Confidence: ConfidenceNone}
+		if ids := SubjectTasks(c.Subject); len(ids) > 0 {
+			entry.MatchedTaskID, entry.Confidence = ids[0], ConfidenceHigh
+			if t, ok := taskByID[ids[0]]; ok {
+				entry.MatchedTaskTitle = t.Title
+			}
+			if len(ids) > 1 {
+				entry.Tasks = ids
+			}
+		} else {
+			unmatched = append(unmatched, c)
+		}
+		entries = append(entries, entry)
+	}
+	if len(unmatched) == 0 || prov == nil {
+		return &TraceMap{GeneratedAt: time.Now(), Entries: entries}, nil
+	}
+
+	prompt := BuildPrompt(unmatched, tasks)
 
 	resp, err := prov.Complete(ctx, prompt, provider.Options{
 		Model:   model,
@@ -187,14 +243,12 @@ func Run(ctx context.Context, prov provider.Provider, model string, workDir stri
 		aiByHash[e.Hash] = e
 	}
 
-	entries := make([]TraceEntry, 0, len(commits))
-	for _, c := range commits {
-		entry := TraceEntry{
-			Hash:       c.Hash,
-			Subject:    c.Subject,
-			Confidence: ConfidenceNone,
+	for i := range entries {
+		entry := &entries[i]
+		if entry.MatchedTaskID != 0 {
+			continue
 		}
-		if ai, ok := aiByHash[c.Hash]; ok {
+		if ai, ok := aiByHash[entry.Hash]; ok {
 			entry.MatchedTaskID = ai.MatchedTaskID
 			entry.Confidence = Confidence(ai.Confidence)
 			if ai.MatchedTaskID > 0 {
@@ -203,7 +257,6 @@ func Run(ctx context.Context, prov provider.Provider, model string, workDir stri
 				}
 			}
 		}
-		entries = append(entries, entry)
 	}
 
 	tm := &TraceMap{
@@ -262,6 +315,109 @@ func LoadTraceJSON(workDir string) (*TraceMap, error) {
 		return nil, nil
 	}
 	return &tm, nil
+}
+
+// MaxTraceFileBytes bounds what Peek reads of .cloop/trace.json. `cloop
+// trace` writes one entry per commit it was asked about — 50 unless told
+// otherwise — and a file far larger than that was not written by it.
+const MaxTraceFileBytes = 4 << 20
+
+// maxTaskCommitEntries bounds the entries TaskCommits reads.
+const maxTaskCommitEntries = 5000
+
+// Peek reads .cloop/trace.json for a reader that must change nothing and
+// trust nothing — the hub, and `cloop requirements trace` (Task 20465). Unlike
+// LoadTraceJSON it never quarantines a file it cannot parse (that is `cloop
+// status`'s to do, in its own checkout); it reads at most MaxTraceFileBytes;
+// and it opens the file inside .cloop only, as a regular file, so that a
+// symbolic link planted in a project's directory cannot have the hub read
+// another project's trace to this one's viewers. A missing, oversized or
+// unparsable file is no trace: (nil, nil).
+func Peek(workDir string) (*TraceMap, error) {
+	root, err := os.OpenRoot(filepath.Join(workDir, ".cloop"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer root.Close()
+	f, err := root.Open("trace.json")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > MaxTraceFileBytes {
+		return nil, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(f, MaxTraceFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	var tm TraceMap
+	if len(data) > MaxTraceFileBytes || json.Unmarshal(data, &tm) != nil {
+		return nil, nil
+	}
+	return &tm, nil
+}
+
+// TaskCommits are the commits tm links to a task, by task id, each task's in
+// the trace's order — newest first, as git log lists them: what the
+// traceability matrix shows of the trace (Task 20465). A link the trace rated
+// none, or at a confidence it does not name, is no link; a hash that is not
+// one is dropped. The subjects are the repository's words: whoever shows them
+// escapes them.
+func (tm *TraceMap) TaskCommits() map[int][]requirements.TraceCommit {
+	out := map[int][]requirements.TraceCommit{}
+	if tm == nil {
+		return out
+	}
+	for i, e := range tm.Entries {
+		if i == maxTaskCommitEntries {
+			break
+		}
+		switch e.Confidence {
+		case ConfidenceHigh, ConfidenceMedium, ConfidenceLow:
+		default:
+			continue
+		}
+		hash := requirements.CleanCommit(e.Hash)
+		if e.MatchedTaskID <= 0 || hash == "" {
+			continue
+		}
+		// A commit whose subject names several tasks is each one's.
+		ids := []int{e.MatchedTaskID}
+		for _, id := range e.Tasks {
+			if id > 0 && !slices.Contains(ids, id) && len(ids) < 16 {
+				ids = append(ids, id)
+			}
+		}
+		for _, id := range ids {
+			out[id] = append(out[id], requirements.TraceCommit{Hash: hash, Subject: e.Subject,
+				TaskID: id, Source: requirements.CommitFromTrace, Confidence: string(e.Confidence)})
+		}
+	}
+	return out
+}
+
+// MatrixPlan is plan as the traceability matrix reads it (Task 20465): its
+// tasks, each with the commits it records of its own work, and the commits
+// the project's trace links to them, read through Peek. A trace that cannot be
+// read is no trace: the matrix without it still has every other column. The
+// hub and `cloop requirements trace` both build theirs here.
+func MatrixPlan(workDir string, plan *pm.Plan) requirements.TracePlan {
+	tp := requirements.TracePlan{Tasks: pm.TracePlanTasks(plan)}
+	if tm, err := Peek(workDir); err == nil {
+		tp.Traced = tm.TaskCommits()
+	}
+	return tp
 }
 
 // LastLinkedCommit returns the most recent commit entry that was matched to a task,

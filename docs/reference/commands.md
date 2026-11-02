@@ -342,6 +342,7 @@ cloop requirements draft [--from-goal|--from-file <path>|-] [--max N] [--dry-run
 cloop requirements lint [id...] [--ai] [--strict] [--all] [--file <spec>] [--json]
 cloop requirements approve <id>...|--all-drafts [--json]
 cloop requirements plan [--count N] [--dry-run|--yes] [--json]
+cloop requirements trace [--json|--markdown|--csv] [--priority must|should|could|none] [--tag <tag>] [--gap <gap>|none] [--limit N] [--after <id>]
 ```
 
 | Flag (`check`) | Default | Description |
@@ -365,6 +366,14 @@ is vacuous, broken or could not run. See
 requirements — must first — each linked to the requirements it closes, and
 offers them for review; `--yes` adds them all, `--dry-run` none. See
 [Planning from the requirements](../guides/requirements.md#planning-from-the-requirements).
+
+`trace` prints the traceability matrix — each approved requirement with the
+tasks that implement it and their states, the commits those tasks produced,
+its latest verdict with its age and staleness, its latest proof and whether it
+is tested, model- or person-assessed or unverified — and the spec coverage of
+the musts: tested, proven, passing and linked. Without `--limit` it prints
+every row; `--after` continues from the cursor a page printed. See
+[Traceability and spec coverage](../guides/requirements.md#traceability-and-spec-coverage).
 
 `gate` shows or sets [requirement-gated completion](../guides/requirements.md#requirement-gated-completion):
 with it on, a task whose agent reports done is accepted only once its linked

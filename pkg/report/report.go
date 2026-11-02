@@ -11,6 +11,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -27,7 +28,46 @@ const (
 type Options struct {
 	Format      Format
 	ShowOutputs bool // include step/task output excerpts
+	// Coverage is the project's spec coverage (Task 20465): how many musts
+	// are tested, proven, passing and linked to a task. Nil, or none
+	// approved, leaves the section out.
+	Coverage *requirements.Coverage
 }
+
+// coverageRows are the rows of the spec coverage's table: a label, then the
+// musts' count and every approved requirement's.
+func coverageRows(c *requirements.Coverage) [][3]string {
+	cell := func(n, pct, total int) string {
+		if total == 0 {
+			return "—"
+		}
+		return fmt.Sprintf("%d (%d%%)", n, pct)
+	}
+	m, a := c.Musts, c.All
+	return [][3]string{
+		{"Requirements", fmt.Sprint(m.Total), fmt.Sprint(a.Total)},
+		{"Tested", cell(m.Tested, m.TestedPct, m.Total), cell(a.Tested, a.TestedPct, a.Total)},
+		{"Proven", cell(m.Proven, m.ProvenPct, m.Total), cell(a.Proven, a.ProvenPct, a.Total)},
+		{"Passing", cell(m.Passing, m.PassingPct, m.Total), cell(a.Passing, a.PassingPct, a.Total)},
+		{"Linked to a task", cell(m.Linked, m.LinkedPct, m.Total), cell(a.Linked, a.LinkedPct, a.Total)},
+	}
+}
+
+// coverageGaps says how many approved requirements have each kind of gap.
+func coverageGaps(c *requirements.Coverage) string {
+	var gaps []string
+	for _, g := range requirements.Gaps {
+		if n := c.Gaps[g]; n > 0 {
+			gaps = append(gaps, fmt.Sprintf("%d %s", n, g))
+		}
+	}
+	if len(gaps) == 0 {
+		return "none"
+	}
+	return strings.Join(gaps, ", ")
+}
+
+func hasCoverage(opts Options) bool { return opts.Coverage != nil && opts.Coverage.Approved > 0 }
 
 // Generate writes a project report to w based on the given state.
 func Generate(w io.Writer, s *state.ProjectState, opts Options) {
@@ -132,6 +172,14 @@ func generateTerminal(w io.Writer, s *state.ProjectState, opts Options) {
 			}
 		}
 		fmt.Fprintf(w, "\n")
+	}
+
+	// Spec coverage (Task 20465)
+	if hasCoverage(opts) {
+		fmt.Fprintf(w, "\n%s\n  Spec coverage\n%s\n", sep, sep)
+		for _, l := range opts.Coverage.Lines() {
+			fmt.Fprintf(w, "  %s\n", l)
+		}
 	}
 
 	// PM task summary
@@ -295,6 +343,15 @@ func generateMarkdown(w io.Writer, s *state.ProjectState, opts Options) {
 		fmt.Fprintf(w, "| Tokens | %s |\n", costStr)
 	}
 	fmt.Fprintf(w, "\n")
+
+	// Spec coverage (Task 20465)
+	if hasCoverage(opts) {
+		fmt.Fprintf(w, "## Spec Coverage\n\n| | Musts | All approved |\n|---|---|---|\n")
+		for _, r := range coverageRows(opts.Coverage) {
+			fmt.Fprintf(w, "| %s | %s | %s |\n", r[0], r[1], r[2])
+		}
+		fmt.Fprintf(w, "\nOpen gaps: %s. Stale verdicts: %d.\n\n", coverageGaps(opts.Coverage), opts.Coverage.Stale)
+	}
 
 	// PM task table
 	if s.PMMode && s.Plan != nil && len(s.Plan.Tasks) > 0 {
@@ -570,6 +627,22 @@ footer{text-align:center;font-size:.75rem;color:#999;margin-top:24px}
 	}
 
 	fmt.Fprintf(w, "  </div>\n</header>\n\n")
+
+	// Spec coverage (Task 20465): numbers and fixed words only.
+	if hasCoverage(opts) {
+		fmt.Fprintf(w, `<div class="section">
+  <h2>Spec Coverage</h2>
+  <table>
+    <thead><tr><th></th><th>Musts</th><th>All approved</th></tr></thead>
+    <tbody>
+`)
+		for _, r := range coverageRows(opts.Coverage) {
+			fmt.Fprintf(w, "      <tr><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+				html.EscapeString(r[0]), html.EscapeString(r[1]), html.EscapeString(r[2]))
+		}
+		fmt.Fprintf(w, "    </tbody>\n  </table>\n  <p class=\"progress-label\" style=\"margin-top:10px\">Open gaps: %s. Stale verdicts: %d.</p>\n</div>\n\n",
+			html.EscapeString(coverageGaps(opts.Coverage)), opts.Coverage.Stale)
+	}
 
 	// Progress section
 	if s.PMMode && total > 0 {

@@ -144,6 +144,7 @@ const _membersOff = () => !myOIDC || _noProject();
 function loadProjectMembers() {
   loadHarnessCred();
   loadProjectForwards();
+  loadReqCoverage();
   if (_membersOff()) return;
   return deferredPanel('members', {
     api, apiMethod, esc, toast, left: clearProjectSelection, idx: _overviewIdx, hidden: _membersOff,
@@ -155,6 +156,21 @@ function loadProjectForwards() {
   if (_noProject()) return;
   return deferredPanel('devices', {api, apiMethod, esc, toast, idx: _overviewIdx}).then(p => p.load()).catch(() => {});
 }
+// The Spec coverage card (Task 20465): read when the Overview opens, then
+// drawn from each requirements_coverage push. Hidden with none approved.
+function reqCoverage(c) {
+  const card = document.getElementById('reqCovCard');
+  if (!card) return;
+  card.style.display = c && c.approved ? '' : 'none';
+  if (!c || !c.approved) return;
+  const m = c.musts.total ? c.musts : c.all;
+  document.getElementById('statReqCov').textContent = m.passing_pct + '% ' + (c.musts.total ? 'of musts' : 'of all') + ' pass';
+  document.getElementById('statReqCovSub').textContent = 'tested ' + m.tested_pct + '% · proven ' + m.proven_pct + '% · linked ' + m.linked_pct + '%';
+}
+function loadReqCoverage() {
+  if (!_noProject()) api(pUrl('/api/requirements/trace?limit=0')).then(d => d && reqCoverage(d.coverage)).catch(() => {});
+}
+ACTIONS.openTrace = () => { switchTab('requirements'); panelAct('requirements', 'trace'); };
 // The Claude credential card and dialog (Task 20379). opts.open shows the
 // dialog — for opts.idx, the grid's project, and with opts.refusal, the 409
 // that sent the user there.

@@ -163,6 +163,30 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Traceability matrix and spec coverage: each requirement's tasks, commits,
+  verdict and proof, and how many musts are tested, proven, passing and
+  linked.** Nothing showed, in one place, what had been done about each
+  requirement and how sure the project was that it held. The Requirements tab
+  has a *Traceability* view now: one row per approved requirement with its
+  priority, the tasks that implement it and their states, the commits those
+  tasks produced, its latest verdict with its age and whether it is stale, its
+  latest proof, and whether it is tested, model- or person-assessed, or
+  unverified. A check or proof that names a task since deleted shows it as
+  deleted. Above the rows is the coverage of the musts, and the rows filter by
+  priority, tag and gap. The same matrix is `cloop requirements trace`
+  (terminal, `--json`, `--markdown`, `--csv` with formula-safe cells) and
+  `GET /api/requirements/trace` (`project.read`, project-scoped). It is paged
+  in SQL by a keyset on the requirement id, through two new indexes (migration
+  0091, additive), each row's latest check and proof one index seek each; a test
+  holds the query plans to it. `cloop report` and a *Spec coverage* card on the
+  project's Overview carry the coverage. Neither polls: the hub pushes
+  `requirements_coverage` when a change to the project moves the matrix, and an
+  open view reads its rows again only then. The commits come from what each task
+  records of its own work and from the commit-to-task trace. `cloop trace` now
+  reads the plan from the project's database, so it links commits on a project
+  that no longer has a `state.json`; it links a commit whose subject names its
+  task without asking a model, and `--no-model` asks none at all (Task 20465).
+
 - **Red-green proofs: a requirement's tests are shown to fail without the
   change and pass with it.** A test that always passes made a requirement look
   fulfilled when it was not, and a check could not tell. `cloop requirements

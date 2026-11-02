@@ -803,6 +803,9 @@ func (s *Server) routeTable() []routeSpec {
 		// asked to assess, a model. Stopping a check is `stop`. The check
 		// itself runs on the project's executor. See requirements_api.go.
 		{Pattern: "GET /api/requirements", Handler: s.handleRequirementsList, Perm: read, Scope: scopeProject},
+		// The traceability matrix and the spec coverage (Task 20465): read
+		// only, a SQL keyset page at a time. See requirements_trace_api.go.
+		{Pattern: "GET /api/requirements/trace", Handler: s.handleRequirementsTrace, Perm: read, Scope: scopeProject},
 		{Pattern: "POST /api/requirements", Handler: s.handleRequirementCreate, Perm: task, Scope: scopeProject},
 		{Pattern: "PUT /api/requirements/{id}", Handler: s.handleRequirementUpdate, Perm: task, Scope: scopeProject},
 		{Pattern: "DELETE /api/requirements/{id}", Handler: s.handleRequirementDelete, Perm: task, Scope: scopeProject},

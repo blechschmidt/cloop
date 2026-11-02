@@ -724,6 +724,111 @@ to the task — and audited as `requirement.prove`; the task's verdict keeps the
 proof, which is how a proof made on a device comes back to the hub, which reads
 it again through its own rules.
 
+## Traceability and spec coverage
+
+The **traceability matrix** answers, for every approved requirement, what has
+been done about it and how sure the project is that it holds — one row per
+requirement:
+
+| Column | What it shows |
+| --- | --- |
+| Requirement | Its id, title, priority and tags, and its open gaps |
+| Tasks | The tasks that [implement it](#tasks-that-implement-a-requirement), each with its state |
+| Commits | The commits those tasks produced (below) |
+| Latest verdict | Its latest check's verdict and method, how long ago, and whether it is **stale**: the requirement *changed since*, or tasks were *done since*; the task the check was made for, if the requirements gate made it |
+| Proof | Its latest [red-green proof](#red-green-proofs), stale when it was of tests it no longer has |
+| Verified | **tested** (it has tests), **model-assessed** (no tests; its latest verdict is the model's reading of the code), **person-assessed** (no tests; a person recorded its verdict) or **unverified** (no tests, and nothing reached a decision about it) |
+
+A check or a proof keeps naming the task it was made for after that task is
+deleted; the matrix shows such a task as **deleted** rather than dropping it.
+
+### The commits
+
+A requirement's commits are its tasks' commits, from two places:
+
+- what each task records of its own work: the commit an isolated executor
+  left it at, which the hub fetched back (`write-back`), and the commit the
+  requirements gate checked it at, when that moved past where the task started
+  (`gate`);
+- the commit-to-task trace in `.cloop/trace.json`, which `cloop trace` writes
+  (`trace`). A commit whose subject names its task — `(Task 12)`,
+  `(Tasks 12, 13)`, or `cloop(task-12): …` as cloop's git workflow writes it —
+  is linked to it without asking a model; `cloop trace --no-model` links only
+  those.
+
+```bash
+cloop trace --no-model --limit 200   # link the recent history to its tasks
+```
+
+The task a gate check was made for brings none of its commits: in
+`linked+must` mode the gate checks every must requirement at every task, so
+that task says nothing about which requirement it implements. A deleted task's
+links went with it, so it implements nothing and brings no commits.
+
+### Spec coverage
+
+What the rows add up to, for the must requirements and for every approved one:
+
+| | A requirement counts when |
+| --- | --- |
+| **Tested** | it has at least one test |
+| **Proven** | its latest proof is proven, and of the tests it has now |
+| **Passing** | its latest check of its current definition found it fulfilled |
+| **Linked** | at least one task in the plan implements it |
+
+Percentages are rounded down, so 100% means every one. A verdict that is stale
+because tasks were done since still counts as passing — it is about the
+requirement as it stands — and is counted as stale beside it; one about an
+earlier definition does not.
+
+### Filters and pages
+
+The matrix filters by **priority** (`must`, `should`, `could`, or `none`), by
+**tag**, and by **gap** — `unfulfilled`, `stale`, `untested`, `unlinked`,
+`unchecked`, or `none` for the requirements with no gap. It is read a page at a
+time in id order, as a keyset page of the project's database that seeks its
+first row through an index: the priority and the tag are answered in SQL, and a
+gap, which needs the plan, by reading on until the page is full. The coverage
+is always of every approved requirement, whatever the filter.
+
+### In the dashboard
+
+The Requirements tab's **Traceability** button shows the matrix: the coverage
+of the musts above it — tested, proven, passing, linked — with a chip per kind
+of open gap that filters to it, the filters, and the rows, a table on a
+desktop and one card per requirement on a phone. **Load more** reads the next
+page. A requirement's id opens it in the list; a task's number opens the task.
+
+The project's Overview has a **Spec coverage** card: how many musts pass, and
+how many are tested, proven and linked; it opens the matrix. Neither polls:
+whenever the hub notices a change to the project's database — a run, the CLI
+or the dashboard — it works the coverage out again for a project somebody has
+open and pushes it, with a digest of the whole matrix, as
+`requirements_coverage`. The card redraws from the push, and an open matrix
+reads its rows again only when the digest moved.
+
+### From a terminal and in reports
+
+```bash
+cloop requirements trace                          # the coverage, and a few lines per requirement
+cloop requirements trace --priority must --gap unlinked
+cloop requirements trace --json                   # rows, coverage, the next page's cursor
+cloop requirements trace --markdown > TRACEABILITY.md
+cloop requirements trace --csv > trace.csv
+cloop requirements trace --limit 50 --after 120   # one page
+```
+
+Without `--limit` it prints every row. A CSV cell that would start a formula —
+`=`, `+`, `-`, `@` — is prefixed with `'`, since titles and commit subjects are
+anyone's words. `cloop report`, in every format, carries the spec coverage
+when the project has an approved requirement.
+
+The same matrix is `GET /api/requirements/trace` (`project.read`, scoped to
+the project): `priority`, `tag` and `gap` filter it, `limit` sets the page
+(50 unless asked, at most 200, `0` for the coverage alone) and `after` is the
+`next` the page before answered. The first page — no `after` — also carries
+the `coverage`, how many rows `matched` the filter, and the `digest`.
+
 ## Requirements as code
 
 The requirements in the hub's database are where the dashboard keeps them and
@@ -879,6 +984,7 @@ minutes old (hourly for a checkout that had none), for somebody who may import;
 | Action | Permission |
 | --- | --- |
 | See the requirements, their checks and runs, and the spec file's state | `project.read` |
+| See the traceability matrix and the spec coverage | `project.read` |
 | Download the requirements as a spec file | `project.read` |
 | Add, change or delete a requirement, record a verdict, add a task from one | `task.mutate` |
 | Have the model draft requirements, approve drafts | `task.mutate` |
@@ -932,6 +1038,9 @@ trail: `requirement.create`, `requirement.update`, `requirement.delete`,
 | Tasks one plan from the requirements proposes | 20, the tasks for must gaps included |
 | Tasks by template one brainstorm or evolve round adds for must gaps | 5 |
 | The requirement status a planner is sent | 64 KiB; past it the least pressing requirements are left out and counted |
+| A page of the traceability matrix | 50 rows unless asked, at most 200 |
+| Tasks and commits one row of it names | 50 tasks and 30 commits; past them it counts what it left out |
+| The commit-to-task trace it reads | `.cloop/trace.json`, at most 4 MiB, a regular file inside `.cloop` |
 
 On an executor that shares the project's directory — a container sandbox
 bind-mounting it, the hub's own host — the project's database is writable from

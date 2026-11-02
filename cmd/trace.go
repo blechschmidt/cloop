@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/trace"
@@ -23,16 +24,22 @@ var (
 	traceProvider string
 	traceModel    string
 	traceSave     bool
+	traceNoModel  bool
 )
 
 var traceCmd = &cobra.Command{
 	Use:   "trace",
 	Short: "Map recent git commits to plan tasks",
-	Long: `Walk recent git commits and use AI to correlate each commit with a PM task.
+	Long: `Walk recent git commits and correlate each commit with a PM task.
+
+A commit whose subject names its task — "(Task 12)", "(Tasks 12, 13)" or
+"cloop(task-12): …" — is linked to it with high confidence without asking a
+model; the model is asked about the rest, unless --no-model says not to.
 
 Displays a table showing: commit hash | message | matched task ID | task title | confidence.
 Writes the mapping to .cloop/trace.json so 'cloop status' can show the last commit
-linked to a task.
+linked to a task, and 'cloop requirements trace' and the dashboard's
+Traceability view the commits each requirement's tasks produced.
 
 Examples:
   cloop trace                              # trace last 50 commits
@@ -41,7 +48,8 @@ Examples:
   cloop trace --since "2 weeks ago"        # commits since 2 weeks ago
   cloop trace --format json                # emit JSON instead of table
   cloop trace --provider anthropic         # use a specific provider
-  cloop trace --no-save                    # don't write .cloop/trace.json`,
+  cloop trace --no-model                   # link only commits that name their task
+  cloop trace --save=false                 # don't write .cloop/trace.json`,
 	RunE: runTrace,
 }
 
@@ -81,9 +89,15 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		OpenAIBaseURL:    cfg.OpenAI.BaseURL,
 		OllamaBaseURL:    cfg.Ollama.BaseURL,
 	}
-	prov, err := provider.Build(provCfg)
-	if err != nil {
-		return fmt.Errorf("provider: %w", err)
+	// No model asked, no provider built: the subjects that name their task
+	// are all --no-model links.
+	var prov provider.Provider
+	with := "the commits' subjects only"
+	if !traceNoModel {
+		if prov, err = provider.Build(provCfg); err != nil {
+			return fmt.Errorf("provider: %w", err)
+		}
+		with = prov.Name()
 	}
 
 	bold := color.New(color.Bold)
@@ -94,12 +108,18 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	if traceSince != "" {
 		sinceMsg = fmt.Sprintf(" (since %s)", traceSince)
 	}
-	bold.Printf("\nTracing last %d commits%s with %s...\n\n", traceLimit, sinceMsg, prov.Name())
+	bold.Printf("\nTracing last %d commits%s with %s...\n\n", traceLimit, sinceMsg, with)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	tm, err := trace.Run(ctx, prov, model, workdir, traceLimit, traceSince)
+	// The plan's tasks, read from the project's database: a project that has
+	// moved off state.json still has them there.
+	var tasks []*pm.Task
+	if s != nil && s.Plan != nil {
+		tasks = s.Plan.Tasks
+	}
+	tm, err := trace.Run(ctx, prov, model, workdir, tasks, traceLimit, traceSince)
 	if err != nil {
 		return fmt.Errorf("trace: %w", err)
 	}
@@ -236,6 +256,7 @@ func init() {
 	traceCmd.Flags().StringVar(&traceProvider, "provider", "", "Provider to use (claudecode, anthropic, openai, ollama)")
 	traceCmd.Flags().StringVar(&traceModel, "model", "", "Model to use")
 	traceCmd.Flags().BoolVar(&traceSave, "save", true, "Write mapping to .cloop/trace.json")
+	traceCmd.Flags().BoolVar(&traceNoModel, "no-model", false, "Link only commits whose subject names their task; ask no model")
 
 	rootCmd.AddCommand(traceCmd)
 }

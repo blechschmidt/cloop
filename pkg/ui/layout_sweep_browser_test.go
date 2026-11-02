@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +57,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/suggest"
 	"github.com/blechschmidt/cloop/pkg/taskqueue"
+	"github.com/blechschmidt/cloop/pkg/trace"
 )
 
 // layoutViewport is one emulated screen. Mobile turns on Chrome's mobile
@@ -624,6 +626,7 @@ type layoutResults struct {
 	Scenarios    []layoutScenario   `json:"scenarios"`
 	AllowSeen    []string           `json:"allow_seen"`
 	Openers      []string           `json:"openers"`
+	Views        []string           `json:"views"`
 	SelfTest     *layoutMeasurement `json:"self_test"`
 	SelfTestWide *layoutMeasurement `json:"self_test_wide"`
 	Exceptions   []struct {
@@ -784,6 +787,13 @@ func TestLayoutSweep_EveryTabAndDialogFits(t *testing.T) {
 		}
 		for _, k := range got.Openers {
 			want["dialog:"+k] = true
+		}
+		// A tab's other views (Task 20465): the Traceability view at least.
+		if !slices.Contains(got.Views, "requirements-trace") {
+			t.Errorf("the driver's VIEWS lost the Traceability view: %v", got.Views)
+		}
+		for _, k := range got.Views {
+			want["view:"+k] = true
 		}
 		for _, s := range got.Scenarios {
 			delete(want, s.Name)
@@ -1172,6 +1182,33 @@ func seedLayoutRequirements(t *testing.T, primary string, s sweepStrings) {
 		t.Fatal(err)
 	}
 	if _, err := db.RecordRequirementVerdict(manual.ID, requirements.VerdictFulfilled, layoutLong("Checked on", s.Device), s.Email); err != nil {
+		t.Fatal(err)
+	}
+	// The Traceability view (Task 20465): the done task and the running one
+	// implement the failing must, the running one the manual must too, and
+	// the commit-to-task trace links commits with the fixture's long names to
+	// them; the failing must's proofs name task 7, which the plan never held.
+	ps, err := state.Load(primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range ps.Plan.Tasks {
+		switch task.ID {
+		case 1:
+			task.Requirements = []int{failed.ID}
+		case 4:
+			task.Requirements = []int{failed.ID, manual.ID}
+		}
+	}
+	if err := ps.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := trace.WriteTraceJSON(primary, &trace.TraceMap{Entries: []trace.TraceEntry{
+		{Hash: "1234567abcdef0123456789abcdef0123456789", Subject: layoutLong("feat("+s.Tag+"):", s.TaskTitle, "(Task 1)"),
+			MatchedTaskID: 1, Confidence: trace.ConfidenceHigh},
+		{Hash: "89abcdef01234567", Subject: layoutLong("fix:", s.RunningTaskTitle, s.URL, "(Task 4)"),
+			MatchedTaskID: 4, Confidence: trace.ConfidenceMedium},
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	if s.DraftTitle == "" {

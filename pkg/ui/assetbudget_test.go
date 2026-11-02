@@ -417,6 +417,12 @@ import (
 // The ceiling follows the measurement down, plus 2,276 B (~2%) of slack, the
 // margin the notes above settled on: room for gzip jitter and a label or two,
 // not for a tab. A new tab or panel belongs in a deferred script.
+//
+// Task 20465 put a Spec coverage card on the Overview, drawn on first paint
+// like the cards beside it: its markup, its renderer and loader, the
+// requirements_coverage case and its SSE name — 342 B wire. The Traceability
+// view it opens is in the Requirements tab's deferred script. The set measured
+// 113,901 B at HEAD; 114,243 B after. The ceiling stays: 557 B of slack.
 const eagerWireBudgetBytes = 114_800
 
 // eagerAsset is one member of the first-paint set.

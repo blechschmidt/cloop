@@ -834,6 +834,9 @@ type Server struct {
 	// 20384): the journal cursor each project's last history_append ended
 	// at. See history.go.
 	history historyFeeds
+	// covFeed is the digest of the traceability matrix each project's open
+	// dashboards were last pushed (Task 20465). See requirements_trace_api.go.
+	covFeed coverageFeed
 
 	// OIDC is the optional OpenID Connect authenticator (Task 20152). Nil
 	// (the default) means OIDC is disabled and the dashboard behaves
@@ -2303,6 +2306,8 @@ func (s *Server) watchState(ctx context.Context) {
 			// The journal rows behind the same change, to the same room
 			// (Task 20384).
 			s.pushHistory(s.WorkDir)
+			// And the spec coverage, when the change moved it (Task 20465).
+			s.pushCoverage(s.WorkDir, ps.Plan)
 		}()
 	}
 }
@@ -6443,15 +6448,20 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 			if path == primaryAbs {
 				continue
 			}
+			var plan *pm.Plan
 			if _, hasSubs := subscribed[path]; hasSubs {
 				if ps, err := state.LoadLite(path); err == nil {
 					s.broadcastStateDiff(path, ps)
+					plan = ps.Plan
 				}
 			}
 			// The journal rows behind the same change (Task 20384), to
 			// WebSocket and SSE subscribers alike; nothing is read for a
 			// project nobody has open.
 			s.pushHistory(path)
+			// The spec coverage, when the change moved it (Task 20465):
+			// likewise only for a project somebody has open.
+			s.pushCoverage(path, plan)
 		}
 	}
 

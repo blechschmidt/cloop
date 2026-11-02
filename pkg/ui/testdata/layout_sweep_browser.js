@@ -705,9 +705,11 @@ async function openTab(name) {
 const TAB_READY = {
   // The header's approvals badge (Task 20427) counts the fixture's pending
   // request, and its hub health indicator (Task 20434) the fixture's failing
-  // check, so every tab is measured with both showing.
+  // check, so every tab is measured with both showing. The Spec coverage card
+  // (Task 20465) shows the fixture's two musts.
   'overview': `${hasContent('#goalText', F.project)} && document.getElementById('approvalsBadge').style.display !== 'none'
-    && document.getElementById('hubHealthBadge').style.display !== 'none'`,
+    && document.getElementById('hubHealthBadge').style.display !== 'none'
+    && document.getElementById('reqCovCard').style.display !== 'none' && ${hasText('#statReqCov', 'of musts pass')}`,
   'tasks': hasContent('#taskListFull', F.taskTitle),
   // A requirement whose last check failed, with its details open: the test
   // output and the commands are the long lines (Task 20458).
@@ -737,6 +739,28 @@ const TAB_READY = {
   'telemetry': hasContent('#telemetryBody', F.resultMarker),
   'settings': `${hasContent('#usbList', 'YubiHSM')} && !${hasContent('#buildInfoBody', 'Loading')}
     && ${hasContent('#hubHealthBody', F.deviceName)}`,
+};
+
+// ── Views ───────────────────────────────────────────────────────────────────
+//
+// VIEWS are a tab's other faces, each reached the way a person reaches it and
+// measured like a tab, at the widths it names.
+const VIEWS = {
+  // The Requirements tab's Traceability view (Task 20465): the spec coverage,
+  // the filters and the matrix — stacked rows on a phone, a table on a
+  // desktop — with the fixture's long names in its tasks, commits and
+  // verdicts.
+  'requirements-trace': {
+    widths: ['phone-320', 'phone-390', 'tablet-768', 'laptop-1024', 'desktop-1280'],
+    open: async () => {
+      await openTab('requirements');
+      await waitFor(visible('#reqViewTrace'), 'the Traceability button');
+      await click('#reqViewTrace');
+    },
+    ready: `${hasContent('#rtCov', 'Spec coverage')} && ${hasContent('#rtTable', F.taskTitle)}
+      && ${hasContent('#rtTable', '1234567abc')} && ${hasContent('#rtTable', 'deleted')}`,
+    close: async () => { await cdp.eval(`(window.panelAct('requirements', 'showList'), true)`); },
+  },
 };
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────
@@ -1287,7 +1311,7 @@ async function crawlAll(out) {
 }
 
 async function main() {
-  const out = {scenarios: [], allow_seen: [], openers: Object.keys(OPENERS)};
+  const out = {scenarios: [], allow_seen: [], openers: Object.keys(OPENERS), views: Object.keys(VIEWS)};
   const launched = await launchChrome();
   cdp = launched.cdp;
   const t0 = Date.now();
@@ -1335,6 +1359,16 @@ async function main() {
           `JSON.stringify(document.getElementById('tab-' + ${q(tab)}).innerText.slice(0, 300))`);
       });
       if (!rec.error) await noteAllowed();
+    }
+
+    for (const [key, op] of Object.entries(VIEWS)) {
+      if (only && !only.has('view:' + key)) continue;
+      const rec = await sweepScenario(out, 'view:' + key, ['body'], vps.filter(v => op.widths.includes(v.name)), async () => {
+        await op.open();
+        await waitFor(op.ready, 'the ' + key + ' view\'s content');
+      });
+      if (!rec.error) await noteAllowed();
+      try { await op.close(); } catch (e) { rec.error = (rec.error ? rec.error + '; ' : '') + String(e); }
     }
 
     for (const [key, op] of Object.entries(OPENERS)) {

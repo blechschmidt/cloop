@@ -37,6 +37,16 @@
 // carries a badge with its latest proof — proven, vacuous, broken,
 // inconclusive — and its details the recent proofs, each side's tests.
 //
+// Traceability (Task 20465) is the tab's second view: one row per approved
+// requirement with the tasks that implement it and their states, the commits
+// those tasks produced, its latest verdict with its age and staleness, its
+// latest proof and how it is verified, filtered by priority, tag and gap, a
+// SQL keyset page at a time (requirements_trace_api.go); above it the spec
+// coverage — how many musts are tested, proven, passing and linked. Nothing
+// polls: a requirements_coverage push carries the coverage, which redraws at
+// once, and a digest of the whole matrix, which reads the rows again when it
+// moved. The Overview's Spec coverage card opens it (trace).
+//
 // It runs outside the dashboard's IIFE, so it is handed the helpers it calls,
 // and the only name it puts on window is the factory.
 (function () {
@@ -56,6 +66,11 @@
     let drafted = null;     // the last draft's answer: what it refused, and the model's notes
     let lint = null;        // the last lint: {findings, notes, checked, model}
     let drafting = '';      // what the dialog is waiting on: draft, lint, approve — or nothing
+    let view = 'list';      // the view on screen: list, or trace (Task 20465)
+    let tr = null;          // the matrix as read: {rows, coverage, matched, next, digest}
+    let trStale = false;    // a push moved the matrix while it was not on screen
+    let trTimer = null;
+    let trSeq = 0;          // numbers reads of the matrix: an answer to an older one is dropped
 
     const el = id => document.getElementById(id);
     const VERDICT = {fulfilled: 'approved', unfulfilled: 'denied', error: 'pending', unverified: 'expired'};
@@ -96,6 +111,7 @@
     // import what it finds; the hub decides whether a read is due — each one
     // starts a workload where the project runs.
     function open() {
+      if (view === 'trace') traceLoad(true);
       return load().then(() => {
         if (h.can && h.can('task.mutate') && !reading) readSpec(true);
       });
@@ -418,7 +434,7 @@
         '</div><div class="req-details" id="reqDetails' + r.id + '" style="display:none"></div></div>';
     }
 
-    function filter() { query = (this.value || '').trim(); render(); }
+    function filter() { query = (this.value || '').trim(); render(); renderTrace(); }
 
     // ── checking ──
     function start(ids, ask) {
@@ -475,6 +491,7 @@
     function openForm(id) {
       const r = id ? (data.requirements || []).find(x => x.id === id) : null;
       if (id && !r) return;
+      setView('list');
       editing = id;
       el('reqFormTitle').textContent = r ? 'Edit R-' + r.id : 'New requirement';
       el('reqTitle').value = r ? r.title : '';
@@ -560,6 +577,7 @@
     // 20460). The tab's own open() is loading the list when it is new; its
     // render shows them.
     function show(arg) {
+      setView('list');
       openID = +arg;
       query = '';
       if (el('reqSearch')) el('reqSearch').value = '';
@@ -683,6 +701,166 @@
         if (d && d.ok) { toast('Added task #' + d.task.id + ', linked to R-' + id, 'ok'); load(); }
         else toast((d && d.error) || 'Could not add the task', 'err');
       }).catch(() => toast('Could not add the task', 'err'));
+    }
+
+    // ── traceability (Task 20465) ──
+    const GAPS = ['unfulfilled', 'stale', 'untested', 'unlinked', 'unchecked'];
+    const yellow = 'color:var(--yellow,#d29922)';
+
+    // setView shows the list or the matrix; the toolbar, the summary and a
+    // check under way show in both.
+    function setView(v) {
+      view = v;
+      if (!el('reqTrace')) return;
+      el('reqListView').style.display = v === 'list' ? '' : 'none';
+      el('reqTrace').style.display = v === 'trace' ? '' : 'none';
+      [['reqViewList', 'list'], ['reqViewTrace', 'trace']].forEach(([id, k]) => {
+        el(id).classList.toggle('primary', v === k);
+        el(id).setAttribute('aria-pressed', String(v === k));
+      });
+    }
+    function showList() { setView('list'); }
+    // trace shows the matrix: the toggle's, and the Overview card's through
+    // panelAct. Read again when a push moved it while it was off screen.
+    function trace() {
+      setView('trace');
+      if (!tr || trStale) return traceLoad(!!tr);
+      renderTrace();
+    }
+    function traceURL(after, limit) {
+      const p = new URLSearchParams();
+      [['priority', 'rtPriority'], ['tag', 'rtTag'], ['gap', 'rtGap']].forEach(([k, id]) => {
+        if (el(id) && el(id).value) p.set(k, el(id).value);
+      });
+      if (after) p.set('after', String(after));
+      p.set('limit', String(limit));
+      return pUrl('/api/requirements/trace?' + p);
+    }
+    // traceLoad reads the first page again: as many rows as are shown, when
+    // keep, so a push does not take away the rows a person paged to.
+    function traceLoad(keep) {
+      const n = keep && tr ? Math.min(200, Math.max(50, (tr.rows || []).length)) : 50;
+      const seq = ++trSeq;
+      trStale = false;
+      return api(traceURL(0, n)).then(d => {
+        if (seq !== trSeq) return;
+        if (!d || !d.ok) { toast((d && d.error) || 'Could not load the traceability matrix', 'err'); return; }
+        tr = {rows: d.rows || [], coverage: d.coverage, matched: d.matched, next: d.next || 0, digest: d.digest};
+        renderTrace();
+      }).catch(() => toast('Could not load the traceability matrix', 'err'));
+    }
+    function traceMore() {
+      if (!tr || !tr.next) return;
+      const seq = trSeq;
+      return api(traceURL(tr.next, 50)).then(d => {
+        if (seq !== trSeq || !tr) return;
+        if (!d || !d.ok) { toast((d && d.error) || 'Could not load more rows', 'err'); return; }
+        tr.rows = tr.rows.concat(d.rows || []);
+        tr.next = d.next || 0;
+        renderTrace();
+      }).catch(() => toast('Could not load more rows', 'err'));
+    }
+    function traceFilter() { return traceLoad(false); }
+    // traceGap filters by a gap the coverage counts.
+    function traceGap(arg) {
+      el('rtGap').value = arg;
+      return traceLoad(false);
+    }
+    function traceShow(arg) { show(arg); }
+    function traceTask(arg) { window.openTaskDetails(+arg); }
+    // coverage is a requirements_coverage push: the coverage redraws at once,
+    // and the rows are read again when the digest moved — later, when the view
+    // is not on screen.
+    function coverage(d) {
+      if (!d || !tr) return;
+      if (d.coverage) tr.coverage = d.coverage;
+      if (d.digest === tr.digest) return;
+      if (view !== 'trace' || h.tab() !== 'requirements') { trStale = true; return; }
+      renderTrace();
+      clearTimeout(trTimer);
+      trTimer = setTimeout(() => traceLoad(true), 250);
+    }
+
+    function covHTML(c) {
+      if (!c.approved) return '<p class="form-hint">No approved requirements yet: the matrix traces the approved ones.</p>';
+      const m = c.musts.total ? c.musts : c.all;
+      const meter = (label, n, pct) => '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;min-width:0">' +
+        '<div class="form-hint">' + label + '</div><div style="font-size:16px;font-weight:600">' + (+pct) + '%</div>' +
+        '<div class="form-hint">' + (+n) + ' of ' + (+m.total) + '</div>' +
+        '<div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px"><div style="height:4px;border-radius:2px;width:' +
+        (+pct) + '%;background:' + (pct >= 80 ? 'var(--green,#3fb950)' : pct >= 50 ? 'var(--yellow,#d29922)' : 'var(--red,#f85149)') + '"></div></div></div>';
+      const a = c.all;
+      const gaps = GAPS.filter(g => c.gaps && c.gaps[g]);
+      return '<div class="section-title" style="margin:0 0 6px">Spec coverage of ' + (c.musts.total ? m.total + ' must requirement' +
+        (m.total === 1 ? '' : 's') : 'every approved requirement: none is a must') + '</div>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px">' +
+        meter('Tested', m.tested, m.tested_pct) + meter('Proven', m.proven, m.proven_pct) + meter('Passing', m.passing, m.passing_pct) +
+        meter('Linked to a task', m.linked, m.linked_pct) + '</div>' +
+        '<div class="form-hint" style="margin-top:6px;' + wrap + '">' + esc('All ' + a.total + ' approved: ' + a.tested_pct + '% tested, ' +
+          a.proven_pct + '% proven, ' + a.passing_pct + '% passing, ' + a.linked_pct + '% linked' +
+          (c.stale ? '; ' + c.stale + ' stale verdict' + (c.stale === 1 ? '' : 's') : '') + '.') + '</div>' +
+        (gaps.length ? '<div class="exec-chips" style="margin-top:6px">' + gaps.map(g => '<button class="exec-chip" data-act="traceGap" data-arg="' + g +
+          '" style="background:transparent;cursor:pointer;font-family:inherit;' + yellow + '" title="Show the requirements with this gap">' +
+          (+c.gaps[g]) + ' ' + g + '</button>').join('') + '</div>' : '');
+    }
+    // An entry in a list cell: one a line in a table column, side by side
+    // once a phone stacks the cells.
+    const entry = 'display:inline-block;margin:0 8px 2px 0;max-width:100%';
+    function taskHTML(t) {
+      if (t.deleted) return '<span class="form-hint" style="' + entry + '">#' + (+t.id) + ' deleted</span>';
+      return '<span style="' + entry + '"><button class="btn" style="padding:1px 6px;font-size:11px" data-act="traceTask" data-arg="' + (+t.id) +
+        '" title="' + esc(t.title || '') + '">#' + (+t.id) + '</button> <span class="form-hint">' + esc(t.status || '') + '</span></span>';
+    }
+    function rowHTML(r) {
+      const v = r.verdict, p = r.proof;
+      const more = n => n ? '<span class="form-hint" style="' + entry + '">+' + (+n) + ' more</span>' : '';
+      const tasks = (r.tasks || []).map(taskHTML).join('') + more(r.tasks_omitted);
+      const commits = (r.commits || []).map(c => '<code style="font-size:11px;' + entry + '" title="' + esc((c.subject ? c.subject + ' — ' : '') +
+        'task #' + c.task_id + ', from the ' + c.source + (c.confidence ? ' (' + c.confidence + ' confidence)' : '')) + '">' +
+        esc(String(c.hash).slice(0, 10)) + '</code>').join('') + more(r.commits_omitted);
+      let verdict = '<span class="form-hint">never checked</span>';
+      if (v) {
+        verdict = badge(v.verdict) + ' <span class="form-hint">' + esc((v.method ? v.method + ' · ' : '') + when(v.checked_at)) + '</span>' +
+          (v.stale ? '<div style="font-size:11px;' + yellow + '">' + esc(v.stale === 'changed' ? 'stale: changed since' : 'stale: ' +
+            v.tasks_done_since + ' task' + (v.tasks_done_since === 1 ? '' : 's') + ' done since') + '</div>' : '') +
+          (v.task ? '<div class="form-hint">' + esc('for task #' + v.task.id + (v.task.deleted ? ' (deleted)' : '')) + '</div>' : '') +
+          (v.regression ? '<div style="font-size:11px;color:var(--red)">regression</div>' : '');
+      }
+      const tags = (r.tags || []).map(t => '<span class="exec-chip" style="' + wrap + '">' + esc(t) + '</span>').join('');
+      return '<tr data-trace="' + (+r.id) + '"><td><button class="btn" style="padding:1px 6px;font-size:11px" data-act="traceShow" data-arg="' +
+        (+r.id) + '" title="Show it in the list">R-' + (+r.id) + '</button> <span style="' + wrap + '">' + esc(r.title) + '</span>' +
+        (tags ? '<div class="exec-chips" style="margin-top:2px">' + tags + '</div>' : '') +
+        ((r.gaps || []).length ? '<div style="font-size:11px;' + yellow + ';' + wrap + '">' + esc('open: ' + r.gaps.join(', ')) + '</div>' : '') +
+        '</td><td data-l="Priority">' + esc(r.priority || '—') + '</td><td data-l="Tasks">' + (tasks || '<span class="form-hint">none</span>') +
+        '</td><td data-l="Commits">' + (commits || '<span class="form-hint">none</span>') + '</td><td data-l="Latest verdict">' + verdict +
+        '</td><td data-l="Proof">' + (r.tests ? proofBadge(p, p && p.stale) : '<span class="form-hint">no tests</span>') +
+        (p && p.task ? '<div class="form-hint">' + esc('for task #' + p.task.id + (p.task.deleted ? ' (deleted)' : '')) + '</div>' : '') +
+        '</td><td data-l="Verified"><span class="exec-chip"' + (r.verification === 'unverified' ? ' style="' + yellow + '"' : '') + '>' +
+        esc(r.verification) + '</span></td></tr>';
+    }
+    function renderTrace() {
+      if (!tr || !el('rtTable')) return;
+      const c = tr.coverage;
+      if (c) {
+        el('rtCov').innerHTML = covHTML(c);
+        // A tag the requirements no longer carry stays chosen until changed.
+        const sel = el('rtTag'), cur = sel.value, tags = (c.tags || []).slice();
+        if (cur && !tags.includes(cur)) tags.push(cur);
+        sel.innerHTML = '<option value="">any</option>' + tags.map(t => '<option value="' + esc(t) + '"' + (t === cur ? ' selected' : '') + '>' +
+          esc(t) + '</option>').join('');
+      }
+      const q = query.toLowerCase();
+      const rows = tr.rows.filter(r => !q || ('r-' + r.id + ' ' + r.title + ' ' + (r.tags || []).join(' ') + ' ' + (r.tasks || []).map(t =>
+        '#' + t.id + ' ' + (t.title || '')).join(' ') + ' ' + (r.commits || []).map(x => x.hash + ' ' + (x.subject || '')).join(' ')).toLowerCase().includes(q));
+      el('rtCount').textContent = tr.matched === undefined || tr.matched === null ? '' : (q ? rows.length + ' found of ' + tr.rows.length +
+        ' shown' : tr.rows.length + ' of ' + tr.matched + ' shown') + (c && tr.matched !== c.approved ? ' (' + c.approved + ' approved)' : '');
+      el('rtTable').innerHTML = rows.length ? '<table class="rt"><colgroup><col style="width:26%"><col style="width:7%"><col style="width:14%">' +
+        '<col style="width:12%"><col style="width:19%"><col style="width:10%"><col style="width:12%"></colgroup><thead><tr><th>Requirement</th>' +
+        '<th>Priority</th><th>Tasks</th><th>Commits</th><th>Latest verdict</th><th>Proof</th><th>Verified</th></tr></thead><tbody>' +
+        rows.map(rowHTML).join('') + '</tbody></table>'
+        : '<p class="form-hint">' + (tr.rows.length ? 'No row matches the search.' : c && !c.approved ? '' :
+          'No approved requirement matches the filter.') + '</p>';
+      el('rtMore').style.display = tr.next ? '' : 'none';
     }
 
     // ── drafting with the model (Task 20462) ──
@@ -868,7 +1046,7 @@
     return h.mount({open, load, pushed, filter, planGaps, checkAll, checkOne, assessOne, prove, stop, add, edit, cancelForm, save, del,
       details, show, openTask, verdict, makeTask, readSpec, reviewSpec, settleOne, importSpec, download,
       draftOpen, draftClose, draftSource, draftFile, draftGo, draftLintModel, draftApproveOne, draftApproveAll, draftEdit,
-      draftDiscard}, 'requirements', `
+      draftDiscard, showList, trace, traceMore, traceFilter, traceGap, traceShow, traceTask, coverage}, 'requirements', `
     <div class="kb-tab-toolbar">
       <span class="section-title" style="margin:0">Requirements</span>
       <div class="kb-search-wrap">
@@ -886,7 +1064,41 @@
       <button class="btn" style="padding:4px 10px;font-size:12px" data-act="load">Refresh</button>
     </div>
     <div id="reqSummary" class="form-hint" style="margin-bottom:6px"></div>
+    <div class="exec-actions" role="group" aria-label="View" style="margin-bottom:8px">
+      <button class="btn primary" id="reqViewList" aria-pressed="true" data-act="showList">Requirements</button>
+      <button class="btn" id="reqViewTrace" aria-pressed="false" data-act="trace"
+        title="Each requirement's tasks, their commits, its latest verdict and proof — and the spec coverage">Traceability</button>
+    </div>
     <div id="reqRun" class="exec-actions" style="display:none;align-items:center;margin-bottom:10px"></div>
+    <div id="reqTrace" style="display:none">
+      <style>
+      #reqTrace .rt{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}
+      #reqTrace .rt th{text-align:left;font-weight:600;color:var(--muted);padding:6px;border-bottom:1px solid var(--border)}
+      #reqTrace .rt td{vertical-align:top;padding:6px;border-top:1px solid var(--border);overflow-wrap:anywhere;word-break:break-word}
+      @media (max-width:900px){#reqTrace .rt,#reqTrace .rt tbody,#reqTrace .rt tr,#reqTrace .rt td{display:block;width:auto}
+        #reqTrace .rt colgroup,#reqTrace .rt thead{display:none}#reqTrace .rt tr{border-top:1px solid var(--border);padding:8px 0}
+        #reqTrace .rt td{border:0;padding:2px 0}#reqTrace .rt td[data-l]::before{content:attr(data-l) ": ";color:var(--muted);font-size:11px}}
+      </style>
+      <div id="rtCov"></div>
+      <div class="exec-actions" style="flex-wrap:wrap;align-items:center;margin:10px 0 6px">
+        <label class="form-hint" for="rtPriority">Priority</label>
+        <select class="form-select" id="rtPriority" data-change="traceFilter" style="flex:0 0 auto;width:auto">
+          <option value="">any</option><option value="must">must</option><option value="should">should</option>
+          <option value="could">could</option><option value="none">none</option></select>
+        <label class="form-hint" for="rtTag">Tag</label>
+        <select class="form-select" id="rtTag" data-change="traceFilter" style="flex:0 1 auto;width:auto;min-width:0;max-width:100%">
+          <option value="">any</option></select>
+        <label class="form-hint" for="rtGap">Gap</label>
+        <select class="form-select" id="rtGap" data-change="traceFilter" style="flex:0 0 auto;width:auto">
+          <option value="">any</option><option value="unfulfilled">unfulfilled</option><option value="stale">stale</option>
+          <option value="untested">untested</option><option value="unlinked">unlinked</option><option value="unchecked">unchecked</option>
+          <option value="none">no gap</option></select>
+        <span id="rtCount" class="form-hint" style="overflow-wrap:anywhere"></span>
+      </div>
+      <div id="rtTable"></div>
+      <div id="rtMore" style="display:none;margin-top:8px"><button class="btn" data-act="traceMore">Load more</button></div>
+    </div>
+    <div id="reqListView">
     <div id="reqDrafts" class="exec-actions" style="display:none;align-items:center;margin-bottom:10px;flex-wrap:wrap"></div>
     <div id="reqSpec" style="display:none"></div>
     <div id="reqForm" class="kb-add-form" style="display:none">
@@ -916,6 +1128,7 @@
       <p>Add what the project must keep doing. A requirement with a test is checked by running it on the project's executor.</p>
     </div>
     <div id="reqList" class="exec-grid" style="align-items:start"></div>
+    </div>
     `, `
     <div id="rd-overlay" data-overlay="flex" data-dismiss="draftClose"
       style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:60;align-items:center;justify-content:center">

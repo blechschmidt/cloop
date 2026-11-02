@@ -287,6 +287,13 @@ var hubHealthSource string
 //go:embed requirements_api.go
 var requirementsAPISource string
 
+// requirementsTraceSource is pkg/ui/requirements_trace_api.go (Task 20465):
+// the requirements_coverage push the Overview's Spec coverage card draws and
+// the Traceability view rereads its rows on.
+//
+//go:embed requirements_trace_api.go
+var requirementsTraceSource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
@@ -316,7 +323,8 @@ func allUISources() string {
 		"\n" + approvalsAPISource +
 		"\n" + deviceForwardersSource +
 		"\n" + hubHealthSource +
-		"\n" + requirementsAPISource
+		"\n" + requirementsAPISource +
+		"\n" + requirementsTraceSource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

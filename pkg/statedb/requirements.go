@@ -192,27 +192,7 @@ func queryRequirements(q requirementQuerier, where string, args ...any) ([]requi
 			&createdBy, &updatedBy, &r.Status, &approvedBy, &approved); err != nil {
 			return nil, fmt.Errorf("statedb: read requirements: %w", classifyDriverErr(err))
 		}
-		r.Title = clipText(r.Title, 4*requirements.MaxTitleRunes)
-		r.Description = clipText(r.Description, 4*requirements.MaxDescriptionRunes)
-		r.Priority = clipText(r.Priority, 16)
-		if !requirements.ValidStatus(r.Status) {
-			// Written by something other than this package: whatever it
-			// meant, it is not approved, so no check runs it unasked.
-			r.Status = requirements.StatusDraft
-		}
-		_ = json.Unmarshal([]byte(tags), &r.Tags)
-		if len(r.Tags) > requirements.MaxTags {
-			r.Tags = r.Tags[:requirements.MaxTags]
-		}
-		_ = json.Unmarshal([]byte(tests), &r.Tests)
-		if len(r.Tests) > requirements.MaxTests {
-			r.Tests = r.Tests[:requirements.MaxTests]
-		}
-		for i := range r.Tests {
-			r.Tests[i].Command = clipText(r.Tests[i].Command, requirements.MaxCommandBytes)
-			r.Tests[i].Name = clipText(r.Tests[i].Name, 4*requirements.MaxTestNameRunes)
-		}
-		r.CreatedAt, r.UpdatedAt = parseReqTime(created), parseReqTime(updated)
+		boundRequirementRow(&r, tags, tests, created, updated)
 		r.CreatedBy, r.UpdatedBy = clipText(createdBy, 4*requirements.MaxActorRunes), clipText(updatedBy, 4*requirements.MaxActorRunes)
 		// Who approved it, for an approved requirement only: whatever else
 		// says so has since stopped being approved.
@@ -225,6 +205,33 @@ func queryRequirements(q requirementQuerier, where string, args ...any) ([]requi
 		return nil, fmt.Errorf("statedb: read requirements: %w", classifyDriverErr(err))
 	}
 	return out, nil
+}
+
+// boundRequirementRow finishes a requirement read from a row: its texts
+// clipped, its JSON columns decoded leniently and bounded, its times parsed.
+// The row may have been written by something other than this package.
+func boundRequirementRow(r *requirements.Requirement, tags, tests, created, updated string) {
+	r.Title = clipText(r.Title, 4*requirements.MaxTitleRunes)
+	r.Description = clipText(r.Description, 4*requirements.MaxDescriptionRunes)
+	r.Priority = clipText(r.Priority, 16)
+	if !requirements.ValidStatus(r.Status) {
+		// Written by something other than this package: whatever it meant,
+		// it is not approved, so no check runs it unasked.
+		r.Status = requirements.StatusDraft
+	}
+	_ = json.Unmarshal([]byte(tags), &r.Tags)
+	if len(r.Tags) > requirements.MaxTags {
+		r.Tags = r.Tags[:requirements.MaxTags]
+	}
+	_ = json.Unmarshal([]byte(tests), &r.Tests)
+	if len(r.Tests) > requirements.MaxTests {
+		r.Tests = r.Tests[:requirements.MaxTests]
+	}
+	for i := range r.Tests {
+		r.Tests[i].Command = clipText(r.Tests[i].Command, requirements.MaxCommandBytes)
+		r.Tests[i].Name = clipText(r.Tests[i].Name, 4*requirements.MaxTestNameRunes)
+	}
+	r.CreatedAt, r.UpdatedAt = parseReqTime(created), parseReqTime(updated)
 }
 
 // Requirements lists the project's requirements in id order.

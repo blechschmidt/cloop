@@ -20,8 +20,10 @@ var reportCmd = &cobra.Command{
 	Short: "Generate a project progress report",
 	Long: `Generate a rich report of the current project state.
 
-Shows task completion status, timeline, token usage, cost estimates,
-and optionally step/task output excerpts.
+Shows task completion status, timeline, token usage, cost estimates, the
+spec coverage of the project's requirements — how many musts are tested,
+proven, passing and linked to a task — and optionally step/task output
+excerpts.
 
 Examples:
   cloop report                        # terminal report
@@ -51,6 +53,8 @@ Examples:
 		opts := report.Options{
 			Format:      format,
 			ShowOutputs: reportShowOutputs,
+			// The spec coverage of the approved requirements (Task 20465).
+			Coverage: projectCoverage(workdir, s.Plan),
 		}
 
 		if reportOutput != "" {
