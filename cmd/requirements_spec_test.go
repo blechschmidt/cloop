@@ -236,18 +236,35 @@ requirements:
 			t.Errorf("checking the draft with %v: %v\n%s", args, err, out)
 		}
 	}
-	if out, err := runHelper(t, exe, dir, "requirements", "check", "--file", "requirements.yaml", "--all", "--json"); err != nil {
-		t.Errorf("--json: %v\n%s", err, out)
-	} else {
-		var rep requirements.Report
-		if err := clijson.Unmarshal(out, &rep); err != nil || len(rep.Results) != 3 {
-			t.Errorf("--all --json reported %+v (%v)", rep, err)
+	// --json is the report, framed, for a tool: what the table says goes to
+	// stderr as each requirement is checked, and the exit status is what it
+	// is without --json. Until Task 20466 a CI job reading the JSON passed
+	// whatever the report said.
+	jsonCheck := exec.Command(exe, "requirements", "check", "--file", "requirements.yaml", "--all", "--json")
+	jsonCheck.Dir = dir
+	var stdout, stderr strings.Builder
+	jsonCheck.Stdout, jsonCheck.Stderr = &stdout, &stderr
+	if err := jsonCheck.Run(); exitCode(err) != 1 {
+		t.Errorf("--json with R-2 unfulfilled exited %v:\n%s\n%s", err, stdout.String(), stderr.String())
+	}
+	var checked requirements.Report
+	if err := clijson.Unmarshal([]byte(stdout.String()), &checked); err != nil || len(checked.Results) != 3 {
+		t.Errorf("--all --json reported %+v (%v)", checked, err)
+	}
+	for _, r := range checked.Results {
+		if r.RequirementID == 3 {
+			t.Errorf("--all checked the draft R-3: %+v", r)
 		}
-		for _, r := range rep.Results {
-			if r.RequirementID == 3 {
-				t.Errorf("--all checked the draft R-3: %+v", r)
-			}
+	}
+	for _, want := range []string{"R-1    checking    Passes\n", "R-1    fulfilled", "R-2    checking    Fails\n",
+		`R-2    unfulfilled test "the failing one" failed (exit 4)`, "R-4    unfulfilled", "R-5    skipped",
+		"1 fulfilled, 2 unfulfilled"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("--json's stderr lacks %q:\n%s", want, stderr.String())
 		}
+	}
+	if strings.Contains(stdout.String(), "checking") || strings.Contains(stdout.String(), "fulfilled, ") {
+		t.Errorf("--json printed the table on stdout beside the frame:\n%s", stdout.String())
 	}
 	if out, err := runHelper(t, exe, dir, "requirements", "check", "--file", "missing.yaml"); exitCode(err) != 1 ||
 		!strings.Contains(string(out), "no requirements spec file at missing.yaml") {

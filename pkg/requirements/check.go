@@ -28,8 +28,9 @@ type Options struct {
 	// Assess answers for a requirement with no tests. Nil leaves such a
 	// requirement unverified.
 	Assess func(ctx context.Context, r Requirement) (Assessment, error)
-	// OnResult is told each result as it is made, for a caller printing
-	// progress.
+	// OnStart is told each requirement as its check starts, and OnResult
+	// each result as it is made, for a caller printing progress.
+	OnStart  func(Requirement)
 	OnResult func(Result)
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
@@ -61,6 +62,9 @@ func Check(ctx context.Context, reqs []Requirement, opts Options) []Result {
 	env, scrub := testEnv(opts.Env)
 	results := make([]Result, 0, len(reqs))
 	for _, req := range reqs {
+		if opts.OnStart != nil && ctx.Err() == nil {
+			opts.OnStart(req)
+		}
 		r := checkOne(ctx, req, opts, env, scrub, now)
 		results = append(results, r)
 		if opts.OnResult != nil {

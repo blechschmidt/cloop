@@ -144,7 +144,12 @@ func TestRequirementsCheckAsTheHubRunsIt(t *testing.T) {
 		{ID: 7, Title: "seven", Tests: []requirements.Test{{Command: "echo the hub asked for this; exit 0"}}},
 		{ID: 9, Title: "nine", Tests: []requirements.Test{{Command: "exit 3"}}},
 	}})
+	// The hub reads the verdicts itself: a check it asked for that ran exits
+	// 0 whatever it found, and prints the frame alone.
 	out := mustRun(t, exe, dir, "requirements", "check", "--json", "--no-record", "--spec="+string(spec))
+	if strings.Contains(out, "checking") || strings.Contains(out, "unfulfilled ") {
+		t.Errorf("the hub's check printed more than the frame:\n%s", out)
+	}
 	var rep requirements.Report
 	if err := clijson.Unmarshal([]byte(out), &rep); err != nil {
 		t.Fatalf("no framed report: %v\n%s", err, out)

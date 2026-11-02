@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strconv"
@@ -382,9 +383,13 @@ project's database, and nothing is recorded: a plain CI job with no hub and no
 and a spec file that does not validate fails it, naming each problem's line.
 
 Exits 1 when a requirement is unfulfilled or its check did not work (a test
-timed out or could not start), so a CI job can run it as a gate. A test's
-processes are all stopped when it ends, and what it printed is kept only in
-part — its last 16 KiB — with credentials scrubbed.`,
+timed out or could not start), so a CI job can run it as a gate. With --json
+the report is printed framed, for a tool, and what the table says goes to
+stderr as each requirement is checked; the exit status is the same — except
+as the hub dispatches it (--spec), which exits 0 for a check that ran: the
+hub reads the verdicts itself. A test's processes are all stopped when it
+ends, and what it printed is kept only in part — its last 16 KiB — with
+credentials scrubbed.`,
 	RunE: runRequirementsCheck,
 }
 
@@ -412,7 +417,7 @@ func init() {
 
 	f := requirementsCheckCmd.Flags()
 	f.Bool("ai", false, "Ask the model about the requirements that have no tests")
-	f.Bool("json", false, "Report as framed JSON, for the hub")
+	f.Bool("json", false, "Report as framed JSON, for a tool or the hub (the table goes to stderr)")
 	f.Bool("no-record", false, "Record nothing in the project (the hub records what it reads back)")
 	f.String("spec", "", "Check the requirements in this JSON spec instead of the project's own (the hub's)")
 	f.String("provider", "", "AI provider for --ai (default: the project's)")
@@ -649,6 +654,19 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 		reqs = tested
 	}
 
+	// What a person reads: the table on stdout, or — when the report is JSON
+	// for a tool such as a CI job — the same lines on stderr beside the frame,
+	// with a line as each requirement starts, so that a check running for
+	// minutes says what it is doing, and a step killed mid-check says where
+	// (Task 20466). The hub's own check (--spec) prints the frame alone.
+	var progress io.Writer
+	switch {
+	case !asJSON:
+		progress = os.Stdout
+	case specArg == "":
+		progress = os.Stderr
+	}
+
 	opts := requirements.Options{Dir: workDir}
 	if assess && hasUntested(reqs) {
 		if st == nil {
@@ -667,13 +685,18 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 		aiTimeout, _ := f.GetDuration("ai-timeout")
 		opts.Assess = assessWith(prov, model, workDir, goal, aiTimeout)
 	}
-	if !asJSON {
+	if progress != nil {
+		if asJSON {
+			opts.OnStart = func(r requirements.Requirement) {
+				fmt.Fprintf(progress, "%-6s %-11s %s\n", requirements.Key(r.ID), "checking", r.Title)
+			}
+		}
 		opts.OnResult = func(r requirements.Result) {
-			verdictColor(r.Verdict).Printf("%-6s %-11s", requirements.Key(r.RequirementID), r.Verdict)
-			fmt.Printf(" %s\n", r.Summary)
+			verdictColor(r.Verdict).Fprintf(progress, "%-6s %-11s", requirements.Key(r.RequirementID), r.Verdict)
+			fmt.Fprintf(progress, " %s\n", r.Summary)
 		}
 		for _, r := range skipped {
-			color.New(color.Faint).Printf("%-6s %-11s no tests: ask the model (--ai), or record a verdict\n",
+			color.New(color.Faint).Fprintf(progress, "%-6s %-11s no tests: ask the model (--ai), or record a verdict\n",
 				requirements.Key(r.ID), "skipped")
 		}
 		var drafts, others []requirements.Requirement
@@ -685,10 +708,11 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if len(others) > 0 {
-			color.New(color.Faint).Printf("Not checked: %s — name them, or pass --status or --all\n", describeUnasked(others))
+			color.New(color.Faint).Fprintf(progress, "Not checked: %s — name them, or pass --status or --all\n",
+				describeUnasked(others))
 		}
 		if len(drafts) > 0 {
-			color.New(color.Faint).Printf("Not checked: %s awaiting approval — nothing checks a draft until a person "+
+			color.New(color.Faint).Fprintf(progress, "Not checked: %s awaiting approval — nothing checks a draft until a person "+
 				"approves it (cloop requirements approve)\n", describeUnasked(drafts))
 		}
 	}
@@ -724,13 +748,22 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	if asJSON {
-		// The verdicts are in the report: a check that ran exits 0, and a
-		// requirement it found unfulfilled is the hub's to say.
-		return clijson.Emit(os.Stdout, report)
+		if err := clijson.Emit(os.Stdout, report); err != nil {
+			return err
+		}
+		// The hub reads the verdicts in the report and records them itself:
+		// a check it asked for (--spec) that ran exits 0, and a requirement
+		// found unfulfilled is the hub's to say. Anybody else reading the
+		// JSON — a CI job gating on a spec file — is also told by the exit
+		// status, as without --json; before Task 20466 such a job passed
+		// whatever the report said.
+		if specArg != "" {
+			return nil
+		}
 	}
 	if len(reqs) == 0 {
 		if len(skipped) == 0 && len(unasked) == 0 {
-			fmt.Println("No requirements to check.")
+			fmt.Fprintln(progress, "No requirements to check.")
 		}
 		return nil
 	}
@@ -741,7 +774,7 @@ func runRequirementsCheck(cmd *cobra.Command, args []string) error {
 			where += " (with uncommitted changes)"
 		}
 	}
-	fmt.Printf("\n%s%s\n", describeCounts(counts), where)
+	fmt.Fprintf(progress, "\n%s%s\n", describeCounts(counts), where)
 	if counts.Failing() {
 		return errRequirementsFailing
 	}

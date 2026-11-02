@@ -951,7 +951,11 @@ records nothing:
 It exits 1 when a requirement is unfulfilled, its check did not work, or the
 file does not validate. A requirement with no tests is skipped unless `--ai`
 asks the model; `--status` and `--all` check drafts and deprecated ones too, and
-`--json` prints the report framed, for a tool.
+`--json` prints the report framed, for a tool, with what the table says on
+stderr as each requirement is checked — so that a long check in a CI log says
+what it is doing — and the same exit status. (Only the hub's own dispatch,
+`--spec`, exits 0 whatever the check found: the hub reads the verdicts
+itself.)
 
 ### In the dashboard
 

@@ -428,6 +428,17 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **`cloop requirements check --file … --json` fails when a requirement does.**
+  With `--json` the check exited 0 whatever it found, which is right for the
+  hub — it dispatches `--spec`, reads the verdicts and records them itself —
+  and wrong for anybody else: a CI job that read the report, as the guide's
+  "In CI, without a hub" suggests, passed with every requirement failing. Now
+  only the hub's `--spec` form exits 0 after a check that ran, and every other
+  `--json` check exits 1 when a requirement is unfulfilled or could not be
+  checked, as it does without `--json`. It also prints the table's lines on
+  stderr as each requirement starts and ends, so a long check in a CI log says
+  what it is running (Task 20466).
+
 - **A Kubernetes Pod's workspace fetch survives the hub process that started
   it.** A Pod's init container fetches its workspace through a git proxy
   session after the dispatch has returned. That session lived only in the
