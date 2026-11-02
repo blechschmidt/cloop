@@ -580,6 +580,18 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A stopping hub no longer waits five seconds on a busy database for each
+  audit gap it owes.** At shutdown and at exit, the audit-failure ledger
+  writes the gap rows it owes, each through a database handle of its own. That
+  handle waited out SQLite's five-second busy timeout whenever another
+  connection held the database's write lock, once for every chain owed, though
+  the flush means to give up at once: a gap it cannot write stays owed, and the
+  status file hands it to the next process. A hub's Shutdown could so outlast
+  its own deadline, and CI's pkg/ui and tests/security runs, where many hubs
+  share one process and so one ledger, timed out waiting for Run to return. The
+  flush now opens its handle without the wait on the way out; the periodic
+  flush is unchanged (Task 20469).
+
 - **`cloop requirements check --file … --json` fails when a requirement does.**
   With `--json` the check exited 0 whatever it found, which is right for the
   hub — it dispatches `--spec`, reads the verdicts and records them itself —

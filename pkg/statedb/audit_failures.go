@@ -785,6 +785,18 @@ func (l *auditFailureLog) flushChain(key, recorded string) {
 			return
 		}
 		defer own.Close()
+		if recorded == GapRecordedAtShutdown || recorded == GapRecordedAtExit {
+			// On its way out, a process does not wait out the database's
+			// busy_timeout, which a hub's Shutdown would otherwise wait once
+			// for every chain it owes (Task 20469). A locked database is a
+			// failed attempt: the gap stays owed, and the status file hands
+			// it to the next process. The handle is this flush's own, with
+			// one connection, so the pragma holds for the append below.
+			if _, err := own.conn.Exec("PRAGMA busy_timeout = 0"); err != nil {
+				l.release(g, err, true)
+				return
+			}
+		}
 		d = own
 	}
 	if d == nil || d.closed.Load() {

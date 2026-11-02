@@ -376,6 +376,56 @@ func TestAuditGapFlushOpensItsOwnHandle(t *testing.T) {
 	}
 }
 
+// A process on its way out does not wait out a busy database for a gap it
+// owes (Task 20469): a shutdown flush that finds the chain's database locked
+// gives up at once rather than after busy_timeout — for every chain it owes —
+// and the gap stays owed for whatever records it next. A hub's Shutdown runs
+// this flush, and CI's pkg/ui tests timed out waiting for it.
+func TestAShutdownFlushDoesNotWaitOutABusyDatabase(t *testing.T) {
+	captureAuditReports(t)
+	path := freshPath(t)
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = d.Close()
+	if err := d.AppendAuditEvent(testEvent(auditaction.ActionStateSave)); err == nil {
+		t.Fatal("append through a closed handle succeeded")
+	}
+	locker, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close()
+	tx, err := locker.conn.Begin() // _txlock=immediate: the write lock
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, recorded := range []string{GapRecordedAtShutdown, GapRecordedAtExit} {
+		start := time.Now()
+		FlushAuditGaps(recorded)
+		if took := time.Since(start); took > time.Duration(BusyTimeoutMillis)*time.Millisecond/2 {
+			t.Fatalf("a %s flush waited %v on a locked database", recorded, took)
+		}
+	}
+	if acct := accountFor(t, d); acct.Unrecorded.Events != 1 {
+		t.Fatalf("the gap the busy database could not take = %+v, want it still owed", acct)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Free again, a flush records it.
+	FlushAuditGaps(GapRecordedByFlush)
+	rep, err := locker.VerifyAuditChain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Gaps != 1 || rep.GapEvents != 1 {
+		t.Errorf("after the database was free the chain records %d gap(s) covering %d, want 1 covering 1", rep.Gaps, rep.GapEvents)
+	}
+}
+
 // A process that dies owing the trail leaves its status file behind; the next
 // process to start there adopts the loss and records it.
 func TestAuditFailureStatusIsAdoptedFromAnExitedProcess(t *testing.T) {
