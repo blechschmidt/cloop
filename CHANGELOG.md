@@ -179,6 +179,33 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A guide to knowledge sources, their trust model, and an end-to-end proof
+  against fake Atlassian servers.** `docs/guides/knowledge-sources.md` covers
+  connecting Confluence and Jira, Cloud or Data Center: a least-privilege
+  account and token for each (an Atlassian service account's scoped token
+  through the API gateway, or a Data Center personal access token of a
+  dedicated user), scoping by spaces, projects, CQL or JQL, restricted pages
+  and secured issues, binding and narrowing, what turning on semantic search
+  sends where, how a run is given fenced, cited reference material and a
+  search tool, and a table of sync errors with their causes. The security
+  model now gives knowledge a section of its own — credentials stay on the
+  hub, cross-project isolation, retrieved text as prompt injection and what
+  fencing and redaction do and do not stop, and the residual that a source's
+  account sees more than the people searching it, which a new test pins: a
+  connector's ACL hints are stored and not enforced. The threat model's
+  knowledge section is a full STRIDE table over sources, not only runs.
+  `TestE2EKnowledgeSourcesReachOnlyTheirProjectsRuns` runs it all on real
+  processes: a strict hub, a device agent and a stand-in `claude` against fake
+  Confluence and Jira Data Center servers the hub reaches over TLS at a private
+  address with the connectors it ships. Through the REST API it connects and
+  binds both sources to two projects and syncs them, then checks the fenced
+  reference material and citations a run's task gets, that the harness can call
+  `knowledge_search` through the MCP server its configuration names, that the
+  other project's run reaches none of those documents by search, id, URL or
+  issue key, that a restricted page and a secured issue reach no one, that an
+  edit in Confluence arrives by an incremental sync, and that neither
+  connector's token leaves the hub (Task 20474).
+
 - **Knowledge in the dashboard: connect sources in Settings, bind them in a
   project's Knowledge tab, watch their syncs live, try a search, and see what a
   task's run cited.** Settings → Knowledge sources lists the Confluence and

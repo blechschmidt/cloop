@@ -133,7 +133,12 @@ Seven pages in order, indexed at
   neither can do, and
   [who spent it](security/model.md#who-spent-it-per-identity-attribution) for
   how a daily budget is attributed to an identity, enforced between tasks, and
-  read back — including the one number in it that is self-reported.
+  read back — including the one number in it that is self-reported. Read
+  [knowledge sources](security/model.md#knowledge-sources) for where a
+  Confluence or Jira credential goes, how one project is kept from another's
+  knowledge, what fencing and redaction do and do not stop when retrieved text
+  tries to instruct an agent, and what the account the hub reads with can see
+  that the people searching it cannot.
 - **[Threat model](security/threat-model.md)** — STRIDE per boundary, with the
   concrete mitigation that exists and an honest residual-risk column, plus the
   [two vulnerabilities found while building the egress filter](security/threat-model.md#vulnerabilities-found-while-building-this).
@@ -183,6 +188,14 @@ Seven pages in order, indexed at
   recorded verdicts, when a verdict goes stale, and turning a failure into a
   task. Requirements as code: `.cloop/requirements.yaml` beside the code, its
   statuses, export and three-way import, and checking it in CI with no hub.
+- **[Knowledge sources: Confluence and Jira](guides/knowledge-sources.md)** —
+  letting agents read what your organisation wrote down: a least-privilege
+  account and token for Confluence and Jira, Cloud or Data Center, connecting
+  it, scoping it by spaces, projects, CQL or JQL, why restricted pages and
+  secured issues stay out, binding sources to projects, what turning on
+  semantic search sends where, how a run is given fenced, cited reference
+  material and a search tool, and what a failed sync is telling you. The trust
+  model is in the [security model](security/model.md#knowledge-sources).
 - **[Task attachments](guides/attachments.md)** — the files a run makes for a
   person to look at — reports, charts, screenshots, exports, logs — attached to
   its task: the outbox an agent copies them into, `cloop task attachments`, the
