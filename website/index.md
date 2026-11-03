@@ -61,6 +61,9 @@ The hub never spawns an agent on itself. Work runs in a container, on an
 enrolled edge device, or as a Kubernetes Pod, and a bootstrapped configuration
 denies host execution and defaults every new user to no role at all.
 
+**[Component and security architecture](docs/architecture/README.md)** draws
+the whole of it on one page, and links to everything below.
+
 <div class="grid cards" markdown>
 
 -   **[Executor architecture](docs/architecture/executors.md)**

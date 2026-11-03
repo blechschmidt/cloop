@@ -826,6 +826,8 @@ and Jira Data Center servers.
 
 ## See also
 
+- [Component and security architecture](../architecture/README.md) — the
+  components behind each boundary
 - [Security model](model.md) — boundaries and the guarantee → test table
 - [Executor architecture](../architecture/executors.md)
 - [Secret and egress grants](../guides/secrets.md)

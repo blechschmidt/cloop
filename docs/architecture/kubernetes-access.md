@@ -1512,6 +1512,8 @@ start-up line is the authority on which of the two.
 
 ## See also
 
+- [Component and security architecture](README.md) — the monitor among the
+  hub's other credential guards
 - [Security model](../security/model.md) — the trust boundaries and the
   guarantee → test table
 - [Threat model](../security/threat-model.md) — STRIDE per boundary, with the

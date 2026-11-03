@@ -104,6 +104,7 @@ its source is [`docs/`](docs/README.md).
 | | |
 | --- | --- |
 | **[Getting started](docs/getting-started/README.md)** | install, your first project, how the loop works, providers, the dashboard, and a screenshot walkthrough of it |
+| **[Component and security architecture](docs/architecture/README.md)** | the whole system on one page — the processes, what every package is for, the path a run takes, and the security architecture around it: trust boundaries, keys, sandbox containment and the guards that keep credentials on the hub |
 | **[Executor architecture](docs/architecture/executors.md)** | how a task travels from the orchestrator to a sandbox and back — the four backends, placement, health supervision, failover, remote agent enrollment |
 | **[Security model](docs/security/model.md)** | the four trust boundaries, the no-host-execution guarantee, SSO and RBAC, and a table mapping every guarantee to the test that checks it |
 | **[Threat model](docs/security/threat-model.md)** | STRIDE per boundary, with an honest residual-risk column |
@@ -132,6 +133,7 @@ cloop hub bootstrap --external-url https://cloop.example.com \
 
 That writes a configuration with `executors.allow_host_process: false` and
 `default_role: none` — no host execution, deny by default. From there, read the
+[component and security architecture](docs/architecture/README.md), the
 [security model](docs/security/model.md), then the
 [operator runbook](docs/operations/runbook.md).
 

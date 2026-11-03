@@ -43,6 +43,16 @@ Seven pages in order, indexed at
 
 ## Architecture
 
+- **[Component and security architecture](architecture/README.md)** — the whole
+  system on one page: the processes cloop runs as, what each of its packages is
+  for, what the hub keeps and where, the path a run takes from **Start** to a
+  landed commit, and the security architecture around it — the design rules,
+  every trust boundary and what authenticates it, the request pipeline and the
+  credentials a caller can hold, the key hierarchy and how a secret becomes a
+  lease, sandbox containment, the credential guards that keep forge, cluster
+  and model credentials on the hub, transport, supply chain, audit, and the
+  suites that keep it true. Start here; every other page in this section and
+  under Security goes deep on one piece of it.
 - **[Executors](architecture/executors.md)** — how a task travels from the
   orchestrator to a sandbox and back. The `Executor` interface, the four
   backends (`localprocess`, `container`, `remote`, `kubernetes`), registry and
@@ -309,11 +319,16 @@ Seven pages in order, indexed at
 
 ### Reading order
 
+Understanding how it fits together:
+[component and security architecture](architecture/README.md), then whichever
+piece it points you to.
+
 Operating a hub: [runbook](operations/runbook.md) → [secrets guide](guides/secrets.md).
 
-Assessing the security posture: [security model](security/model.md) →
-[threat model](security/threat-model.md) — the second is only meaningful with
-the boundaries from the first.
+Assessing the security posture:
+[component and security architecture](architecture/README.md#security-architecture) →
+[security model](security/model.md) → [threat model](security/threat-model.md) —
+the last is only meaningful with the boundaries from the one before it.
 
 Extending cloop: [executors](architecture/executors.md) →
 [security model](security/model.md#the-no-host-execution-guarantee), because a

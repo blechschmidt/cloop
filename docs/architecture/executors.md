@@ -4003,6 +4003,8 @@ version its signed manifest names.
 
 ## See also
 
+- [Component and security architecture](README.md) — where executors sit in the
+  whole system
 - [Security model](../security/model.md) — what each boundary authenticates with
 - [Threat model](../security/threat-model.md) — STRIDE per boundary
 - [Secret and egress grants](../guides/secrets.md) — what a sandbox is given

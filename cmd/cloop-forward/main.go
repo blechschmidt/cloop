@@ -7,9 +7,10 @@
 // dashboard and a hundred other commands. The trust model here is "the agent
 // runs in an isolated environment in the cloud with limited access to on-prem
 // hardware", and the aperture through which that access is granted should be as
-// small as the job: this main imports pkg/deviceforward and nothing of the rest
-// of cloop, so what runs on the machine wired to the hardware is a byte pump
-// with a credential, not a product.
+// small as the job: this main imports pkg/deviceforward, pkg/executor (for its
+// USB device matching) and pkg/version, and links no orchestrator, dashboard or
+// hub, so what runs on the machine wired to the hardware is a byte pump with a
+// credential, not a product.
 //
 // Enrollment, revocation and listing are hub-side operations — run them with
 // the full `cloop forward enroll|revoke|list` on the control plane. This binary

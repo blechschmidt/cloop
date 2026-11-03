@@ -5696,6 +5696,8 @@ shape pkg/redact does not know passes both scrubs
 
 ## See also
 
+- [Component and security architecture](../architecture/README.md) — every
+  component and control of this page placed on one map
 - [Threat model](threat-model.md) — STRIDE per boundary, with the honest column
 - [Executor architecture](../architecture/executors.md) — how the boundaries connect
 - [Secret and egress grants](../guides/secrets.md) — granting credentials safely
