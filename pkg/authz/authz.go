@@ -736,6 +736,11 @@ const (
 
 	// SourceUnauthenticated means there was no identity to resolve.
 	SourceUnauthenticated Source = "unauthenticated"
+
+	// SourceRunSession means the caller presented a run's knowledge session
+	// token (Task 20472): read access to the knowledge of the one project the
+	// run belongs to, resolved by FromRoles, and nothing anywhere else.
+	SourceRunSession Source = "run_session"
 )
 
 // Decision is the resolved authority of one subject over one scope.

@@ -392,6 +392,7 @@ func (s *Server) letGoOfLostRun(run dispatchedRun, reason string) {
 	}
 	closeRunEgress(run.handleID, reason)
 	closeRunForwards(run.handleID, reason)
+	closeRunKnowledge(run.handleID, reason)
 	closeRunLeases(run.ex.ID(), run.handleID)
 	// And what this member could not take over yet (Task 20451): failed, and
 	// its records left for the janitor, whose sweep takes a lapsed lease back

@@ -299,6 +299,11 @@ type Task struct {
 	// regressions. Nil when the gate was off or never reached the task. See
 	// requirementsgate.go.
 	RequirementsCheck *TaskRequirementsCheck `json:"requirements_check,omitempty"`
+	// Citations are the knowledge-source documents the task's latest run was
+	// given as reference material or read through the hub's knowledge search
+	// (Task 20472): title, URL and source each. Written by the run, like its
+	// outcome; see citation.go.
+	Citations []Citation `json:"citations,omitempty"`
 	// Quarantine marks a task the control plane suspects of taking down the
 	// nodes that ran it (Task 20391): two or more distinct executors went
 	// unreachable while it was running. It runs again only after an explicit

@@ -226,3 +226,47 @@ func (c *Client) SearchKnowledgeRetrieval(ctx context.Context, idx int, query st
 	}
 	return out.Hits, out.Retrieval, nil
 }
+
+// KnowledgeRunSetting is how a project's runs are given its knowledge (Task
+// 20472), as GET /api/projects/{idx}/knowledge/retrieval answers.
+type KnowledgeRunSetting struct {
+	// Enabled says whether each task's prompt gets reference material.
+	Enabled bool `json:"enabled"`
+	// K is how many passages a prompt is given; TokenBudget bounds them.
+	K           int `json:"k"`
+	TokenBudget int `json:"token_budget"`
+	// Default reports a project that never set it.
+	Default bool `json:"default"`
+	// Sources counts the knowledge sources bound to the project.
+	Sources int `json:"sources"`
+}
+
+// KnowledgeRunSettingChange is a change to it: nil fields are left alone; 0
+// for K or TokenBudget returns it to the default.
+type KnowledgeRunSettingChange struct {
+	Enabled     *bool `json:"enabled,omitempty"`
+	K           *int  `json:"k,omitempty"`
+	TokenBudget *int  `json:"token_budget,omitempty"`
+}
+
+// KnowledgeRunSetting reads project idx's knowledge retrieval setting.
+func (c *Client) KnowledgeRunSetting(ctx context.Context, idx int) (*KnowledgeRunSetting, error) {
+	var out struct {
+		Retrieval KnowledgeRunSetting `json:"retrieval"`
+	}
+	if err := c.Do(ctx, http.MethodGet, fmt.Sprintf("/api/projects/%d/knowledge/retrieval", idx), nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out.Retrieval, nil
+}
+
+// SetKnowledgeRunSetting changes project idx's knowledge retrieval setting.
+func (c *Client) SetKnowledgeRunSetting(ctx context.Context, idx int, change KnowledgeRunSettingChange) (*KnowledgeRunSetting, error) {
+	var out struct {
+		Retrieval KnowledgeRunSetting `json:"retrieval"`
+	}
+	if err := c.Do(ctx, http.MethodPut, fmt.Sprintf("/api/projects/%d/knowledge/retrieval", idx), nil, change, &out); err != nil {
+		return nil, err
+	}
+	return &out.Retrieval, nil
+}

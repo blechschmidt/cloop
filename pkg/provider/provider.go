@@ -73,6 +73,13 @@ type Options struct {
 	// pushes (Task 20357). Honoured by claudecode; HTTP providers spawn no
 	// process and ignore it.
 	Env []string
+
+	// MCPConfig names a file of MCP servers to give the agent harness on top
+	// of its own — cloop's knowledge tools for a run of a project with
+	// knowledge sources (Task 20472). Honoured by claudecode (--mcp-config),
+	// never for a ReadOnly call, whose tools are an allow-list; others ignore
+	// it.
+	MCPConfig string
 }
 
 // EffortLevels are the valid reasoning-effort levels accepted by

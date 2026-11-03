@@ -79,6 +79,10 @@ type State struct {
 	// (Task 20461), stored as JSON under the requirements_gate meta key. Nil
 	// when never set.
 	RequirementsGate *pm.RequirementsGate
+	// KnowledgeRetrieval is how the project's runs are given knowledge
+	// (Task 20472), stored as JSON under the knowledge_retrieval meta key.
+	// Nil when never set, which means on with the defaults.
+	KnowledgeRetrieval *pm.KnowledgeRetrieval
 	// FollowBuilds, RunOwner and AdoptRequest are the project's side of a
 	// run adopting newer builds (Task 20389): the "follow new builds" option
 	// (follow_builds), the record the run keeps of its own process and build
@@ -452,6 +456,12 @@ func (d *DB) saveStateLocked(s *State) (changed []taskAuditChange, deleted []int
 		b, _ := json.Marshal(s.RequirementsGate)
 		meta["requirements_gate"] = string(b)
 	}
+	// And for knowledge retrieval (Task 20472): changed through
+	// SaveKnowledgeRetrieval.
+	if s.KnowledgeRetrieval != nil {
+		b, _ := json.Marshal(s.KnowledgeRetrieval)
+		meta[metaKnowledgeRetrieval] = string(b)
+	}
 
 	// workdir is write-once: it records where the project was created, and the
 	// process saving is not always in a position to know that. An isolating
@@ -697,6 +707,13 @@ func (d *DB) loadStateMetaTx() (*State, error) {
 		var g pm.RequirementsGate
 		if err := json.Unmarshal([]byte(v), &g); err == nil {
 			s.RequirementsGate = &g
+		}
+	}
+
+	if v := metaMap[metaKnowledgeRetrieval]; v != "" {
+		var r pm.KnowledgeRetrieval
+		if err := json.Unmarshal([]byte(v), &r); err == nil {
+			s.KnowledgeRetrieval = &r
 		}
 	}
 
@@ -1043,6 +1060,8 @@ var taskColumns = []string{
 	"requirements",
 	// 0088_requirements_gate (Task 20461).
 	"requirements_check",
+	// 0096_knowledge_citations (Task 20472).
+	"citations",
 }
 
 // taskSelect reads every task column, then the task's run id, quarantine and
@@ -1094,6 +1113,7 @@ func taskValues(t *pm.Task) []any {
 		t.RiskScore, t.ImpactScore, t.RetryBudget,
 		listText(t.Requirements),
 		encodeRequirementsCheck(t.RequirementsCheck),
+		encodeCitations(t.Citations),
 	}
 }
 
@@ -1115,6 +1135,7 @@ type taskScanner struct {
 	lists                                       taskListColumns
 	bgJSON, abortJSON, reviewJSON               string
 	reqCheckJSON, quarantineJSON                string
+	citationsJSON                               string
 	startedAt, completedAt, deadline, nextRunAt sql.NullString
 	reqApproval, approved, pinned               int
 	dest                                        []any
@@ -1140,6 +1161,7 @@ func newTaskScanner() *taskScanner {
 		&t.RiskScore, &t.ImpactScore, &t.RetryBudget,
 		&sc.lists.Requirements,
 		&sc.reqCheckJSON,
+		&sc.citationsJSON,
 		&t.RunID, &sc.quarantineJSON, &t.AttachmentCount,
 	}
 	return sc
@@ -1166,6 +1188,7 @@ func (sc *taskScanner) scan(rows rowScanner) (*pm.Task, error) {
 	t.Abort = decodeAbort(sc.abortJSON)
 	t.Review = decodeReview(sc.reviewJSON)
 	t.RequirementsCheck = decodeRequirementsCheck(sc.reqCheckJSON)
+	t.Citations = decodeCitations(sc.citationsJSON)
 	t.RequiresApproval = sc.reqApproval == 1
 	t.Approved = sc.approved == 1
 	t.Pinned = sc.pinned == 1
@@ -1635,6 +1658,34 @@ func (d *DB) SaveCommitPolicy(p *pm.CommitPolicy) error {
 	return nil
 }
 
+// metaKnowledgeRetrieval is the meta key a project's knowledge retrieval
+// setting is stored under (Task 20472).
+const metaKnowledgeRetrieval = "knowledge_retrieval"
+
+// SaveKnowledgeRetrieval stores the project's knowledge retrieval setting and
+// nothing else (Task 20472), for the same reason as SaveCommitPolicy: the
+// dashboard and the CLI change it while a run may be saving its tasks. Nil
+// stores none, which means on with the defaults.
+func (d *DB) SaveKnowledgeRetrieval(r *pm.KnowledgeRetrieval) error {
+	value := ""
+	if r != nil {
+		b, err := json.Marshal(r)
+		if err != nil {
+			return fmt.Errorf("statedb: encode knowledge retrieval: %w", err)
+		}
+		value = string(b)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, err := d.conn.Exec(
+		`INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		metaKnowledgeRetrieval, value,
+	); err != nil {
+		return fmt.Errorf("statedb: save knowledge retrieval: %w", classifyDriverErr(err))
+	}
+	return nil
+}
+
 // SaveRequirementsGate stores the project's requirements gate setting and
 // nothing else (Task 20461), for the same reason as SaveCommitPolicy: the
 // dashboard and the CLI change it while a run may be saving its tasks.
@@ -1771,6 +1822,44 @@ func decodeRequirementsCheck(raw string) *pm.TaskRequirementsCheck {
 	}
 	return &c
 }
+
+// encodeCitations serialises a task's citations for the plan_tasks.citations
+// column (Task 20472): none is the empty string, so a row written by this
+// build reads the same as one predating migration 0096.
+func encodeCitations(cs []pm.Citation) string {
+	if len(cs) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(cs)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeCitations parses the citations column as it was written, at most
+// pm.MaxTaskCitations of them. Anything unreadable, or past
+// maxCitationsBytes, reads as none: on an executor that shares the project's
+// directory the row is writable from inside the sandbox, and every plan load
+// decodes it. What a citation says is cleaned where it is shown
+// (pm.CleanCitation), not here: the store returns what it holds.
+func decodeCitations(raw string) []pm.Citation {
+	if raw == "" || raw == "null" || len(raw) > maxCitationsBytes {
+		return nil
+	}
+	var cs []pm.Citation
+	if err := json.Unmarshal([]byte(raw), &cs); err != nil {
+		return nil
+	}
+	if len(cs) > pm.MaxTaskCitations {
+		cs = cs[:pm.MaxTaskCitations]
+	}
+	return cs
+}
+
+// maxCitationsBytes bounds a stored citations column: MaxTaskCitations at
+// their longest, with room to spare.
+const maxCitationsBytes = 256 << 10
 
 // maxRequirementsCheckBytes bounds a stored requirements-gate record: fifty
 // requirements of sixteen tests, each failing one with a 4 KiB tail, and room

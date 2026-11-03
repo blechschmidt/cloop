@@ -59,6 +59,7 @@ value that ends that way (`GITHUB_TOKEN=ghp_xxxx…`) or is a template
 | `cloop-git-proxy-session` | cloop git proxy session password | `cloop_git1_<43 base64url>`, the password a sandbox's git presents to the hub's git proxy in place of a GitHub credential (Task 20454). Passwords minted before that task carry no prefix and no shape. |
 | `cloop-kube-guard-session` | cloop Kubernetes monitor session token | `cloop_kube1_<id>.<secret>`, the bearer token a sandbox's kubectl presents to the hub's Kubernetes access monitor (Task 20454). Tokens minted before that task are a bare `<id>.<secret>`, which has no shape. |
 | `cloop-egress-session` | cloop egress proxy session password | `cloop_egress1_<64 hex>`, the password in the HTTPS_PROXY a sandbox reaches the Internet through (Task 20454). Passwords minted before that task are bare hex, which has no shape. |
+| `cloop-knowledge-session` | cloop run knowledge session token | `cloop_know1_<id>.<secret>`, the bearer token a run presents to the hub's run-scoped knowledge search (Task 20472). |
 | `cloop-enrollment-token` | cloop executor enrollment token | `clet1.<id>.<secret>.<mac>`, the single-use token an edge device enrolls with. |
 | `cloop-enrollment-bundle` | cloop executor enrollment bundle | `cloopenroll1.<base64url>`, the copy-paste bundle that carries an enrollment token. |
 | `cloop-agent-credential` | cloop executor agent credential | `clac1.<agent>.<secret>.<mac>`, the long-lived credential an enrolled agent reconnects with. |

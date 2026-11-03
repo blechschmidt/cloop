@@ -143,8 +143,24 @@ func buildArgs(opts provider.Options) []string {
 	// default instead of granted by omission.
 	if opts.ReadOnly {
 		args = append(args, "--tools", readOnlyTools, "--strict-mcp-config")
+	} else if cfg := mcpConfigPath(opts.MCPConfig); cfg != "" {
+		// MCP servers on top of the agent's own (Task 20472): a file, so
+		// what the servers are started with is not on a command line every
+		// local user can read. A path the CLI would take for a flag, or that
+		// is not absolute, is not passed.
+		args = append(args, "--mcp-config", cfg)
 	}
 	return args
+}
+
+// mcpConfigPath returns p when it is an absolute path to an MCP
+// configuration file, and "" otherwise.
+func mcpConfigPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" || !filepath.IsAbs(p) || strings.HasPrefix(p, "-") {
+		return ""
+	}
+	return filepath.Clean(p)
 }
 
 // readOnlyTools are the built-in tools a read-only call may use.

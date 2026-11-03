@@ -1077,6 +1077,9 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	ensureGrantRevocationHook()
 	// The model relay charges and checks this server's quotas (Task 20435).
 	setModelRelayServer(srv)
+	// And runs reach their project's knowledge on this server's listener
+	// (Task 20472).
+	setKnowledgeRunServer(srv)
 	// And refusals recorded from now on reach this server's dashboards.
 	srv.notifyDenials()
 	return srv
@@ -2146,8 +2149,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // false, and the rate limiter still applies: it sits outside this middleware.
 func servedBeforeAuth(r *http.Request) bool {
 	return isPublicShell(r) || isPublicIcon(r) || isPublicAsset(r) || isCSPReport(r) || isCIFederationEndpoint(r) ||
-		isDeviceGrantEndpoint(r) || isSCIMEndpoint(r) || isModelRelayEndpoint(r)
+		isDeviceGrantEndpoint(r) || isSCIMEndpoint(r) || isModelRelayEndpoint(r) || isKnowledgeRunEndpoint(r)
 }
+
+// The run-scoped knowledge search (Task 20472, isKnowledgeRunEndpoint) is the
+// second kind: a run presents the knowledge session token the hub minted for
+// it, which knowledge_run_api.go checks, and holds no hub session by design.
+// Every request without a live session's token is refused there.
 
 // The SCIM service (Task 20415, isSCIMEndpoint) is the second kind too: an
 // identity provider presents the cloop_scim_ credential minted for it, which
@@ -5312,9 +5320,18 @@ func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The knowledge-source documents the task's latest run was given and
+	// read (Task 20472), always a list, and cleaned again here — http and
+	// https links only, bounded text — since the row they come from may have
+	// been written from inside a sandbox: the modal draws them as links.
+	citations := pm.MergeCitations(nil, task.Citations, nil)
+	if citations == nil {
+		citations = []pm.Citation{}
+	}
 	out := map[string]interface{}{
 		"ok":                 true,
 		"task":               task,
+		"citations":          citations,
 		"artifact_body":      artifactBody,
 		"artifact_truncated": artifactTruncated,
 		"artifact_path":      artifactSourcePath,

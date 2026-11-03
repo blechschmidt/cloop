@@ -830,7 +830,8 @@ func sameOutcome(a, b *pm.Task) bool {
 		sameJSON(a.Background, b.Background) &&
 		sameJSON(a.Abort, b.Abort) &&
 		sameJSON(a.Review, b.Review) &&
-		sameJSON(a.RequirementsCheck, b.RequirementsCheck)
+		sameJSON(a.RequirementsCheck, b.RequirementsCheck) &&
+		sameJSON(a.Citations, b.Citations)
 }
 
 // applyOutcome copies the outcome fields from the run's task onto the hub's.
@@ -850,6 +851,10 @@ func applyOutcome(h, after *pm.Task, scrub func(string) string) {
 	h.Abort = sanitizeAbort(after.Abort, h.Abort, scrub)
 	h.Review = sanitizeReview(after.Review, scrub)
 	h.RequirementsCheck = sanitizeRequirementsCheck(after.RequirementsCheck, scrub)
+	// The documents the run cited (Task 20472), held to the bounds a task
+	// keeps and scrubbed like the rest of its outcome: a device's copy of the
+	// row is the device's to write.
+	h.Citations = pm.MergeCitations(nil, after.Citations, scrub)
 }
 
 // appendAnnotations adds the notes the run attached to a task. It reports

@@ -68,6 +68,7 @@ const (
 	EventDiskLimit         = statedb.EventDiskLimit
 	EventTaskAttachments   = statedb.EventTaskAttachments
 	EventModelRelay        = statedb.EventModelRelay
+	EventKnowledge         = statedb.EventKnowledge
 	EventRunReexecuted     = statedb.EventRunReexecuted
 	EventRunAdoption       = statedb.EventRunAdoption
 	EventGitPushRefused    = statedb.EventGitPushRefused

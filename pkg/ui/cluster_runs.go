@@ -70,6 +70,9 @@ type runOwnerMeta struct {
 	// Egress are the egress proxy sessions the run holds, which the member
 	// adopting it restores with their counters (Task 20383).
 	Egress []string `json:"egress,omitempty"`
+	// Knowledge are the run's knowledge sessions, which the member adopting
+	// it keeps alive and closes when the run ends (Task 20472).
+	Knowledge []string `json:"knowledge,omitempty"`
 	// Workspace is the workspace lease and the pinned git proxy session a
 	// driver keeps for the run's push write-back, which the member adopting
 	// it takes over and restores (Task 20390).
@@ -679,6 +682,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 			s.retireRunLeases([]string{meta.Workspace.Lease}, "its run ended while no hub process held the lease")
 		}
 		retireRunEgressRecords(meta.Egress, "its run ended while no hub process held the session")
+		retireRunKnowledge(meta.Knowledge, "its run ended while no hub process held the session")
 		closeAdoptedSessions(ex, meta.Handle, st, stErr)
 		if stErr == nil {
 			journalPushWriteBack(workDir, ex, st)
@@ -699,6 +703,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 	s.takeOverRunLeases(workDir, ex, meta.Handle, meta.Leases)
 	s.takeOverWorkspaceLease(workDir, ex, meta.Handle, meta.Workspace)
 	s.restoreRunEgress(workDir, ex, meta.Handle, meta.Egress)
+	restoreRunKnowledge(workDir, ex, meta.Handle, meta.Knowledge)
 	// What its firewall refuses from here on is recorded on the run (Task
 	// 20437). The levels are re-read: the dispatch's are gone with the
 	// process that composed them.
@@ -754,6 +759,7 @@ func (s *Server) settleOrphanedLostRun(o hubcluster.Owner, meta runOwnerMeta, lo
 		s.retireRunLeases([]string{meta.Workspace.Lease}, "its run's executor was lost")
 	}
 	retireRunEgressRecords(meta.Egress, "its run's executor was lost")
+	retireRunKnowledge(meta.Knowledge, "its run's executor was lost")
 	s.reconcileDeadRun(workDir, runVerdict{Detail: detail, Lost: true})
 }
 

@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/knowledgerun"
 	"github.com/blechschmidt/cloop/pkg/mcp"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -16,6 +17,7 @@ import (
 
 var mcpProvider string
 var mcpModel string
+var mcpKnowledgeOnly bool
 
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
@@ -30,6 +32,16 @@ query cloop through the following tools:
   add_task       Append a new task to the plan
   complete_task  Mark a task as done with an optional result
   run_task       Execute a one-shot AI prompt and return the response
+
+In a run of a project with knowledge sources bound to it (Task 20472) — a run
+the hub dispatched, holding CLOOP_KNOWLEDGE_URL and CLOOP_KNOWLEDGE_TOKEN — it
+also offers:
+
+  knowledge_search  Search the project's knowledge sources
+  knowledge_get     Read one of their documents by id, URL or issue key
+
+With --knowledge it offers those two alone, needs no project directory and no
+provider, and is what a run gives its agent.
 
 The server reads newline-delimited JSON from stdin and writes responses to stdout.
 All log output goes to stderr so it does not corrupt the MCP stream.
@@ -47,6 +59,21 @@ Claude Desktop configuration example (~/.claude/claude_desktop_config.json):
   }`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
+
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
+		// A run's knowledge session (Task 20472), when the hub gave it one.
+		knowledge, kerr := knowledgerun.FromEnv(os.Getenv)
+		if mcpKnowledgeOnly {
+			if kerr != nil {
+				return kerr
+			}
+			fmt.Fprintf(os.Stderr, "cloop MCP server started (knowledge search at %s)\n", knowledge.Base())
+			srv := mcp.New(workdir, nil, os.Stdin, os.Stdout).
+				WithKnowledge(knowledge, knowledgerun.TaskFromEnv(os.Getenv), true)
+			return srv.Serve(ctx)
+		}
 
 		// Load config
 		cfg, err := config.Load(workdir)
@@ -100,15 +127,18 @@ Claude Desktop configuration example (~/.claude/claude_desktop_config.json):
 		fmt.Fprintf(os.Stderr, "cloop MCP server started (provider: %s, workdir: %s)\n",
 			prov.Name(), workdir)
 
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-
-		return mcp.RunStdio(ctx, workdir, prov)
+		srv := mcp.New(workdir, prov, os.Stdin, os.Stdout)
+		if kerr == nil {
+			srv.WithKnowledge(knowledge, knowledgerun.TaskFromEnv(os.Getenv), false)
+		}
+		return srv.Serve(ctx)
 	},
 }
 
 func init() {
 	mcpCmd.Flags().StringVar(&mcpProvider, "provider", "", "AI provider to use for run_task (anthropic, openai, ollama, claudecode)")
 	mcpCmd.Flags().StringVar(&mcpModel, "model", "", "Model to use for run_task")
+	mcpCmd.Flags().BoolVar(&mcpKnowledgeOnly, "knowledge", false,
+		"Offer only the knowledge tools of a run's knowledge session (CLOOP_KNOWLEDGE_URL and CLOOP_KNOWLEDGE_TOKEN)")
 	rootCmd.AddCommand(mcpCmd)
 }

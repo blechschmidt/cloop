@@ -646,6 +646,17 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// of the CA can tell whether activating would break it (Task 20438) —
 	// after the git proxy's trust, the relay's and the lease's kubeconfig.
 	spec = labelHubCATrust(spec, ex)
+	// The run's knowledge session (Task 20472): for a run of a project with
+	// knowledge sources bound to it, the token and URL its orchestrator and
+	// its agent search the project's knowledge with. Never a refusal — a run
+	// that cannot have one runs without knowledge, and the journal says why —
+	// and taken back if the run does not start.
+	spec, knowledge := applyKnowledgeSession(spec, ex, workDir, runID, identity, argv)
+	defer func() {
+		if err != nil {
+			knowledge.abandon("the run did not start")
+		}
+	}()
 	// Whether the spend drain charges this run's ledger or the relay already
 	// charged it (model_relay_spend.go) — recorded either way, so a mark an
 	// earlier relayed run left is cleared — and taken back if the run does
@@ -722,6 +733,10 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	}
 	egress.bindHandle(ex, handle.ID)
 	egressHandedOff = true
+	// Kept alive from here while the workload runs, and closed where every run
+	// is settled (runEnded) — not by the watcher below, which returns at once
+	// for a run that holds no lease.
+	knowledge.bindHandle(ex, handle.ID)
 	// What its firewall refuses is the run's (Task 20437), explained by the
 	// levels just composed for it.
 	bindDenialRoute(ex, handle.ID, runID, workDir, denialLevels(ex, fwRes, spec))

@@ -17,7 +17,7 @@ package redact
 // # What Tokens does instead
 //
 // Every token the hub mints starts with a prefix that says what it is:
-// cloop_git1_, cloop_kube1_, cloop_egress1_, cloop_relay_, and GitHub's ghs_
+// cloop_git1_, cloop_kube1_, cloop_egress1_, cloop_relay_, cloop_know1_, and GitHub's ghs_
 // for installation tokens. That makes searching a stream for candidates as
 // cheap as a substring search. Each candidate is cut to a length the hub
 // recorded for its kind and hashed, and it is replaced only when that SHA-256
@@ -77,6 +77,10 @@ const (
 	EgressTokenPrefix = "cloop_egress1_"
 	// RelayTokenPrefix starts a model relay session's token.
 	RelayTokenPrefix = "cloop_relay_"
+	// KnowledgeTokenPrefix starts a run's knowledge session token, which the
+	// run presents to the hub's run-scoped knowledge search (Task 20472):
+	// cloop_know1_<id>.<secret>.
+	KnowledgeTokenPrefix = "cloop_know1_"
 	// GitHubAppTokenPrefix starts a GitHub App installation token, the one
 	// kind of token the hub mints whose format it does not choose.
 	GitHubAppTokenPrefix = "ghs_"
@@ -85,7 +89,8 @@ const (
 // mintedPrefixes are the prefixes a recorded hash can be found by. None is a
 // prefix of another, so a token has at most one.
 var mintedPrefixes = []string{
-	GitProxyTokenPrefix, KubeGuardTokenPrefix, EgressTokenPrefix, RelayTokenPrefix, GitHubAppTokenPrefix,
+	GitProxyTokenPrefix, KubeGuardTokenPrefix, EgressTokenPrefix, RelayTokenPrefix, KnowledgeTokenPrefix,
+	GitHubAppTokenPrefix,
 }
 
 // MintedPrefix returns the minted prefix token starts with, or "".

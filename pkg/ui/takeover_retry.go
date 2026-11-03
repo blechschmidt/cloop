@@ -859,6 +859,7 @@ func lockRunMeta(workDir string) func() {
 func fillRunCredentials(meta *runOwnerMeta, executorID, handleID string) {
 	meta.Leases = liveLeases.forHandle(executorID, handleID)
 	meta.Egress = liveEgress.idsForHandle(handleID)
+	meta.Knowledge = liveKnowledge.idsForHandle(handleID)
 	meta.Workspace = liveLeases.workspaceForHandle(executorID, handleID)
 	meta.Takeovers = nil
 	for _, p := range pendingTakeovers.forHandle(executorID, handleID) {

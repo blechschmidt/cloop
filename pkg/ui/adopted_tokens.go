@@ -65,6 +65,8 @@ func recordedTokenShape(kind string) (prefix string, n int, ok bool) {
 		return redact.EgressTokenPrefix, egressbroker.TokenLen, true
 	case statedb.ProxySessionModel:
 		return modelRelayTokenPrefix, claudeproxy.TokenLen(modelRelayTokenPrefix), true
+	case statedb.ProxySessionKnowledge:
+		return redact.KnowledgeTokenPrefix, knowledgeTokenLen, true
 	}
 	return "", 0, false
 }
@@ -80,6 +82,8 @@ func recordedTokenField(kind string) (field, secret string) {
 		return "the Kubernetes monitor session token", ""
 	case statedb.ProxySessionEgress:
 		return "the egress proxy session's password", "the run's egress proxy session"
+	case statedb.ProxySessionKnowledge:
+		return "the knowledge session token", "the run's knowledge session"
 	default:
 		return "the model relay session token", "the run's model relay session"
 	}
@@ -110,6 +114,8 @@ func adoptedRunTokens(db *statedb.DB, meta runOwnerMeta) ([]adoptedToken, string
 		}
 	}
 	sessions = append(sessions, meta.Egress...)
+	// And its knowledge sessions (Task 20472).
+	sessions = append(sessions, meta.Knowledge...)
 
 	var rows []statedb.ProxySessionRow
 	if len(leases) > 0 {

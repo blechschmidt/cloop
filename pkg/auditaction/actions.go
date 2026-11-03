@@ -113,6 +113,15 @@ const (
 	// knowledge source now (Task 20470).
 	ActionKnowledgeSourceSync Action = "knowledge.source.sync"
 
+	// ── knowledge.run ──────────────────────────────────────────────────────
+
+	// ActionKnowledgeRunSearch records a run searching its project's
+	// knowledge with its knowledge session (Task 20472).
+	ActionKnowledgeRunSearch Action = "knowledge.run.search"
+	// ActionKnowledgeRunGet records a run reading one document of its
+	// project's knowledge.
+	ActionKnowledgeRunGet Action = "knowledge.run.get"
+
 	// ── step ───────────────────────────────────────────────────────────────
 
 	// ActionStepAppend records one execution step's transcript.

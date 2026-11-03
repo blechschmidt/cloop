@@ -1488,6 +1488,9 @@ func (s *Server) routeTable() []routeSpec {
 	table = append(table, s.executorUpgradeRoutes()...)
 	table = append(table, s.forwarderRoutes()...)
 	table = append(table, s.knowledgeRoutes()...)
+	// The run-scoped knowledge search (Task 20472): public to the gate, the
+	// handlers authenticating a run's knowledge session token.
+	table = append(table, s.knowledgeRunRoutes()...)
 	// Terminal sign-in (Task 20412): `cloop login`'s two endpoints and the
 	// approval page a signed-in browser decides on.
 	table = append(table, s.deviceRoutes()...)

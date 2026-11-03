@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 235 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 237 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 203 |
+| `control-plane` | the hub's own state.db | 205 |
 | `project` | the project's .cloop/state.db | 28 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-235 actions in 50 families. Every action is listed: this section is the whole
+237 actions in 51 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (6) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (8) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (6) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -226,6 +226,21 @@ Payload keys:
 - `knowledge.source.sync` — Written when the sync takes the source's sync lease, so a request refused because another sync of the source is running writes none. `origin` is `manual`; `member` is the hub process that runs it. The syncs the hub-cluster leader schedules are its own routine work and are not audited: how each went is on the source (status, counts, duration and the last error, scrubbed of credentials).
 - `knowledge.source.unbind` — A project removed from the hub takes its bindings with it — they are keyed by its path, and would otherwise serve whatever is registered there next — one row each, `reason` saying so.
 - `knowledge.source.update` — `changed` lists the fields the request changed. `resync` is true when a new configuration made the next sync start over from the beginning.
+
+### knowledge.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `knowledge.run.get` | `knowledge_session` | control-plane | stable | A run reads one document of its project's knowledge with its knowledge session — by its id, its URL or its issue key: the orchestrator reading a document the task names, or the agent's knowledge_get tool — POST /api/run/knowledge/get. |
+| `knowledge.run.search` | `knowledge_session` | control-plane | stable | A run searches its project's knowledge with its knowledge session: the orchestrator assembling a task's reference material, or the agent's knowledge_search tool or `cloop knowledge search` in its sandbox — POST /api/run/knowledge/search. |
+
+Payload keys:
+
+- `knowledge.run.get` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `purpose`, `lookup`, `documents`, `outcome`, `reason`
+- `knowledge.run.search` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `purpose`, `query`, `k`, `hits`, `documents`, `mode`, `outcome`, `reason`
+
+- `knowledge.run.get` — `lookup` says how the document was named (`id`, `url` or `key`) with the value, scrubbed and cut at 512 bytes. `documents` are the ids returned: none when the project's knowledge holds nothing by that name, which is also the answer for another project's document.
+- `knowledge.run.search` — The entity id is the knowledge session's. `query` is what the run searched for, scrubbed of anything shaped like a credential and cut at 512 bytes; `documents` are the ids of the documents the answer held. `purpose` is `inject` for the orchestrator's own retrieval, whose documents the task cites as injected; otherwise they are recorded as the agent's reads. `outcome` is `ok`, or `refused` with `reason` for a request the session's rate limit or a malformed query refused. A token that is not a live session's is refused before anything is read, and writes no row.
 
 ### step.*
 

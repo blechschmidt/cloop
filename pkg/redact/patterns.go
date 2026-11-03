@@ -561,6 +561,14 @@ var specs = []spec{
 		keywords: []string{"cloop_egress1_"},
 	},
 	{
+		name:  "cloop-knowledge-session",
+		label: "cloop run knowledge session token",
+		recognises: "`cloop_know1_<id>.<secret>`, the bearer token a run presents to the hub's run-scoped " +
+			"knowledge search (Task 20472).",
+		pattern:  `(?P<kind>cloop_know1_)[0-9A-Za-z\-]{4,}\.[0-9A-Za-z_\-]{8,}`,
+		keywords: []string{"cloop_know1_"},
+	},
+	{
 		name:       "cloop-enrollment-token",
 		label:      "cloop executor enrollment token",
 		recognises: "`clet1.<id>.<secret>.<mac>`, the single-use token an edge device enrolls with.",

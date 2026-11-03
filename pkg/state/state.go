@@ -212,6 +212,14 @@ type ProjectState struct {
 	// at its next sync.
 	RequirementsGate *pm.RequirementsGate `json:"requirements_gate,omitempty"`
 
+	// KnowledgeRetrieval is how the project's runs are given knowledge from
+	// the sources bound to it (Task 20472): whether each task's prompt gets
+	// reference material, how many passages and within what token budget.
+	// Nil means on with the defaults. Set from the hub's API or `cloop
+	// knowledge retrieval`; a running orchestrator picks up changes at its
+	// next sync.
+	KnowledgeRetrieval *pm.KnowledgeRetrieval `json:"knowledge_retrieval,omitempty"`
+
 	// FollowBuilds is the "follow new builds" option (Task 20389): a run of
 	// this project on this host adopts a newly deployed cloop build at its
 	// next task boundary instead of running the build it started with until
@@ -746,6 +754,8 @@ func (s *ProjectState) mergeExternalTasks(adoptOrder bool) error {
 	s.CommitPolicy = disk.CommitPolicy
 	// Task 20461: and the requirements gate.
 	s.RequirementsGate = disk.RequirementsGate
+	// Task 20472: and knowledge retrieval.
+	s.KnowledgeRetrieval = disk.KnowledgeRetrieval
 	// Task 20389: and "follow new builds", a pending request to adopt one, and
 	// the run's own record, which only the run writes.
 	s.FollowBuilds = disk.FollowBuilds
@@ -864,6 +874,26 @@ func SetRequirementsGate(workDir string, g *pm.RequirementsGate) error {
 	return db.SaveRequirementsGate(g)
 }
 
+// SetKnowledgeRetrieval stores a project's knowledge retrieval setting (Task
+// 20472) without rewriting anything else in its state. A run in progress picks
+// the change up at its next sync, and builds the next task's prompt with it.
+// Nil stores none: on, with the defaults.
+func SetKnowledgeRetrieval(workDir string, r *pm.KnowledgeRetrieval) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	dbPath := effectiveDBPath(workDir)
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("no cloop project in %s: %w", workDir, err)
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.SaveKnowledgeRetrieval(r)
+}
+
 // SaveRunStatus writes the run's status and pause reason and nothing else —
 // no tasks, no steps, no merge (Task 20362). It is the last write an
 // orchestrator makes when it stops because a full Save failed, so it touches
@@ -967,37 +997,38 @@ func (s *ProjectState) LastNSteps(n int) []StepResult {
 
 func toRaw(s *ProjectState) *statedb.State {
 	r := &statedb.State{
-		Goal:              s.Goal,
-		WorkDir:           s.WorkDir,
-		MaxSteps:          s.MaxSteps,
-		CurrentStep:       s.CurrentStep,
-		Status:            s.Status,
-		PauseReason:       pausereason.Normalize(s.Status, s.PauseReason),
-		CreatedAt:         s.CreatedAt,
-		UpdatedAt:         s.UpdatedAt,
-		Model:             s.Model,
-		Instructions:      s.Instructions,
-		AutoEvolve:        s.AutoEvolve,
-		EvolveStep:        s.EvolveStep,
-		Provider:          s.Provider,
-		Effort:            s.Effort,
-		PMMode:            s.PMMode,
-		Plan:              s.Plan,
-		Milestones:        s.Milestones,
-		TotalInputTokens:  s.TotalInputTokens,
-		TotalOutputTokens: s.TotalOutputTokens,
-		DefaultMaxMinutes: s.DefaultMaxMinutes,
-		SkipClarify:       s.SkipClarify,
-		InnovateMode:      s.InnovateMode,
-		Parallel:          s.Parallel,
-		MaxParallel:       s.MaxParallel,
-		WorktreeParallel:  s.WorktreeParallel,
-		PlanOnly:          s.PlanOnly,
-		RetryFailed:       s.RetryFailed,
-		DryRun:            s.DryRun,
-		ReviewGate:        s.ReviewGate.Clone(),
-		CommitPolicy:      s.CommitPolicy.Clone(),
-		RequirementsGate:  s.RequirementsGate.Clone(),
+		Goal:               s.Goal,
+		WorkDir:            s.WorkDir,
+		MaxSteps:           s.MaxSteps,
+		CurrentStep:        s.CurrentStep,
+		Status:             s.Status,
+		PauseReason:        pausereason.Normalize(s.Status, s.PauseReason),
+		CreatedAt:          s.CreatedAt,
+		UpdatedAt:          s.UpdatedAt,
+		Model:              s.Model,
+		Instructions:       s.Instructions,
+		AutoEvolve:         s.AutoEvolve,
+		EvolveStep:         s.EvolveStep,
+		Provider:           s.Provider,
+		Effort:             s.Effort,
+		PMMode:             s.PMMode,
+		Plan:               s.Plan,
+		Milestones:         s.Milestones,
+		TotalInputTokens:   s.TotalInputTokens,
+		TotalOutputTokens:  s.TotalOutputTokens,
+		DefaultMaxMinutes:  s.DefaultMaxMinutes,
+		SkipClarify:        s.SkipClarify,
+		InnovateMode:       s.InnovateMode,
+		Parallel:           s.Parallel,
+		MaxParallel:        s.MaxParallel,
+		WorktreeParallel:   s.WorktreeParallel,
+		PlanOnly:           s.PlanOnly,
+		RetryFailed:        s.RetryFailed,
+		DryRun:             s.DryRun,
+		ReviewGate:         s.ReviewGate.Clone(),
+		CommitPolicy:       s.CommitPolicy.Clone(),
+		RequirementsGate:   s.RequirementsGate.Clone(),
+		KnowledgeRetrieval: s.KnowledgeRetrieval.Clone(),
 	}
 	r.Steps = make([]statedb.StepRow, len(s.Steps))
 	for i, sr := range s.Steps {
@@ -1017,43 +1048,44 @@ func toRaw(s *ProjectState) *statedb.State {
 
 func fromRaw(r *statedb.State) *ProjectState {
 	s := &ProjectState{
-		Goal:              r.Goal,
-		WorkDir:           r.WorkDir,
-		MaxSteps:          r.MaxSteps,
-		CurrentStep:       r.CurrentStep,
-		Status:            r.Status,
-		PauseReason:       pausereason.Normalize(r.Status, r.PauseReason),
-		CreatedAt:         r.CreatedAt,
-		UpdatedAt:         r.UpdatedAt,
-		Model:             r.Model,
-		Instructions:      r.Instructions,
-		AutoEvolve:        r.AutoEvolve,
-		EvolveStep:        r.EvolveStep,
-		Provider:          r.Provider,
-		Effort:            r.Effort,
-		PMMode:            r.PMMode,
-		Plan:              r.Plan,
-		Milestones:        r.Milestones,
-		TotalInputTokens:  r.TotalInputTokens,
-		TotalOutputTokens: r.TotalOutputTokens,
-		DefaultMaxMinutes: r.DefaultMaxMinutes,
-		SkipClarify:       r.SkipClarify,
-		InnovateMode:      r.InnovateMode,
-		Parallel:          r.Parallel,
-		MaxParallel:       r.MaxParallel,
-		WorktreeParallel:  r.WorktreeParallel,
-		PlanOnly:          r.PlanOnly,
-		RetryFailed:       r.RetryFailed,
-		DryRun:            r.DryRun,
-		ReviewGate:        r.ReviewGate,
-		CommitPolicy:      r.CommitPolicy,
-		RequirementsGate:  r.RequirementsGate,
-		FollowBuilds:      r.FollowBuilds,
-		RunOwner:          r.RunOwner,
-		AdoptRequest:      r.AdoptRequest,
-		RunBuild:          runbuild.Assess(r.RunOwner, SelfBuild()),
-		StepCount:         r.StepCount,
-		LastStepTime:      r.LastStepTime,
+		Goal:               r.Goal,
+		WorkDir:            r.WorkDir,
+		MaxSteps:           r.MaxSteps,
+		CurrentStep:        r.CurrentStep,
+		Status:             r.Status,
+		PauseReason:        pausereason.Normalize(r.Status, r.PauseReason),
+		CreatedAt:          r.CreatedAt,
+		UpdatedAt:          r.UpdatedAt,
+		Model:              r.Model,
+		Instructions:       r.Instructions,
+		AutoEvolve:         r.AutoEvolve,
+		EvolveStep:         r.EvolveStep,
+		Provider:           r.Provider,
+		Effort:             r.Effort,
+		PMMode:             r.PMMode,
+		Plan:               r.Plan,
+		Milestones:         r.Milestones,
+		TotalInputTokens:   r.TotalInputTokens,
+		TotalOutputTokens:  r.TotalOutputTokens,
+		DefaultMaxMinutes:  r.DefaultMaxMinutes,
+		SkipClarify:        r.SkipClarify,
+		InnovateMode:       r.InnovateMode,
+		Parallel:           r.Parallel,
+		MaxParallel:        r.MaxParallel,
+		WorktreeParallel:   r.WorktreeParallel,
+		PlanOnly:           r.PlanOnly,
+		RetryFailed:        r.RetryFailed,
+		DryRun:             r.DryRun,
+		ReviewGate:         r.ReviewGate,
+		CommitPolicy:       r.CommitPolicy,
+		RequirementsGate:   r.RequirementsGate,
+		KnowledgeRetrieval: r.KnowledgeRetrieval,
+		FollowBuilds:       r.FollowBuilds,
+		RunOwner:           r.RunOwner,
+		AdoptRequest:       r.AdoptRequest,
+		RunBuild:           runbuild.Assess(r.RunOwner, SelfBuild()),
+		StepCount:          r.StepCount,
+		LastStepTime:       r.LastStepTime,
 	}
 	// r.Steps is nil under LoadStateLite — keep s.Steps nil too so callers
 	// can tell the difference between "no steps recorded" and "lite load,
@@ -1224,6 +1256,9 @@ type legacyState struct {
 	// executor checks its tasks' requirements inside the sandbox, beside the
 	// work (Task 20461).
 	RequirementsGate *pm.RequirementsGate `json:"requirements_gate,omitempty"`
+	// KnowledgeRetrieval travels the same way, so a run on an isolating
+	// executor builds its prompts as the project set it (Task 20472).
+	KnowledgeRetrieval *pm.KnowledgeRetrieval `json:"knowledge_retrieval,omitempty"`
 	// Requirements are not project state but its requirements table's rows
 	// that the plan's unfinished tasks implement: a seed carries them
 	// (projectseed.BuildWith) so the run on an isolating executor gives its
@@ -1254,37 +1289,38 @@ func migrateFromJSON(dir, jsonPath, dbPath string) error {
 	}
 
 	s := &ProjectState{
-		Goal:              legacy.Goal,
-		WorkDir:           legacy.WorkDir,
-		MaxSteps:          legacy.MaxSteps,
-		CurrentStep:       legacy.CurrentStep,
-		Status:            legacy.Status,
-		Steps:             legacy.Steps,
-		CreatedAt:         legacy.CreatedAt,
-		UpdatedAt:         legacy.UpdatedAt,
-		Model:             legacy.Model,
-		Instructions:      legacy.Instructions,
-		AutoEvolve:        legacy.AutoEvolve,
-		EvolveStep:        legacy.EvolveStep,
-		Provider:          legacy.Provider,
-		Effort:            legacy.Effort,
-		PMMode:            legacy.PMMode,
-		Plan:              legacy.Plan,
-		Milestones:        legacy.Milestones,
-		TotalInputTokens:  legacy.TotalInputTokens,
-		TotalOutputTokens: legacy.TotalOutputTokens,
-		DefaultMaxMinutes: legacy.DefaultMaxMinutes,
-		SkipClarify:       legacy.SkipClarify,
-		InnovateMode:      legacy.InnovateMode,
-		Parallel:          legacy.Parallel,
-		MaxParallel:       legacy.MaxParallel,
-		WorktreeParallel:  legacy.WorktreeParallel,
-		PlanOnly:          legacy.PlanOnly,
-		RetryFailed:       legacy.RetryFailed,
-		DryRun:            legacy.DryRun,
-		ReviewGate:        legacy.ReviewGate,
-		CommitPolicy:      legacy.CommitPolicy,
-		RequirementsGate:  legacy.RequirementsGate,
+		Goal:               legacy.Goal,
+		WorkDir:            legacy.WorkDir,
+		MaxSteps:           legacy.MaxSteps,
+		CurrentStep:        legacy.CurrentStep,
+		Status:             legacy.Status,
+		Steps:              legacy.Steps,
+		CreatedAt:          legacy.CreatedAt,
+		UpdatedAt:          legacy.UpdatedAt,
+		Model:              legacy.Model,
+		Instructions:       legacy.Instructions,
+		AutoEvolve:         legacy.AutoEvolve,
+		EvolveStep:         legacy.EvolveStep,
+		Provider:           legacy.Provider,
+		Effort:             legacy.Effort,
+		PMMode:             legacy.PMMode,
+		Plan:               legacy.Plan,
+		Milestones:         legacy.Milestones,
+		TotalInputTokens:   legacy.TotalInputTokens,
+		TotalOutputTokens:  legacy.TotalOutputTokens,
+		DefaultMaxMinutes:  legacy.DefaultMaxMinutes,
+		SkipClarify:        legacy.SkipClarify,
+		InnovateMode:       legacy.InnovateMode,
+		Parallel:           legacy.Parallel,
+		MaxParallel:        legacy.MaxParallel,
+		WorktreeParallel:   legacy.WorktreeParallel,
+		PlanOnly:           legacy.PlanOnly,
+		RetryFailed:        legacy.RetryFailed,
+		DryRun:             legacy.DryRun,
+		ReviewGate:         legacy.ReviewGate,
+		CommitPolicy:       legacy.CommitPolicy,
+		RequirementsGate:   legacy.RequirementsGate,
+		KnowledgeRetrieval: legacy.KnowledgeRetrieval,
 	}
 
 	db, err := statedb.Open(dbPath)

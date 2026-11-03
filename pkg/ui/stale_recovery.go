@@ -338,6 +338,8 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// takes, including one adopted from another hub member, whose watcher —
 	// and whose session — were on the member that dispatched it.
 	closeRunEgress(handleID, "the run ended")
+	// And its knowledge session (Task 20472).
+	closeRunKnowledge(handleID, "the run ended")
 	// And its forwarded devices (Task 20430), for the same reason.
 	closeRunForwards(handleID, "the run ended")
 	// And whatever of an adopted run's credentials could not be taken over

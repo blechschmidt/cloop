@@ -308,6 +308,9 @@ var runFields = []string{
 	// The requirements gate's verdict on the latest attempt (Task 20461):
 	// written by the run that checked it, like the review gate's.
 	"RequirementsCheck",
+	// What the latest run was given and read from the project's knowledge
+	// (Task 20472): written by the run, like its outcome.
+	"Citations",
 }
 
 // derivedFields are not stored as themselves: RunID is read from task_runs,

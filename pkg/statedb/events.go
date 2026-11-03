@@ -241,6 +241,16 @@ const (
 	// relay measured.
 	EventModelRelay EventType = "model_relay"
 
+	// EventKnowledge records what a run had of its project's knowledge
+	// sources (Task 20472): that its runs could not reach the hub's knowledge
+	// search and why, and — from the orchestrator — a task whose reference
+	// material could not be retrieved, which the task then ran without.
+	// Never a token, a query's results or a document's text.
+	//
+	// On the project's journal because the people running the project are
+	// the ones who bound the sources and expect the runs to use them.
+	EventKnowledge EventType = "knowledge"
+
 	// EventGitPushRefused records a push the git proxy refused because it
 	// carries a credential the run was given, or because the proxy could not
 	// scan it within its limits or read its pack (Task 20436). The message

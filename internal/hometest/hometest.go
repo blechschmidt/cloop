@@ -30,6 +30,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blechschmidt/cloop/pkg/knowledgerun"
 	"github.com/blechschmidt/cloop/pkg/rootkey"
 )
 
@@ -82,7 +83,12 @@ var clearedVars = []string{EnvRoot, "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CLA
 // They are kept apart from clearedVars because they are secrets, not paths:
 // verify and Guard print and judge those.
 var rootKeyVars = []string{rootkey.EnvKey, rootkey.EnvKeyFile, rootkey.EnvPrevious, rootkey.EnvPreviousFile,
-	rootkey.EnvCredentialsDirectory}
+	rootkey.EnvCredentialsDirectory,
+	// A run's knowledge session (Task 20472), for the same reason: an agent
+	// running this suite in a run of a project with knowledge sources holds
+	// one, and every orchestrator a test builds would search its hub's
+	// knowledge with it and put the answers in the test's prompts.
+	knowledgerun.EnvURL, knowledgerun.EnvToken}
 
 // Isolate points every per-user state path at a fresh temporary directory for
 // the lifetime of the whole test binary, runs m, and removes the directory.

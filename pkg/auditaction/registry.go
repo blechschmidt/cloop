@@ -440,6 +440,45 @@ var registry = []Entry{
 			"on the source (status, counts, duration and the last error, scrubbed of credentials).",
 	},
 
+	// ── knowledge.run ──────────────────────────────────────────────────────
+	{
+		Action: ActionKnowledgeRunSearch,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_session",
+		Trigger: "A run searches its project's knowledge with its knowledge session: the orchestrator assembling a " +
+			"task's reference material, or the agent's knowledge_search tool or `cloop knowledge search` in its " +
+			"sandbox — POST /api/run/knowledge/search.",
+		Payload: []string{
+			"session_id", "run_id", "project", "executor_id", "task", "purpose", "query", "k", "hits", "documents",
+			"mode", "outcome", "reason",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The entity id is the knowledge session's. `query` is what the run searched for, scrubbed of anything " +
+			"shaped like a credential and cut at 512 bytes; `documents` are the ids of the documents the answer " +
+			"held. `purpose` is `inject` for the orchestrator's own retrieval, whose documents the task cites as " +
+			"injected; otherwise they are recorded as the agent's reads. `outcome` is `ok`, or `refused` with " +
+			"`reason` for a request the session's rate limit or a malformed query refused. A token that is not a " +
+			"live session's is refused before anything is read, and writes no row.",
+	},
+	{
+		Action: ActionKnowledgeRunGet,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_session",
+		Trigger: "A run reads one document of its project's knowledge with its knowledge session — by its id, its " +
+			"URL or its issue key: the orchestrator reading a document the task names, or the agent's knowledge_get " +
+			"tool — POST /api/run/knowledge/get.",
+		Payload: []string{
+			"session_id", "run_id", "project", "executor_id", "task", "purpose", "lookup", "documents", "outcome",
+			"reason",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`lookup` says how the document was named (`id`, `url` or `key`) with the value, scrubbed and cut at " +
+			"512 bytes. `documents` are the ids returned: none when the project's knowledge holds nothing by that " +
+			"name, which is also the answer for another project's document.",
+	},
+
 	// ── step ───────────────────────────────────────────────────────────────
 	{
 		Action:    ActionStepAppend,

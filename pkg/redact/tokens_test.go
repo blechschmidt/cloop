@@ -28,6 +28,8 @@ func mintLike(t *testing.T, prefix string) string {
 		return prefix + hex.EncodeToString(b)
 	case RelayTokenPrefix:
 		return prefix + hex.EncodeToString(b[:12]) + "." + hex.EncodeToString(b)
+	case KnowledgeTokenPrefix:
+		return prefix + hex.EncodeToString(b[:12]) + "." + base64.RawURLEncoding.EncodeToString(b)
 	default:
 		// An installation token's classic form: ghs_ and 36 letters and
 		// digits.

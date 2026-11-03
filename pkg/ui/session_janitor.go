@@ -164,6 +164,8 @@ func servedHere(row statedb.ProxySessionRow) bool {
 	case statedb.ProxySessionModel:
 		svc := activeModelRelay()
 		return svc != nil && svc.reg.Known(row.SessionID)
+	case statedb.ProxySessionKnowledge:
+		return liveKnowledge.known(row.SessionID)
 	}
 	return false
 }

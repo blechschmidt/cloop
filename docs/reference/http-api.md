@@ -93,18 +93,18 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-340 endpoints, by the permission each one requires:
+345 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 62 |
+| `public` (no permission) | 65 |
 | `audit.read` | 5 |
 | `config.write` | 19 |
 | `executor.manage` | 36 |
 | `executor.read` | 6 |
-| `project.read` | 65 |
+| `project.read` | 66 |
 | `project.share` | 3 |
-| `project.write` | 15 |
+| `project.write` | 16 |
 | `run.start` | 6 |
 | `run.stop` | 3 |
 | `sandbox.attach` | 2 |
@@ -302,6 +302,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/projects/{idx}/hidden` | `view.prefs` | project-index |
 | POST | `/api/projects/{idx}/knowledge/bindings` | `project.write` | project-index |
 | DELETE | `/api/projects/{idx}/knowledge/bindings/{bid}` | `project.write` | project-index |
+| GET | `/api/projects/{idx}/knowledge/retrieval` | `project.read` | project-index |
+| PUT | `/api/projects/{idx}/knowledge/retrieval` | `project.write` | project-index |
 | GET | `/api/projects/{idx}/knowledge/search` | `project.read` | project-index |
 | GET | `/api/projects/{idx}/knowledge/sources` | `project.read` | project-index |
 | GET | `/api/projects/{idx}/members` | `project.read` | project-index |
@@ -355,6 +357,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/risk-matrix` | `project.read` | project |
 | POST | `/api/run` | `run.start` | project |
 | POST | `/api/run/adopt-build` | `run.start` | project |
+| POST | `/api/run/knowledge/citations` | `public` | global |
+| POST | `/api/run/knowledge/get` | `public` | global |
+| POST | `/api/run/knowledge/search` | `public` | global |
 | GET | `/api/scim` | `user.manage` | global |
 | POST | `/api/scim/credentials` | `user.manage` | global |
 | POST | `/api/scim/credentials/{id}/revoke` | `user.manage` | global |

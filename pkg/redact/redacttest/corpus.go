@@ -499,6 +499,13 @@ func positives(r *rand.Rand) []Positive {
 		Text:    "curl -s -u wiki-bot@corp.example:" + curlTok + " https://corp.atlassian.net/wiki/api/v2/spaces?keys=ENG",
 		Secrets: []string{curlTok}, Keep: []string{"curl -s -u wiki-bot@corp.example:", " https://corp.atlassian.net/wiki/api/v2/spaces?keys=ENG"}})
 
+	// A run's knowledge session token (Task 20472), as the sandbox's
+	// environment holds it.
+	know := "cloop_know1_" + pick(r, hexChars, 24) + "." + generated(r, b64url, 43)
+	add(Positive{Name: "cloop-knowledge-session/sandbox-environment", Detector: "cloop-knowledge-session",
+		Text:    "CLOOP_KNOWLEDGE_URL=https://hub.example.com/api/run/knowledge\nCLOOP_KNOWLEDGE_TOKEN=" + know,
+		Secrets: []string{know}, Keep: []string{"CLOOP_KNOWLEDGE_URL=https://hub.example.com/api/run/knowledge", "CLOOP_KNOWLEDGE_TOKEN="}})
+
 	return out
 }
 

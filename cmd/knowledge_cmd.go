@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -27,12 +28,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/blechschmidt/cloop/pkg/hubclient"
+	"github.com/blechschmidt/cloop/pkg/knowledgerun"
+	"github.com/blechschmidt/cloop/pkg/pm"
 )
 
 var (
-	knowledgeJSON bool
-	knowledgeWait bool
-	knowledgeK    int
+	knowledgeJSON     bool
+	knowledgeWait     bool
+	knowledgeK        int
+	knowledgeMaxBytes int
 )
 
 // knowledgePoll is how often `cloop knowledge sync --wait` reads the source.
@@ -152,9 +156,20 @@ var knowledgeSearchCmd = &cobra.Command{
 	Long: `Search what the knowledge sources bound to a project hold, best matches first.
 The hub ranks by the query's words — a word ending in * matches a prefix — and,
 with its knowledge.embeddings on, by their meaning too. A search that could not
-use meaning says why on stderr.`,
-	Args: cobra.MinimumNArgs(2),
+use meaning says why on stderr.
+
+Inside a run of a project with knowledge sources bound to it — the run's
+sandbox holds CLOOP_KNOWLEDGE_URL and CLOOP_KNOWLEDGE_TOKEN — the project is the
+run's own and is not named: ` + "`cloop knowledge search <query...>`" + ` searches it with
+the run's knowledge session, and what it finds is cited on the task.`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if rc, ok := runKnowledgeClient(); ok {
+			return runKnowledgeSearch(cmd, rc, strings.Join(args, " "))
+		}
+		if len(args) < 2 {
+			return fmt.Errorf("name a project and a query: cloop knowledge search <project> <query...>")
+		}
 		c, err := remoteClient()
 		if err != nil {
 			return err
@@ -199,6 +214,149 @@ use meaning says why on stderr.`,
 		}
 		return nil
 	},
+}
+
+var knowledgeGetCmd = &cobra.Command{
+	Use:   "get <id|url|ISSUE-KEY>",
+	Short: "Read one document of the run's project's knowledge (inside a run)",
+	Long: `Read one document of the knowledge sources bound to the project of the run
+this command runs in, whole: by the document id a search printed, the URL a
+person reads it at, or its issue key (ENG-42). It uses the run's knowledge
+session — CLOOP_KNOWLEDGE_URL and CLOOP_KNOWLEDGE_TOKEN, which a run of a
+project with knowledge sources bound to it is given — and what it reads is
+cited on the task. What it prints is untrusted reference material.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		rc, ok := runKnowledgeClient()
+		if !ok {
+			return knowledgerun.ErrNotConfigured
+		}
+		ref := strings.TrimSpace(args[0])
+		req := knowledgerun.GetRequest{MaxBytes: knowledgeMaxBytes, Task: knowledgerun.TaskFromEnv(os.Getenv)}
+		what := ""
+		if id, err := strconv.ParseInt(ref, 10, 64); err == nil && id > 0 {
+			req.DocumentID, what = id, fmt.Sprintf("with id %d", id)
+		} else if strings.HasPrefix(ref, "https://") || strings.HasPrefix(ref, "http://") {
+			req.URL, what = ref, "at "+ref
+		} else {
+			req.Key, what = ref, "with key "+ref
+		}
+		resp, err := rc.Get(remoteContext(cmd), req)
+		if err != nil {
+			return err
+		}
+		if knowledgeJSON {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
+		}
+		_, err = io.WriteString(cmd.OutOrStdout(), knowledgerun.FormatDocuments(what, resp))
+		return err
+	},
+}
+
+var (
+	knowledgeRetrievalOn     bool
+	knowledgeRetrievalOff    bool
+	knowledgeRetrievalK      int
+	knowledgeRetrievalBudget int
+)
+
+var knowledgeRetrievalCmd = &cobra.Command{
+	Use:   "retrieval <project>",
+	Short: "Show or set how a project's runs are given its knowledge",
+	Long: `Show or set how the runs of a project with knowledge sources bound to it are
+given what those sources hold. By default each task's prompt gets the ` + strconv.Itoa(pm.DefaultRetrievalK) + `
+passages that best match the task — and the documents it names by issue key
+or URL — within ` + strconv.Itoa(pm.DefaultRetrievalTokens) + ` tokens, fenced as untrusted reference material.
+
+  --off         keep reference material out of the prompts (the agent can
+                still search the project's knowledge itself)
+  --on          put it back in
+  --k N         passages per prompt (1-` + strconv.Itoa(pm.MaxRetrievalK) + `; 0 for the default)
+  --budget N    tokens per prompt (` + strconv.Itoa(pm.MinRetrievalTokens) + `-` + strconv.Itoa(pm.MaxRetrievalTokens) + `; 0 for the default)
+
+A running run picks a change up at its next task.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if knowledgeRetrievalOn && knowledgeRetrievalOff {
+			return fmt.Errorf("--on and --off contradict each other")
+		}
+		c, err := remoteClient()
+		if err != nil {
+			return err
+		}
+		ctx := remoteContext(cmd)
+		p, err := c.ResolveProject(ctx, args[0])
+		if err != nil {
+			return remoteErr(c, err)
+		}
+		var change hubclient.KnowledgeRunSettingChange
+		changed := false
+		if knowledgeRetrievalOn || knowledgeRetrievalOff {
+			on := knowledgeRetrievalOn
+			change.Enabled, changed = &on, true
+		}
+		if cmd.Flags().Changed("k") {
+			change.K, changed = &knowledgeRetrievalK, true
+		}
+		if cmd.Flags().Changed("budget") {
+			change.TokenBudget, changed = &knowledgeRetrievalBudget, true
+		}
+		var st *hubclient.KnowledgeRunSetting
+		if changed {
+			st, err = c.SetKnowledgeRunSetting(ctx, p.Idx, change)
+		} else {
+			st, err = c.KnowledgeRunSetting(ctx, p.Idx)
+		}
+		if err != nil {
+			return remoteErr(c, err)
+		}
+		out := cmd.OutOrStdout()
+		if knowledgeJSON {
+			return json.NewEncoder(out).Encode(st)
+		}
+		state := "on"
+		if !st.Enabled {
+			state = "off"
+		}
+		fmt.Fprintf(out, "Reference material for %s's tasks: %s — %d passages within %d tokens", p.Name, state, st.K, st.TokenBudget)
+		if st.Default {
+			fmt.Fprint(out, " (the defaults)")
+		}
+		fmt.Fprintln(out, ".")
+		if st.Sources == 0 {
+			fmt.Fprintln(out, "No knowledge source is bound to the project, so its runs get none.")
+		}
+		return nil
+	},
+}
+
+// runKnowledgeClient is the run's knowledge session, when this command runs
+// in a run that has one and names no hub or token of its own.
+func runKnowledgeClient() (*knowledgerun.Client, bool) {
+	if remoteHub != "" || remoteToken != "" {
+		return nil, false
+	}
+	c, err := knowledgerun.FromEnv(os.Getenv)
+	if err != nil {
+		return nil, false
+	}
+	return c, true
+}
+
+// runKnowledgeSearch searches the run's project's knowledge.
+func runKnowledgeSearch(cmd *cobra.Command, c *knowledgerun.Client, query string) error {
+	query = strings.TrimSpace(query)
+	resp, err := c.Search(remoteContext(cmd), knowledgerun.SearchRequest{
+		Query: query, K: knowledgeK, Task: knowledgerun.TaskFromEnv(os.Getenv),
+	})
+	if err != nil {
+		return err
+	}
+	if knowledgeJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(resp)
+	}
+	_, err = io.WriteString(cmd.OutOrStdout(), knowledgerun.FormatHits(query, resp))
+	return err
 }
 
 // waitForKnowledgeSync reads source id until the sync running names has
@@ -351,6 +509,13 @@ func init() {
 	knowledgeSyncCmd.Flags().BoolVar(&knowledgeJSON, "json", false, "With --wait, print the source as the sync left it, as JSON")
 	knowledgeSearchCmd.Flags().IntVarP(&knowledgeK, "limit", "k", 0, "How many results to print (the hub's default: 10; at most 50)")
 	knowledgeSearchCmd.Flags().BoolVar(&knowledgeJSON, "json", false, "Print JSON")
-	knowledgeCmd.AddCommand(knowledgeSourcesCmd, knowledgeSyncCmd, knowledgeSearchCmd)
+	knowledgeGetCmd.Flags().IntVar(&knowledgeMaxBytes, "max-bytes", 0, "How much of the document's text to print (default 32768, at most 65536)")
+	knowledgeGetCmd.Flags().BoolVar(&knowledgeJSON, "json", false, "Print JSON")
+	knowledgeRetrievalCmd.Flags().BoolVar(&knowledgeRetrievalOn, "on", false, "Put reference material in the project's task prompts")
+	knowledgeRetrievalCmd.Flags().BoolVar(&knowledgeRetrievalOff, "off", false, "Keep reference material out of the project's task prompts")
+	knowledgeRetrievalCmd.Flags().IntVar(&knowledgeRetrievalK, "k", 0, "Passages per prompt (0 for the default)")
+	knowledgeRetrievalCmd.Flags().IntVar(&knowledgeRetrievalBudget, "budget", 0, "Tokens of reference material per prompt (0 for the default)")
+	knowledgeRetrievalCmd.Flags().BoolVar(&knowledgeJSON, "json", false, "Print JSON")
+	knowledgeCmd.AddCommand(knowledgeSourcesCmd, knowledgeSyncCmd, knowledgeSearchCmd, knowledgeGetCmd, knowledgeRetrievalCmd)
 	rootCmd.AddCommand(knowledgeCmd)
 }

@@ -55,6 +55,8 @@ func (s *Server) knowledgeRoutes() []routeSpec {
 		{Pattern: "POST /api/projects/{idx}/knowledge/bindings", Handler: s.handleProjectKnowledgeBind, Perm: authz.PermProjectWrite, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		{Pattern: "DELETE /api/projects/{idx}/knowledge/bindings/{bid}", Handler: s.handleProjectKnowledgeUnbind, Perm: authz.PermProjectWrite, Scope: scopeProjectIdx},
 		{Pattern: "GET /api/projects/{idx}/knowledge/search", Handler: s.handleProjectKnowledgeSearch, Perm: authz.PermProjectRead, Scope: scopeProjectIdx},
+		{Pattern: "GET /api/projects/{idx}/knowledge/retrieval", Handler: s.handleProjectKnowledgeRetrieval, Perm: authz.PermProjectRead, Scope: scopeProjectIdx},
+		{Pattern: "PUT /api/projects/{idx}/knowledge/retrieval", Handler: s.handleProjectKnowledgeRetrievalSet, Perm: authz.PermProjectWrite, Scope: scopeProjectIdx},
 	}
 }
 

@@ -597,3 +597,61 @@ requirements:
         command: go test ./pkg/knowledge -run '^(TestEmbeddingOutageFallsBackToWords|TestEmbeddingDimensionMismatchIsRejected|TestEmbeddingBackfillsWhenTheModelChanges|TestHybridSearchFusesWordsAndMeaning|TestAnEmbeddingBacklogResumesAtOnce)$'
       - name: the endpoint client's cool-down and retries
         command: go test ./pkg/knowledge/embed -run '^(TestQueriesWaitOutAFailingEndpoint|TestBusyEndpointsAreRetriedForDocuments)$'
+  - id: R-31
+    title: A run's knowledge session shall reach only its own project's knowledge, only while the run lives, and never the hub's source credentials.
+    status: approved
+    priority: must
+    tags: [security, knowledge]
+    details: |-
+      A run of a project with knowledge sources bound to it is dispatched with a
+      knowledge session token whose SHA-256 alone the hub stores, compared in
+      constant time. The token is good while its session is open and unexpired —
+      renewed while the run's workload runs, closed when the run ends or is
+      stopped, taken over by the hub process that adopts the run — and every other
+      token, lapsed, closed, forged or malformed, is refused with the same 401. It
+      is answered as a viewer of its run's project alone, through the project's
+      bindings and narrowing, so another project's document is not found by
+      search, id or URL. Every answer is bounded and scrubbed by pkg/redact on its
+      way out, every query is audited, each session is rate-limited, and the run
+      is given the index's text and ids, never the credentials the hub reads the
+      sources with. Promised in docs/security/model.md, "Knowledge sources".
+    tests:
+      - name: the run-scoped search
+        command: go test ./pkg/ui -run '^(TestRunKnowledgeSessionIsMintedForTheRunAlone|TestRemoteRunTokenReachesOnlyItsOwnProject|TestEndedRunTokensAreRefused|TestRunKnowledgeScrubsWhatLeavesTheHub|TestRunKnowledgeIsBoundedAuditedAndCited|TestKnowledgeSessionsFollowTheRun|TestKnowledgeSessionLivesAsLongAsItsDispatchedRun)$'
+      - name: the lookups through the bindings
+        command: go test ./pkg/statedb -run '^(TestKnowledgeProjectDocumentsByKey|TestKnowledgeRunReads)$'
+  - id: R-32
+    title: A task's reference material from the project's knowledge shall be fenced in its prompt as untrusted data.
+    status: approved
+    priority: must
+    tags: [security, knowledge]
+    details: |-
+      Before each task, on the sequential and the parallel path, a run with a
+      knowledge session puts the passages that best match the task — and the
+      documents it names by issue key or URL — into the prompt within the
+      project's token budget, each between lines naming it untrusted reference
+      material from its source and carrying a random marker a document cannot
+      know, after every {{NAME}} substitution, so a placeholder written into a
+      wiki page stays text. The task cites what it was given and what its agent
+      read, and the citations survive the database. A project that switched
+      retrieval off gets none.
+    tests:
+      - name: the prompt and the citations
+        command: go test ./pkg/orchestrator -run '^(TestTaskPromptsCarryFencedReferenceMaterial|TestRetrievalSwitchedOffKeepsReferenceMaterialOut|TestRunWithoutKnowledgeIsUnchanged)$'
+      - name: the fence, the budget and the client
+        command: go test ./pkg/knowledgerun -run '^(TestReferenceSectionFencesUntrustedText|TestReferenceSectionKeepsToItsBudget|TestClientKeepsTheTokenToTheHub)$'
+      - name: the citations
+        command: go test ./pkg/pm -run '^(TestCitationsAreCleanedAndBounded|TestMergeCitations)$'
+  - id: R-33
+    title: A knowledge retrieval that fails shall never fail the task it was made for.
+    status: approved
+    priority: must
+    tags: [robustness, knowledge]
+    details: |-
+      A hub that cannot be reached, or answers a run's knowledge request with an
+      error, costs the task its reference material only: the task runs, the run
+      says why, the project's journal records it, and a hub that could not be
+      reached is not asked again for two minutes.
+    tests:
+      - name: an erroring and an unreachable hub
+        command: go test ./pkg/orchestrator -run '^TestRetrievalFailureNeverFailsTheTask$'

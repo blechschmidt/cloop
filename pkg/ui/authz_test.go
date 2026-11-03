@@ -67,6 +67,16 @@ const scimPublicReason = "SCIM 2.0 provisioning. The caller is an identity provi
 	"its own, every refusal and every change is audited as scim:<name>, and a hub without single " +
 	"sign-on answers 404. Served before authentication too (isSCIMEndpoint)"
 
+// knowledgeRunPublicReason is why the run-scoped knowledge search declares no
+// permission (Task 20472).
+const knowledgeRunPublicReason = "the run-scoped knowledge search. The caller is a run, which holds no cloop " +
+	"session and no API token — only the cloop_know1_ knowledge session token minted for it at dispatch, whose " +
+	"SHA-256 is compared in constant time with the one the hub recorded; a malformed, unknown, wrong, closed or " +
+	"lapsed token is refused identically. The session names one project and is answered as knowledge.RunPrincipal " +
+	"— viewer of that project and of nothing else — through its bindings and narrowing; it lives only while the " +
+	"run does, each session is rate-limited, every answer is bounded and scrubbed by pkg/redact, and every query " +
+	"is audited. Served before authentication too (isKnowledgeRunEndpoint)"
+
 var publicRouteAllowlist = map[string]string{
 	"/":                  "the SPA shell; authMiddleware already gated whether this caller may load it",
 	"/assets/":           "content-hashed CSS/JS served same-origin for the CSP",
@@ -176,6 +186,12 @@ var publicRouteAllowlist = map[string]string{
 		"the output, the payer's daily budgets are checked before a call is relayed, and the run's Claude " +
 		"credential is attached only after both. Answers 404 unless executors.model_relay serves on the " +
 		"dashboard's listener",
+
+	// The run-scoped knowledge search (Task 20472): one justification for the
+	// three routes.
+	"POST /api/run/knowledge/search":    knowledgeRunPublicReason,
+	"POST /api/run/knowledge/get":       knowledgeRunPublicReason,
+	"POST /api/run/knowledge/citations": knowledgeRunPublicReason,
 
 	// SCIM 2.0 provisioning (Task 20415): one justification for the service.
 	"GET /scim/v2/ServiceProviderConfig": scimPublicReason,

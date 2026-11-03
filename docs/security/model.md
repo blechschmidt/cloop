@@ -3303,6 +3303,41 @@ search: the sync records a warning and the search ranks by words
 outside the hub's control. Turn embeddings on only for an endpoint the
 organisation would trust with every page of every source it connects.
 
+**Runs read their project's knowledge, and nothing else's.** A run the hub
+dispatches for a project with knowledge sources bound to it carries a knowledge
+session (Task 20472): a per-run bearer token, `cloop_know1_<id>.<secret>`, and
+the URL of the hub's run-scoped search (`POST /api/run/knowledge/search`,
+`/get` and `/citations`). Only the token's SHA-256 is stored, every hub member
+checks it against that in constant time, and it is good only while its session
+is open and unexpired: renewed every ten minutes from the process streaming
+the run while its workload runs, closed when the run ends or is stopped, taken
+over with the run by the process that adopts it, and refused — lapsed, closed,
+forged, malformed or of another kind — with the same 401
+(`TestRunKnowledgeSessionIsMintedForTheRunAlone`, `TestEndedRunTokensAreRefused`,
+`TestKnowledgeSessionsFollowTheRun`). The session names one project, and is
+answered as a viewer of that project and of nothing else, through its bindings
+and narrowing: a device run's token finds none of another project's documents,
+by search, by id or by URL (`TestRemoteRunTokenReachesOnlyItsOwnProject`). Each
+session is rate-limited (a burst of 30, then one request a second), every
+answer is bounded, its text passed through pkg/redact once more on its way out,
+so a credential pasted into a page is scrubbed even from an index written
+before its pattern was known, and every search and lookup is on the trail with
+its run, its task and the documents it returned
+(`TestRunKnowledgeScrubsWhatLeavesTheHub`, `TestRunKnowledgeIsBoundedAuditedAndCited`).
+What a run is given is the index's text and the hub's ids: the credentials the
+hub reads the sources with never leave it. Before each task the orchestrator
+puts the best passages into the prompt fenced as untrusted reference material,
+between lines carrying a random marker a document cannot know, and after every
+`{{NAME}}` substitution, so a placeholder written into a wiki page is never
+replaced with the project's secret of that name; a retrieval that fails costs
+the task its reference material and nothing else
+(`TestTaskPromptsCarryFencedReferenceMaterial`, `TestRetrievalFailureNeverFailsTheTask`).
+The fence is a boundary for the model, not an enforcement point: text an
+attacker writes into a bound source still reaches the agent, labelled as data,
+and the agent's own tools and the run's sandbox are what bound what it can do.
+A sandbox reaches the search at the hub's public URL; a sandbox whose firewall
+does not allow that address gets no knowledge, and the run says so.
+
 Every change is on the trail:
 [`knowledge.source.create`](../reference/audit-events.md#knowledgesource),
 [`knowledge.source.update`](../reference/audit-events.md#knowledgesource),

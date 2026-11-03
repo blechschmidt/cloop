@@ -454,6 +454,9 @@ type Orchestrator struct {
 	queue       *taskqueue.Queue   // central work queue; nil-safe (Mark*/Enqueue tolerate nil)
 	statedb     *statedb.DB        // shared SQLite handle (kill_requests, events journal); nil-safe
 	watchdog    *watchdog.Watchdog // per-task cancel registry for manual aborts (Task 20140); nil-safe
+	// knowledge is the run's knowledge session (Task 20472): nil for a run
+	// with no knowledge sources to reach. See knowledge.go.
+	knowledge *knowledgeAccess
 
 	// testAbortWaitCeiling and testAbortBackoff narrow maxAbortWait and
 	// abortBackoff so tests can exercise the abort paths without sleeping out
@@ -651,7 +654,9 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	// The watchdog is a plain per-task cancel registry: the kill-request
 	// poller fires the registered cancel when an operator aborts a running
 	// task from the UI (Task 20140).
-	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb, watchdog: &watchdog.Watchdog{}, liveDeadlines: newLiveDeadlineRegistry()}
+	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb, watchdog: &watchdog.Watchdog{}, liveDeadlines: newLiveDeadlineRegistry(),
+		// The run's knowledge session, when the hub gave it one (Task 20472).
+		knowledge: newKnowledgeAccess(os.Getenv)}
 	o.adopt = defaultAdoptHooks()
 	o.selfBuild = state.SelfBuild()
 	o.refusedFiles = map[runbuild.FileID]bool{}
@@ -899,10 +904,14 @@ func isTimeoutErr(taskCtx context.Context, err error) bool {
 // runs; the sequential loop passes nil. It is held across the change and the
 // write, and released before the notifications, which go out over the network.
 // The returned error is the write's and must end the run.
-func (o *Orchestrator) handleTaskTimeout(_ context.Context, s *state.ProjectState, task *pm.Task, partialOutput string, dimColor *color.Color, mu sync.Locker) error {
+func (o *Orchestrator) handleTaskTimeout(ctx context.Context, s *state.ProjectState, task *pm.Task, partialOutput string, dimColor *color.Color, mu sync.Locker) error {
+	// What the agent read before its budget ran out (Task 20472), asked of
+	// the hub before the lock is taken.
+	fetched := o.fetchedCitations(ctx, task.ID)
 	if mu != nil {
 		mu.Lock()
 	}
+	addCitations(task, fetched)
 	task.Status = pm.TaskTimedOut
 	completedAt := time.Now()
 	task.CompletedAt = &completedAt
@@ -1276,6 +1285,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// orchestrator after Run would already misbehave (state/plan are baked
 	// in at New time), so closing here is safe.
 	defer o.Close()
+	// The MCP configurations the run's agents were given (Task 20472).
+	defer o.knowledge.close()
 	o.settleReserve()
 	// Which process and build this run is (Task 20389), for the dashboard,
 	// `cloop status` and hub doctor to compare with theirs.
@@ -2336,6 +2347,11 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
 			prompt = learningMem + prompt
 		}
+		// Reference material from the project's knowledge sources (Task
+		// 20472) — after every placeholder substitution above, so that a
+		// {{NAME}} a wiki page holds stays text and is never replaced by the
+		// project's secret or variable of that name.
+		prompt = o.withTaskReference(ctx, s, task, prompt)
 		// The requirements the task implements, as its acceptance contract
 		// (Task 20460) — after the override, so an edited prompt keeps it too.
 		contract := o.requirementContract(task)
@@ -2442,6 +2458,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			maOpts, _ := o.makeOpts(s.Model, s.LiveEffort(), false)
 			maOpts = o.withBackgroundWaitNotice(maOpts, s, task, nil)
 			maOpts.Env = agentEnv(activeGate, outbox)
+			maOpts = o.withKnowledgeTools(maOpts, task.ID)
 			maRes, maErr := multiagent.RunTask(taskCtx, taskProvider, maOpts, multiagent.Brief{
 				Task:           task,
 				Goal:           s.Goal,
@@ -2508,6 +2525,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				consensusProviders := o.buildConsensusProviders(taskProvider)
 				opts, _ := o.makeOpts(s.Model, s.LiveEffort(), false) // no streaming in consensus mode
 				opts.Env = agentEnv(activeGate, outbox)
+				opts = o.withKnowledgeTools(opts, task.ID)
 				cOutput, cReport, cErr := consensus.RunConsensus(
 					taskCtx,
 					consensusProviders,
@@ -2563,6 +2581,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				opts, wasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
 				opts = o.withBackgroundWaitNotice(opts, s, task, nil)
 				opts.Env = agentEnv(activeGate, outbox)
+				opts = o.withKnowledgeTools(opts, task.ID)
 				// Open live artifact file so `cloop task watch` can tail output.
 				liveFile, liveErr := artifact.OpenLiveArtifact(o.config.WorkDir, task.ID)
 				if liveErr != nil {
@@ -2851,6 +2870,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 
 				healOpts, healWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
 				healOpts.Env = agentEnv(activeGate, outbox)
+				healOpts = o.withKnowledgeTools(healOpts, task.ID)
 				healResult, healErr := safeComplete(taskCtx, taskProvider, healPrompt, healOpts)
 				if healErr != nil {
 					if runInterrupted(ctx) {
@@ -2949,6 +2969,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 						"Do NOT ask for clarification or confirmation. Just do the work and finish with TASK_DONE."
 					clarifyOpts, clarifyWasStreamed := o.makeOpts(s.Model, s.LiveEffort(), true)
 					clarifyOpts.Env = agentEnv(activeGate, outbox)
+					clarifyOpts = o.withKnowledgeTools(clarifyOpts, task.ID)
 					clarifyResult, clarifyErr := safeComplete(taskCtx, taskProvider, clarifyPrompt, clarifyOpts)
 					if clarifyErr != nil {
 						if runInterrupted(ctx) {
@@ -3079,6 +3100,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			fixOpts, _ := o.makeOpts(s.Model, s.LiveEffort(), false)
 			fixOpts = o.withBackgroundWaitNotice(fixOpts, s, task, nil)
 			fixOpts.Env = agentEnv(activeGate, outbox)
+			fixOpts = o.withKnowledgeTools(fixOpts, task.ID)
 			gateOut = o.passGate(provideraudit.WithTaskContext(taskCtx, task.ID, task.Title), activeGate, gateInput{
 				task: task, goal: s.Goal, conventions: s.Instructions, prompt: prompt,
 				output: taskOutput, signal: signal, sessionID: taskSessionID, background: taskBackground,
@@ -3641,8 +3663,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 			}
 		}
 
-		// Attach what the attempt left in the task's outbox (Task 20428).
+		// Attach what the attempt left in the task's outbox (Task 20428),
+		// and cite what its agent read (Task 20472).
 		o.collectAttachments(task, true)
+		addCitations(task, o.fetchedCitations(ctx, task.ID))
 		// Persist full AI response as a Markdown artifact file.
 		o.writeTaskArtifact(task, taskOutput)
 		// If consensus was used, append the decision report to the artifact.
@@ -3995,6 +4019,10 @@ type taskResult struct {
 	// cut short.
 	reqCheck       *pm.TaskRequirementsCheck
 	reqInterrupted bool
+	// fetched are the documents the hub served the agent during the attempt
+	// (Task 20472), collected by the worker so the result loop, which holds
+	// the plan's lock, does not wait on the hub.
+	fetched []pm.Citation
 }
 
 // parallelShutdownGracePeriod bounds how long runPMParallel will wait for
@@ -4621,6 +4649,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			if learningMem := learning.FormatForPrompt(o.config.WorkDir); learningMem != "" {
 				prompt = learningMem + prompt
 			}
+			// Reference material (Task 20472), after the substitutions, as
+			// on the sequential path; retrieved here, in the main goroutine,
+			// with the rest of the prompt, so the workers touch no plan state.
+			prompt = o.withTaskReference(ctx, s, t, prompt)
 			prompt = withGateSection(prompt, o.requirementContract(t))
 			prompt = withGateSection(prompt, requirementsRetrySection(t.RequirementsCheck))
 			roundOutboxes[i] = o.openOutbox(t, o.router.For(t.Role))
@@ -4783,6 +4815,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				gate := roundGates[idx]
 				prompt = withGateSection(prompt, gate.promptSection())
 				opts.Env = agentEnv(gate, roundOutboxes[idx])
+				opts = o.withKnowledgeTools(opts, t.ID)
 				// Apply per-task time budget in parallel mode.
 				tTaskCtx, tTaskCancel := o.taskContextWithTimeout(roundCtx, t)
 				defer tTaskCancel()
@@ -4872,7 +4905,8 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				res = taskResult{task: t, result: result, err: err, duration: dur, timedOut: timedOut,
 					continued: turns.unfinished, uncommitted: turns.uncommitted, commitAbort: commitAbort,
 					pushed: guard.pushed(), commitNote: guard.passNote(), gate: gateOut,
-					reqCheck: reqCheck, reqInterrupted: reqInterrupted}
+					reqCheck: reqCheck, reqInterrupted: reqInterrupted,
+					fetched: o.fetchedCitations(roundCtx, t.ID)}
 			}(i, task, prebuiltPrompts[i], taskWorkDirs[i])
 		}
 
@@ -5528,8 +5562,10 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 				}
 			}
 
-			// Attach what the attempt left in the task's outbox (Task 20428).
+			// Attach what the attempt left in the task's outbox (Task 20428),
+			// and cite what its agent read (Task 20472).
 			o.collectAttachments(task, true)
+			addCitations(task, res.fetched)
 			// Persist full AI response as a Markdown artifact file.
 			o.writeTaskArtifact(task, result.Output)
 
