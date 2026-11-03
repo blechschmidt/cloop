@@ -471,6 +471,14 @@ func (s *Server) Run(ctx context.Context) error {
 	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
 		plan.Port = tcp.Port // the port actually bound, when Port was 0
 	}
+	// Recorded as soon as the listener exists, for the reason httpServer is:
+	// the port answers a connection from here on — the kernel queues it
+	// before Serve accepts — so a caller that sees it answer must find the
+	// address too. Recorded after the banner, BoundAddr was nil for that
+	// long, and CI's TestServeBindsLoopbackWithoutAToken saw it.
+	s.shutdownMu.Lock()
+	s.boundAddr = ln.Addr()
+	s.shutdownMu.Unlock()
 
 	auth := ""
 	if s.Token != "" {
@@ -496,10 +504,6 @@ func (s *Server) Run(ctx context.Context) error {
 			"cert_file":   s.TLSCertFile,
 		})
 	}
-
-	s.shutdownMu.Lock()
-	s.boundAddr = ln.Addr()
-	s.shutdownMu.Unlock()
 
 	errCh := make(chan error, 1)
 	go func() {

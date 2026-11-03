@@ -721,6 +721,13 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **`cloop serve` records the address it listens on before its port answers.**
+  The API server bound its listener, printed its banner and logged, and only
+  then recorded the address `BoundAddr` returns; a connection succeeds as soon
+  as the listener exists, so a caller that saw the port answer could still read
+  no address. CI's `TestServeBindsLoopbackWithoutAToken` did, once
+  (Task 20473).
+
 - **A stopping hub no longer waits five seconds on a busy database for each
   audit gap it owes.** At shutdown and at exit, the audit-failure ledger
   writes the gap rows it owes, each through a database handle of its own. That
