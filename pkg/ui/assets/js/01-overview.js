@@ -93,7 +93,7 @@ function mountPanel(fns, tab, html, dialogs) {
 // other tab but Overview, Tasks and Projects in Task 20456: a session that
 // never leaves those three fetches none of them.
 const DEFERRED_TABS = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'timeline', 'requirements',
-  'queue', 'kanban', 'kb', 'deps', 'risk-matrix', 'analytics', 'chat', 'assistant', 'replay', 'provider-calls', 'executors'];
+  'knowledge', 'queue', 'kanban', 'kb', 'deps', 'risk-matrix', 'analytics', 'chat', 'assistant', 'replay', 'provider-calls', 'executors'];
 function openDeferredTab(name) {
   const box = document.getElementById('tab-' + name);
   if (!_deferred[name]) box.innerHTML = '<p class="deferred-note">Loading…</p>';

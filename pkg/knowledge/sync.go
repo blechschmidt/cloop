@@ -120,6 +120,11 @@ type SyncOptions struct {
 	// EmbedBudget bounds how long the sync embeds chunks, after its listing
 	// (DefaultEmbedBudget). A source with more to embed is due again at once.
 	EmbedBudget time.Duration
+	// OnPage, when set, is called after each page of the listing is indexed —
+	// its documents and the cursor after them committed — so the hub can
+	// show the source's counts move while a long sync runs. It must return
+	// at once.
+	OnPage func()
 }
 
 // Why a sync stopped before its end without failing: the runner cancels a
@@ -357,6 +362,9 @@ func (r *syncRun) listAll() error {
 		}
 		if err := r.writePage(page, now); err != nil {
 			return err
+		}
+		if r.opts.OnPage != nil {
+			r.opts.OnPage()
 		}
 		if page.More && page.Cursor == cursor {
 			return mark(fmt.Errorf("the %s connector returned another page without moving its cursor", r.conn.Kind()),

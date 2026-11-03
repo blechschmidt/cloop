@@ -51,6 +51,7 @@ func (s *Server) knowledgeRoutes() []routeSpec {
 		{Pattern: "PATCH /api/knowledge/sources/{id}", Handler: s.handleKnowledgeSourceUpdate, Perm: authz.PermSecretOwn, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "DELETE /api/knowledge/sources/{id}", Handler: s.handleKnowledgeSourceDelete, Perm: authz.PermSecretOwn, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "POST /api/knowledge/sources/{id}/sync", Handler: s.handleKnowledgeSourceSync, Perm: authz.PermSecretOwn, Scope: scopeGlobal},
+		{Pattern: "POST /api/knowledge/test-connection", Handler: s.handleKnowledgeTestConnection, Perm: authz.PermSecretOwn, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "GET /api/projects/{idx}/knowledge/sources", Handler: s.handleProjectKnowledgeSources, Perm: authz.PermProjectRead, Scope: scopeProjectIdx},
 		{Pattern: "POST /api/projects/{idx}/knowledge/bindings", Handler: s.handleProjectKnowledgeBind, Perm: authz.PermProjectWrite, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		{Pattern: "DELETE /api/projects/{idx}/knowledge/bindings/{bid}", Handler: s.handleProjectKnowledgeUnbind, Perm: authz.PermProjectWrite, Scope: scopeProjectIdx},
@@ -511,6 +512,7 @@ func (s *Server) handleKnowledgeSourceCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.broadcastAuditAppend(string(auditaction.ActionKnowledgeSourceCreate))
+	s.knowledgeChanged(src.ID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]any{"source": knowledgeSourceViewOf(acc, src)})
@@ -559,6 +561,7 @@ func (s *Server) handleKnowledgeSourceUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.broadcastAuditAppend(string(auditaction.ActionKnowledgeSourceUpdate))
+	s.knowledgeChanged(id)
 	jsonOK(w, map[string]any{"source": knowledgeSourceViewOf(acc, updated)})
 }
 
@@ -588,6 +591,7 @@ func (s *Server) handleKnowledgeSourceDelete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.broadcastAuditAppend(string(auditaction.ActionKnowledgeSourceDelete))
+	s.knowledgeGone(deleted)
 	jsonOK(w, map[string]any{
 		"deleted": knowledgeSourceRef{ID: deleted.ID, Name: deleted.Name, Kind: deleted.Kind},
 		"removed": map[string]int{"documents": counts.Documents, "chunks": counts.Chunks, "bindings": counts.Bindings},
@@ -706,6 +710,7 @@ func (s *Server) handleProjectKnowledgeBind(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.broadcastAuditAppend(string(auditaction.ActionKnowledgeSourceBind))
+	s.knowledgeChanged(b.SourceID)
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
@@ -737,6 +742,7 @@ func (s *Server) handleProjectKnowledgeUnbind(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.broadcastAuditAppend(string(auditaction.ActionKnowledgeSourceUnbind))
+	s.knowledgeChanged(b.SourceID)
 	jsonOK(w, map[string]any{"binding": knowledgeBindingViewOf(b)})
 }
 

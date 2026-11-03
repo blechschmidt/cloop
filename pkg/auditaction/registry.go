@@ -439,6 +439,26 @@ var registry = []Entry{
 			"syncs the hub-cluster leader schedules are its own routine work and are not audited: how each went is " +
 			"on the source (status, counts, duration and the last error, scrubbed of credentials).",
 	},
+	{
+		Action: ActionKnowledgeSourceTest,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_source",
+		Trigger: "A person tries a knowledge source's connection — the dashboard's Test connection, " +
+			"POST /api/knowledge/test-connection — for a new source or an existing one: the hub lists one small " +
+			"page with the source's configuration and credential, and indexes nothing.",
+		Payload: []string{
+			"id", "kind", "name", "scope", "owner", "config", "signs_in_with", "outcome", "documents", "withheld",
+			"reason", "error",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "The entity id is the source's for a test of an existing one, and empty for a source not yet saved. " +
+			"`config` and `signs_in_with` are what was tried, which a form may not have saved. `outcome` is `ok` or " +
+			"`failed`; a failure's `reason` is `credential` (the secret could not be opened) or `connector` (the " +
+			"remote refused or could not be reached), and `error` says why, scrubbed of the credential and of anything " +
+			"else shaped like one. A configuration or credential reference the hub would refuse to store is refused " +
+			"before anything is tried, and writes no row.",
+	},
 
 	// ── knowledge.run ──────────────────────────────────────────────────────
 	{

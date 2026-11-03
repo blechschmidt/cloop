@@ -122,6 +122,13 @@ type RunnerOptions struct {
 	// OnSync, when set, is told every sync's end — for the hub to tell the
 	// dashboards that may read the source.
 	OnSync func(SyncResult)
+	// OnChange, when set, is told each time what a source's dashboards show
+	// of its sync moves on this process: the sync took the source's lease,
+	// indexed a page of its listing, or ended — its outcome recorded and its
+	// lease released, whatever it found to do (Task 20473). It is called on
+	// the sync's own goroutine, so it must return at once; a panic in it is
+	// recovered.
+	OnChange func(sourceID int64)
 }
 
 // SyncResult is how one sync went.
@@ -598,6 +605,7 @@ func (r *Runner) run(parent context.Context, svc *Service, lease statedb.Knowled
 	}
 	keepalive := r.keepalive(ctx, cancel, svc, lease)
 	started := r.o.Now()
+	r.changed(lease.SourceID)
 	defer func() {
 		// A panic the sync did not recover itself — in the runner's own
 		// work around it — fails this sync, not the process.
@@ -615,9 +623,13 @@ func (r *Runner) run(parent context.Context, svc *Service, lease statedb.Knowled
 		r.mu.Unlock()
 		res.Duration = r.o.Now().Sub(started)
 		r.record(res)
+		r.changed(lease.SourceID)
 	}()
-	report, err := svc.SyncWith(ctx, lease.SourceID, SyncOptions{Holder: lease.Holder, Origin: lease.Origin,
-		Budget: r.o.Budget})
+	opts := SyncOptions{Holder: lease.Holder, Origin: lease.Origin, Budget: r.o.Budget}
+	if r.o.OnChange != nil {
+		opts.OnPage = func() { r.changed(lease.SourceID) }
+	}
+	report, err := svc.SyncWith(ctx, lease.SourceID, opts)
 	res.Report, res.Err, res.Status = report, err, SyncStatusOf(err)
 	if errors.Is(err, ErrDisabled) || errors.Is(err, ErrNotFound) {
 		// Disabled or deleted between its lease and its start: there was
@@ -725,6 +737,16 @@ func (r *Runner) record(res SyncResult) {
 			r.o.OnSync(res)
 		}()
 	}
+}
+
+// changed tells OnChange that source id's sync moved. A panic in it is the
+// hook's own, and stays there.
+func (r *Runner) changed(id int64) {
+	if r.o.OnChange == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	r.o.OnChange(id)
 }
 
 // randomID is a sync's own id, unique among every sync of every member.

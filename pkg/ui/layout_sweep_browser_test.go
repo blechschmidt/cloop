@@ -48,6 +48,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/hubdoctor"
 	"github.com/blechschmidt/cloop/pkg/kb"
+	"github.com/blechschmidt/cloop/pkg/knowledge"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/quota"
@@ -71,10 +72,12 @@ type layoutViewport struct {
 	Mobile bool   `json:"mobile"`
 }
 
-// layoutViewports: the narrowest phone still sold and the commonest one, a
-// tablet in portrait, a small laptop and a common desktop.
+// layoutViewports: the narrowest phone still sold, the one this hub's own
+// users carry (telemetry: 360x780 at dpr 3, Task 20473) and the commonest
+// one, a tablet in portrait, a small laptop and a common desktop.
 var layoutViewports = []layoutViewport{
 	{Name: "phone-320", Width: 320, Height: 568, Scale: 2, Mobile: true},
+	{Name: "phone-360", Width: 360, Height: 780, Scale: 3, Mobile: true},
 	{Name: "phone-390", Width: 390, Height: 844, Scale: 3, Mobile: true},
 	{Name: "tablet-768", Width: 768, Height: 1024, Scale: 2, Mobile: true},
 	{Name: "laptop-1024", Width: 1024, Height: 768, Scale: 1, Mobile: false},
@@ -138,6 +141,7 @@ type layoutFixture struct {
 	ReplayOutput     string              `json:"replayOutput"`
 	Assistant        []map[string]string `json:"assistant"`
 	DraftTitle       string              `json:"draftTitle"`
+	Source           string              `json:"source"`
 }
 
 // The fixture's long content. Unbroken on purpose: CSS offers a line break at
@@ -189,6 +193,9 @@ type sweepStrings struct {
 	// UserAgent is the browser the seeded telemetry claims to come from;
 	// empty sends Go's own.
 	UserAgent string
+	// Source names a knowledge source (Task 20473) — at most 128 characters,
+	// as the hub takes one — and SyncError is what its last sync said.
+	Source, SyncError string
 }
 
 var layoutSweepStrings = sweepStrings{
@@ -206,6 +213,9 @@ var layoutSweepStrings = sweepStrings{
 	// Lint finds "fast", and "and alert" starting a second behaviour.
 	DraftTitle: "When_the_ingest_pipeline_backs_up_the_hub_shall_shed_load_fast_and_alert_the_on_call_rotation_of_" +
 		layoutProject,
+	Source: "confluence_datacenter_runbooks_for_" + layoutProject,
+	SyncError: layoutLong("list: GET", layoutURL, "answered 503 after 30s; the last page listed is in",
+		layoutRepoPath),
 }
 
 // seedHubAs is seedHub sent with the User-Agent ua, when one is given.
@@ -274,6 +284,14 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 			StartedAt: &started, CompletedAt: &done, EstimatedMinutes: 45, ActualMinutes: 60,
 			RiskScore: 8, ImpactScore: 9, Assignee: s.Email, ExternalURL: s.URL,
 			Links: []pm.Link{{URL: s.URL, Label: s.TaskTitle, Kind: pm.DetectLinkKind(s.URL)}},
+			// What its run read from the project's knowledge (Task 20473):
+			// a passage in its prompt and a document the agent fetched.
+			Citations: []pm.Citation{
+				{Kind: pm.CitationInjected, Title: s.TaskTitle, URL: s.URL, Source: s.Source, SourceKind: "confluence",
+					DocumentID: 1, RunID: "run_layout"},
+				{Kind: pm.CitationFetched, Title: s.RiskTaskTitle, URL: s.URL, Source: s.Source, SourceKind: "jira",
+					DocumentID: 2, RunID: "run_layout"},
+			},
 			Annotations: []pm.Annotation{{Timestamp: done, Author: s.Email,
 				Text: layoutLong("Verified on", s.Device, "against", s.URL)}}},
 		{ID: 2, Title: s.RiskTaskTitle, Priority: 2,
@@ -384,6 +402,7 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		}}}
 	installQuotas(t, srv, quota.Config{Defaults: quota.Limits{quota.ResProjects: 10}})
 	withControlPlaneDir(t, primary)
+	seedLayoutKnowledge(t, srv, primary, s)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
@@ -415,7 +434,7 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		TokenName: s.TokenName, Token: "cloop_pat_" + strings.Repeat("a1b2c3d4", 8),
 		Transcript: layoutLong("also cover the case where", s.Device, "drops off mid-dispatch, see",
 			s.URL), TranscriptMarker: s.Device,
-		PromptMarker: s.PromptMarker, ReplayOutput: s.ReplayOutput, DraftTitle: s.DraftTitle,
+		PromptMarker: s.PromptMarker, ReplayOutput: s.ReplayOutput, DraftTitle: s.DraftTitle, Source: s.Source,
 		Assistant: []map[string]string{
 			{"role": "user", "content": layoutLong("what blocks", s.TaskTitle+"?")},
 			{"role": "assistant", "content": layoutLong("Nothing — it finished; the test is at", s.URL)},
@@ -580,7 +599,7 @@ func fileLayoutRequest(t *testing.T, dir string, s sweepStrings) {
 // content has rendered is TAB_READY in the driver, which fails a tab it has no
 // entry for.
 var layoutTabs = []string{
-	"overview", "tasks", "requirements", "queue", "kanban", "timeline", "kb", "deps", "risk-matrix", "analytics",
+	"overview", "tasks", "requirements", "knowledge", "queue", "kanban", "timeline", "kb", "deps", "risk-matrix", "analytics",
 	"chat", "assistant", "replay", "provider-calls",
 	"projects", "budget", "executors", "secrets", "audit", "quotas", "telemetry", "settings",
 }
@@ -814,7 +833,7 @@ func TestLayoutSweep_EveryTabAndDialogFits(t *testing.T) {
 			}
 			want := len(layoutViewports) + 1 // and once more in the dark
 			if strings.HasPrefix(s.Name, "dialog:mobileNavOverlay") {
-				want = 3 // the phone menu exists only below the tablet breakpoint
+				want = 4 // the phone menu exists only below the tablet breakpoint: three phones and the dark one
 			}
 			if len(s.Measurements) != want {
 				t.Errorf("%s: measured %d times, want %d", s.Name, len(s.Measurements), want)
@@ -1122,6 +1141,44 @@ func deferredTabNames(t *testing.T) []string {
 // fulfilled, a must, so that lint names it; and two drafts the model wrote,
 // awaiting approval in the Draft dialog (Task 20462), the second repeating the
 // first.
+// seedLayoutKnowledge connects a knowledge source on the sweep's hub (Task
+// 20473) — its name, its last sync's error and its document's title, path and
+// passage carry the fixture's content — and binds it to the selected project,
+// narrowed to a space, so Settings → Knowledge sources, the project's Knowledge
+// tab and its test search all have something long to lay out.
+func seedLayoutKnowledge(t *testing.T, srv *Server, primary string, s sweepStrings) {
+	t.Helper()
+	db, err := srv.controlPlaneDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	src, err := db.CreateKnowledgeSource(statedb.KnowledgeSourceRow{Kind: "confluence", Name: s.Source, Scope: "org",
+		Config: `{"deployment":"datacenter","base_url":"https://wiki.internal.example.com/confluence","auth":"bearer",` +
+			`"spaces":["ENG","OBSERVABILITY_INGEST_PIPELINE_RUNBOOKS"]}`, Enabled: true}, "layout-sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := knowledge.New(db)
+	if _, err := svc.Index(src.ID, knowledge.Document{ExternalID: "4242", Title: s.TaskTitle, URL: s.URL,
+		Space: "ENG", Ancestors: []string{s.RiskTaskTitle, s.FailedTaskTitle},
+		Body: "# " + s.RunningTaskTitle + "\n\n" + layoutLong("The ingest pipeline sheds load at", s.Device,
+			"before the queue at", s.RepoPath, "fills; the dashboards are at", s.URL, "and the incident that taught us is",
+			s.TaskTitle, "— ingest backpressure is what the alert means.")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.For(knowledge.PrincipalFor(false, nil, nil, "", "layout-sweep")).Bind(context.Background(),
+		knowledge.Project{Path: primary, Name: s.Project}, src.ID, knowledge.Filter{Spaces: []string{"ENG"}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := db.RecordKnowledgeSyncOutcome(src.ID, statedb.KnowledgeSyncOutcome{Status: knowledge.StatusError,
+		Error: s.SyncError, Origin: knowledge.OriginSchedule, StartedAt: now.Add(-2 * time.Minute),
+		FinishedAt: now.Add(-time.Minute), Report: `{"pages":3,"listed":120,"created":1,"updated":7,"unchanged":112}`}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func seedLayoutRequirements(t *testing.T, primary string, s sweepStrings) {
 	t.Helper()
 	db, err := statedb.Open(state.DBPath(primary))

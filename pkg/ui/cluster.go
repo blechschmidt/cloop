@@ -689,6 +689,10 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		if err := ev.Decode(&p); err == nil && p.Project != "" {
 			s.detachRun(p.Project)
 		}
+	case invalidateKnowledge:
+		// A knowledge source's sync moved, or a person changed the source,
+		// on another member (Task 20473): this member tells its dashboards.
+		s.onBusKnowledge(ev)
 	case invalidateBinding:
 		var p bindingInvalidation
 		if err := ev.Decode(&p); err == nil {

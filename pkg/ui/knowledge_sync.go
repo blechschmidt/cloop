@@ -66,6 +66,8 @@ func (s *Server) knowledgeRunner() *knowledge.Runner {
 		Logf: func(format string, args ...any) {
 			s.log().Warn(logger.EventKnowledge, 0, fmt.Sprintf(format, args...), nil)
 		},
+		// The dashboards showing the source see its sync move (Task 20473).
+		OnChange: s.knowledgeChanged,
 	}
 	if st.tune != nil {
 		st.tune(&opts)

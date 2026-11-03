@@ -1894,9 +1894,26 @@
       });
     }
 
+    // loadKnowledgeSources draws Settings → Knowledge sources (Task 20473),
+    // a deferred script of its own, for someone who may connect sources. A
+    // page that opened on Settings may not have heard from /api/me yet, so it
+    // looks again for a little while rather than draw for the wrong person.
+    function loadKnowledgeSources(tries) {
+      if (!h.known()) {
+        if ((tries || 0) < 40 && h.tab() === 'settings') setTimeout(() => loadKnowledgeSources((tries || 0) + 1), 250);
+        return;
+      }
+      if (!canGlobal('secret.own')) return;
+      h.panel('ksources').then(p => p.load()).catch(() => {
+        const b = document.getElementById('ksBody');
+        if (b) b.textContent = 'The Knowledge sources panel did not load. Open Settings again to retry.';
+      });
+    }
+
     // open runs on every visit to the tab, as switchTab's list used to.
     function open() {
       loadHubHealth();
+      loadKnowledgeSources();
       loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadSCIM(); loadStaticToken(); loadTelemetryPolicy();
       loadNotifications();
       loadCIPanel();
@@ -1928,6 +1945,16 @@
             most a minute old, and is made again once the configuration changes.
           </p>
           <div id="hubHealthBody"></div>
+        </div>
+
+        <div class="settings-section" id="ksSection" data-global-perm="secret.own" data-perm-hide>
+          <h3>Knowledge sources</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Confluence spaces and Jira projects the hub indexes for the projects they are bound to: the organisation’s,
+            which administrators connect with a shared credential, and your own, which read with yours. A project’s
+            Knowledge tab binds them; each sync’s progress shows here as it happens.
+          </p>
+          <div id="ksBody"></div>
         </div>
 
         <div class="settings-section">

@@ -745,6 +745,9 @@ type Server struct {
 	// knowledgeEmbed is the embedding client knowledge.embeddings names
 	// (Task 20471), kept while the section is unchanged.
 	knowledgeEmbed knowledgeEmbedState
+	// knowledgePush is what this member owes its dashboards of the knowledge
+	// sources' changes (Task 20473). See knowledge_push.go.
+	knowledgePush knowledgePushState
 	// The spec-file reads this member is running, one per project, and the
 	// parses of what they read (Task 20459). See requirements_spec_api.go.
 	specReads  specReadJobs

@@ -294,6 +294,13 @@ var requirementsAPISource string
 //go:embed requirements_trace_api.go
 var requirementsTraceSource string
 
+// knowledgePushSource is pkg/ui/knowledge_push.go (Task 20473): the
+// knowledge_source push Settings → Knowledge sources and a project's
+// Knowledge tab redraw a source's card on.
+//
+//go:embed knowledge_push.go
+var knowledgePushSource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
@@ -324,7 +331,8 @@ func allUISources() string {
 		"\n" + deviceForwardersSource +
 		"\n" + hubHealthSource +
 		"\n" + requirementsAPISource +
-		"\n" + requirementsTraceSource
+		"\n" + requirementsTraceSource +
+		"\n" + knowledgePushSource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

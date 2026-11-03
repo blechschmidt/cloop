@@ -197,6 +197,15 @@ var deferredScripts = []struct{ token, path string }{
 	// The requirements gate's verdict in a task's details (Task 20461),
 	// fetched the first time a task the gate checked is opened.
 	{"reqgate.js", "assets/js/deferred/reqgate.js"},
+	// The Knowledge tab (Task 20473): a project's bound knowledge sources,
+	// its retrieval setting and a test search.
+	{"knowledge.js", "assets/js/deferred/knowledge.js"},
+	// Settings → Knowledge sources (Task 20473), fetched when the Settings
+	// tab opens for someone who may connect sources.
+	{"ksources.js", "assets/js/deferred/ksources.js"},
+	// The knowledge a task's run cited, in its details (Task 20473), fetched
+	// the first time a task with citations is opened.
+	{"citations.js", "assets/js/deferred/citations.js"},
 	{"deps.js", "assets/js/deferred/deps.js"},
 	{"risk-matrix.js", "assets/js/deferred/risk-matrix.js"},
 	{"analytics.js", "assets/js/deferred/analytics.js"},

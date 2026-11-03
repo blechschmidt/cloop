@@ -58,7 +58,7 @@ const WAIT_MS = 30000;
 // asset URL. A single-project page fetches the Overview's own cards (harness,
 // devices) at boot; none of these.
 const MOVED_TABS = ['queue', 'kanban', 'kb', 'deps', 'risk-matrix', 'analytics', 'chat', 'assistant',
-  'replay', 'provider-calls', 'executors', 'requirements'];
+  'replay', 'provider-calls', 'executors', 'requirements', 'knowledge'];
 const DEFERRED = ['settings', 'budget', 'secrets', 'audit', 'quotas', 'telemetry', 'execadmin', 'execpicker']
   .concat(MOVED_TABS);
 const DEFERRED_RE = new RegExp('/assets/(' + DEFERRED.join('|') + ')\\.[0-9a-f]{16}\\.js$');
@@ -899,6 +899,17 @@ const TAB = {
       await hub('POST', '/api/requirements', {title: 'dp-req-pushed-' + way});
       await waitFor(cdp, `${text('#reqList')}.includes('dp-req-pushed-' + ${q(way)})`, 'the pushed requirement');
       return true;
+    },
+  },
+  // The Knowledge tab (Task 20473): the project's bound sources and its
+  // retrieval setting drawn; Refresh reads them again.
+  knowledge: {
+    ready: `!!document.getElementById('knInject') && !${text('#knBound')}.includes('Loading')`,
+    press: async cdp => {
+      const mark = apiCalls.length;
+      await click(cdp, '#tab-knowledge [data-act="load"]');
+      await requested(mark, '/api/projects/0/knowledge/sources', 'Refresh to re-read the bound sources');
+      return 'refreshed';
     },
   },
   executors: {

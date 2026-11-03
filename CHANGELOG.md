@@ -179,6 +179,36 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Knowledge in the dashboard: connect sources in Settings, bind them in a
+  project's Knowledge tab, watch their syncs live, try a search, and see what a
+  task's run cited.** Settings → Knowledge sources lists the Confluence and
+  Jira sources the hub indexes, each with how its sync stands (syncing, synced,
+  failed with its scrubbed error, interrupted), what it holds, when it syncs
+  next and what its last sync did, and connects, edits, enables, disables,
+  syncs and deletes them. An administrator manages the organisation's sources;
+  anyone who may keep credentials (`secret.own`) manages their own personal
+  ones and sees no one else's. The connect dialog asks for the kind, scope,
+  deployment, base URL, how the source signs in (email and API token, or a
+  bearer token), its spaces or projects or a CQL/JQL query, and a credential
+  picked from the person's env secrets or stored there from the form — sent
+  once, never shown again. **Test connection** lists one small page with what
+  the form holds and says what came back, or the remote's error with the
+  credential redacted out of it (`POST /api/knowledge/test-connection`: the
+  same rules as saving, a recent sign-in on SSO hubs, a few per person in a
+  row, audited as `knowledge.source.test`). Nothing polls: every sync's start,
+  progress and end, and every change to a source, on any hub member, are
+  pushed over the WebSocket (`knowledge_source`) to each dashboard rendered as
+  that person's own GET would show it, and to nobody who may not see the
+  source. A project's new **Knowledge** tab (`?tab=knowledge`) binds and
+  unbinds the sources a maintainer may bind, narrows a binding to spaces or a
+  query, sets whether task prompts carry cited reference material and how
+  much (passages, token budget), and runs a test search that ranks passages
+  with their source, path and a link to where each lives. A task's details
+  list the knowledge its run cited. All of it is fetched on demand (first
+  paint +239 B), escapes everything a source holds, links only http(s) URLs,
+  and adds no inline handler; the layout sweep now also measures every tab and
+  dialog at 360px, the width this hub's users' phones report (Task 20473).
+
 - **Runs read their project's knowledge: cited reference material in every
   task's prompt, and a scoped search the agent can call.** A run the hub
   dispatches for a project with knowledge sources bound to it now carries a

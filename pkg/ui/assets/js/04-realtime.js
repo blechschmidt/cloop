@@ -334,6 +334,12 @@ function handleRealtimeMsg(type, data, scope) {
       // /api/me decides who sees the banner, so the push only says re-read.
       refreshPermissions();
       break;
+    case 'knowledge_source':
+      // A knowledge source this socket may see moved, changed or went (Task
+      // 20473), rendered for it by the hub.
+      panelIf('ksources', 'pushed', data);
+      panelIf('knowledge', 'pushed', data);
+      break;
     case 'hub_health':
       // This member made a new Hub health report: its summary, sent only to
       // sockets that may read it, or word that this one no longer may (Tasks
@@ -617,7 +623,7 @@ function connectSSE() {
   };
   // Named SSE events carry the WebSocket message of the same type; 'log' is
   // step_output's older name.
-  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health', 'requirements_update', 'requirements_coverage']) {
+  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health', 'requirements_update', 'requirements_coverage', 'knowledge_source']) {
     evtSource.addEventListener(t, (e) => {
       try { handleRealtimeMsg(t === 'log' ? 'step_output' : t, JSON.parse(e.data), scope); } catch(_) {}
     });

@@ -593,6 +593,9 @@ function _renderTaskDetails(d) {
   if (d.network) html += '<div class="td-section" id="td-net"></div>';
   // The requirements gate's last check (Task 20461): deferred/reqgate.js.
   if (t.requirements_check) html += '<div class="td-section" id="td-reqgate"></div>';
+  // The knowledge its runs cited (Task 20473): deferred/citations.js.
+  const cites = d.citations || [];
+  if (cites.length) html += '<div class="td-section" id="td-cite"></div>';
 
   if (t.annotations && t.annotations.length) {
     const annos = t.annotations.slice().reverse().map(a => {
@@ -640,6 +643,7 @@ function _renderTaskDetails(d) {
   if (t.attachment_count) panelAct('attachments', 'show', t.id);
   if (d.network) panelAct('network', 'task', t.id);
   if (t.requirements_check) panelAct('reqgate', 'show', t.requirements_check);
+  if (cites.length) panelAct('citations', 'show', cites);
 }
 
 // Triggered from the task list. Ignore clicks that originated on action

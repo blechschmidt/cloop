@@ -318,7 +318,7 @@ type movedTabScenario struct {
 // movedTabs is DEFERRED_TABS less the tabs Task 20386 had already moved:
 // each is a deferred script of its own name.
 var movedTabs = []string{"queue", "kanban", "kb", "deps", "risk-matrix", "analytics", "chat", "assistant",
-	"replay", "provider-calls", "executors", "requirements"}
+	"replay", "provider-calls", "executors", "requirements", "knowledge"}
 
 // checkMovedTabs holds one way's run to what opening a moved tab must do: draw
 // the tab from a script fetched for it alone, answer a control of its moved

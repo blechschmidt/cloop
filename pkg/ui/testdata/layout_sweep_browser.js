@@ -718,6 +718,14 @@ const TAB_READY = {
     const d = document.querySelector('#reqList .req-details');
     if (b && d && d.style.display === 'none') b.click();
     return ${hasContent('#reqList', F.taskTitle)} && !!d && d.style.display !== 'none' && ${hasText('#reqList .req-details', 'exit 1')}; })()`,
+  // The bound source with its failed sync and narrowing, and a test search
+  // for the word its passage holds, ranked with its long title, path and
+  // snippet (Task 20473). Readiness runs the search once the card is there.
+  // The index keeps a title on one line, so only its head is matched.
+  'knowledge': `(() => { const q = document.getElementById('knQ'), b = document.getElementById('knSearchBtn');
+    if (q && b && !q.value && document.querySelector('#knBound .kn-card')) { q.value = 'ingest'; b.click(); }
+    return ${hasContent('#knBound', F.source)} && ${hasContent('#knHits', F.taskTitle.slice(0, 24))}
+      && !!document.querySelector('#knHits mark'); })()`,
   'queue': hasContent('#queueTable', F.taskTitle),
   'kanban': hasContent('#kanbanBoard', F.riskTaskTitle),
   'timeline': hasContent('#timelineChart', F.taskTitle.slice(0, 24)),
@@ -738,7 +746,7 @@ const TAB_READY = {
   'quotas': hasContent('#quotaBody', F.email),
   'telemetry': hasContent('#telemetryBody', F.resultMarker),
   'settings': `${hasContent('#usbList', 'YubiHSM')} && !${hasContent('#buildInfoBody', 'Loading')}
-    && ${hasContent('#hubHealthBody', F.deviceName)}`,
+    && ${hasContent('#hubHealthBody', F.deviceName)} && ${hasContent('#ksList', F.source)}`,
 };
 
 // ── Views ───────────────────────────────────────────────────────────────────
@@ -751,7 +759,7 @@ const VIEWS = {
   // desktop — with the fixture's long names in its tasks, commits and
   // verdicts.
   'requirements-trace': {
-    widths: ['phone-320', 'phone-390', 'tablet-768', 'laptop-1024', 'desktop-1280'],
+    widths: ['phone-320', 'phone-360', 'phone-390', 'tablet-768', 'laptop-1024', 'desktop-1280'],
     open: async () => {
       await openTab('requirements');
       await waitFor(visible('#reqViewTrace'), 'the Traceability button');
@@ -810,7 +818,7 @@ const OPENERS = {
     ready: visible('#loginTokenInput'),
   },
   'mobileNavOverlay': {
-    widths: ['phone-320', 'phone-390'],
+    widths: ['phone-320', 'phone-360', 'phone-390'],
     open: async () => { await waitFor(visible('#hamburgerBtn'), 'the hamburger'); await click('#hamburgerBtn'); },
     ready: visible('#mobileNavOverlay .mobile-nav-close'),
   },
@@ -876,7 +884,9 @@ const OPENERS = {
       await openTab('tasks');
       await click(`#taskListFull .task-item[data-task-id="${F.taskID}"] .task-title`);
     },
-    ready: hasText('#td-body', F.resultMarker),
+    // The knowledge its run cited (Task 20473) is drawn by a script of its
+    // own, after the rest.
+    ready: `${hasText('#td-body', F.resultMarker)} && ${hasContent('#td-cite', F.source)}`,
   },
   'at-overlay': {
     // Over the task details it is opened from, as the page does.
@@ -1036,6 +1046,18 @@ const OPENERS = {
   'executor-labels-overlay': {
     open: async () => { await onExecutors('labels'); },
     ready: visible('#execLabelsInput'),
+  },
+  'ks-overlay': {
+    // Settings → Knowledge sources' Edit on the fixture's source (Task 20473):
+    // its long name, address and spaces in the form, the credential picker
+    // filled from the secret store.
+    open: async () => {
+      await openTab('settings');
+      await waitFor(visible('#ksList [data-ks="edit"]'), 'the knowledge source\'s Edit button');
+      await click('#ksList [data-ks="edit"]');
+    },
+    ready: `(document.getElementById('ksName') || {}).value === ${q(F.source)}
+      && !!document.querySelector('#ksCred option[value="__new"]')`,
   },
   'secret-overlay': {
     open: async () => { await onSecrets('openSecretModal'); },

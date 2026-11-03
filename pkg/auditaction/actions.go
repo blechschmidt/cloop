@@ -112,6 +112,9 @@ const (
 	// ActionKnowledgeSourceSync records a person asking the hub to sync a
 	// knowledge source now (Task 20470).
 	ActionKnowledgeSourceSync Action = "knowledge.source.sync"
+	// ActionKnowledgeSourceTest records a person trying a knowledge source's
+	// connection from the dashboard (Task 20473).
+	ActionKnowledgeSourceTest Action = "knowledge.source.test"
 
 	// ── knowledge.run ──────────────────────────────────────────────────────
 

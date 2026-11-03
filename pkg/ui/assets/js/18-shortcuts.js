@@ -61,6 +61,7 @@ const CMD_REGISTRY = [
   { label:'Chat',            icon:'💬', shortcut:'9', action:()=>switchTab('chat') },
   { label:'Assistant',       icon:'🤖', shortcut:'',  action:()=>switchTab('assistant') },
   { label:'Requirements',    icon:'☑️', shortcut:'',  action:()=>switchTab('requirements') },
+  { label:'Knowledge',       icon:'📖', shortcut:'',  action:()=>switchTab('knowledge') },
   { label:'Projects',        icon:'📁', shortcut:'',  action:()=>switchTab('projects') },
   { label:'Executors',       icon:'🖥', shortcut:'',  action:()=>switchTab('executors') },
   { label:'Settings',        icon:'⚙️', shortcut:'',  action:()=>switchTab('settings') },

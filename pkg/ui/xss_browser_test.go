@@ -15,7 +15,8 @@ package ui
 // and its USB inventory, a virtual executor, the features, the grant's
 // subject, an access request's justification, a token's name, a quota's
 // identity, the KB, the chat, the AI suggestions, the activity log, provider
-// calls and a replay. Secret names and the image reference are validated by
+// calls and a replay, and a knowledge source's name, its last sync's error,
+// its document's title, path and passage, and a task's citations (Task 20473). Secret names and the image reference are validated by
 // the hub, so they hold what it accepts.
 //
 // Pressing every control is the half the static gates cannot do. Under the
@@ -98,6 +99,8 @@ var hostileSweepStrings = sweepStrings{
 	Suggestion:   hostile("suggestion"),
 	DraftTitle:   hostile("draft"),
 	UserAgent:    hostileName("agent"),
+	Source:       hostileName("source"),
+	SyncError:    hostile("syncerror"),
 }
 
 type xssCrawlScenario struct {

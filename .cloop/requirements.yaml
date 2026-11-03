@@ -655,3 +655,26 @@ requirements:
     tests:
       - name: an erroring and an unreachable hub
         command: go test ./pkg/orchestrator -run '^TestRetrievalFailureNeverFailsTheTask$'
+  - id: R-34
+    title: The dashboard shall tell a person of a knowledge source only if they may see it, and try a source's connection only where saving it would be allowed.
+    status: approved
+    priority: must
+    tags: [security, knowledge]
+    details: |-
+      Every change to a knowledge source — its sync starting, moving and ending,
+      on any hub member, and every edit — is pushed to each dashboard rendered as
+      that person's own GET would show it, and to nobody who may not see it: an
+      operator hears of the organisation's sources and their own, never that a
+      colleague's personal source exists or changed, and a viewer hears of none.
+      Test connection lists one page with a configuration and credential
+      reference only for someone who may save them — an organisation source needs
+      knowledge.admin, an existing source its manager, and an administrator cannot
+      point a person's source elsewhere — asks a stale session to sign in again,
+      is rate-limited per person, is audited, and answers with the remote's error
+      scrubbed of the credential. Promised in docs/security/model.md, "Knowledge
+      sources".
+    tests:
+      - name: the pushes and the route
+        command: go test ./pkg/ui -run '^(TestKnowledgeSourcesArePushedToWhoMaySeeThem|TestKnowledgePushReachesAViewerNothing|TestKnowledgeTestConnectionAPI|TestKnowledgeTestConnectionIsRateLimited)$'
+      - name: the rules and the scrubbing
+        command: go test ./pkg/knowledge -run '^(TestConnectionTestFollowsTheSourceRules|TestConnectionTestScrubsTheCredentialFromAFailure|TestConnectionTestRecoversAConnectorPanic|TestPeekAndCanSee|TestOnChangeFollowsASync)$'

@@ -59,6 +59,14 @@ func (a *Access) canSee(row statedb.KnowledgeSourceRow) bool {
 	return a.mayOwn()
 }
 
+// CanSee reports whether the caller may know src exists — the rule Sources
+// lists by, asked of a source the hub already holds: the hub's fan-out of a
+// source's changes (Service.Peek) asks it of each dashboard before telling
+// it anything.
+func (a *Access) CanSee(src Source) bool {
+	return a.canSee(statedb.KnowledgeSourceRow{Scope: src.Scope, Owner: src.Owner})
+}
+
 // CanManage reports whether the caller may change src: its configuration, its
 // credential reference, its bindings. The hub shows a source's secret
 // reference only to a caller who can.
@@ -250,6 +258,40 @@ func (a *Access) Source(ctx context.Context, id int64) (Source, []Binding, error
 		bindings = append(bindings, bindingFromRow(b))
 	}
 	return src, bindings, ctx.Err()
+}
+
+// Peek returns source id as the hub itself holds it — what it says, what it
+// holds and the sync running on it — for no caller in particular. It is for
+// the hub's own fan-out of a source's changes to the dashboards that show it,
+// which asks each one's Access whether it may see the source (CanSee) and
+// renders it for that Access, as Source would have: nothing read here reaches
+// anyone that Access would not answer.
+func (s *Service) Peek(ctx context.Context, id int64) (Source, error) {
+	row, err := s.db.GetKnowledgeSource(id)
+	if errors.Is(err, statedb.ErrKnowledgeSourceNotFound) {
+		return Source{}, fmt.Errorf("%w: source %d", ErrNotFound, id)
+	}
+	if err != nil {
+		return Source{}, err
+	}
+	leases, err := s.db.LiveKnowledgeSyncLeases(s.now())
+	if err != nil {
+		return Source{}, err
+	}
+	src := withSchedule(sourceFromRowFor(row, s.EmbeddingModel()), row, leases)
+	counts, err := s.db.CountKnowledge(row.ID)
+	if err != nil {
+		return Source{}, err
+	}
+	vectors := map[int64]int{}
+	if model := s.EmbeddingModel(); model != "" {
+		if vectors, err = s.db.CountKnowledgeVectors(model); err != nil {
+			return Source{}, err
+		}
+	}
+	c := counts[row.ID]
+	src.Counts = Counts{Documents: c.Documents, Chunks: c.Chunks, Bindings: c.Bindings, Vectors: vectors[row.ID]}
+	return src, ctx.Err()
 }
 
 // SourceInput is a new source.

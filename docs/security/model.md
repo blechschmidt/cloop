@@ -3276,6 +3276,37 @@ prefix.
 The ACL hints a connector reports for a document are stored with it but not
 enforced: a binding is what decides who may search a source.
 
+**Trying a connection.** The dashboard's Test connection
+(`POST /api/knowledge/test-connection`, Task 20473) lists one small page of a
+source with the configuration and credential reference a form holds, and
+indexes nothing. It sends the credential where that configuration points, so
+it is allowed exactly where saving the configuration would be: anyone who may
+connect a personal source tries their own, an organisation source needs
+`knowledge.admin`, an existing source only its manager — an administrator
+cannot try someone's personal source with a changed address — and a reference
+the source could not sign in with is refused before anything is opened
+(`TestConnectionTestFollowsTheSourceRules`). It asks a session for a recent
+sign-in like saving does, each person may run a few in a row and then one
+every ten seconds, and every try is on the trail as
+[`knowledge.source.test`](../reference/audit-events.md#knowledgesource), with
+the remote's error in its answer and its row scrubbed of the credential it was
+tried with (`TestKnowledgeTestConnectionAPI`,
+`TestKnowledgeTestConnectionIsRateLimited`,
+`TestConnectionTestScrubsTheCredentialFromAFailure`). The form stores a new
+credential through the secret store and names it by reference; its value is
+never sent back to the page (`TestKnowledgePanelsInBrowser`).
+
+**Sync status is pushed only to who may see the source.** Settings →
+Knowledge sources and a project's Knowledge tab follow each sync live: a
+change to a source, on any hub member, is pushed to every dashboard rendered
+for its person — the source as their own GET would show it — and to nobody who
+may not see it: an operator hears of the organisation's sources and their own,
+never that a colleague's personal one exists or changed, and a viewer of
+nothing (`TestKnowledgeSourcesArePushedToWhoMaySeeThem`,
+`TestKnowledgePushReachesAViewerNothing`, `TestKnowledgePanelsInBrowser`). The
+credential a stream was opened with is read as it stands at each push, so a
+session that ended or a person demoted stops hearing.
+
 **Semantic search: chunk text sent to an endpoint an administrator names.**
 `knowledge.embeddings` (Task 20471) is off unless an administrator turns it on
 in the hub's own configuration, never a project's. On, the hub sends the text of

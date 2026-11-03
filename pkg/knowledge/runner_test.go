@@ -644,3 +644,50 @@ func TestAScheduledSyncOfASourceSyncedMeanwhileIsDropped(t *testing.T) {
 		t.Fatalf("a manual sync of a source just synced = %+v, %v", res, err)
 	}
 }
+
+// TestOnChangeFollowsASync: the hub tells dashboards a source's sync moved
+// (Task 20473), so the runner says so when the sync takes its lease, after
+// each page it indexes, and once its outcome is recorded and its lease
+// released — and a hook that panics fails nothing.
+func TestOnChangeFollowsASync(t *testing.T) {
+	rf := newRunnerFixture(t)
+	var docs []Document
+	for i := range 3 {
+		docs = append(docs, Document{ExternalID: fmt.Sprint(i), Title: fmt.Sprint("Doc ", i), Body: "text"})
+	}
+	src := rf.scripted(t, "changes", &script{docs: docs})
+	var mu sync.Mutex
+	var seen []string
+	r := rf.runner(t, "member-a", func(o *RunnerOptions) {
+		o.OnChange = func(id int64) {
+			if id != src.ID {
+				t.Errorf("OnChange(%d), want %d", id, src.ID)
+			}
+			row, err := rf.db.GetKnowledgeSource(id)
+			leases, lerr := rf.db.LiveKnowledgeSyncLeases(time.Now())
+			if err != nil || lerr != nil {
+				t.Errorf("read the source in OnChange: %v / %v", err, lerr)
+			}
+			_, held := leases[id]
+			mu.Lock()
+			seen = append(seen, fmt.Sprintf("held=%v status=%s", held, row.SyncStatus))
+			mu.Unlock()
+			panic("a dashboard's hook broke")
+		}
+	})
+	res, err := r.SyncNow(context.Background(), src.ID, OriginManual, "root@corp.example")
+	if err != nil || res.Status != StatusOK {
+		t.Fatalf("SyncNow = %+v, %v", res, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// Start (lease held, never synced), one page (held, still never), end
+	// (released, ok).
+	want := []string{"held=true status=", "held=true status=", "held=false status=ok"}
+	if strings.Join(seen, "; ") != strings.Join(want, "; ") {
+		t.Errorf("OnChange saw %q, want %q", seen, want)
+	}
+	if got := sourceRow(t, rf, src.ID); got.SyncStatus != StatusOK {
+		t.Errorf("the source's status = %q: a panicking hook must not fail the sync", got.SyncStatus)
+	}
+}
