@@ -105,6 +105,10 @@ type restartScene struct {
 	// agentEnv is added to the agent's: the trust a variant gives the device
 	// to reach the hub's git proxy.
 	agentEnv []string
+	// extraProjects are further project directories the hub serves beside
+	// proj, each initialised by the variant that names them before the hub
+	// starts.
+	extraProjects []string
 
 	mu       sync.Mutex
 	hub      *exec.Cmd
@@ -236,7 +240,11 @@ func newRestartSceneWith(t *testing.T, opt restartOptions) *restartScene {
 // — the one the agent's credential names, so it finds the new process itself.
 func (s *restartScene) startHub() {
 	s.t.Helper()
-	cmd := exec.Command(s.bin, "ui", "--port", strconv.Itoa(s.port), "--no-browser", "--projects", s.proj)
+	args := []string{"ui", "--port", strconv.Itoa(s.port), "--no-browser", "--projects", s.proj}
+	for _, p := range s.extraProjects {
+		args = append(args, "--projects", p)
+	}
+	cmd := exec.Command(s.bin, args...)
 	cmd.Dir = s.hubDir
 	cmd.Env = append(append([]string(nil), s.env...), s.hubEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

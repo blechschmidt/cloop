@@ -3,6 +3,7 @@ package knowledge
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -77,6 +78,33 @@ func TestSearchNeverCrossesProjects(t *testing.T) {
 		if err != nil || len(hits) != 0 {
 			t.Fatalf("%s found %+v, %v", p.Path, hits, err)
 		}
+	}
+}
+
+// TestACLHintsDoNotDecideWhoReads pins a residual the security model states
+// (docs/security/model.md, "What is not mitigated"): who may read an indexed
+// document is decided by the bindings alone. A connector's ACL hints — here
+// those a Confluence page restricted to a group carries when its source sets
+// include_restricted — are stored with the document and enforced nowhere, so
+// every viewer of a bound project reads it whether or not the site would have
+// shown it to them. A change that enforces the hints changes this test.
+func TestACLHintsDoNotDecideWhoReads(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	src := orgSource(t, f, "Wiki", projectB)
+	acl := []string{"space:FIN", "restricted", "group:finance"}
+	index(t, f, src.ID, Document{ExternalID: "payroll", Title: "Payroll schedule", Space: "FIN",
+		Body: "The zeppelin payroll runs on the last Friday.", ACL: acl})
+	row, found, err := f.db.GetKnowledgeDocument(src.ID, "payroll")
+	if err != nil || !found || !slices.Equal(slices.Sorted(slices.Values(row.ACL)), slices.Sorted(slices.Values(acl))) {
+		t.Fatalf("stored document = %+v (found %v, %v); want its ACL hints %v kept", row, found, err, acl)
+	}
+	// vic views project B and is in no finance group.
+	viewer := f.svc.For(as(t, "vic@corp.example", "proj-b-viewers"))
+	hits, err := viewer.Search(ctx, projectB, "zeppelin", 5)
+	if err != nil || len(hits) != 1 || hits[0].Title != "Payroll schedule" {
+		t.Fatalf("a viewer of the bound project searching for the restricted page = %+v, %v; want it found — "+
+			"if the ACL hints are enforced now, rewrite the residual in docs/security/model.md", hits, err)
 	}
 }
 
