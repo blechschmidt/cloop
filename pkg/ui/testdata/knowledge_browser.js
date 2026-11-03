@@ -40,6 +40,7 @@ const CONTROL = process.argv[4];
 const TASK = Number(process.argv[5]);
 const COOKIE = process.env.KNOWLEDGE_COOKIE || '';
 const TOKEN = process.env.KNOWLEDGE_TOKEN || '';
+const SHOTS = process.env.KNOWLEDGE_BROWSER_SHOTS || '';
 const MINE = "Lead's runbooks";
 const ORG = 'kb-browser-org-wiki';
 const BOB = 'kb-browser-bob';
@@ -237,6 +238,26 @@ async function setValue(cdp, sel, value) {
   if (r !== 'ok') throw new Error(r);
 }
 
+// snap saves what sel shows at a phone's and a desktop's width, when
+// KNOWLEDGE_BROWSER_SHOTS names a directory: pictures of the panels for a
+// person to look at, never a check.
+async function snap(cdp, name, sel) {
+  if (!SHOTS) return;
+  for (const [w, h, scale, mobile] of [[360, 780, 3, true], [1280, 900, 1, false]]) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {width: w, height: h, deviceScaleFactor: scale, mobile});
+    await sleep(300);
+    const r = await cdp.eval(`(() => { const e = document.querySelector(${q(sel)}); if (!e) return null;
+      const b = e.getBoundingClientRect(); return {x: b.left + scrollX, y: b.top + scrollY, w: b.width, h: b.height}; })()`);
+    if (r && r.w && r.h) {
+      const shot = await cdp.send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true,
+        clip: {x: r.x, y: r.y, width: r.w, height: Math.min(r.h, 4000), scale: 1}});
+      fs.writeFileSync(path.join(SHOTS, name + '-' + w + '.png'), Buffer.from(shot.data, 'base64'));
+    }
+  }
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
+  await sleep(300);
+}
+
 // cardOf is the Settings card whose name is name.
 const cardOf = name => `[...document.querySelectorAll('#ksList .ks-card')].find(c =>
   (c.querySelector('.exec-name') || {}).textContent === ${q(name)})`;
@@ -288,6 +309,7 @@ async function main() {
     await click(cdp, '#ks-overlay [data-act="testForm"]');
     await waitFor(cdp, `${text('#ksTestOut')}.includes('connection failed')`, 'the failed test');
     out.fail_text = await cdp.eval(text('#ksTestOut'));
+    await snap(cdp, 'connect-dialog-failed-test', '#ks-overlay [role="dialog"]');
     out.value_cleared = await cdp.eval(`document.getElementById('ksCredValue').value === ''`);
     out.cred_selected = await cdp.eval(`document.getElementById('ksCred').value`);
     out.token_in_page = await cdp.eval(`document.documentElement.outerHTML.includes(${q(TOKEN)}) ||
@@ -306,6 +328,7 @@ async function main() {
     await waitFor(cdp, `(() => { const c = ${cardOf(MINE)}; return !!c && c.textContent.includes('synced')
       && c.textContent.includes('2 documents'); })()`, 'the synced card');
     out.synced_card = await cdp.eval(`(${cardOf(MINE)}).textContent`);
+    await snap(cdp, 'settings-knowledge-sources', '#ksSection');
     out.list_refetches = requests.filter(r => r === 'GET /api/knowledge/sources').length - listsBefore;
 
     // A colleague renames their source, then an administrator syncs the
@@ -334,6 +357,7 @@ async function main() {
         rel: a ? a.rel : '', marks: li.querySelectorAll('mark').length, markup: li.querySelectorAll('img,svg,script').length,
         where: li.querySelector('.form-hint').textContent, snippet: (li.querySelector('.kn-snip') || {}).textContent || ''}; })`;
     out.hits = await cdp.eval(HITS);
+    await snap(cdp, 'knowledge-tab-search', '#tab-knowledge');
     out.mode = await cdp.eval(text('#knMode'));
 
     // The retrieval setting.
@@ -363,6 +387,7 @@ async function main() {
     await cdp.eval(`switchTab('tasks')`);
     await cdp.eval(`window.openTaskDetails(${TASK})`);
     await waitFor(cdp, `${text('#td-cite')}.includes('Knowledge cited')`, 'the task\'s citations');
+    await snap(cdp, 'task-details-citations', '#td-cite');
     out.cites = await cdp.eval(`({text: ${text('#td-cite')}, links: [...document.querySelectorAll('#td-cite a')].map(a => a.getAttribute('href')),
       markup: document.querySelectorAll('#td-cite img,#td-cite svg,#td-cite script').length})`);
 

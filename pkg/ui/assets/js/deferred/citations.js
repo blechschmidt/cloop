@@ -21,7 +21,8 @@
       const url = /^https?:\/\//i.test(c.url || '') ? c.url : '';
       const title = esc(c.title || c.url || 'untitled');
       const where = [c.source, KIND[c.source_kind] || c.source_kind].filter(Boolean).join(' · ');
-      return '<li>' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + title + '</a>' : '<strong>' + title + '</strong>') +
+      return '<li>' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">' + title + '</a>' :
+        '<strong>' + title + '</strong>') +
         ' <span class="td-trunc-note">' + esc([where, HOW[c.kind] || c.kind].filter(Boolean).join(' — ')) + '</span></li>';
     }
 

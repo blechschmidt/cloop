@@ -304,6 +304,7 @@
     #tab-knowledge .kn-hits{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:10px}
     #tab-knowledge .kn-hit{border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;background:var(--surface);overflow-wrap:anywhere;min-width:0}
     #tab-knowledge .kn-hit-head{display:flex;gap:8px;align-items:baseline;font-size:13px}
+    #tab-knowledge .kn-hit a{color:var(--accent)}
     #tab-knowledge .kn-rank{flex:none;font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:9px;padding:0 6px}
     #tab-knowledge .kn-snip{font-size:12.5px;line-height:1.5;margin-top:6px;white-space:pre-wrap}
     #tab-knowledge .kn-snip mark{background:rgba(210,153,34,.28);color:inherit;border-radius:2px;padding:0 1px}

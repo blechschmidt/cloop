@@ -332,8 +332,9 @@
 
     function authChanged() {
       el('ksEmailRow').style.display = el('ksAuth').value === 'basic' ? '' : 'none';
-      el('ksCredHint').textContent = el('ksAuth').value === 'basic' ? 'The API token of the account above.' :
-        'A Data Center personal access token, or an OAuth access token.';
+      el('ksCredHint').textContent = !shape() ? 'The secret this connector signs in with.' :
+        el('ksAuth').value === 'basic' ? 'The API token of the account above.' :
+          'A Data Center personal access token, or an OAuth access token.';
     }
 
     function byChanged() {
