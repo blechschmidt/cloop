@@ -37,8 +37,9 @@ const (
 	CodeTokenBudget Code = "token_budget"
 	// CodeStepLimit is the --steps or per-project max-steps ceiling.
 	CodeStepLimit Code = "step_limit"
-	// CodeApproval is a human-in-the-loop gate: an approval declined, or an
-	// interactive review the operator quit.
+	// CodeApproval is a human-in-the-loop gate: a run that reached a human
+	// review gate in its task list (Task 20477, TaskID names the gate), an
+	// approval declined, or an interactive review the operator quit.
 	CodeApproval Code = "approval"
 	// CodeAbort is a provider or harness refusal that waiting will not fix —
 	// a hard quota, a rejected credential, a harness that would not start.
@@ -175,11 +176,26 @@ type Reason struct {
 	// OAuth usage API reports each window's reset, so the hub can resume
 	// without a human. Nil means "nobody knows; a human decides".
 	ResumesAt *time.Time `json:"resumes_at,omitempty"`
+	// TaskID is the task the pause is about, when it is about one: the human
+	// review gate the run stopped at (Task 20477), or the task whose
+	// interactive approval was declined. It lets a reader go straight to the
+	// decision the run is waiting on. Zero for a pause about the run as a
+	// whole.
+	TaskID int `json:"task_id,omitempty"`
 }
 
 // New builds a Reason with no known resume time.
 func New(code Code, detail string) Reason {
 	return Reason{Code: code, Detail: strings.TrimSpace(detail)}
+}
+
+// NewForTask builds a Reason about one task, with no known resume time.
+func NewForTask(code Code, detail string, taskID int) Reason {
+	r := New(code, detail)
+	if taskID > 0 {
+		r.TaskID = taskID
+	}
+	return r
 }
 
 // NewUntil builds a Reason that lifts by itself at resumesAt. A zero time is

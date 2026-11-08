@@ -64,6 +64,14 @@ type TaskFile struct {
 	RetryBudget    int        `json:"retry_budget,omitempty"    yaml:"retry_budget,omitempty"    toml:"retry_budget,omitempty"`
 	TDDStatus      string     `json:"tdd_status,omitempty"      yaml:"tdd_status,omitempty"      toml:"tdd_status,omitempty"`
 	TDDScore       int        `json:"tdd_score,omitempty"       yaml:"tdd_score,omitempty"       toml:"tdd_score,omitempty"`
+
+	// Kind is what the entry is (Task 20477): empty for work, "human_gate"
+	// for a human review gate. It travels so a gate stays a gate in the
+	// importing project, closed there whatever the exporting team decided:
+	// approvals are not interchanged (see notInterchanged), so an imported
+	// gate waits for the importing team's own review. A plan exported before
+	// kinds existed has none, and every task in it is work.
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty" toml:"kind,omitempty"`
 }
 
 // LinkFile is the portable representation of a task link. pm.Link is tagged
@@ -247,6 +255,7 @@ func planToFile(plan *pm.Plan) PlanFile {
 			RetryBudget:      t.RetryBudget,
 			TDDStatus:        t.TDDStatus,
 			TDDScore:         t.TDDScore,
+			Kind:             string(t.Kind),
 		}
 		for _, l := range t.Links {
 			tf.Links = append(tf.Links, LinkFile{URL: l.URL, Label: l.Label, Kind: string(l.Kind)})
@@ -289,6 +298,7 @@ func fileToTask(tf TaskFile) *pm.Task {
 		RetryBudget:      tf.RetryBudget,
 		TDDStatus:        tf.TDDStatus,
 		TDDScore:         tf.TDDScore,
+		Kind:             pm.TaskKind(strings.TrimSpace(tf.Kind)),
 	}
 	for _, l := range tf.Links {
 		t.Links = append(t.Links, pm.Link{URL: l.URL, Label: l.Label, Kind: pm.LinkKind(l.Kind)})

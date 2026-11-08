@@ -818,6 +818,9 @@ type glassesTask struct {
 	Title    string `json:"title"`
 	Status   string `json:"status"`
 	Priority int    `json:"priority,omitempty"`
+	// Kind is set for an entry that is not work: "human_gate" for a human
+	// review gate (Task 20477), which the display labels as one.
+	Kind string `json:"kind,omitempty"`
 }
 
 // handleGlassesTasks serves GET /api/glasses/tasks?project_idx=N.
@@ -897,6 +900,7 @@ func (s *Server) handleGlassesTasks(w http.ResponseWriter, r *http.Request) {
 			Title:    truncateForGlasses(t.Title, 200),
 			Status:   taskStatusOrPending(t),
 			Priority: t.Priority,
+			Kind:     string(t.Kind),
 		})
 	}
 

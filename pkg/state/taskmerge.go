@@ -61,6 +61,15 @@ var definitionFields = []string{
 	// requirement's deletion, which writes the database directly — a run's
 	// next save must adopt both rather than write its stale list back.
 	"Requirements",
+
+	// What the entry is (Task 20477): work, or a human review gate. Set when
+	// a gate is created, from the dashboard or the CLI and usually while a
+	// run holds the plan; a gate is a new ID, so the merge adopts it whole,
+	// and listing the field here is what keeps a run that held the row from
+	// ever writing it back as work. A gate's approval is Approved, above,
+	// for the same reason: an approval made while a run is going must
+	// survive that run's next save.
+	"Kind",
 }
 
 // definitionIndex holds each definition field's index in pm.Task, resolved

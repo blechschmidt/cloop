@@ -989,7 +989,9 @@ function buildTask(t) {
 function fillTask(row, t) {
   setClass(row._dot, dotClass(t.status));
   setText(row._name, '#' + t.id + ' ' + t.title);
-  setText(row._meta, String(t.status || '').replace(/_/g, ' ') + (t.priority ? ' · P' + t.priority : ''));
+  // A human review gate (Task 20477) is named as one: runs stop there.
+  setText(row._meta, (t.kind ? 'review gate · ' : '') +
+    String(t.status || '').replace(/_/g, ' ') + (t.priority ? ' · P' + t.priority : ''));
 }
 
 function renderFilters() {

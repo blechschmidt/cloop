@@ -717,6 +717,12 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/tasks", Handler: s.handleGetTasks, Perm: read, Scope: scopeProject},
 		{Pattern: "POST /api/tasks", Handler: s.handlePostTasks, Perm: task, Scope: scopeProject},
 		{Pattern: "POST /api/tasks/reorder", Handler: s.handleReorderTasks, Perm: task, Scope: scopeProject},
+		// Human review gates (Task 20477). Adding one and approving one are
+		// task mutations like any other: whoever may edit or delete a gate
+		// may approve it. Restarting the run after an approval is /api/run,
+		// under `start`. See humangate_api.go.
+		{Pattern: "POST /api/tasks/gate", Handler: s.handleTaskGateCreate, Perm: task, Scope: scopeProject},
+		{Pattern: "POST /api/tasks/{id}/approve", Handler: s.handleTaskApprove, Perm: task, Scope: scopeProject},
 		{Pattern: "PUT /api/tasks/{id}", Handler: s.handlePutTask, Perm: task, Scope: scopeProject},
 		{Pattern: "PATCH /api/tasks/{id}", Handler: s.handlePutTask, Perm: task, Scope: scopeProject},
 		{Pattern: "DELETE /api/tasks/{id}", Handler: s.handleDeleteTask, Perm: task, Scope: scopeProject},

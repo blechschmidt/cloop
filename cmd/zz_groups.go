@@ -266,6 +266,7 @@ var taskCommandGroups = map[string]string{
 	"reset":     groupTaskLifecycle,
 	"move":      groupTaskLifecycle,
 	"approve":   groupTaskLifecycle,
+	"gate":      groupTaskLifecycle,
 	"archive":   groupTaskLifecycle,
 	"unarchive": groupTaskLifecycle,
 	"exec":      groupTaskLifecycle,

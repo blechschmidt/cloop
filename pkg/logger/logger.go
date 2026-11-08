@@ -117,6 +117,10 @@ const (
 	// that failed and why, scrubbed of credentials, a lease it lost, and
 	// what a pass purged.
 	EventKnowledge Event = "knowledge"
+
+	// EventReviewGate tags a run stopping at a human review gate in its
+	// task list (Task 20477), and a gate it went past once approved.
+	EventReviewGate Event = "review_gate"
 )
 
 // Entry is the legacy JSON schema for a log line. Kept for callers that

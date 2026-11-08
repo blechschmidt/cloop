@@ -284,7 +284,17 @@ const (
 	// own boot ID. Gated on the hub side: an older agent has no handler and
 	// would never answer, so the hub does not ask, and records the device's
 	// claim as unverified with the upgrade named. See MinIsolationProbeVersion.
-	ProtocolVersion = 26
+	//
+	// v27 says the agent's cloop honours human review gates in a seeded plan
+	// (Task 20477): an entry of kind human_gate holds the queue, the run stops
+	// when it reaches one, and none is ever handed to the harness. No frame
+	// changes; the kind rides in the seed's task rows. Gated on the hub side:
+	// an older agent's cloop ignores the field it does not know and would run
+	// the gate as one more task — and report it done, opening it without the
+	// review it stands for — so the hub refuses to dispatch a plan holding a
+	// pending gate to such a device and names the upgrade. See
+	// MinHumanGateVersion.
+	ProtocolVersion = 27
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -527,6 +537,15 @@ const MinNodeCABundleVersion = 25
 // SupportsNodeCABundle reports whether an agent speaking this protocol version
 // accepts a Node bundle of more than one CA.
 func SupportsNodeCABundle(version int) bool { return version >= MinNodeCABundleVersion }
+
+// MinHumanGateVersion is the first protocol whose agents run a seeded plan
+// holding human review gates as gates (Task 20477): they stop at one and never
+// hand it to the harness. An older agent runs it as a task.
+const MinHumanGateVersion = 27
+
+// SupportsHumanGates reports whether an agent speaking this protocol version
+// honours the human review gates in a seeded plan.
+func SupportsHumanGates(version int) bool { return version >= MinHumanGateVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.

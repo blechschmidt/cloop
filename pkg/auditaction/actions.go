@@ -33,6 +33,10 @@ const (
 	// ActionTaskAttachmentDelete records a person deleting a file attached to
 	// a task (Task 20428).
 	ActionTaskAttachmentDelete Action = "task.attachment_delete"
+	// ActionTaskGateApprove records a person approving a human review gate in
+	// a task list, or pre-approving a task that requires approval (Task
+	// 20477).
+	ActionTaskGateApprove Action = "task.gate_approve"
 
 	// ── run ────────────────────────────────────────────────────────────────
 

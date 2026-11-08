@@ -339,6 +339,16 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 			rep.Kept = append(rep.Kept, fmt.Sprintf("task #%d came back with an unknown status %q.", id, clip(string(after.Status), 32)))
 			continue
 		}
+		// A human review gate is opened by a person, never by a run (Task
+		// 20477). The one outcome a run may report for one is passing a gate
+		// the hub's copy says was approved. Anything else is a device whose
+		// cloop predates gates and ran this one as a task, or a device
+		// reporting a review that never happened.
+		if !h.IsWork() && !(h.Approved && after.Status == pm.TaskDone) {
+			rep.Kept = append(rep.Kept, fmt.Sprintf("task #%d is a human review gate, which only a person opens: "+
+				"the run reported it %s, and it was left %s.", id, statusWord(after.Status), statusWord(h.Status)))
+			continue
+		}
 		startedByRun := !sameTime(tc.Before.StartedAt, after.StartedAt) || tc.Before.Status != after.Status
 		// A requirements gate verdict the run reached is recorded as the
 		// project's requirement checks too (Task 20461), once.

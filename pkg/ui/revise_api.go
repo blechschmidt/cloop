@@ -112,6 +112,9 @@ func (s *Server) handleTaskRevise(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
+	if refuseIfGate(w, task, "revise") {
+		return
+	}
 
 	// The stored title is the fallback, not the override: an editor who has
 	// retitled the task but not yet saved is describing the task they mean, and

@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
-	"sort"
+	"errors"
 	"strings"
 	"testing"
 
@@ -408,39 +408,21 @@ func TestTaskEdit_UpdatesPriority(t *testing.T) {
 
 // --- task move logic ---
 
-// taskMoveHelper simulates the move command logic without os.Getwd().
+// taskMoveHelper runs the move command's logic, pm.Plan.MoveInQueue, without
+// os.Getwd(). It used to carry its own copy of the priority swap the command
+// did, so these tests went on passing after the command changed; since Task
+// 20477 they test the code the command runs.
 func taskMoveHelper(tasks []*pm.Task, id int, direction string) ([]*pm.Task, error) {
-	sorted := make([]*pm.Task, len(tasks))
-	copy(sorted, tasks)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return sorted[i].Priority < sorted[j].Priority
-	})
-
-	idx := -1
-	for i, t := range sorted {
-		if t.ID == id {
-			idx = i
-			break
-		}
-	}
-	if idx == -1 {
+	plan := &pm.Plan{Tasks: tasks}
+	if plan.TaskByID(id) == nil {
 		return nil, &taskNotFoundError{id: id}
 	}
-
-	var other *pm.Task
-	if direction == "up" {
-		if idx == 0 {
+	if _, err := plan.MoveInQueue(id, direction == "up"); err != nil {
+		if errors.Is(err, pm.ErrQueueEdge) {
 			return nil, &taskAtBoundaryError{}
 		}
-		other = sorted[idx-1]
-	} else {
-		if idx == len(sorted)-1 {
-			return nil, &taskAtBoundaryError{}
-		}
-		other = sorted[idx+1]
+		return nil, err
 	}
-
-	sorted[idx].Priority, other.Priority = other.Priority, sorted[idx].Priority
 	return tasks, nil
 }
 

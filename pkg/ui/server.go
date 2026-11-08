@@ -3812,6 +3812,12 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// A run that would stop at a review gate before doing anything (Task
+	// 20477): nothing is dispatched until the gate is approved or work is put
+	// ahead of it.
+	if refuseRunAtGate(w, s.resolveWorkDir(r)) {
+		return
+	}
 
 	// Admission (Task 20182), before anything is dispatched. Starting a run
 	// is the action that actually spends the fleet: it holds an executor
@@ -4364,6 +4370,9 @@ const decomposeMaxSubtasks = 20
 // destructive: running tasks would race the orchestrator, and done tasks
 // would silently lose their completion (apply marks the parent skipped).
 func checkDecomposable(t *pm.Task) error {
+	if !t.IsWork() {
+		return fmt.Errorf("task %d is a human review gate, which holds no work to split", t.ID)
+	}
 	switch t.Status {
 	case pm.TaskInProgress:
 		return fmt.Errorf("task %d is currently running — stop it before decomposing", t.ID)
@@ -4676,12 +4685,25 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	// Capture the attempt token before SaveDirect so the kill request names
 	// the execution the operator was actually looking at (Task 20203).
 	attempt := state.AttemptToken(task)
-	task.Status = newStatus
+	// A human review gate takes its own three statuses, and "done" on one is
+	// its approval (Task 20477).
+	gateApproved, gateWaiting := false, false
+	if !task.IsWork() {
+		var ok bool
+		if ok, gateApproved, gateWaiting = s.gateStatusChange(w, r, ps, task, newStatus); !ok {
+			return
+		}
+	} else {
+		task.Status = newStatus
+	}
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
 	workDir := s.resolveWorkDir(r)
+	if gateApproved {
+		s.recordApproval(r, workDir, task, gateWaiting, "dashboard")
+	}
 	// Manual-abort hook (Task 20140): when an operator moves a task out of
 	// in_progress, request the orchestrator to cancel its in-flight provider
 	// call. The orchestrator's kill-poller picks this up within a second and
@@ -4722,7 +4744,15 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID, "status": req.Status, "released_quarantine": released})
 }
 
-// handleTaskMove reorders a task up or down by swapping priorities.
+// handleTaskMove moves a pending task — or a human review gate — one place up
+// or down the run queue (POST /api/task/move, {"id": N, "direction": "up"}).
+//
+// It used to swap the task's priority with its neighbour's in priority order,
+// over every task in the plan. Two tasks of equal priority swapped nothing, so
+// the move silently did nothing in a plan whose tasks mostly share a priority,
+// and a finished task's place in history could be traded for a queued one's.
+// The move is now pm.Plan.MoveInQueue's: within the queue the orchestrator
+// actually runs, re-ranked so it takes effect (Task 20477).
 func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
@@ -4739,7 +4769,8 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps, err := state.Load(s.resolveWorkDir(r))
+	workDir := s.resolveWorkDir(r)
+	ps, err := state.Load(workDir)
 	if err != nil {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
@@ -4748,43 +4779,21 @@ func (s *Server) handleTaskMove(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-
-	sorted := make([]*pm.Task, len(ps.Plan.Tasks))
-	copy(sorted, ps.Plan.Tasks)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Priority < sorted[j].Priority })
-
-	idx := -1
-	for i, t := range sorted {
-		if t.ID == req.ID {
-			idx = i
-			break
+	other, err := ps.Plan.MoveInQueue(req.ID, req.Direction == "up")
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, pm.ErrNotQueued) {
+			code = http.StatusConflict
 		}
+		jsonErr(w, err.Error(), code)
+		return
 	}
-	// idx != -1: RequireTask already verified the task exists; sorted holds
-	// the same task pointers in a different order, so the index lookup is
-	// always successful here.
-
-	var other *pm.Task
-	if req.Direction == "up" {
-		if idx == 0 {
-			jsonErr(w, "already at top", http.StatusBadRequest)
-			return
-		}
-		other = sorted[idx-1]
-	} else {
-		if idx == len(sorted)-1 {
-			jsonErr(w, "already at bottom", http.StatusBadRequest)
-			return
-		}
-		other = sorted[idx+1]
-	}
-	sorted[idx].Priority, other.Priority = other.Priority, sorted[idx].Priority
-
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID})
+	s.broadcastStateDiff(workDir, ps)
+	jsonOK(w, map[string]interface{}{"ok": true, "id": req.ID, "past": other.ID})
 }
 
 // handleTaskEdit edits a task's title, description, priority, and/or depends_on.
@@ -4992,6 +5001,7 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 	priorStatus := task.Status
 	priorAttempt := state.AttemptToken(task)
 	statusChanged := false
+	gateApproved, gateWaiting := false, false
 	if req.Status != "" {
 		validStatuses := map[string]pm.TaskStatus{
 			"pending":     pm.TaskPending,
@@ -5001,14 +5011,25 @@ func (s *Server) handlePutTask(w http.ResponseWriter, r *http.Request) {
 			"failed":      pm.TaskFailed,
 		}
 		if ns, ok := validStatuses[req.Status]; ok {
-			task.Status = ns
-			statusChanged = ns != priorStatus
+			if !task.IsWork() {
+				// The Kanban board's drag lands here too (Task 20477).
+				var allowed bool
+				if allowed, gateApproved, gateWaiting = s.gateStatusChange(w, r, ps, task, ns); !allowed {
+					return
+				}
+			} else {
+				task.Status = ns
+			}
+			statusChanged = task.Status != priorStatus
 		}
 	}
 
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), statedb.HTTPStatus(err))
 		return
+	}
+	if gateApproved {
+		s.recordApproval(r, s.resolveWorkDir(r), task, gateWaiting, "dashboard")
 	}
 
 	// Manual-abort hook (Task 20140): when this PUT moved the task out of

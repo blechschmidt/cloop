@@ -53,6 +53,7 @@
 <meta name="cloop-hubhealth-src" content="{{asset:hubhealth.js}}">
 <!-- A pending task's Split dialog, fetched by splitTask (Task 20441). -->
 <meta name="cloop-split-src" content="{{asset:split.js}}">
+<meta name="cloop-ledger-src" content="{{asset:ledger.js}}">
 <meta name="cloop-taskreqs-src" content="{{asset:taskreqs.js}}">
 <meta name="cloop-reauth-src" content="{{asset:reauth.js}}">
 <!-- Every other tab but Overview, Tasks and Projects, fetched on first open (Task 20456). -->
@@ -663,7 +664,9 @@
       <div class="section">
         <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           Tasks <span id="taskCountBadge" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span>
-          <button id="toggleCompletedBtn" class="btn" style="margin-left:auto;padding:3px 10px;font-size:11px" data-action="toggleCompletedTasks">Show completed</button>
+          <button class="btn" data-perm="task.mutate" style="margin-left:auto;padding:3px 10px;font-size:11px" data-action="addReviewGate"
+                  title="Runs stop at a review gate until someone approves it">+ Review gate</button>
+          <button id="toggleCompletedBtn" class="btn" style="padding:3px 10px;font-size:11px" data-action="toggleCompletedTasks">Show completed</button>
         </div>
         <div class="task-list" id="taskListFull">
           <div class="empty-state"><h3>No tasks yet</h3><p>Add a task above, or run <code>cloop run --pm</code> to generate a task plan.</p></div>

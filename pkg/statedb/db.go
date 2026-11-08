@@ -1062,6 +1062,8 @@ var taskColumns = []string{
 	"requirements_check",
 	// 0096_knowledge_citations (Task 20472).
 	"citations",
+	// 0097_task_kind (Task 20477).
+	"kind",
 }
 
 // taskSelect reads every task column, then the task's run id, quarantine and
@@ -1114,6 +1116,7 @@ func taskValues(t *pm.Task) []any {
 		listText(t.Requirements),
 		encodeRequirementsCheck(t.RequirementsCheck),
 		encodeCitations(t.Citations),
+		string(t.Kind),
 	}
 }
 
@@ -1131,7 +1134,7 @@ func upsertTaskTx(tx *sql.Tx, t *pm.Task) error {
 // dashboard request.
 type taskScanner struct {
 	row                                         pm.Task
-	status, role                                string
+	status, role, kind                          string
 	lists                                       taskListColumns
 	bgJSON, abortJSON, reviewJSON               string
 	reqCheckJSON, quarantineJSON                string
@@ -1162,6 +1165,7 @@ func newTaskScanner() *taskScanner {
 		&sc.lists.Requirements,
 		&sc.reqCheckJSON,
 		&sc.citationsJSON,
+		&sc.kind,
 		&t.RunID, &sc.quarantineJSON, &t.AttachmentCount,
 	}
 	return sc
@@ -1180,6 +1184,7 @@ func (sc *taskScanner) scan(rows rowScanner) (*pm.Task, error) {
 	*t = sc.row
 	t.Status = pm.TaskStatus(sc.status)
 	t.Role = pm.AgentRole(sc.role)
+	t.Kind = pm.TaskKind(sc.kind)
 	if err := decodeTaskColumns(t, sc.lists); err != nil {
 		return nil, err
 	}

@@ -564,6 +564,14 @@ type Spec struct {
 	//
 	// json:"-" for size rather than for secrecy; see seed.go.
 	ProjectSeed []byte `json:"-"`
+	// HumanGates says the plan in ProjectSeed holds a pending human review
+	// gate (Task 20477), which only a cloop that knows gates stops at: one
+	// that predates them runs the gate as a task. The hub sets it when it
+	// builds the seed, and a driver whose far side runs an older cloop it can
+	// identify — a device agent below protocol 27 — refuses the dispatch.
+	// json:"-" like ProjectSeed: it describes the seed, and goes nowhere
+	// without it.
+	HumanGates bool `json:"-"`
 
 	// BranchBundleFile names the git bundle Workspace.Branch describes, as a
 	// path on the control plane's host, for the driver to read while it

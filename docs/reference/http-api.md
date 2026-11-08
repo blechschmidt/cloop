@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-346 endpoints, by the permission each one requires:
+348 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -113,7 +113,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `secret.request` | 5 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
-| `task.mutate` | 40 |
+| `task.mutate` | 42 |
 | `token.admin` | 6 |
 | `user.manage` | 24 |
 | `view.prefs` | 2 |
@@ -389,10 +389,12 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/task/status` | `task.mutate` | project |
 | GET | `/api/tasks` | `project.read` | project |
 | POST | `/api/tasks` | `task.mutate` | project |
+| POST | `/api/tasks/gate` | `task.mutate` | project |
 | POST | `/api/tasks/reorder` | `task.mutate` | project |
 | PUT | `/api/tasks/{id}` | `task.mutate` | project |
 | PATCH | `/api/tasks/{id}` | `task.mutate` | project |
 | DELETE | `/api/tasks/{id}` | `task.mutate` | project |
+| POST | `/api/tasks/{id}/approve` | `task.mutate` | project |
 | GET | `/api/tasks/{id}/attach` | `sandbox.attach` | project |
 | GET | `/api/tasks/{id}/attach/info` | `sandbox.attach` | project |
 | GET | `/api/tasks/{id}/attachments` | `project.read` | project |

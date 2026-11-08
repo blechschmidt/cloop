@@ -676,6 +676,17 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 			"Or run this project on an executor that shares the control plane's filesystem."))
 	}
 
+	// And for human review gates in that state (Task 20477). An older agent's
+	// cloop reads the seed but not an entry's kind, so it would run a gate as
+	// a task, report it done and carry on past the point a person asked the
+	// run to stop at.
+	if len(spec.ProjectSeed) > 0 && spec.HumanGates && !SupportsHumanGates(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf("%w: %s", ErrProjectSeedUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinHumanGateVersion,
+			"to stop at the human review gate in this project's plan, rather than run it as a task",
+			"Or approve or remove the project's pending review gates."))
+	}
+
 	// And for a shipped branch — a feature's. An older agent has no handler
 	// for the chunks that carry it and ignores the workspace field that names
 	// it, so the harness would start on the feature's base commit with none of

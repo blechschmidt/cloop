@@ -73,40 +73,21 @@ act('setStatus', function(id, status) {
   }).catch(() => toast('Request failed', 'err'));
 }, el => [+el.dataset.arg, el.dataset.argStatus]);
 
-// reopenAbortedTask and clearAbortedTask record the two verdicts available on a
-// task whose stored summary is a provider refusal rather than work
-// (Task 20224). Until now the only way to act on one of these findings was
-// `cloop task audit-ledger --reopen` on the CLI — which is why fourteen of them
-// sat unnoticed in this project's own plan for about a hundred iterations.
-act('reopenAbortedTask', function(id) {
-  api(pUrl('/api/tasks/'+id+'/reopen-aborted'), {}).then(d => {
-    if (d.ok) { toast('Task '+id+' reopened — it never ran', 'ok'); refreshState(); }
-    else toast(d.error||'Reopen failed', 'err');
-  }).catch(() => toast('Request failed', 'err'));
-}, NUM);
+// The two verdicts on a task recorded done on a provider refusal (Task 20224):
+// deferred/ledger.js, fetched on the first press (Task 20477 moved them there
+// to pay for the review gate's row).
+act('reopenAbortedTask', id => panelAct('ledger', 'reopen', id), NUM);
+act('clearAbortedTask', id => panelAct('ledger', 'clear', id), NUM);
 
-// The note is mandatory server-side: a clearance without a reason cannot be
-// told apart from giving up on the audit, and an audit nobody can close is an
-// audit that gets ignored. Prompt rather than a modal because the answer is one
-// line ("re-landed by Task N") and this is a rare, deliberate action.
-act('clearAbortedTask', function(id) {
-  const note = window.prompt(
-    'This task is recorded as done but its summary is a provider refusal.\n\n' +
-    'Where did the work actually land? (e.g. "re-implemented by Task 20016")');
-  if (note === null) return;
-  if (!note.trim()) { toast('A note is required', 'err'); return; }
-  api(pUrl('/api/tasks/'+id+'/clear-aborted'), {note: note.trim()}).then(d => {
-    if (d.ok) { toast('Task '+id+': ledger entry checked', 'ok'); refreshState(); }
-    else toast(d.error||'Could not clear the finding', 'err');
-  }).catch(() => toast('Request failed', 'err'));
-}, NUM);
-
-window.moveTask = function(id, direction) {
-  api(pUrl('/api/task/move'), {id, direction}).then(d => {
-    if (d.ok) { refreshState(); }
-    else toast(d.error||'Move failed', 'err');
-  }).catch(() => toast('Request failed', 'err'));
-};
+// Human review gates (Task 20477). A new one goes to the end of the queue, to
+// be dragged where the run should stop. Approving one where the run stopped at
+// it starts the run again; the list itself follows the hub's state_diff.
+act('addReviewGate', () => api(pUrl('/api/tasks/gate'), {}).then(d =>
+  toast(d.ok ? 'Gate #'+d.id+' added: drag it to where runs should stop' : d.error, d.ok ? 'ok' : 'err')).catch(() => toast('Request failed', 'err')));
+act('approveGate', id => api(pUrl('/api/tasks/'+id+'/approve'), {}).then(d => {
+  toast(d.ok ? 'Gate #'+id+' approved' : d.error, d.ok ? 'ok' : 'err');
+  if (d.waiting) apiRun();
+}).catch(() => toast('Request failed', 'err')), NUM);
 
 act('removeTask', function(id) {
   pendingDeleteId = id;

@@ -262,7 +262,7 @@ func applyWorkspaceFor(spec executor.Spec, ex executor.Executor, workDir string,
 // failure — a clean-looking run that did nothing — that this whole file exists
 // to remove, so it refuses instead, naming the upgrade.
 func finishWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (executor.Spec, error) {
-	seed, err := projectSeedFor(workDir)
+	seed, gates, err := projectSeedWithGates(workDir)
 	if err != nil {
 		return spec, err
 	}
@@ -272,6 +272,7 @@ func finishWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (
 	switch {
 	case len(seed) > 0 && seedable:
 		spec.ProjectSeed = seed
+		spec.HumanGates = gates
 	case mustSeed && !seedable:
 		return spec, &workspaceSourceError{
 			ProjectPath:  workDir,
@@ -339,12 +340,20 @@ func finishWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (
 // plan, and reports success having run nothing — the failure mode this whole
 // file exists to remove.
 func projectSeedFor(workDir string) ([]byte, error) {
+	seed, _, err := projectSeedWithGates(workDir)
+	return seed, err
+}
+
+// projectSeedWithGates is projectSeedFor, also reporting whether the plan it
+// carries holds a pending human review gate (Task 20477): a device whose cloop
+// predates gates would run one as a task, so the dispatch must know.
+func projectSeedWithGates(workDir string) ([]byte, bool, error) {
 	st, err := state.LoadLite(workDir)
 	if err != nil {
 		if errors.Is(err, statedb.ErrProjectNotFound) {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, &workspaceSourceError{
+		return nil, false, &workspaceSourceError{
 			ProjectPath: workDir,
 			Reason: fmt.Sprintf("could not read the project state to send to the executor: %v. "+
 				"The sandbox fetches the source tree but gets its goal, instructions and plan "+
@@ -361,12 +370,12 @@ func projectSeedFor(workDir string) ([]byte, error) {
 	st.Model = resolveProjectModel(workDir, st.Provider, st)
 	seed, err := projectseed.BuildFull(st, seedRequirementsFor(workDir, st), seedRequirementStatusFor(workDir, st))
 	if err != nil {
-		return nil, &workspaceSourceError{
+		return nil, false, &workspaceSourceError{
 			ProjectPath: workDir,
 			Reason:      err.Error(),
 		}
 	}
-	return seed, nil
+	return seed, st.Plan.HasPendingGates(), nil
 }
 
 // seedRequirementsFor reads the requirements st's unfinished tasks implement

@@ -1989,13 +1989,18 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// the condition gate, all in GateTasks so this path and runPMParallel
 		// cannot disagree about the outcome or how it is worded.
 		gate := GateTasks(ctx, s.Plan, o.gateConfig(false))
-		if gate.Skipped() > 0 {
-			if err := o.persist(s, fmt.Sprintf("the execution gate's skips (tasks %v)", gate.SkippedIDs())); err != nil {
+		if gate.Changed() {
+			if err := o.persist(s, fmt.Sprintf("the execution gate's changes (tasks %v)", gate.ChangedIDs())); err != nil {
 				return err
 			}
 		}
 		printGateDecision(gate, failColor, dimColor)
 		if len(gate.Runnable) == 0 {
+			// A human review gate the run has reached (Task 20477): the
+			// tasks after it wait for a person, so the run stops here.
+			if gate.Waiting != nil {
+				return o.stopAtReviewGate(s, gate.Waiting)
+			}
 			if gate.Exhausted {
 				break
 			}
@@ -2110,8 +2115,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				dimColor.Printf("→ Task %d skipped at approval gate.\n\n", task.ID)
 				continue
 			case res.Paused:
-				s.SetPaused(pausereason.New(pausereason.CodeApproval,
-					fmt.Sprintf("approval declined for task #%d", task.ID)))
+				s.SetPaused(pausereason.NewForTask(pausereason.CodeApproval,
+					fmt.Sprintf("approval declined for task #%d", task.ID), task.ID))
 				if err := o.persist(s, "the pause (approval declined)"); err != nil {
 					return err
 				}
@@ -2152,8 +2157,8 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				color.New(color.FgYellow).Printf("⏸ Review mode: user quit. Run 'cloop run' to resume.\n")
 				return nil
 			case "no":
-				s.SetPaused(pausereason.New(pausereason.CodeApproval,
-					fmt.Sprintf("interactive review: operator declined task #%d", task.ID)))
+				s.SetPaused(pausereason.NewForTask(pausereason.CodeApproval,
+					fmt.Sprintf("interactive review: operator declined task #%d", task.ID), task.ID))
 				if err := o.persist(s, "the pause (operator declined the task in review mode)"); err != nil {
 					return err
 				}
@@ -4476,13 +4481,19 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		// worded. Parallel mode differs only in taking every eligible task
 		// rather than the single highest-priority one.
 		gate := GateTasks(ctx, s.Plan, o.gateConfig(true))
-		if gate.Skipped() > 0 {
-			if err := o.persist(s, fmt.Sprintf("the execution gate's skips (tasks %v)", gate.SkippedIDs())); err != nil {
+		if gate.Changed() {
+			if err := o.persist(s, fmt.Sprintf("the execution gate's changes (tasks %v)", gate.ChangedIDs())); err != nil {
 				return err
 			}
 		}
 		printGateDecision(gate, failColor, dimColor)
 		if len(gate.Runnable) == 0 {
+			// Same stop as the sequential loop's (Task 20477). Rounds launch
+			// together and drain together, so nothing is in flight here: the
+			// work ahead of the gate has all finished.
+			if gate.Waiting != nil {
+				return o.stopAtReviewGate(s, gate.Waiting)
+			}
 			if gate.Exhausted {
 				break
 			}

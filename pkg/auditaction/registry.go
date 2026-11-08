@@ -114,6 +114,17 @@ var registry = []Entry{
 		Note:      "`via` names the reset — the dashboard, `cloop task reset`, `cloop task bulk reset`; the actor is who pressed it.",
 	},
 	{
+		Action:    ActionTaskGateApprove,
+		Home:      HomeProject,
+		Entity:    "task",
+		Trigger:   "A person approves a human review gate in the task list, letting the run continue past it, or pre-approves a task that requires approval.",
+		Payload:   []string{"task_id", "title", "kind", "waiting", "via"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`kind` is `human_gate` for a review gate and empty for a task. `waiting` is true when a run had " +
+			"stopped at the gate. `via` names where it was approved: the dashboard or `cloop task gate approve`.",
+	},
+	{
 		Action:    ActionTaskAttachmentDelete,
 		Home:      HomeProject,
 		Entity:    "task",

@@ -79,6 +79,8 @@ const (
 	// Task 20461.
 	EventTaskRequirements      = statedb.EventTaskRequirements
 	EventRequirementRegression = statedb.EventRequirementRegression
+	// Task 20477.
+	EventReviewGate = statedb.EventReviewGate
 )
 
 // LogEvent appends one row to the project's event journal. Best-effort: any

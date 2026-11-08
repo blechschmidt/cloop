@@ -159,6 +159,9 @@ var deferredScripts = []struct{ token, path string }{
 	// The Timeline tab (Task 20427): deferred to pay for the approvals badge
 	// first paint now carries.
 	{"timeline.js", "assets/js/deferred/timeline.js"},
+	// The two verdicts on a task recorded done on a provider refusal (Task
+	// 20224), deferred by Task 20477 to pay for the review gate's row.
+	{"ledger.js", "assets/js/deferred/ledger.js"},
 	// The approvals inbox the badge opens (Task 20427): what waits on the
 	// caller, and what became of their own requests.
 	{"approvals.js", "assets/js/deferred/approvals.js"},

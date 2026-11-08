@@ -327,6 +327,16 @@ const (
 	// where it last passed. The hub's notifier sends them to the webhooks
 	// that ask for requirement.regression.
 	EventRequirementRegression EventType = "requirement_regression"
+
+	// EventReviewGate records a human review gate in a project's task list
+	// (Task 20477) being reached — the run stopped at it, waiting for a
+	// person — or approved, and by whom. Details carry "action": "reached"
+	// or "approved".
+	//
+	// Its own type because it explains what a status alone cannot: a run
+	// that stopped with work still queued, and a task list that carried on
+	// past the point a person asked it to stop at.
+	EventReviewGate EventType = "review_gate"
 )
 
 // NoStep is the EventRow.Step value for events that are not bound to any

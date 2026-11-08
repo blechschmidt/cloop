@@ -66,6 +66,11 @@ func Run(plan *pm.Plan, thresholdDays int, dryRun bool) []Promotion {
 			t.Status == pm.TaskFailed || t.Status == pm.TaskTimedOut {
 			continue
 		}
+		// A human review gate is never promoted (Task 20477): where it sits
+		// in the queue is where a person asked the run to stop.
+		if !t.IsWork() {
+			continue
+		}
 		if t.Priority <= 1 {
 			// Already at highest priority.
 			continue

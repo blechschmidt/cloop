@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -166,14 +167,39 @@ func bulkStatusFn(newStatus pm.TaskStatus, verb string) func(*cobra.Command, []s
 		// Captured before the assignment: after it, every target reads as
 		// newStatus and the trail could only record that they are now what they
 		// were just set to.
+		// A human review gate takes the status as its own meaning (Task
+		// 20477): done approves it, which no task's run may do. Every target
+		// is checked before any is changed, so a refusal changes nothing.
+		for _, t := range targets {
+			if t.IsWork() {
+				continue
+			}
+			if !pm.GateStatusAllowed(newStatus) {
+				return fmt.Errorf("task %d is a human review gate: it is pending (waiting for review), "+
+					"done (approved) or skipped, never %s", t.ID, newStatus)
+			}
+			if newStatus == pm.TaskDone && t.GateClosed() && insideTaskRun() {
+				return errApprovalInsideRun
+			}
+		}
 		priorStatus := make([]pm.TaskStatus, len(targets))
+		var approved []*pm.Task
 		for i, t := range targets {
 			priorStatus[i] = t.Status
-			t.Status = newStatus
+			ok, err := pm.SetStatusByHand(t, newStatus, operatorActor(), time.Now())
+			if err != nil {
+				return err
+			}
+			if ok {
+				approved = append(approved, t)
+			}
 		}
 
 		if err := s.Save(); err != nil {
 			return err
+		}
+		for _, t := range approved {
+			recordCLIApproval(workdir, t, s.Status == "paused" && s.PauseReason != nil && s.PauseReason.TaskID == t.ID)
 		}
 		// One row per task rather than one per command (Task 20282). A bulk
 		// operation is a convenience for the operator, not a different kind of

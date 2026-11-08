@@ -237,7 +237,10 @@ function renderTasks(s) {
 
   container.innerHTML = visible.map(t => {
     const cls = t.status || 'pending';
-    const statusActions = buildStatusActions(t);
+    // A human review gate (Task 20477), or a kind this page does not know:
+    // never work, so it gets the gate's row, not a task's buttons.
+    const g = !!t.kind;
+    const statusActions = g ? gateActs(t, s) : buildStatusActions(t);
     const tid = t.id;
     // A task blocked on background work gets the running treatment on the row
     // itself, so the list reads correctly at a glance: it is not finished.
@@ -254,19 +257,19 @@ function renderTasks(s) {
         ' data-action-dragover="onDragOver" data-action-dragleave="onDragLeave"'+
         ' data-action-drop="onDrop" data-action-dragend="onDragEnd"'
       : '';
-    return '<div class="task-item '+esc(cls)+bgCls+abCls+'" data-task-id="'+tid+'"'+dragAttrs+' '+
+    return '<div class="task-item '+esc(cls)+bgCls+abCls+(g?' gate':'')+'" data-task-id="'+tid+'"'+dragAttrs+' '+
       'data-action="taskRowClick" data-arg="'+tid+'" '+
       'style="cursor:pointer" '+
       'title="Click to view execution summary, output, and history">'+
       (canOrder
         ? '<div class="drag-handle" title="Drag to reorder — tasks run top to bottom">&#8597;</div>'
         : '<div class="drag-handle drag-handle-disabled" aria-hidden="true"></div>')+
-      '<div class="task-icon">'+taskIcon(cls)+'</div>'+
+      '<div class="task-icon">'+(g?'⏸':taskIcon(cls))+'</div>'+
       '<div class="task-body">'+
         '<div class="task-title">'+(t.pinned?'<span class="pin-badge" title="Pinned">📌</span> ':'')+esc(t.title)+'</div>'+
         (t.description ? '<div class="task-desc">'+esc(t.description)+'</div>' : '')+
         '<div class="task-meta">'+
-          '<span>'+esc(cls)+'</span>'+
+          '<span>'+esc(g?gateWord(t,s):cls)+'</span>'+
           (t.role?'<span>'+esc(t.role)+'</span>':'')+
           (t.depends_on&&t.depends_on.length?'<span>deps: #'+t.depends_on.join(', #')+'</span>':'')+
           (t.tags&&t.tags.length?'<span class="task-tags">'+t.tags.map(function(tg){return '<span class="task-tag">'+esc(tg)+'</span>';}).join('')+'</span>':'')+
@@ -281,7 +284,7 @@ function renderTasks(s) {
       '</div>'+
       '<div class="task-actions">'+
         statusActions+
-        (cls !== 'done' && cls !== 'in_progress'
+        (!g && cls !== 'done' && cls !== 'in_progress'
           ? '<button class="act split"  title="AI-split into sub-tasks" data-action="splitTask" data-arg="'+tid+'">Split</button>' : '')+
         '<button class="act edit"   title="Edit"   data-action="openEditModal" data-arg="'+tid+'">Edit</button>'+
         '<button class="act remove" title="Remove" data-action="removeTask" data-arg="'+tid+'">Remove</button>'+
@@ -290,6 +293,23 @@ function renderTasks(s) {
       '</div>'+
     '</div>';
   }).join('');
+}
+
+// gateWaits: the run stopped at this review gate (Task 20477) and nobody has
+// approved it yet. gateWord says where a gate stands; gateActs offers Approve
+// on a closed one — "& continue" where the run stopped at it — and Reopen.
+function gateWaits(t, s) {
+  const p = s && s.pause_reason;
+  return s.status === 'paused' && !!p && p.task_id === t.id && t.status === 'pending' && !t.approved;
+}
+function gateWord(t, s) {
+  return 'review gate · ' + (t.status === 'skipped' ? 'bypassed' : t.status === 'done' || t.approved ? 'approved' :
+    gateWaits(t, s) ? 'waiting for review' : 'the run stops here');
+}
+function gateActs(t, s) {
+  return t.status === 'pending' && !t.approved
+    ? '<button class="act done" data-action="approveGate" data-arg="'+t.id+'">'+(gateWaits(t, s) ? 'Approve &amp; continue' : 'Approve')+'</button>'
+    : '<button class="act reset" data-action="setStatus" data-arg="'+t.id+'" data-arg-status="pending">Reopen</button>';
 }
 
 // fmtBackgroundWork renders work an agent left running after it claimed the

@@ -553,6 +553,13 @@ func (s *Server) toolCompleteTask(raw json.RawMessage) (ToolResult, error) {
 	if found == nil {
 		return ToolResult{}, fmt.Errorf("task %d not found", args.ID)
 	}
+	// A human review gate is a person's decision (Task 20477): this tool is
+	// what an agent calls, so it never opens one. A person approves a gate in
+	// the dashboard or with `cloop task gate approve`.
+	if !found.IsWork() {
+		return ToolResult{}, fmt.Errorf("task %d is a human review gate, which only a person approves "+
+			"(in the dashboard or with `cloop task gate approve %d`)", args.ID, args.ID)
+	}
 
 	now := time.Now()
 	found.Status = pm.TaskDone

@@ -166,6 +166,11 @@ Seven pages, best read in order. They are also listed on the
   people to look at (reports, charts, screenshots, exports, logs), attached to
   the task. Where an agent puts them, `cloop task attachments`, and how they
   appear in the dashboard.
+- **[Stopping a run for review](guides/human-review-gates.md)**: human review
+  gates in the task list. A run stops at one until someone approves it, so you
+  can check the work above it and add or change tasks before the run goes on.
+  Covers adding and moving gates, approving them and what remote executors
+  need.
 - **[Reviewing tasks before they are published](guides/review-gate.md)**: the
   review gate, where a second model (which can differ from the one doing the
   work) reads each task's changes before anything is pushed or merged. Covers

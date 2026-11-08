@@ -5728,6 +5728,18 @@ space or project can try to steer the runs of every project it is bound to, and
 a credential shape that pkg/redact doesn't know passes both scrubs
 ([retrieved text is untrusted](#retrieved-text-is-untrusted)).
 
+**An agent on a local executor can open a human review gate itself.** No agent
+is handed a gate (`TestRunStopsAtAReviewGateUntilItIsApproved`), the MCP
+server's `complete_task` refuses one (`TestCompleteTaskRefusesAReviewGate`),
+`cloop task gate approve` refuses inside a task's run
+(`TestTaskGateCommands`), and a run on a remote executor can't report a gate
+passed unless the hub's copy was approved
+(`TestMergeNeverOpensAGateTheHubDidNotApprove`). But the CLI's refusal reads
+the agent's environment, and an agent running as a local process can write the
+project's database directly. A gate is a stop for review. If you don't trust
+an agent, run it on an isolating executor, where the hub's copy of the plan is
+out of its reach.
+
 ---
 
 ## See also

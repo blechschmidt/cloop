@@ -293,7 +293,34 @@ cloop task done <id>               # mark as done
 cloop task fail <id>               # mark as failed
 cloop task reset <id>              # reset to pending
 cloop task remove <id>             # remove from plan
+cloop task move <id> up            # run a task, or a review gate, one place sooner (or down)
 ```
+
+#### `cloop task gate`
+
+Human review gates: entries in the task list where a run stops until someone
+approves them. See [Stopping a run for review](../guides/human-review-gates.md).
+
+```bash
+cloop task gate add                          # at the end of the queue
+cloop task gate add --after 4                # right after task 4
+cloop task gate add --before 7 --title "Check the schema" --note "Look at the migration"
+cloop task gate approve <id>                 # let runs continue past it
+cloop task gate reopen <id>                  # make runs stop there again
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--after` | | `add`: put the gate right after this task (the head of the queue if that task has already run) |
+| `--before` | | `add`: put the gate right before this task, which must still be queued |
+| `--title` | `Human review` | `add`: what the gate is for |
+| `--note` | | `add`: what the reviewer should look at |
+| `--json` | `false` | `add`: print the new gate as JSON |
+
+`cloop task done <id>` on a gate approves it, `cloop task reset <id>` closes it
+again and `cloop task skip <id>` bypasses it. `cloop task approve <id>` approves
+a gate as well. Approving refuses to run inside a task's run, where the agent's
+environment names the task.
 
 #### `cloop task attachments`
 

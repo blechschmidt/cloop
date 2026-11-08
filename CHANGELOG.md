@@ -179,6 +179,27 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Human review gates in the task list.** A gate is an entry in the queue that
+  no agent runs. When a run reaches one, which means every task above it has
+  finished, the run pauses with *waiting for human review at gate #N*, sends a
+  notification and records the stop in the event history. A person can then
+  check the work, edit the tasks below the gate or add tasks above it, and
+  press Run to have those carried out before the run stops at the gate again.
+  Approving the gate lets the run continue past it. Add one with **+ Review
+  gate** on the Tasks tab or `cloop task gate add [--after N | --before N]`,
+  move it like any task (drag, or `cloop task move <id> up|down`), and approve
+  it with **Approve & continue** or `cloop task gate approve <id>`. A gate at
+  the end of the list keeps the plan from counting as complete, so auto-evolve
+  does not plan past a review nobody has done. Approvals are audited as
+  `task.gate_approve`, naming who approved. The approve command refuses to run
+  inside a task's run, so an agent cannot approve the gate it is working
+  towards. A run on a remote executor cannot open a gate either: the hub keeps
+  its own copy closed unless a person approved it. Gates are a new
+  `plan_tasks.kind` column (migration 0097, additive). Device agents speak
+  protocol 27, and the hub refuses to send a plan holding a pending gate to an
+  older agent, which would run the gate as a task. See
+  `docs/guides/human-review-gates.md` (Task 20477).
+
 - **A guide to knowledge sources, their trust model, and an end-to-end proof
   against fake Atlassian servers.** `docs/guides/knowledge-sources.md` covers
   connecting Confluence and Jira, Cloud or Data Center: a least-privilege
@@ -747,6 +768,17 @@ schema and the hub's HTTP API may change in any release.
   what every other command prints (Task 20452).
 
 ### Fixed
+
+- **Moving a task up or down now takes effect between tasks of equal
+  priority.** `cloop task move <id> up|down` and the dashboard's move endpoint
+  swapped the task's priority with its neighbour's in priority order over the
+  whole plan. Two tasks of the same priority swapped nothing, so in a plan where
+  most tasks share a priority the move did nothing, and a finished task's place
+  could be traded for a queued one's. A move now works within the run queue,
+  pending tasks and review gates in the order they run. The two entries still
+  trade priorities, and where that changes nothing the queue is renumbered so
+  the move takes effect. Moving a finished or running task is refused, and so
+  is moving past a pinned task (Task 20477).
 
 - **`cloop init` prints the database it created, and `cloop doctor` no longer
   warns about a missing `state.json`.** The banner's `State:` line named

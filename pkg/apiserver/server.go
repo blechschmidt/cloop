@@ -874,9 +874,16 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 				WithDetails(map[string]any{"field": "status", "value": body.Status}))
 			return
 		}
-		task.Status = pm.TaskStatus(body.Status)
-		if body.Status == "done" || body.Status == "failed" || body.Status == "skipped" {
-			now := time.Now()
+		// A human review gate takes the status as its own meaning (Task
+		// 20477): done approves it, pending closes it again, and a status no
+		// gate takes is refused.
+		now := time.Now()
+		if _, err := pm.SetStatusByHand(task, pm.TaskStatus(body.Status), "api", now); err != nil {
+			apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, err.Error()).
+				WithDetails(map[string]any{"field": "status", "value": body.Status}))
+			return
+		}
+		if task.IsWork() && (body.Status == "done" || body.Status == "failed" || body.Status == "skipped") {
 			task.CompletedAt = &now
 		}
 	}

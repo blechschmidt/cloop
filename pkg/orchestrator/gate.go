@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/condition"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -44,6 +45,10 @@ const (
 	// quarantined as a suspected node killer (Task 20391). Its status is left
 	// alone: it waits, visibly pending, for the explicit reset that releases it.
 	GateHoldQuarantined GateEventKind = "hold_quarantined"
+	// GatePassedReview records a human review gate a person approved, which
+	// the run now records as passed (Task 20477). It changes the gate's
+	// status, so the caller persists the plan.
+	GatePassedReview GateEventKind = "passed_review"
 )
 
 // GateEvent is one decision the gate made about one task, carrying both the
@@ -57,6 +62,10 @@ type GateEvent struct {
 	// Annotation is the text recorded on the task. Empty for non-skip events.
 	Annotation string
 }
+
+// changesPlan reports whether this event changed the task it names, so the
+// pass that produced it must be persisted: a skip, or a review gate passed.
+func (e GateEvent) changesPlan() bool { return e.IsSkip() || e.Kind == GatePassedReview }
 
 // IsSkip reports whether this event changed the task's status to skipped.
 func (e GateEvent) IsSkip() bool {
@@ -103,6 +112,33 @@ type GateDecision struct {
 	// and the blocked sweep found nothing either — the plan has no more work
 	// the gate can unblock, so the caller should leave its loop.
 	Exhausted bool
+	// Waiting is the human review gate the run has reached (Task 20477):
+	// closed, first in the queue, and with no work ahead of it left to run.
+	// The caller stops the run there for a person to review; nil otherwise.
+	// Never set together with Exhausted or a non-empty Runnable.
+	Waiting *pm.Task
+}
+
+// Changed reports whether this pass changed the plan — a skip or a review
+// gate recorded as passed — so the caller must persist it.
+func (d GateDecision) Changed() bool {
+	for _, e := range d.Events {
+		if e.changesPlan() {
+			return true
+		}
+	}
+	return false
+}
+
+// ChangedIDs returns the IDs of the tasks this pass changed, in order.
+func (d GateDecision) ChangedIDs() []int {
+	var ids []int
+	for _, e := range d.Events {
+		if e.changesPlan() {
+			ids = append(ids, e.Task.ID)
+		}
+	}
+	return ids
 }
 
 // Skipped returns the number of tasks this pass moved to skipped. A non-zero
@@ -130,18 +166,24 @@ func (d GateDecision) SkippedIDs() []int {
 
 // GateTasks decides what runs next. It applies, in order:
 //
-//  1. Eligibility — pending tasks whose dependencies are all done or skipped,
-//     and which are not quarantined as suspected node killers.
+//  0. Human review gates a person approved are recorded as passed (Task
+//     20477), so the tasks they held become eligible in this same pass.
+//  1. Eligibility — pending work whose dependencies are all done or skipped,
+//     which is not held behind a closed human review gate, and which is not
+//     quarantined as a suspected node killer.
 //  2. The blocked sweep — only when nothing is eligible, so a task whose
 //     failed dependency is still being healed is not skipped prematurely.
+//     It reaches no further than the first closed review gate: a person
+//     reviewing there may yet reset the failed dependency. With nothing
+//     swept and a closed gate first in the queue, the run has reached it
+//     (Waiting).
 //  3. Selection — every eligible task in parallel mode, otherwise the single
 //     highest-priority one.
 //  4. The tag filter.
 //  5. The condition gate.
 //
-// Skips are applied to the plan (status plus annotation) before returning;
-// the caller is responsible for printing Events and persisting the plan when
-// Skipped() is non-zero.
+// Skips and passed gates are applied to the plan before returning; the caller
+// is responsible for printing Events and persisting the plan when Changed().
 func GateTasks(ctx context.Context, plan *pm.Plan, cfg GateConfig) GateDecision {
 	var d GateDecision
 	if plan == nil {
@@ -149,7 +191,27 @@ func GateTasks(ctx context.Context, plan *pm.Plan, cfg GateConfig) GateDecision 
 		return d
 	}
 
-	// (1) Eligibility. ReadyTasks is pending && DepsReady in plan order.
+	// (0) Approved review gates. An approval is a definition field, so it
+	// reaches a run that held the plan when the person approved (its sync
+	// adopts it); the status is the run's to write, and it writes it here.
+	// Only an approval opens a gate this way — the run never decides on its
+	// own that a review is done.
+	passed := 0
+	now := time.Now()
+	for _, t := range plan.Tasks {
+		if t != nil && !t.IsWork() && t.Approved && t.Status == pm.TaskPending {
+			pm.PassGate(t, now)
+			passed++
+			d.Events = append(d.Events, GateEvent{
+				Kind: GatePassedReview,
+				Task: t,
+				Line: fmt.Sprintf("✓ Review gate %d approved — continuing past it: %s\n", t.ID, t.Title),
+			})
+		}
+	}
+
+	// (1) Eligibility. ReadyTasks is pending work with its dependencies
+	// satisfied, ahead of the first closed review gate, in execution order.
 	eligible := plan.ReadyTasks()
 
 	// A quarantined task never runs, whatever its status (Task 20391). It
@@ -186,9 +248,15 @@ func GateTasks(ctx context.Context, plan *pm.Plan, cfg GateConfig) GateDecision 
 	// PermanentlyBlocked only ever becomes true, never false, for a task whose
 	// dependency stays failed.
 	if len(eligible) == 0 {
+		// Only work is swept, and only work ahead of the first closed review
+		// gate (Task 20477). A gate is never skipped for a dependency: that
+		// would open it without the person it waits for. And the tasks it
+		// holds wait for the review too, which may reset the failed task they
+		// depend on rather than let them be skipped under it.
+		barrier := plan.GateBarrier()
 		swept := 0
 		for _, t := range plan.Tasks {
-			if t.Status == pm.TaskPending && plan.PermanentlyBlocked(t) {
+			if t.Status == pm.TaskPending && t.IsWork() && !pm.HeldBy(barrier, t) && plan.PermanentlyBlocked(t) {
 				d.Events = append(d.Events, applySkip(blockedSkip(t)))
 				swept++
 			}
@@ -196,7 +264,17 @@ func GateTasks(ctx context.Context, plan *pm.Plan, cfg GateConfig) GateDecision 
 		// Exhausted when the sweep changed nothing. Counted from the sweep
 		// alone: a held quarantined task is an event too, and counting it
 		// would keep the caller looping over a plan with nothing it may run.
-		d.Exhausted = swept == 0
+		// A gate passed above changed the plan as a skip does, so the caller
+		// looks again. And a closed gate first in the queue with nothing
+		// ahead of it left to run is not the end of the plan: the run has
+		// reached it, and stops there for a person.
+		if swept == 0 && passed == 0 {
+			if w := plan.WaitingGate(); w != nil {
+				d.Waiting = w
+			} else {
+				d.Exhausted = true
+			}
+		}
 		return d
 	}
 

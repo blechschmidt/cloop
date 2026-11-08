@@ -94,6 +94,32 @@ func AuditTaskStatus(d *DB, taskID int, oldStatus, newStatus, actor string) {
 	})
 }
 
+// AuditTaskGateApprove records a person approving a human review gate, or
+// pre-approving a task that requires approval (Task 20477). waiting says
+// whether a run had stopped at the gate; via names where it was approved. It
+// belongs in the project's chain: d must be the project's handle.
+func AuditTaskGateApprove(d *DB, t *pm.Task, waiting bool, actor, via string) {
+	if t == nil {
+		return
+	}
+	if actor == "" {
+		actor = "system"
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  string(auditaction.ActionTaskGateApprove),
+		EntityType: "task",
+		EntityID:   fmt.Sprintf("%d", t.ID),
+		Payload: MarshalAuditPayload(map[string]any{
+			"task_id": t.ID,
+			"title":   t.Title,
+			"kind":    string(t.Kind),
+			"waiting": waiting,
+			"via":     via,
+		}),
+	})
+}
+
 // AuditTaskQuarantine records a task marked as a suspected node killer (Task
 // 20391). It belongs in the project's chain: d must be the project's handle.
 func AuditTaskQuarantine(d *DB, t *pm.Task, q pm.TaskQuarantine, actor string) {

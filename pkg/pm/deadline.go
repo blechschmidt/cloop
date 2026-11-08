@@ -137,6 +137,13 @@ func CheckAndBoostOverdue(plan *Plan) []OverdueResult {
 		if !IsOverdue(t) {
 			continue
 		}
+		// A human review gate's place in the queue is a person's decision
+		// (Task 20477): a deadline on one is reported, never acted on by
+		// moving the gate.
+		if !t.IsWork() {
+			results = append(results, OverdueResult{Task: t, Overdue: true})
+			continue
+		}
 		r := OverdueResult{Task: t, Overdue: true}
 		if t.Priority != 1 {
 			r.OldPriority = t.Priority

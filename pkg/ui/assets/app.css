@@ -742,6 +742,7 @@
   .task-item.in_progress { border-color:var(--cyan); background:rgba(57,197,207,.05); }
   .task-item.done        { border-color:rgba(63,185,80,.3); }
   .task-item.failed      { border-color:rgba(248,81,73,.3); }
+  .task-item.gate        { border-style:dashed; border-color:var(--yellow); }
   .task-item.skipped     { opacity:.5; }
   .task-icon { font-size:15px; flex-shrink:0; margin-top:1px; }
   .task-body { flex:1; min-width:0; }

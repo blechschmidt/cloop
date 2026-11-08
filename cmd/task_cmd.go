@@ -456,6 +456,13 @@ var taskNextCmd = &cobra.Command{
 		}
 		task := s.Plan.NextTask()
 		if task == nil {
+			// Nothing runnable can mean a review gate the run has reached
+			// (Task 20477), not a finished plan.
+			if g := s.Plan.WaitingGate(); g != nil {
+				color.New(color.FgYellow).Printf("Waiting for review at gate #%d: %s\n", g.ID, g.Title)
+				color.New(color.Faint).Printf("  Approve it with 'cloop task gate approve %d' to continue.\n", g.ID)
+				return nil
+			}
 			color.New(color.FgGreen).Printf("All tasks complete — no pending tasks remaining.\n")
 			return nil
 		}
@@ -471,13 +478,15 @@ var taskNextCmd = &cobra.Command{
 
 var taskMoveCmd = &cobra.Command{
 	Use:   "move <id> <up|down>",
-	Short: "Move a task up or down in priority order",
-	Long: `Move a task up (higher priority) or down (lower priority) by swapping
-priorities with the adjacent task in the sorted order.
+	Short: "Move a task or review gate one place up or down the run queue",
+	Long: `Move a pending task, or a human review gate, one place up (towards the head
+of the run queue) or down. The two entries trade priorities; where they share
+one, the queue is renumbered so the move still takes effect. Finished and
+running tasks have no place in the queue.
 
 Examples:
-  cloop task move 3 up    # increase priority of task 3
-  cloop task move 5 down  # decrease priority of task 5`,
+  cloop task move 3 up    # run task 3 one place sooner
+  cloop task move 12 down # let one more task run before review gate 12`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
@@ -493,57 +502,30 @@ Examples:
 		if err != nil {
 			return fmt.Errorf("invalid task ID %q: must be a number", args[0])
 		}
-
 		direction := strings.ToLower(args[1])
 		if direction != "up" && direction != "down" {
 			return fmt.Errorf("direction must be 'up' or 'down', got %q", args[1])
 		}
-
-		// Build a sorted copy (by priority, stable) to find adjacents.
-		sorted := make([]*pm.Task, len(s.Plan.Tasks))
-		copy(sorted, s.Plan.Tasks)
-		sort.SliceStable(sorted, func(i, j int) bool {
-			return sorted[i].Priority < sorted[j].Priority
-		})
-
-		// Find our task's position in the sorted slice.
-		idx := -1
-		for i, t := range sorted {
-			if t.ID == id {
-				idx = i
-				break
-			}
-		}
-		if idx == -1 {
+		if s.Plan.TaskByID(id) == nil {
 			return fmt.Errorf("task %d not found: %w", id, statedb.ErrTaskNotFound)
 		}
 
-		var other *pm.Task
-		if direction == "up" {
-			if idx == 0 {
-				return fmt.Errorf("task %d is already at the highest priority", id)
-			}
-			other = sorted[idx-1]
-		} else {
-			if idx == len(sorted)-1 {
-				return fmt.Errorf("task %d is already at the lowest priority", id)
-			}
-			other = sorted[idx+1]
+		// Within the queue the orchestrator runs, re-ranked (Task 20477). It
+		// used to swap priorities with the neighbour in priority order over the
+		// whole plan, which did nothing at all between two equal priorities.
+		other, err := s.Plan.MoveInQueue(id, direction == "up")
+		if err != nil {
+			return err
 		}
-
-		// Swap priorities.
-		sorted[idx].Priority, other.Priority = other.Priority, sorted[idx].Priority
-
 		if err := s.Save(); err != nil {
 			return err
 		}
 
-		arrow := "↑"
+		arrow, where := "↑", "ahead of"
 		if direction == "down" {
-			arrow = "↓"
+			arrow, where = "↓", "behind"
 		}
-		color.New(color.FgGreen).Printf("Moved task %d %s %s (priority now %d)\n",
-			id, arrow, direction, sorted[idx].Priority)
+		color.New(color.FgGreen).Printf("Moved task %d %s %s task %d\n", id, arrow, where, other.ID)
 		return nil
 	},
 }
@@ -705,11 +687,23 @@ func setTaskStatus(idStr string, status pm.TaskStatus) error {
 	}
 
 	old := task.Status
-	task.Status = status
+	// A human review gate takes its own three statuses (Task 20477): done is
+	// its approval, pending closes it again.
+	if status == pm.TaskDone && task.GateClosed() && insideTaskRun() {
+		return errApprovalInsideRun
+	}
+	gateWaiting := s.Status == "paused" && s.PauseReason != nil && s.PauseReason.TaskID == id
+	gateApproved, err := pm.SetStatusByHand(task, status, operatorActor(), time.Now())
+	if err != nil {
+		return err
+	}
 	if err := s.Save(); err != nil {
 		return err
 	}
 	auditManualTaskStatus(workdir, id, old, status)
+	if gateApproved {
+		recordCLIApproval(workdir, task, gateWaiting)
+	}
 
 	verb := map[pm.TaskStatus]string{
 		pm.TaskPending: "reset to pending",
@@ -717,6 +711,13 @@ func setTaskStatus(idStr string, status pm.TaskStatus) error {
 		pm.TaskSkipped: "skipped",
 		pm.TaskFailed:  "marked failed",
 	}[status]
+	if !task.IsWork() {
+		verb = map[pm.TaskStatus]string{
+			pm.TaskPending: "review gate closed: runs stop here again",
+			pm.TaskDone:    "review gate approved",
+			pm.TaskSkipped: "review gate bypassed",
+		}[status]
+	}
 
 	dimColor := color.New(color.Faint)
 	fmt.Printf("Task %d: %s — %s", id, task.Title, verb)
@@ -769,17 +770,16 @@ func printTaskList(plan *pm.Plan) {
 	warnColor := color.New(color.FgYellow)
 	pinColor := color.New(color.FgCyan)
 
-	// Sort by priority (lowest number = highest priority), stable to preserve insertion order for ties.
-	sorted := make([]*pm.Task, len(plan.Tasks))
-	copy(sorted, plan.Tasks)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		return sorted[i].Priority < sorted[j].Priority
-	})
-	// Pinned tasks always float to the top (preserving their relative order among pinned).
-	sorted = pm.SortPinnedFirst(sorted)
+	// The order tasks run in (Task 20299): pinned first, then priority, then
+	// id — so a human review gate is listed where it holds the queue.
+	sorted := pm.SortByExecutionOrder(plan.Tasks)
 
 	fmt.Printf("Tasks: %s\n\n", plan.Summary())
 	for _, t := range sorted {
+		if !t.IsWork() {
+			printGateLine(plan, t, dimColor, successColor, warnColor)
+			continue
+		}
 		rolePart := ""
 		if t.Role != "" {
 			rolePart = fmt.Sprintf(" [%s]", t.Role)
@@ -821,6 +821,26 @@ func printTaskList(plan *pm.Plan) {
 		if len(t.Tags) > 0 {
 			dimColor.Printf("       tags: %s\n", strings.Join(t.Tags, ", "))
 		}
+	}
+}
+
+// printGateLine lists a human review gate (Task 20477).
+func printGateLine(plan *pm.Plan, g *pm.Task, dim, ok, warn *color.Color) {
+	pinPart := ""
+	if g.Pinned {
+		pinPart = " [PIN]"
+	}
+	kind := "review gate"
+	if !g.IsHumanGate() {
+		kind = string(g.Kind) + ", unknown to this cloop: held like a gate"
+	}
+	marker, c := "[⏸]", warn
+	if !g.GateClosed() {
+		marker, c = "[✓]", ok
+	}
+	c.Printf("  %s #%d [P%d]%s %s — %s (%s)\n", marker, g.ID, g.Priority, pinPart, g.Title, gateState(plan, g), kind)
+	if g.Description != "" {
+		dim.Printf("       %s\n", truncateStr(g.Description, 100))
 	}
 }
 
@@ -1646,6 +1666,10 @@ Example:
 
 		revoke, _ := cmd.Flags().GetBool("revoke")
 		if revoke {
+			// Revoking a review gate's approval closes it again (Task 20477).
+			if !task.IsWork() {
+				return setTaskStatus(args[0], pm.TaskPending)
+			}
 			task.Approved = false
 			if err := s.Save(); err != nil {
 				return err
@@ -1654,13 +1678,9 @@ Example:
 			return nil
 		}
 
-		task.Approved = true
-		if err := s.Save(); err != nil {
-			return err
-		}
-		color.New(color.FgGreen).Printf("Task %d pre-approved: %s\n", task.ID, task.Title)
-		color.New(color.Faint).Printf("  This task will bypass the interactive approval gate on next run.\n")
-		return nil
+		// A human review gate is approved as 'cloop task gate approve' does,
+		// and an ordinary task pre-approved; neither from inside a task's run.
+		return approveFromCLI(args[0], false)
 	},
 }
 

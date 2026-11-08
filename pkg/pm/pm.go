@@ -164,11 +164,16 @@ func AddAnnotation(task *Task, author, text string) {
 
 // Task is a single unit of work derived from the project goal.
 type Task struct {
-	ID               int          `json:"id"`
-	Title            string       `json:"title"`
-	Description      string       `json:"description"`
-	Priority         int          `json:"priority"` // 1 = highest
-	Status           TaskStatus   `json:"status"`
+	ID          int        `json:"id"`
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Priority    int        `json:"priority"` // 1 = highest
+	Status      TaskStatus `json:"status"`
+	// Kind says what the entry is (Task 20477): work for an agent, the
+	// default, or a human review gate that holds the queue until someone
+	// approves it. See humangate.go. A definition field, set when the entry
+	// is created.
+	Kind             TaskKind     `json:"kind,omitempty"`
 	Role             AgentRole    `json:"role,omitempty"`       // specialized agent role for this task
 	DependsOn        []int        `json:"depends_on,omitempty"` // IDs of tasks that must complete before this one
 	Result           string       `json:"result,omitempty"`
@@ -547,10 +552,15 @@ func (p *Plan) NextTask() *Task {
 // order still decides which ones start first when the worker pool is smaller
 // than the queue — so it is sorted here rather than left in plan order, which
 // would make a reorder in the UI invisible to every capped parallel run.
+//
+// Only work is ready: a human review gate is never handed to an agent, and the
+// first closed one holds every task after it in execution order until it is
+// approved (Task 20477), so those are not ready either.
 func (p *Plan) ReadyTasks() []*Task {
+	barrier := p.GateBarrier()
 	var ready []*Task
 	for _, t := range p.Tasks {
-		if t.Status == TaskPending && p.DepsReady(t) {
+		if t.Status == TaskPending && t.IsWork() && p.DepsReady(t) && !HeldBy(barrier, t) {
 			ready = append(ready, t)
 		}
 	}
@@ -572,6 +582,12 @@ func (p *Plan) IsComplete() bool {
 	}
 	for _, t := range p.Tasks {
 		if t.Status == TaskInProgress {
+			return false
+		}
+		// A closed human review gate is a person's decision still to be
+		// made (Task 20477), even with nothing after it: a plan is not
+		// finished — and auto-evolve does not plan past it — until it is.
+		if t.GateClosed() {
 			return false
 		}
 		if t.Status == TaskDone && t.Abort.Blocks() {
@@ -713,9 +729,10 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 		b.WriteString(BuildChainPrompt(task, task.ChainInput))
 	}
 
-	// Show completed tasks for context
+	// Show completed tasks for context. Only work: a human review gate is a
+	// person's decision, and listed here it would read as a task (Task 20477).
 	done := []*Task{}
-	for _, t := range plan.Tasks {
+	for _, t := range WorkTasks(plan.Tasks) {
 		if t.Status == TaskDone || t.Status == TaskSkipped {
 			done = append(done, t)
 		}
@@ -742,7 +759,7 @@ func ExecuteTaskPrompt(goal, instructions, workDir string, plan *Plan, task *Tas
 
 	// Show remaining tasks
 	pending := []*Task{}
-	for _, t := range plan.Tasks {
+	for _, t := range WorkTasks(plan.Tasks) {
 		if t.Status == TaskPending && t.ID != task.ID {
 			pending = append(pending, t)
 		}
@@ -920,9 +937,10 @@ func AdaptiveReplanPrompt(goal, instructions string, plan *Plan, failedTask *Tas
 		b.WriteString(fmt.Sprintf("## CONSTRAINTS\n%s\n\n", instructions))
 	}
 
-	// Report completed tasks
+	// Report completed tasks: the work, without the human review gates
+	// (Task 20477), which a replan neither revises nor removes.
 	done := []*Task{}
-	for _, t := range plan.Tasks {
+	for _, t := range WorkTasks(plan.Tasks) {
 		if t.Status == TaskDone || t.Status == TaskSkipped {
 			done = append(done, t)
 		}
@@ -947,7 +965,7 @@ func AdaptiveReplanPrompt(goal, instructions string, plan *Plan, failedTask *Tas
 
 	// Report remaining pending tasks
 	pending := []*Task{}
-	for _, t := range plan.Tasks {
+	for _, t := range WorkTasks(plan.Tasks) {
 		if t.Status == TaskPending {
 			pending = append(pending, t)
 		}
@@ -1001,9 +1019,10 @@ func EvolveDiscoverPrompt(goal, instructions string, plan *Plan, evolveStep int,
 
 	b.WriteString(fmt.Sprintf("## EVOLVE ITERATION\n#%d\n\n", evolveStep))
 
-	// Show completed tasks
+	// Show completed tasks: the work, not the human review gates passed on
+	// the way (Task 20477).
 	done := []*Task{}
-	for _, t := range plan.Tasks {
+	for _, t := range WorkTasks(plan.Tasks) {
 		if t.Status == TaskDone || t.Status == TaskSkipped {
 			done = append(done, t)
 		}

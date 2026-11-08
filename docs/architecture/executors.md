@@ -373,7 +373,10 @@ tree itself before starting the harness or, for a project with no repository of
 its own, keeps its own working directory, which the hub seeds with the project's
 state. See [Workspace provisioning](#workspace-provisioning). Fetching needs
 `git` on the device and protocol v3; seeding needs protocol v10. An agent below
-either is refused placement instead of being trusted to notice.
+either is refused placement instead of being trusted to notice. A plan that
+holds a pending [human review gate](../guides/human-review-gates.md) also needs
+protocol v27: an older agent's cloop would run the gate as a task, so the hub
+refuses to send it there and names the upgrade.
 
 #### Where the payload runs on the device (Task 20307)
 
