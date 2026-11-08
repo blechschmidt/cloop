@@ -153,6 +153,21 @@ func sentinel(table string, col column) string {
 	}
 }
 
+// meaningful names the columns whose value decides what their row is, with
+// the value to rehearse them with and the rows to set it on. A sentinel there
+// would rehearse a different plan from the one the release writes: in
+// plan_tasks.kind (Task 20477) any value but ” is an entry no agent runs —
+// "human_gate" a human review gate, anything else one this build does not
+// know — and every task holding it would hold the queue. So the column gets a
+// value it can really have, on the rows where that changes nothing the
+// rehearsal goes on to check: a gate that was passed is history.
+func meaningful(table, name string) (value, only string, ok bool) {
+	if table == "plan_tasks" && name == "kind" {
+		return "'human_gate'", `status = 'done'`, true
+	}
+	return "", "", false
+}
+
 // tableRows is every row of a table, keyed by its primary key.
 type tableRows map[string]map[string]string
 
@@ -248,8 +263,11 @@ func (s *scene) checkColumnsSurviveReleaseWrites(releaseSchema map[string]schema
 		if col.probe {
 			value = fmt.Sprintf(`'probe of %s row ' || rowid`, col.table)
 		}
-		s.exec(col.dir, fmt.Sprintf(`UPDATE "%s" SET "%s" = %s WHERE "%s" IS NULL OR "%s" = '' OR "%s" = 0`,
-			col.table, col.column.name, value, col.column.name, col.column.name, col.column.name))
+		where := fmt.Sprintf(`("%s" IS NULL OR "%s" = '' OR "%s" = 0)`, col.column.name, col.column.name, col.column.name)
+		if v, only, ok := meaningful(col.table, col.column.name); ok && !col.probe {
+			value, where = v, where+" AND "+only
+		}
+		s.exec(col.dir, fmt.Sprintf(`UPDATE "%s" SET "%s" = %s WHERE %s`, col.table, col.column.name, value, where))
 	}
 	// The sessions have been idle for a while, as a person's do between two
 	// requests: a member records a session's use at most once a minute, and
