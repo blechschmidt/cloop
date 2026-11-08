@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/coder/websocket"
 )
 
@@ -26,7 +27,11 @@ func TestServer_Run_GracefulShutdown_OnContextCancel(t *testing.T) {
 	t.Parallel()
 
 	port := pickFreePort(t)
-	srv := New(t.TempDir(), port, "")
+	// A migrated database, as every hub but a brand-new one has: migrating
+	// one from scratch inside Run, under -race and as the first test of a
+	// process, took longer than the five seconds below allow for shutdown,
+	// and the wait measured the migration rather than the shutdown.
+	srv := New(statedbtest.Dir(t), port, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -76,7 +81,9 @@ func TestServer_Shutdown_StopsRun(t *testing.T) {
 	t.Parallel()
 
 	port := pickFreePort(t)
-	srv := New(t.TempDir(), port, "")
+	// Migrated already, for the reason TestServer_Run_GracefulShutdown_
+	// OnContextCancel gives.
+	srv := New(statedbtest.Dir(t), port, "")
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Run(context.Background()) }()
@@ -118,7 +125,9 @@ func TestServer_Shutdown_TwiceSafe(t *testing.T) {
 	t.Parallel()
 
 	port := pickFreePort(t)
-	srv := New(t.TempDir(), port, "")
+	// Migrated already, for the reason TestServer_Run_GracefulShutdown_
+	// OnContextCancel gives (Task 20435 saw this one hang the same way).
+	srv := New(statedbtest.Dir(t), port, "")
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Run(context.Background()) }()

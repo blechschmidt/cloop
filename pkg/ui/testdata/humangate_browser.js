@@ -255,6 +255,10 @@ async function main() {
     await waitFor(cdp, `!!document.querySelector('#taskListFull .task-item[data-task-id="8"]')`,
       'the new gate in the list', `document.getElementById('toast').textContent`);
     results.added = await cdp.eval(rowExpr(8));
+    // The row can arrive over the WebSocket before the button's own answer
+    // toasts, so the toast is waited for rather than read.
+    await waitFor(cdp, `document.getElementById('toast').textContent.indexOf('added') !== -1`,
+      'the add toast', `document.getElementById('toast').textContent`);
     results.added_toast = await cdp.eval(`document.getElementById('toast').textContent`);
     results.order_after = await cdp.eval(orderExpr);
 
@@ -265,6 +269,8 @@ async function main() {
     await waitFor(cdp, `(() => { const r = ${rowExpr(8)}; return !!r && r.buttons.indexOf('Reopen') !== -1; })()`,
       'the approved gate to offer Reopen', `document.getElementById('toast').textContent`);
     results.approved = await cdp.eval(rowExpr(8));
+    await waitFor(cdp, `document.getElementById('toast').textContent.indexOf('approved') !== -1`,
+      'the approve toast', `document.getElementById('toast').textContent`);
     results.approved_toast = await cdp.eval(`document.getElementById('toast').textContent`);
     await shot(cdp, 'humangate-approved');
 
