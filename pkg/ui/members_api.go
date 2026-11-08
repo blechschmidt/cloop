@@ -45,6 +45,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
+	"github.com/blechschmidt/cloop/pkg/hubteam"
 	"github.com/blechschmidt/cloop/pkg/jsonbody"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -58,9 +59,14 @@ import (
 // identity, a role and a reason.
 const maxMemberBodyBytes = 16 << 10
 
-// memberView is one row of the Members card.
+// memberView is one row of the Members card: a person, or a team (Task
+// 20478).
 type memberView struct {
-	Identity  string    `json:"identity"`
+	Identity string `json:"identity"`
+	// Kind is "person" or "team". A team's Identity is "team:<slug>".
+	Kind string `json:"kind"`
+	// Team describes the team a "team" row names.
+	Team      *teamRef  `json:"team,omitempty"`
 	Role      string    `json:"role"`
 	Reason    string    `json:"reason,omitempty"`
 	GrantedAt time.Time `json:"granted_at"`
@@ -74,12 +80,38 @@ type memberView struct {
 	Manageable bool `json:"manageable"`
 }
 
+// teamRef is a team as the Members card shows it.
+type teamRef struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+	// Members counts the people added by name; a team following a group has
+	// more members than that, which IdPGroup and SCIMGroup say.
+	Members   int    `json:"members"`
+	IdPGroup  string `json:"idp_group,omitempty"`
+	SCIMGroup string `json:"scim_group,omitempty"`
+	// Builtin marks Everyone, the team of every signed-in identity.
+	Builtin bool `json:"builtin,omitempty"`
+}
+
 // membersResponse is what GET returns.
 type membersResponse struct {
-	Project string       `json:"project"`
-	Path    string       `json:"path"`
-	Owner   string       `json:"owner,omitempty"`
-	Members []memberView `json:"members"`
+	Project string `json:"project"`
+	Path    string `json:"path"`
+	Owner   string `json:"owner,omitempty"`
+	// OwnerRole is what owning the project means: admin (Task 20478).
+	OwnerRole string       `json:"owner_role,omitempty"`
+	Members   []memberView `json:"members"`
+
+	// Visibility is "private" — its owner, the hub's administrators and the
+	// people and teams below — or "everyone" when it is shared with the
+	// built-in team of every signed-in identity, or nobody owns it on a hub
+	// without role mappings; "policy" for a project nobody owns on a hub with
+	// them, which the mappings decide.
+	Visibility string `json:"visibility"`
+
+	// Teams are the teams the caller may share this project with, Everyone
+	// first; present only when they may share it.
+	Teams []teamRef `json:"teams,omitempty"`
 
 	// InheritedFrom names the project a feature takes its members from; the
 	// roster is edited there.
@@ -99,9 +131,11 @@ type membersResponse struct {
 }
 
 // memberRequest is the POST and PATCH body. Reason is a pointer so a PATCH
-// can leave it alone by omitting it.
+// can leave it alone by omitting it. A POST names a person in Identity, or a
+// team in Team (equivalently Identity "team:<slug>").
 type memberRequest struct {
 	Identity string  `json:"identity"`
+	Team     string  `json:"team"`
 	Role     string  `json:"role"`
 	Reason   *string `json:"reason"`
 }
@@ -121,6 +155,15 @@ func (s *Server) handleProjectMembers(w http.ResponseWriter, r *http.Request) {
 		Owner:          project.Owner,
 		Members:        []memberView{},
 		GrantableRoles: []string{},
+		Visibility:     "private",
+	}
+	switch {
+	case project.Owner != "":
+		resp.OwnerRole = string(authz.RoleAdmin)
+	case s.authzActive():
+		resp.Visibility = "policy"
+	default:
+		resp.Visibility = "everyone"
 	}
 	if inherited {
 		resp.InheritedFrom = project.Name
@@ -142,17 +185,53 @@ func (s *Server) handleProjectMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	self := identityMemberKey(s.recipientIdentity(r))
 	for _, m := range store.MembersOf(project.Path) {
-		resp.Members = append(resp.Members, memberView{
+		v := memberView{
 			Identity:   m.IdentityKey,
+			Kind:       "person",
 			Role:       string(m.Role),
 			Reason:     m.Reason,
 			GrantedAt:  m.GrantedAt,
 			GrantedBy:  m.GrantedBy,
 			Self:       self != "" && m.IdentityKey == self,
 			Manageable: resp.CanShare && m.IdentityKey != self && yours.Role.AtLeast(m.Role),
-		})
+		}
+		if slug, isTeam := teamShareSlug(m); isTeam {
+			v.Kind = "team"
+			ref := s.teamRefFor(slug)
+			v.Team = &ref
+			if ref.Builtin && project.Owner != "" {
+				resp.Visibility = "everyone"
+			}
+		}
+		resp.Members = append(resp.Members, v)
+	}
+	if resp.CanShare {
+		resp.Teams = s.shareableTeams()
 	}
 	jsonOK(w, resp)
+}
+
+// teamRefFor describes the team slug for the Members card. A share naming a
+// team the store does not list — it cannot outlive its team, but a cache may
+// lag a deletion by a moment — is shown by its slug.
+func (s *Server) teamRefFor(slug string) teamRef {
+	t, ok := s.teamStore().Get(slug)
+	if !ok {
+		return teamRef{Slug: slug, Name: slug}
+	}
+	return teamRef{Slug: t.Slug, Name: t.Label(), Members: len(t.Members),
+		IdPGroup: t.IdPGroup, SCIMGroup: t.SCIMGroup, Builtin: t.Builtin()}
+}
+
+// shareableTeams lists every team a project can be shared with: Everyone,
+// then the hub's teams by slug.
+func (s *Server) shareableTeams() []teamRef {
+	out := []teamRef{s.teamRefFor(hubteam.Everyone)}
+	for _, t := range s.teamStore().All() {
+		out = append(out, teamRef{Slug: t.Slug, Name: t.Label(), Members: len(t.Members),
+			IdPGroup: t.IdPGroup, SCIMGroup: t.SCIMGroup})
+	}
+	return out
 }
 
 // handleProjectMemberAdd serves POST /api/projects/{idx}/members.
@@ -165,7 +244,7 @@ func (s *Server) handleProjectMemberAdd(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	key, err := projectmember.ParseKey(req.Identity)
+	key, err := memberRequestKey(req)
 	if err != nil {
 		writeMemberError(w, apierror.CodeInvalidInput, err)
 		return
@@ -179,6 +258,13 @@ func (s *Server) handleProjectMemberAdd(w http.ResponseWriter, r *http.Request) 
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
 			"you cannot add yourself to a project: a membership is granted by another maintainer"))
 		return
+	}
+	if slug, isTeam := hubteam.SlugOfShareKey(key); isTeam {
+		if _, exists := s.teamStore().Get(slug); !exists {
+			apierror.WriteError(w, apierror.New(apierror.CodeNotFound,
+				"there is no team "+slug+" on this hub — an administrator creates teams under Settings → Teams"))
+			return
+		}
 	}
 	if msg := s.membershipWouldAddNothing(entry, key); msg != "" {
 		apierror.WriteError(w, apierror.New(apierror.CodeConflict, msg))
@@ -225,12 +311,33 @@ func (s *Server) handleProjectMemberAdd(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.announceMembershipChange(entry.Path)
+	view := memberView{
+		Identity: stored.IdentityKey, Kind: "person", Role: string(stored.Role), Reason: stored.Reason,
+		GrantedAt: stored.GrantedAt, GrantedBy: stored.GrantedBy, Manageable: true,
+	}
+	if slug, isTeam := teamShareSlug(stored); isTeam {
+		ref := s.teamRefFor(slug)
+		view.Kind, view.Team = "team", &ref
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(memberView{
-		Identity: stored.IdentityKey, Role: string(stored.Role), Reason: stored.Reason,
-		GrantedAt: stored.GrantedAt, GrantedBy: stored.GrantedBy, Manageable: true,
-	})
+	_ = json.NewEncoder(w).Encode(view)
+}
+
+// memberRequestKey is the grantee a POST names: a team in Team, or a person —
+// or a team spelled "team:<slug>" — in Identity.
+func memberRequestKey(req memberRequest) (string, error) {
+	if team := strings.TrimSpace(req.Team); team != "" {
+		if strings.TrimSpace(req.Identity) != "" {
+			return "", errors.New("name a person in identity or a team in team, not both")
+		}
+		slug, err := hubteam.ParseSlug(team)
+		if err != nil {
+			return "", errors.New(strings.TrimPrefix(err.Error(), "team: "))
+		}
+		return hubteam.ShareKey(slug), nil
+	}
+	return projectmember.ParseKey(req.Identity)
 }
 
 // handleProjectMemberChange serves PATCH /api/projects/{idx}/members?identity=….
@@ -378,7 +485,8 @@ func (s *Server) handleProjectMemberLeave(w http.ResponseWriter, r *http.Request
 	}
 	if removed == nil {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound,
-			"you are not a member of this project — you see it as its owner, an admin, or through the role policy"))
+			"you are not a member of this project by name — you see it as its owner, a hub administrator, "+
+				"through a team it is shared with, or through the role policy"))
 		return
 	}
 	s.announceMembershipChange(entry.Path)
@@ -498,23 +606,24 @@ func ceilingRefusal(yours, want authz.Role, msg string) *memberRefusal {
 }
 
 // membershipWouldAddNothing explains why a grant would change nothing, or
-// returns "". Only on a hub without role mappings: there, whoever can see a
-// project already holds everything on it, so admitting them is a no-op that
-// would still list them as a member at a role that does not describe them.
-// Where role mappings are configured a membership adds to the policy for
-// anyone, including the owner and the unowned case.
+// returns "". The owner is the project's administrator on every hub (Task
+// 20478), so a membership for them could only list them at a role that does
+// not describe them. On a hub without role mappings whoever can see a project
+// already holds everything on it: everyone, on a project nobody owns, and the
+// hub's admins on every project. Where mappings are configured a share adds to
+// the policy for anyone else, the unowned case included.
 func (s *Server) membershipWouldAddNothing(entry multiui.ProjectEntry, key string) string {
-	if s.authzActive() {
-		return ""
-	}
+	team := projectmember.IsTeamKey(key)
 	switch {
+	case !team && ownedBy(entry.Owner, key):
+		return "that identity owns this project and is already its administrator"
+	case s.authzActive():
+		return ""
 	case entry.Owner == "":
 		return "this project has no owner, so every signed-in user can already see it and act on it — " +
-			"a membership would add nothing"
-	case strings.EqualFold(entry.Owner, key):
-		return "that identity owns this project"
-	case !strings.HasPrefix(key, "sub:") && s.OIDC.IsAdmin(&oidcauth.Identity{Email: key}):
-		return "that identity is a hub admin and already sees every project"
+			"a share would add nothing"
+	case !team && !strings.HasPrefix(key, "sub:") && s.OIDC.IsAdmin(&oidcauth.Identity{Email: key}):
+		return "that identity is a hub admin and already administers every project"
 	}
 	return ""
 }
@@ -528,19 +637,22 @@ func (s *Server) callerMemberKey(r *http.Request) string {
 	return identityMemberKey(s.recipientIdentity(r))
 }
 
-// membersNote says what a role means on this hub, where that is not what the
-// ladder alone would suggest.
+// membersNote says who else can reach the project, where the card's rows
+// alone would not.
 func (s *Server) membersNote(entry multiui.ProjectEntry, available bool) string {
 	switch {
 	case !available:
 		return "Project sharing needs single sign-on: a membership names a signed-in identity, and this hub has none."
-	case s.authzActive():
-		return ""
+	case entry.Owner == "" && s.authzActive():
+		return "This project has no owner, so the hub's role mappings decide who else can reach it; " +
+			"the people and teams below are added to what they give."
 	case entry.Owner == "":
 		return "This project has no owner, so every signed-in user can already see it and act on it."
+	case s.authzActive():
+		return "Private: only its owner, the hub's administrators and the people and teams below can see it."
 	}
-	return "No role mappings are configured on this hub, so a member's role here is all they may do on this " +
-		"project, while its owner and the hub's admins keep full access."
+	return "Private: only its owner, the hub's administrators and the people and teams below can see it. " +
+		"No role mappings are configured, so a member's role here is all they may do on this project."
 }
 
 // memberAudit builds the audit rows committed with a roster change. force
@@ -579,6 +691,9 @@ func (s *Server) memberAudit(r *http.Request, entry multiui.ProjectEntry, force 
 			return nil, nil
 		}
 		payload["identity"] = m.IdentityKey
+		if slug, isTeam := teamShareSlug(*m); isTeam {
+			payload["team"] = slug
+		}
 		payload["role"] = string(m.Role)
 		if m.Reason != "" {
 			payload["reason"] = m.Reason
@@ -683,6 +798,11 @@ func (s *Server) writeMemberStoreError(w http.ResponseWriter, err error) {
 	var refused *memberRefusal
 	if errors.As(err, &refused) {
 		refused.write(w)
+		return
+	}
+	if errors.Is(err, statedb.ErrTeamNotFound) {
+		// Deleted between the check and the write (Task 20478).
+		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "that team no longer exists on this hub"))
 		return
 	}
 	s.log().Warn(logger.EventAuthz, 0, "project membership write failed",

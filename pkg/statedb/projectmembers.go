@@ -85,6 +85,10 @@ func (d *DB) PutProjectMember(row ProjectMemberRow, audit MemberAudit) (ProjectM
 
 	var prev *ProjectMemberRow
 	err := d.memberTx(func(tx *sql.Tx) ([]*AuditEvent, error) {
+		// A share with a team names a team that exists (Task 20478; teams.go).
+		if err := requireTeamForShareTx(tx, row.IdentityKey); err != nil {
+			return nil, err
+		}
 		existing, found, err := getProjectMemberTx(tx, row.ProjectPath, row.IdentityKey)
 		if err != nil {
 			return nil, err

@@ -147,11 +147,14 @@ func (s *Server) membersExist() bool {
 
 // subjectMemberKey is the membership key of a resolved subject — the same
 // namespace as oidcauth.Identity.OwnerKey, which project owners are recorded in.
+// A key spelled like a team's share ("team:…") is no person's: an identity
+// provider releasing such an "email" gets no key, and so can never be taken
+// for a team a project was shared with (Task 20478).
 func subjectMemberKey(sub *authz.Subject) string {
 	if sub == nil {
 		return ""
 	}
-	return projectmember.KeyFor(sub.Email, sub.Sub)
+	return personKey(projectmember.KeyFor(sub.Email, sub.Sub))
 }
 
 // identityMemberKey is subjectMemberKey for an identity.
@@ -159,47 +162,61 @@ func identityMemberKey(id *oidcauth.Identity) string {
 	if id == nil {
 		return ""
 	}
-	return projectmember.KeyFor(id.Email, id.Sub)
+	return personKey(projectmember.KeyFor(id.Email, id.Sub))
 }
 
-// membershipDecision is what a membership alone grants sub on scope, and
-// whether there is one. Looked up on the scope's policy path, so a feature's
-// scope finds its project's membership even if a caller did not map it.
-func (s *Server) membershipDecision(sub *authz.Subject, scope authz.Scope) (authz.Decision, bool) {
-	if sub == nil || scope.ProjectPath == "" || !s.oidcEnabled() {
-		return authz.Decision{}, false
+// personKey refuses a member key that names a team.
+func personKey(key string) string {
+	if projectmember.IsTeamKey(key) {
+		return ""
 	}
-	role, ok := s.memberStore().RoleFor(policyProjectPath(scope.ProjectPath), subjectMemberKey(sub))
-	if !ok {
-		return authz.Decision{}, false
-	}
-	return authz.FromRoles([]authz.Role{role}, authz.SourceProjectMember, sub.Label(), scope), true
+	return key
 }
 
-// subjectAuthority is what sub holds on scope where role mappings are in
-// force: the policy's answer, unioned with any membership.
+// subjectAuthority is what sub holds on scope where a role policy is in force
+// (Task 20478, access.go). Outside a project — the global scope, an executor —
+// and on a project nobody owns, it is the policy's answer unioned with any
+// share. On a project somebody owns it is the policy's answer only for a hub
+// administrator, or where a binding names the project; for everyone else the
+// policy's hub-wide role does not reach it, and what they hold there is what
+// owning it or having it shared with them grants.
 func (s *Server) subjectAuthority(sub *authz.Subject, scope authz.Scope) authz.Decision {
 	d := s.Authz.Resolve(sub, scope)
-	if m, ok := s.membershipDecision(sub, scope); ok {
+	if scope.ProjectPath == "" || !s.oidcEnabled() || d.Source == authz.SourceRuntimeDeny {
+		return d
+	}
+	owned := s.projectOwner(policyProjectPath(scope.ProjectPath)) != ""
+	if owned && !d.ProjectPinned() && !s.subjectIsHubAdmin(sub) {
+		d = authz.Deny(authz.SourceProjectPrivate, sub.Label(), scope)
+	}
+	if m, ok := s.shareDecision(sub, scope); ok {
 		d = authz.Union(d, m)
 	}
 	return d
 }
 
-// membershipBinds answers, for a hub without role mappings, whether a
-// membership is sub's whole authority on scope — true when sub holds one and
-// could not see the project without it. See the package comment above for
-// why that is a grant and never a demotion.
+// membershipBinds answers, for a hub without a role policy, whether sub's
+// authority on scope is something other than the allow-all such a hub gives:
+// true on a project somebody owns that sub neither owns nor administers as a
+// hub admin, with what their shares grant — or nothing, because the project is
+// private (Task 20478). The owner and the hub's admins keep the allow-all, and
+// so does everyone on a project nobody owns, which such a hub shares with every
+// signed-in user.
 func (s *Server) membershipBinds(sub *authz.Subject, scope authz.Scope) (authz.Decision, bool) {
-	d, ok := s.membershipDecision(sub, scope)
-	if !ok {
+	if sub == nil || scope.ProjectPath == "" || !s.oidcEnabled() {
 		return authz.Decision{}, false
 	}
-	entry, found := s.registeredEntry(policyProjectPath(scope.ProjectPath))
-	if found && s.identityCanSeeWithoutMembership(identityFromSubject(sub), entry) {
+	owner := s.projectOwner(policyProjectPath(scope.ProjectPath))
+	if owner == "" || ownedBy(owner, subjectMemberKey(sub)) {
 		return authz.Decision{}, false
 	}
-	return d, true
+	if s.OIDC.IsAdmin(identityFromSubject(sub)) && s.Authz.DeniedBy(sub, authz.GlobalScope) == nil {
+		return authz.Decision{}, false
+	}
+	if m, ok := s.shareDecision(sub, scope); ok {
+		return m, true
+	}
+	return authz.Deny(authz.SourceProjectPrivate, sub.Label(), scope), true
 }
 
 // identityFromSubject is the reverse of subjectFromIdentity, for the checks
@@ -208,7 +225,8 @@ func identityFromSubject(sub *authz.Subject) *oidcauth.Identity {
 	if sub == nil {
 		return nil
 	}
-	return &oidcauth.Identity{Sub: sub.Sub, Email: sub.Email, Groups: sub.Groups, Roles: sub.Roles}
+	return &oidcauth.Identity{Sub: sub.Sub, Email: sub.Email, Groups: sub.Groups, Roles: sub.Roles,
+		Username: sub.Username, OID: sub.OID}
 }
 
 // registeredEntry finds the project registered at path. Features are not
@@ -243,20 +261,6 @@ func statusesInclude(statuses []multiui.ProjectStatus, path string) bool {
 		}
 	}
 	return false
-}
-
-// identityHoldsMembership reports whether user is a member of entry's project.
-func (s *Server) identityHoldsMembership(user *oidcauth.Identity, entry multiui.ProjectEntry) bool {
-	key := identityMemberKey(user)
-	if key == "" {
-		return false
-	}
-	path := entry.Path
-	if entry.IsFeature() {
-		path = entry.Parent
-	}
-	_, ok := s.memberStore().Lookup(path, key)
-	return ok
 }
 
 // recipientGrant builds the authorization context newGrant would build for a

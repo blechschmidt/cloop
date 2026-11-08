@@ -229,6 +229,14 @@ type MembershipRef struct {
 	Identity string `json:"identity"`
 }
 
+// TeamMembershipRef is one team the identity was named on (Task 20478),
+// removed outright like a project membership: a person still named on a team
+// is still on every project shared with it.
+type TeamMembershipRef struct {
+	Team     string `json:"team"`
+	Identity string `json:"identity"`
+}
+
 // Failure records a surface that could not be severed, so a partial run is
 // legible instead of being reported as a success.
 type Failure struct {
@@ -256,6 +264,12 @@ type Plan struct {
 	// (Task 20366). Unlike Projects these are removed, in the credential
 	// transaction.
 	Memberships []MembershipRef `json:"memberships"`
+
+	// TeamMemberships are the teams this identity is named on (Task 20478).
+	// Removed in the credential transaction, with the memberships. A team
+	// that follows an identity-provider group keeps the person until the
+	// group drops them; the deny binding keeps them out meanwhile.
+	TeamMemberships []TeamMembershipRef `json:"team_memberships"`
 
 	// Credentials is what the identity keeps on the hub — personal secrets,
 	// the grants over them, pending requests, Claude logins (Task 20400).
@@ -288,7 +302,7 @@ type HoldRef struct {
 func (p Plan) Empty() bool {
 	return len(p.Sessions) == 0 && len(p.Tokens) == 0 && len(p.Glasses) == 0 &&
 		len(p.Denies) == 0 && len(p.Leases) == 0 && len(p.Tasks) == 0 &&
-		len(p.Memberships) == 0 && p.Credentials.Empty()
+		len(p.Memberships) == 0 && len(p.TeamMemberships) == 0 && p.Credentials.Empty()
 }
 
 // Report is the outcome of a run. A dry run returns the Plan with DryRun set
@@ -310,6 +324,10 @@ type Report struct {
 	// MembershipsRevoked are the project memberships actually removed, in
 	// the same transaction as the credentials (Task 20366).
 	MembershipsRevoked []MembershipRef `json:"memberships_revoked,omitempty"`
+
+	// TeamMembershipsRevoked are the named team memberships actually removed
+	// (Task 20478).
+	TeamMembershipsRevoked []TeamMembershipRef `json:"team_memberships_revoked,omitempty"`
 
 	// What became of the stored credentials (Task 20400). Under a legal hold
 	// SecretsKept replaces SecretsDeleted, and each Claude copy reports Kept.
@@ -561,6 +579,11 @@ func Run(o Options) (Report, error) {
 			Path: m.ProjectPath, Role: m.Role, Identity: m.IdentityKey,
 		})
 	}
+	for _, m := range applied.TeamMembers {
+		rep.TeamMembershipsRevoked = append(rep.TeamMembershipsRevoked, TeamMembershipRef{
+			Team: m.TeamSlug, Identity: m.IdentityKey,
+		})
+	}
 
 	// 2. Leases. Released after the credentials so a task that reacts to losing
 	//    its secrets cannot re-authenticate to get them back.
@@ -686,6 +709,7 @@ func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*
 		"tasks":       len(plan.Tasks),
 		"projects":    len(plan.Projects),
 		"memberships": len(a.Members),
+		"teams":       len(a.TeamMembers),
 		// The stored footprint, as planned: it is destroyed after this
 		// transaction commits, and each piece has its own row then.
 		"personal_secrets": len(plan.Credentials.Secrets),
@@ -722,16 +746,20 @@ func credentialAuditEvents(plan Plan, o Options, a statedb.OffboardApplied) ([]*
 			return nil, err
 		}
 	}
-	if len(a.Members) > 0 {
+	if len(a.Members) > 0 || len(a.TeamMembers) > 0 {
 		// The projects, not only a count: "whose projects could this person
 		// reach" is the question asked here, and once the rows are gone the
-		// table no longer holds the answer.
+		// table no longer holds the answer. The teams likewise (Task 20478).
 		projects := make([]string, 0, len(a.Members))
 		for _, m := range a.Members {
 			projects = append(projects, m.ProjectPath+" ("+m.Role+")")
 		}
+		teams := make([]string, 0, len(a.TeamMembers))
+		for _, m := range a.TeamMembers {
+			teams = append(teams, m.TeamSlug)
+		}
 		if err := add(auditaction.ActionUserOffboardMembership, map[string]any{
-			"count": len(a.Members), "projects": projects}); err != nil {
+			"count": len(a.Members), "projects": projects, "teams": teams}); err != nil {
 			return nil, err
 		}
 	}

@@ -84,6 +84,7 @@
         ['Secret leases', n('leases'),   'released'],
         ['Running tasks', n('tasks'),    'stopped'],
         ['Project memberships', n('memberships'), 'removed'],
+        ['Team memberships', n('team_memberships'), 'removed'],
         ['Grants over personal secrets', c('grants'), 'revoked'],
         ['Personal secrets', c('secrets'), keep ? 'kept (legal hold)' : 'destroyed'],
         ['Pending grant requests', c('requests'), 'withdrawn'],
@@ -218,6 +219,7 @@
         ['Secret leases released', n('leases_released')],
         ['Running tasks stopped', n('tasks_stopped')],
         ['Project memberships removed', n('memberships_revoked')],
+        ['Team memberships removed', n('team_memberships_revoked')],
         ['Grants over personal secrets revoked', n('grants_revoked')],
         keep ? ['Personal secrets kept (legal hold)', n('secrets_kept')]
              : ['Personal secrets destroyed', n('secrets_deleted')],

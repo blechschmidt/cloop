@@ -17,6 +17,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,6 +44,7 @@ var projectCmd = &cobra.Command{
 
   cloop project members list [<project>]
   cloop project members add <project> <identity> --role operator --reason "..."
+  cloop project members add <project> team:<slug> --role viewer --reason "..."
   cloop project members remove <project> <identity> --reason "..."
 
 Run it from the hub's directory, or pass --workdir.`,
@@ -50,24 +52,28 @@ Run it from the hub's directory, or pass --workdir.`,
 
 var projectMembersCmd = &cobra.Command{
 	Use:   "members",
-	Short: "List, add and remove the identities a project is shared with",
-	Long: `A project on a hub with single sign-on is visible to its owner and the hub's
-admins. A member is one more identity admitted to it, at a role:
+	Short: "List, add and remove the people and teams a project is shared with",
+	Long: `On a hub with single sign-on a project somebody creates is private: its owner,
+who is its administrator, and the hub's administrators can see it, and nobody
+else until it is shared. A member is one more person or team admitted to it, at
+a role:
 
   viewer      read the project
   operator    also start and stop runs and change tasks
   maintainer  also reshape the project and change its members
   admin       everything
 
-A membership only adds access. The hub unions its role with whatever the
-identity already holds, so sharing a project at viewer never demotes an
-operator. On a hub without role mappings (admin_emails alone) a member's role
-is their whole authority on the project, while its owner and the hub's admins
-keep full access.
+On a project somebody owns, a member's role is what they may do there: a role
+they hold hub-wide does not reach it, so sharing at viewer means view. A
+project nobody owns follows the hub's role mappings, and a membership adds to
+what they give. On a hub without role mappings (admin_emails alone) a project
+nobody owns is open to every signed-in user, and sharing it adds nothing.
 
 <project> is a registered project's name or its directory. A feature is shared
 with its project and has no members of its own. <identity> is the member's
-email, or "sub:<subject>" when the identity provider releases no email.`,
+email, "sub:<subject>" when the identity provider releases no email, or
+"team:<slug>" for a team ("team:everyone" is every signed-in identity; the
+hub's administrators keep the other teams with "cloop hub team").`,
 }
 
 var projectMembersListCmd = &cobra.Command{
@@ -147,10 +153,11 @@ var projectMembersAddCmd = &cobra.Command{
 			return err
 		}
 		if p.Owner == "" {
-			fmt.Fprintln(os.Stderr, "note: this project has no owner, so on a hub without role mappings every\n"+
-				"      signed-in user already reaches it and this membership adds nothing there.")
+			fmt.Fprintln(os.Stderr, "note: this project has no owner, so the hub's role mappings decide who reaches it\n"+
+				"      and this membership adds to them; on a hub without role mappings every signed-in\n"+
+				"      user already reaches it and it adds nothing there.")
 		} else if strings.EqualFold(p.Owner, key) {
-			fmt.Fprintln(os.Stderr, "note: that identity owns this project.")
+			fmt.Fprintln(os.Stderr, "note: that identity owns this project and is already its administrator.")
 		}
 
 		db, closer, err := openHubDB(workdir)
@@ -165,6 +172,10 @@ var projectMembersAddCmd = &cobra.Command{
 		stored, prev, err := store.Grant(projectmember.Member{
 			ProjectPath: p.Path, IdentityKey: key, Role: role, Reason: reason, GrantedBy: operatorActor(),
 		}, cliMemberAudit(p, reason, ""))
+		if errors.Is(err, statedb.ErrTeamNotFound) {
+			return fmt.Errorf("there is no team %s on this hub — create it with: cloop hub team create %s",
+				strings.TrimPrefix(key, statedb.TeamKeyPrefix), strings.TrimPrefix(key, statedb.TeamKeyPrefix))
+		}
 		if err != nil {
 			return err
 		}
@@ -316,6 +327,9 @@ func cliMemberAudit(p hubProject, reason string, force auditaction.Action) proje
 			return nil, nil
 		}
 		payload["identity"] = m.IdentityKey
+		if slug, isTeam := statedb.TeamSlugOfKey(m.IdentityKey); isTeam {
+			payload["team"] = slug
+		}
 		payload["role"] = string(m.Role)
 		blob, err := json.Marshal(payload)
 		if err != nil {

@@ -915,6 +915,11 @@ type Server struct {
 	// this hub can be shared, and every membership check answers "none".
 	members memberStoreState
 
+	// teams holds the team store and its database handle (Task 20478):
+	// named groups of people a project can be shared with. Opened with the
+	// membership store; nil means no team exists, and only Everyone does.
+	teams teamStoreState
+
 	// streamJoinHook, when set, runs after a realtime stream has passed the
 	// gate and before it joins its room — the window a revocation can land
 	// in unseen by the eviction pass. Tests set it to land one there (Task
@@ -1554,6 +1559,8 @@ func (s *Server) Run(ctx context.Context) error {
 	// member's streams close here too when the change came from somewhere the
 	// bus does not reach (Task 20366).
 	go s.watchMemberships(watcherCtx)
+	// And the teams, for the same reason (Task 20478).
+	go s.watchTeams(watcherCtx)
 	// Every member removes the Claude homes of identities the control plane
 	// denies from its own tree, now and hourly — its tree is its own, so not
 	// a leader duty (Task 20422). See claude_sweep.go.
@@ -1776,6 +1783,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.closeSCIM()
 	// And the project memberships, read from the same path.
 	s.closeMemberStore()
+	s.closeTeamStore()
 	// Stop the git interception proxy. A session nothing will restore is
 	// closed, so the audit trail records why it ended rather than leaving rows
 	// that simply stop; a recorded one is suspended for the process that

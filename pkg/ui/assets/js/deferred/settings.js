@@ -2,7 +2,7 @@
 //
 // Configuration: the default provider and each provider's model and key, the
 // hub's speech-to-text key, single sign-on (Task 20308), telemetry collection
-// (Task 20311), GitHub Apps (Task 20306), the USB hardware of enrolled devices
+// (Task 20311), teams (Task 20478), GitHub Apps (Task 20306), the USB hardware of enrolled devices
 // (Task 20345), CI/CD pipeline federation (Task 20278), the display-glasses
 // link (Task 20194), this hub's build, hidden projects and the reset.
 //
@@ -1910,11 +1910,154 @@
       });
     }
 
+    // ── Teams (Task 20478) ──────────────────────────────────────────────────────
+    // Named groups of people a project can be shared with. Administrators keep
+    // them (user.manage): who is on a team decides who reaches every project
+    // shared with it. A project's Members card offers them; this is where they
+    // are made, linked to an identity-provider or provisioned group, given
+    // people, and deleted.
+    const teamsState = {view: null};
+
+    function _teamsNote(text, bad) {
+      const el = document.getElementById('teamsNote');
+      if (el) { el.textContent = text || ''; el.style.color = bad ? 'var(--red)' : 'var(--muted)'; }
+    }
+
+    function loadTeams() {
+      if (!canGlobal('user.manage')) return Promise.resolve();
+      return api('/api/teams').then(ok).then(_teamsRender)
+        .catch(err => _teamsNote('Could not read the teams: ' + ((err && err.message) || err), true));
+    }
+
+    function _teamFollows(t) {
+      const parts = [];
+      if (t.idp_group) parts.push('everyone whose sign-in carries the group ' + t.idp_group);
+      if (t.scim_group) parts.push('everyone provisioned into ' + t.scim_group);
+      return parts.join(', and ');
+    }
+
+    function _teamsRender(d) {
+      teamsState.view = d;
+      const teams = Array.isArray(d.teams) ? d.teams : [];
+      const own = teams.filter(t => !t.builtin);
+      const badge = document.getElementById('teamsBadge');
+      if (badge) {
+        badge.textContent = own.length ? own.length + ' team' + (own.length === 1 ? '' : 's') : 'none';
+        badge.className = 'badge ' + (own.length ? 'running' : 'unknown');
+      }
+      const scim = document.getElementById('teamSCIMGroupRow');
+      if (scim) scim.style.display = d.directory ? '' : 'none';
+      const list = document.getElementById('teamsList');
+      if (!list) return;
+      list.innerHTML = teams.map(t => {
+        const slug = esc(t.slug);
+        const projects = (t.projects || []).map(p => esc(p.name) + ' <span class="sec-count">' + esc(p.role) + '</span>').join(', ');
+        const follows = _teamFollows(t);
+        let body = '';
+        if (t.builtin) {
+          body = '<div style="font-size:12px;color:var(--muted)">Every identity that can sign in to this hub. Built in.</div>';
+        } else {
+          const people = (t.members || []).map(m => '<span class="feat-opt" style="display:inline-flex;gap:4px;align-items:center">' +
+            esc(m.identity) + '<button class="btn" style="padding:0 6px;font-size:11px" data-act="teamRemoveMember" data-team="' + slug +
+            '" data-identity="' + esc(m.identity) + '" title="Take ' + esc(m.identity) + ' off the team">&times;</button></span>').join(' ');
+          body =
+            (t.description ? '<div style="font-size:12px;margin-bottom:6px">' + esc(t.description) + '</div>' : '') +
+            (follows ? '<div style="font-size:12px;color:var(--muted);margin-bottom:6px">Also on it: ' + esc(follows) + '.</div>' : '') +
+            '<div style="font-size:12px;margin-bottom:6px">By name: ' + (people || '<span class="sec-count">nobody</span>') + '</div>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+              '<input class="form-input" data-team-add="' + slug + '" data-enter="teamAddMember" data-arg="' + slug +
+                '" placeholder="Email, or sub:&lt;subject&gt;" autocomplete="off" spellcheck="false" style="flex:1;min-width:180px" aria-label="Person to add to ' + slug + '">' +
+              '<button class="btn" data-act="teamAddMember" data-arg="' + slug + '">Add</button>' +
+              '<button class="btn" data-act="teamEdit" data-arg="' + slug + '">Edit</button>' +
+              '<button class="btn danger" data-act="teamDelete" data-arg="' + slug + '">Delete</button>' +
+            '</div>';
+        }
+        return '<div class="feat-row" data-team-row="' + slug + '" style="display:block;padding:10px 0;border-bottom:1px solid var(--border)">' +
+          '<div style="font-weight:600;margin-bottom:4px">' + esc(t.name || t.slug) +
+            (t.builtin ? '' : ' <span class="sec-count">' + slug + '</span>') + '</div>' + body +
+          '<div style="font-size:12px;color:var(--muted);margin-top:6px">Shared with: ' + (projects || 'no project') + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    function _teamFields() {
+      const val = id => ((document.getElementById(id) || {}).value || '').trim();
+      return {slug: val('teamSlug').toLowerCase(), name: val('teamName'), description: val('teamDescription'),
+        idp_group: val('teamIdPGroup'), scim_group: val('teamSCIMGroup')};
+    }
+
+    function teamCreate() {
+      const f = _teamFields();
+      if (!f.slug) { _teamsNote('Give the team a slug: lowercase letters, digits, "-", "_" and ".".', true); return; }
+      return api('/api/teams', f).then(ok).then(t => {
+        ['teamSlug', 'teamName', 'teamDescription', 'teamIdPGroup', 'teamSCIMGroup'].forEach(id => {
+          const el = document.getElementById(id); if (el) el.value = '';
+        });
+        _teamsNote('');
+        toast('Team ' + t.slug + ' created', 'ok');
+        return loadTeams();
+      }).catch(err => _teamsNote('Could not create the team: ' + ((err && err.message) || err), true));
+    }
+
+    function _team(slug) {
+      return ((teamsState.view && teamsState.view.teams) || []).filter(t => t.slug === slug)[0];
+    }
+
+    function teamEdit(slug) {
+      const t = _team(slug);
+      if (!t) return;
+      const name = prompt('Name of ' + slug, t.name || slug);
+      if (name === null) return;
+      const idp = prompt('Identity-provider group whose members are on ' + slug + ' (empty for none)', t.idp_group || '');
+      if (idp === null) return;
+      const body = {name: name, idp_group: idp};
+      if (teamsState.view && teamsState.view.directory) {
+        const scim = prompt('Provisioned (SCIM) group whose members are on ' + slug + ' (empty for none)', t.scim_group || '');
+        if (scim === null) return;
+        body.scim_group = scim;
+      }
+      return apiMethod('PATCH', '/api/teams/' + encodeURIComponent(slug), body).then(ok).then(() => {
+        toast('Team ' + slug + ' saved', 'ok');
+        return loadTeams();
+      }).catch(err => _teamsNote('Could not save ' + slug + ': ' + ((err && err.message) || err), true));
+    }
+
+    function teamDelete(slug) {
+      const t = _team(slug);
+      const n = t && t.projects ? t.projects.length : 0;
+      if (!confirm('Delete the team ' + slug + '? ' + (n ? 'It is shared with ' + n + ' project' + (n === 1 ? '' : 's') +
+          ', and those shares end at once.' : 'No project is shared with it.'))) return;
+      return apiMethod('DELETE', '/api/teams/' + encodeURIComponent(slug)).then(ok).then(() => {
+        toast('Team ' + slug + ' deleted', 'ok');
+        return loadTeams();
+      }).catch(err => _teamsNote('Could not delete ' + slug + ': ' + ((err && err.message) || err), true));
+    }
+
+    function teamAddMember(slug) {
+      const input = document.querySelector('[data-team-add="' + slug + '"]');
+      const identity = ((input && input.value) || '').trim();
+      if (!identity) { _teamsNote('Enter the email, or sub:<subject>, of the person to add to ' + slug + '.', true); return; }
+      return api('/api/teams/' + encodeURIComponent(slug) + '/members', {identity}).then(ok).then(m => {
+        toast('Added ' + (m.identity || identity) + ' to ' + slug, 'ok');
+        _teamsNote('');
+        return loadTeams();
+      }).catch(err => _teamsNote('Could not add ' + identity + ': ' + ((err && err.message) || err), true));
+    }
+
+    function teamRemoveMember() {
+      const slug = this.dataset.team, identity = this.dataset.identity;
+      if (!slug || !identity) return;
+      if (!confirm('Take ' + identity + ' off ' + slug + '? They lose every project they reach only through it, at once.')) return;
+      return apiMethod('DELETE', '/api/teams/' + encodeURIComponent(slug) + '/members?identity=' + encodeURIComponent(identity))
+        .then(ok).then(() => { toast('Removed ' + identity + ' from ' + slug, 'ok'); return loadTeams(); })
+        .catch(err => _teamsNote('Could not remove ' + identity + ': ' + ((err && err.message) || err), true));
+    }
+
     // open runs on every visit to the tab, as switchTab's list used to.
     function open() {
       loadHubHealth();
       loadKnowledgeSources();
-      loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadSCIM(); loadStaticToken(); loadTelemetryPolicy();
+      loadConfig(); loadSTTSettings(); loadOIDCSettings(); loadSCIM(); loadTeams(); loadStaticToken(); loadTelemetryPolicy();
       loadNotifications();
       loadCIPanel();
       loadGitHubApps(); loadUSBSettings(); loadGlassesLink();
@@ -1925,7 +2068,8 @@
       open, saveConfigField, saveAnthropicCfg, saveOpenAICfg, saveOllamaCfg, saveSTTCfg,
       clearSTTCfg, confirmReset, saveProvider, saveCCModel, saveCopilotModel, loadOIDCSettings, oidcAddMapping,
       saveOIDCSettings, oidcClearSecret, oidcTestIssuer, oidcEnforce, loadSCIM, scimMint, scimRotate, scimRevoke,
-      holdPlace, holdRelease, loadStaticToken, retireStaticToken,
+      holdPlace, holdRelease, loadTeams, teamCreate, teamEdit, teamDelete, teamAddMember, teamRemoveMember,
+      loadStaticToken, retireStaticToken,
       loadTelemetryPolicy, loadNotifications, notifyAdd, notifyEdit, notifyRemove, notifyTest, saveNotifyDashboard,
       onTelemetryPolicyToggle, saveTelemetryPolicy, ghAppDiscover, ghAppSaveInstallation,
       loadGitHubApps, loadCISettings, saveCISettings, copyCISnippet, loadCIRules, ciNewRule,
@@ -2231,6 +2375,32 @@
               placeholder="The matter, e.g. LH-17" style="flex:1;min-width:160px" data-enter="holdPlace">
             <button class="btn" data-act="holdPlace">Place hold</button>
           </div>
+        </div>
+
+        <div class="settings-section" id="teamsSection" data-global-perm="user.manage" data-perm-hide>
+          <h3>Teams <span id="teamsBadge" class="badge"></span></h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+            Named groups of people a project can be shared with, at a role, from the project&rsquo;s Members card.
+            Projects are private to whoever created them until they are shared. Who is on a team decides who reaches
+            every project shared with it, so only administrators keep them. A team can follow a group from your identity
+            provider, or one it provisions over SCIM, so its members stay where you already manage them.
+          </p>
+          <div id="teamsList" style="margin-bottom:12px"></div>
+          <div style="padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-weight:600;margin-bottom:8px">Create a team</div>
+            <div class="form-row"><label for="teamSlug">Slug</label>
+              <input type="text" id="teamSlug" class="input" placeholder="payments" autocomplete="off" maxlength="63" spellcheck="false"></div>
+            <div class="form-row"><label for="teamName">Name</label>
+              <input type="text" id="teamName" class="input" placeholder="Payments" autocomplete="off" maxlength="100"></div>
+            <div class="form-row"><label for="teamDescription">Description</label>
+              <input type="text" id="teamDescription" class="input" placeholder="optional" autocomplete="off" maxlength="500"></div>
+            <div class="form-row"><label for="teamIdPGroup">Identity-provider group</label>
+              <input type="text" id="teamIdPGroup" class="input" placeholder="optional: everyone whose sign-in carries it is on the team" autocomplete="off" maxlength="256"></div>
+            <div class="form-row" id="teamSCIMGroupRow" style="display:none"><label for="teamSCIMGroup">Provisioned group</label>
+              <input type="text" id="teamSCIMGroup" class="input" placeholder="optional: everyone provisioned into it is on the team" autocomplete="off" maxlength="256"></div>
+            <button class="btn settings-save" data-act="teamCreate">Create team</button>
+          </div>
+          <div id="teamsNote" style="font-size:12px;color:var(--muted);margin-top:8px;white-space:pre-wrap"></div>
         </div>
 
         <div class="settings-section" id="staticTokenPanel" data-global-perm="token.admin" data-perm-hide>

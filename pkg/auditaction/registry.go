@@ -2326,7 +2326,7 @@ var registry = []Entry{
 		Home:    HomeControlPlane,
 		Entity:  "user",
 		Trigger: "An identity is offboarded, summarising every surface the operation touched.",
-		Payload: append([]string{"sessions", "tokens", "glasses", "denies", "leases", "tasks", "projects", "memberships",
+		Payload: append([]string{"sessions", "tokens", "glasses", "denies", "leases", "tasks", "projects", "memberships", "teams",
 			"personal_secrets", "personal_grants", "grant_requests", "claude_homes", "legal_hold", "warnings"}, offboardPayload...),
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
@@ -2371,8 +2371,8 @@ var registry = []Entry{
 		Action:    ActionUserOffboardMembership,
 		Home:      HomeControlPlane,
 		Entity:    "user",
-		Trigger:   "Offboarding drops the identity's project memberships.",
-		Payload:   append([]string{"count", "projects"}, offboardPayload...),
+		Trigger:   "Offboarding drops the identity's project memberships, and the teams it was named on.",
+		Payload:   append([]string{"count", "projects", "teams"}, offboardPayload...),
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 	},
@@ -2772,6 +2772,63 @@ var registry = []Entry{
 		Note:      "Separate from project.member.revoke so \"was this person removed or did they leave\" stays answerable.",
 	},
 
+	// ── team ───────────────────────────────────────────────────────────────
+	// Named groups of people a project can be shared with (Task 20478). The
+	// hub's administrators keep them, because who is on a team decides who
+	// reaches every project shared with it. Each row is committed in the same
+	// transaction as the change it records. entity_id is the team's slug, or
+	// "<slug>|<identity>" for a member.
+	{
+		Action:    ActionTeamCreate,
+		Home:      HomeControlPlane,
+		Entity:    "team",
+		Trigger:   "An administrator creates a team.",
+		Payload:   teamPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "`via` is \"api\" or \"cli\". `idp_group` and `scim_group` name the groups whose members are on the team without being added by name.",
+	},
+	{
+		Action:    ActionTeamUpdate,
+		Home:      HomeControlPlane,
+		Entity:    "team",
+		Trigger:   "An administrator renames a team, or changes the groups it follows.",
+		Payload:   teamPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "`previous` holds the name and links replaced. Relinking a team changes who is on it, and so who reaches every project shared with it.",
+	},
+	{
+		Action:    ActionTeamDelete,
+		Home:      HomeControlPlane,
+		Entity:    "team",
+		Trigger:   "An administrator deletes a team.",
+		Payload:   teamPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`members` lists the people it named and `shares` counts the projects it was shared with. Each of those shares is " +
+			"removed in the same commit and recorded as its own project.member.revoke, with `reason` saying the team was deleted.",
+	},
+	{
+		Action:    ActionTeamMemberAdd,
+		Home:      HomeControlPlane,
+		Entity:    "team",
+		Trigger:   "An administrator adds a person to a team by name.",
+		Payload:   teamPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+	},
+	{
+		Action:    ActionTeamMemberRemove,
+		Home:      HomeControlPlane,
+		Entity:    "team",
+		Trigger:   "An administrator takes a person off a team.",
+		Payload:   teamPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "Removes the person's named membership only: somebody on the team through its identity-provider or SCIM group stays on it until the group changes.",
+	},
+
 	// ── audit ──────────────────────────────────────────────────────────────
 	// The trail's record of itself. A row that could not be appended leaves
 	// no trace in a hash chain — the next append links to the last one that
@@ -2969,5 +3026,6 @@ var (
 	// on top of its own counts.
 	offboardPayload = []string{"identity", "identity_input", "subjects", "emails", "reason", "via"}
 
-	projectMemberPayload = []string{"project", "project_path", "identity", "role", "previous_role", "reason", "via", "left"}
+	projectMemberPayload = []string{"project", "project_path", "identity", "team", "role", "previous_role", "reason", "via", "left"}
+	teamPayload          = []string{"team", "name", "idp_group", "scim_group", "previous", "identity", "members", "shares", "via", "reason", "os_user"}
 )

@@ -145,6 +145,25 @@ func BuildPlan(o Options) (Plan, error) {
 		}
 	}
 
+	// Named team memberships (Task 20478), read the same way and for the same
+	// reason: Run removes them by identity, so a failure costs the preview.
+	if members, err := o.DB.ListTeamMembers(); err != nil {
+		plan.Warnings = append(plan.Warnings,
+			fmt.Sprintf("could not enumerate team memberships: %v", err))
+	} else {
+		keys := map[string]bool{}
+		for _, k := range target.OwnerKeys() {
+			keys[k] = true
+		}
+		for _, m := range members {
+			if keys[projectmember.NormalizeKey(m.IdentityKey)] {
+				plan.TeamMemberships = append(plan.TeamMemberships, TeamMembershipRef{
+					Team: m.TeamSlug, Identity: m.IdentityKey,
+				})
+			}
+		}
+	}
+
 	// A legal hold placed on any spelling of the person (Task 20415) keeps
 	// what they stored, as --keep-credentials does. Unreadable holds keep it
 	// too: an offboarding that cannot tell whether evidence is under a hold

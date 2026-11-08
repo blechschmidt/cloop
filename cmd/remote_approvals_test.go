@@ -48,7 +48,10 @@ func TestRemoteApprovalsListApproveDeny(t *testing.T) {
 		t.Fatalf("a requester approving their own request = %v, want the hub's refusal", err)
 	}
 
-	// A maintainer sees both, soonest deadline first, with the reason given.
+	// A maintainer of the project sees both, soonest deadline first, with the
+	// reason given. The project is root's, so private (Task 20478): a hub-wide
+	// maintainer is given it to see and decide what waits on it.
+	share(t, w, path, alexEmail, "maintainer")
 	w.as(t, alexEmail, ssohubtest.GroupMaintainers)
 	out, err = runRemoteCLI(t, "approvals", "list", "--json")
 	if err != nil {

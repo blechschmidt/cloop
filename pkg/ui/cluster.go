@@ -682,6 +682,11 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		// reach a project (Task 20366). Reload now rather than at the TTL;
 		// the reload closes this member's streams that lost access.
 		s.onBusMembersInvalidate()
+	case invalidateTeams:
+		// A team changed on another member, or by `cloop hub team` (Task
+		// 20478): reload now; the reload closes the streams of anybody who
+		// lost a project the team gave them.
+		s.onBusTeamsInvalidate()
 	case invalidateRunMoved:
 		var p struct {
 			Project string `json:"project"`

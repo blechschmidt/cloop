@@ -154,6 +154,16 @@ func (s *Server) offboardAftermath(rep offboard.Report) {
 			s.announceMembershipChange(m.Path)
 		}
 	}
+	// So did the named team memberships (Task 20478).
+	if len(rep.TeamMembershipsRevoked) > 0 {
+		if store := s.teamStore(); store != nil {
+			store.Invalidate()
+			_ = store.Refresh()
+		}
+		for _, m := range rep.TeamMembershipsRevoked {
+			s.announceTeamsChange(m.Team)
+		}
+	}
 	// Tokens and glasses links went in the same transaction, also behind the
 	// token manager's back, so nothing has yet told this hub or the others to
 	// close the streams they opened (Task 20398). Sessions need no such word:

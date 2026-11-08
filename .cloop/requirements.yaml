@@ -678,3 +678,30 @@ requirements:
         command: go test ./pkg/ui -run '^(TestKnowledgeSourcesArePushedToWhoMaySeeThem|TestKnowledgePushReachesAViewerNothing|TestKnowledgeTestConnectionAPI|TestKnowledgeTestConnectionIsRateLimited)$'
       - name: the rules and the scrubbing
         command: go test ./pkg/knowledge -run '^(TestConnectionTestFollowsTheSourceRules|TestConnectionTestScrubsTheCredentialFromAFailure|TestConnectionTestRecoversAConnectorPanic|TestPeekAndCanSee|TestOnChangeFollowsASync)$'
+  - id: R-35
+    title: A project somebody creates shall be reachable only by its owner, the hub's administrators, and the people, teams and role mappings it is shared with, at the role it was shared with.
+    status: approved
+    priority: must
+    tags: [security, rbac, sharing]
+    details: |-
+      On a hub with single sign-on a project's creator is recorded as its owner and
+      holds admin on it. Nobody else sees the project or gets anything but 404 for
+      it, except the hub's administrators (admin_emails, or the admin role
+      hub-wide), the people and the teams it is shared with, and whoever a role
+      mapping naming the project admits. A role held hub-wide does not reach it for
+      anyone but an administrator, so a share at viewer means view. A team's
+      members are its named people and the identity-provider or SCIM group it
+      follows; only administrators keep teams; deleting a team unshares every
+      project it reached in the same commit, and a share cannot name a team that
+      does not exist. Taking somebody off a team closes their open streams on its
+      projects on every hub member. A project nobody owns follows the role policy,
+      and a share there only adds. Promised in docs/security/model.md, "Project
+      members" and "Teams".
+    tests:
+      - name: private by default, and what a share and a team give
+        command: go test ./pkg/ui -run '^(TestTeams_PrivateByDefault|TestMembers_AShareDecidesOnAnOwnedProject|TestMembers_NeverDemoteOnAProjectNobodyOwns|TestTeams_OnlyTheHubsAdministratorsKeepThem|TestTeams_AProjectSharedWithATeamReachesItsMembers|TestTeams_ATeamFollowsAnIdentityProviderGroup|TestTeams_EveryoneOpensAProjectToTheWholeHub|TestTeams_DeletingATeamUnsharesEveryProjectItReached|TestTeams_LeavingATeamClosesTheLiveSocket|TestClusterTeamChangesReachEveryMember)$'
+        timeout: 20m
+      - name: who is on a team, and a share needs its team
+        command: go test ./pkg/hubteam -run '^(TestWhoIsOnATeam|TestAShareNeedsItsTeam|TestCreateUpdateDeleteAndAudit)$'
+      - name: the binding that names a project
+        command: go test ./pkg/authz -run '^TestProjectPinnedTellsABindingNamingTheProjectFromAHubWideOne$'

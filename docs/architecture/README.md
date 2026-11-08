@@ -222,7 +222,7 @@ running on its own is always the leader.
 
 | Store | What it holds | Protection |
 | --- | --- | --- |
-| `<hub>/.cloop/state.db` | executors and their sessions, dashboard sessions, API tokens, role bindings, project members, quotas, provisioned users and groups, secrets, grants, leases, grant requests, proxy sessions, cluster membership and bus, knowledge sources and chunks, telemetry, the hub's audit chain | SQLite in WAL mode with a bounded log; credential payloads sealed under the [key hierarchy](#secrets-and-keys); credentials the hub issues kept only as hashes |
+| `<hub>/.cloop/state.db` | executors and their sessions, dashboard sessions, API tokens, role bindings, project members, teams, quotas, provisioned users and groups, secrets, grants, leases, grant requests, proxy sessions, cluster membership and bus, knowledge sources and chunks, telemetry, the hub's audit chain | SQLite in WAL mode with a bounded log; credential payloads sealed under the [key hierarchy](#secrets-and-keys); credentials the hub issues kept only as hashes |
 | `<project>/.cloop/state.db` | the plan and its tasks, run state, events, costs, requirements and verdicts, the project's audit chain | the same schema and rules: migrations only add to the schema; a binary refuses a newer database unless every migration it lacks is recorded as harmless to it; a save never erases a column that an older binary doesn't know about |
 | `<project>/.cloop/` files | task artifacts, live output, checkpoints, attachments, the sandbox spec, config | crash-safe writes (`pkg/atomicfile`), size-limited reads (`pkg/boundedread`), and size kept in check by the janitor (`pkg/janitor`) |
 | Root key | `CLOOP_SECRET_KEY`, from a file, a systemd credential or the environment; or KEKs held by a KMS | kept outside every `.cloop/` directory; can be escrowed under a passphrase (`pkg/keyescrow`) |
@@ -462,7 +462,10 @@ gate, because each of them authenticates itself.
 identity's role is decided per scope from three sources: role bindings in the
 config, mapped from the IdP's claims; bindings written at runtime during an
 incident (`pkg/rolestore`); and a project's own member list
-(`pkg/projectmember`). RBAC is in force when single sign-on is on and an
+(`pkg/projectmember`), whose members are people and teams (`pkg/hubteam`). A
+project somebody creates is private: its owner is its administrator, and a role
+held hub-wide reaches it only for the hub's administrators
+([project members](../security/model.md#project-members)). RBAC is in force when single sign-on is on and an
 operator has written a policy (a role mapping or a `default_role`). The request
 gate and everything that reports on RBAC decide this with the same predicate,
 `authz.Enforced`
@@ -881,7 +884,8 @@ each one is for.
 | `pkg/offboard` | offboarding in one operation |
 | `pkg/authz` | roles, permissions, scopes, bindings and the enforcement predicate |
 | `pkg/rolestore` | role bindings written at runtime |
-| `pkg/projectmember` | a project's members and the role each one holds |
+| `pkg/projectmember` | a project's members, people and teams, and the role each one holds |
+| `pkg/hubteam` | the hub's teams: named groups of people, optionally following an IdP or SCIM group, that projects are shared with |
 | `pkg/projectconfine` | which directories may be a hub project |
 | `pkg/quota` | quotas and admission |
 | `pkg/quotastore` | per-identity quotas and overrides in the hub database |

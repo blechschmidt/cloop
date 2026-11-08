@@ -350,6 +350,11 @@ but not for anything reachable from a network.`,
 				if _, memberErr := srv.OpenMemberStore(); memberErr != nil {
 					return fmt.Errorf("could not open project memberships: %w", memberErr)
 				}
+				// Teams (Task 20478): who is on the teams projects are shared
+				// with. Fatal for the same reason.
+				if _, teamErr := srv.OpenTeamStore(); teamErr != nil {
+					return fmt.Errorf("could not open teams: %w", teamErr)
+				}
 				// SCIM provisioning (ui.oidc.scim — Task 20415): the directory
 				// the identity provider provisions, read at every decision for
 				// the groups a scim_group binding names. Fatal like the role

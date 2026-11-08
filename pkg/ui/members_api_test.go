@@ -50,15 +50,25 @@ type memberFixture struct {
 
 // newMemberFixture builds the hub. With rbac, role mappings are configured the
 // way :8888's are — a default role of "none" — plus a global maintainer
-// binding for alice; without, the hub runs on admin_emails alone.
+// binding for alice; without, the hub runs on admin_emails alone. The project
+// is alice's: she created it, so she is its administrator (Task 20478).
 func newMemberFixture(t *testing.T, rbac bool, extra ...authz.Binding) *memberFixture {
+	t.Helper()
+	return newMemberFixtureOwnedBy(t, rbac, aliceEmail, extra...)
+}
+
+// newMemberFixtureOwnedBy is newMemberFixture with the project registered under
+// owner — "" for a project nobody owns, which the role policy governs. On such
+// a project alice's authority is her global maintainer binding, which is what a
+// test of the maintainer's ceiling needs: on her own project she is admin.
+func newMemberFixtureOwnedBy(t *testing.T, rbac bool, owner string, extra ...authz.Binding) *memberFixture {
 	t.Helper()
 	// A registry of its own: these tests assert on indices.
 	t.Setenv(multiui.EnvRoot, t.TempDir())
 	idp := newUIFakeIdP(t)
 	srv, ts := newOIDCTestServer(t, idp, "", []string{rootEmail})
 	project := setupProjectDir(t, "alice's goal", nil)
-	registerOwned(t, project, aliceEmail)
+	registerOwned(t, project, owner)
 	if rbac {
 		resolver, err := authz.New(authz.Config{
 			DefaultRole: authz.RoleNone,
@@ -76,6 +86,10 @@ func newMemberFixture(t *testing.T, rbac bool, extra ...authz.Binding) *memberFi
 		t.Fatalf("OpenMemberStore: %v", err)
 	}
 	t.Cleanup(srv.closeMemberStore)
+	if _, err := srv.OpenTeamStore(); err != nil {
+		t.Fatalf("OpenTeamStore: %v", err)
+	}
+	t.Cleanup(srv.closeTeamStore)
 	// The test drives several sessions and many requests from one address.
 	srv.RPS, srv.Burst = 10000, 10000
 	logs := &captureLogger{}
@@ -238,11 +252,10 @@ func TestMembers_ShareOnAHubWhoseDefaultRoleIsNone(t *testing.T) {
 		body map[string]any
 		want int
 	}{
-		"above the granter's role": {map[string]any{"identity": carolEmail, "role": "admin"}, http.StatusForbidden},
-		"oneself":                  {map[string]any{"identity": aliceEmail, "role": "viewer"}, http.StatusBadRequest},
-		"not an identity":          {map[string]any{"identity": "carol", "role": "viewer"}, http.StatusBadRequest},
-		"no such role":             {map[string]any{"identity": carolEmail, "role": "owner"}, http.StatusBadRequest},
-		"already a member":         {map[string]any{"identity": bobEmail, "role": "viewer"}, http.StatusConflict},
+		"oneself":          {map[string]any{"identity": aliceEmail, "role": "viewer"}, http.StatusBadRequest},
+		"not an identity":  {map[string]any{"identity": "carol", "role": "viewer"}, http.StatusBadRequest},
+		"no such role":     {map[string]any{"identity": carolEmail, "role": "owner"}, http.StatusBadRequest},
+		"already a member": {map[string]any{"identity": bobEmail, "role": "viewer"}, http.StatusConflict},
 	} {
 		if code, body := f.call(t, f.alice, http.MethodPost, members, c.body); code != c.want {
 			t.Errorf("%s: %d %v, want %d", name, code, body, c.want)
@@ -300,10 +313,12 @@ func TestMembers_ShareOnAHubWhoseDefaultRoleIsNone(t *testing.T) {
 	}
 }
 
-// TestMembers_NeverDemote: a membership only adds. Bob holds operator
-// everywhere through his group; a viewer membership on alice's project shows
-// it to him and leaves him an operator there. An admin keeps admin.
-func TestMembers_NeverDemote(t *testing.T) {
+// TestMembers_AShareDecidesOnAnOwnedProject (Task 20478): bob holds operator
+// everywhere through his group, which does not reach a project alice created.
+// Shared with him at viewer, it is visible to him and he may only view it — a
+// hub-wide role decides what he may do across the hub, not on her project. An
+// admin keeps admin.
+func TestMembers_AShareDecidesOnAnOwnedProject(t *testing.T) {
 	f := newMemberFixture(t, true, authz.Binding{Claim: authz.ClaimGroup, Value: "engineers", Role: authz.RoleOperator})
 	if i := f.idx(t, f.bob, f.project); i >= 0 {
 		t.Fatal("bob sees alice's project before it is shared with him")
@@ -316,19 +331,44 @@ func TestMembers_NeverDemote(t *testing.T) {
 	if i < 0 {
 		t.Fatal("the membership did not make the project visible")
 	}
-	if code, body := f.call(t, f.bob, http.MethodGet, "/api/me?project_idx="+itoa(i), nil); body["role"] != "operator" {
-		t.Errorf("a viewer membership demoted an operator to %v (%d)", body["role"], code)
+	if code, body := f.call(t, f.bob, http.MethodGet, "/api/me?project_idx="+itoa(i), nil); body["role"] != "viewer" {
+		t.Errorf("bob's role on a project shared with him at viewer = %v (%d), want viewer", body["role"], code)
 	}
-	if code, body := f.call(t, f.bob, http.MethodPost, "/api/tasks?project_idx="+itoa(i), map[string]any{"title": "x"}); code >= 300 {
-		t.Errorf("an operator with a viewer membership was refused a task: %d %v", code, body)
+	if code, body := f.call(t, f.bob, http.MethodPost, "/api/tasks?project_idx="+itoa(i), map[string]any{"title": "x"}); code != http.StatusForbidden {
+		t.Errorf("a hub-wide operator shared a project at viewer added a task there: %d %v", code, body)
 	}
-	// Root, an admin, granted viewer by name, keeps everything.
+	// The owner is the project's administrator, whatever the policy says.
+	if code, body := f.call(t, f.alice, http.MethodGet, "/api/me?project_idx="+itoa(f.idx(t, f.alice, f.project)), nil); body["role"] != "admin" {
+		t.Errorf("the owner's role on her project = %v (%d), want admin", body["role"], code)
+	}
+	// Root, a hub admin, granted viewer by name, keeps everything.
 	if code, body := f.call(t, f.alice, http.MethodPost, members, map[string]any{"identity": rootEmail, "role": "viewer"}); code != http.StatusCreated {
 		t.Fatalf("share with root: %d %v", code, body)
 	}
 	ri := f.idx(t, f.root, f.project)
 	if code, body := f.call(t, f.root, http.MethodGet, "/api/me?project_idx="+itoa(ri), nil); body["role"] != "admin" {
-		t.Errorf("an admin's role on the project = %v (%d)", body["role"], code)
+		t.Errorf("a viewer membership demoted an admin to %v (%d)", body["role"], code)
+	}
+}
+
+// TestMembers_NeverDemoteOnAProjectNobodyOwns: a project nobody owns follows
+// the role policy (Task 20478), and there a membership only adds — bob, an
+// operator everywhere, keeps operator when he is also named at viewer.
+func TestMembers_NeverDemoteOnAProjectNobodyOwns(t *testing.T) {
+	f := newMemberFixtureOwnedBy(t, true, "", authz.Binding{Claim: authz.ClaimGroup, Value: "engineers", Role: authz.RoleOperator})
+	i := f.idx(t, f.bob, f.project)
+	if i < 0 {
+		t.Fatal("an operator hub-wide does not see a project nobody owns")
+	}
+	members := f.membersURL(t, f.alice)
+	if code, body := f.call(t, f.alice, http.MethodPost, members, map[string]any{"identity": bobEmail, "role": "viewer"}); code != http.StatusCreated {
+		t.Fatalf("share: %d %v", code, body)
+	}
+	if code, body := f.call(t, f.bob, http.MethodGet, "/api/me?project_idx="+itoa(i), nil); body["role"] != "operator" {
+		t.Errorf("a viewer membership demoted an operator to %v (%d)", body["role"], code)
+	}
+	if code, body := f.call(t, f.bob, http.MethodPost, "/api/tasks?project_idx="+itoa(i), map[string]any{"title": "x"}); code >= 300 {
+		t.Errorf("an operator with a viewer membership was refused a task: %d %v", code, body)
 	}
 }
 
@@ -627,7 +667,7 @@ func TestMembers_RoutesAreGated(t *testing.T) {
 				t.Errorf("%s requires %s, want %s", rs.Pattern, rs.Perm, perm)
 			}
 		}
-		if strings.Contains(rs.Pattern, "/members") && rs.Scope != scopeProjectIdx {
+		if strings.Contains(rs.Pattern, "/api/projects/") && strings.Contains(rs.Pattern, "/members") && rs.Scope != scopeProjectIdx {
 			t.Errorf("%s is not scoped to its project index", rs.Pattern)
 		}
 	}
@@ -682,6 +722,8 @@ func TestMembers_VisibilityAndAuthorityUnitRules(t *testing.T) {
 	if _, _, err := store.Grant(projectMember("/srv/payments", bobEmail, authz.RoleViewer), nil); err != nil {
 		t.Fatal(err)
 	}
+	// Alice's project: only a registry row carries an owner (Task 20478).
+	registerOwned(t, "/srv/payments", aliceEmail)
 	bob := &oidcauth.Identity{Sub: "sub-bob", Email: "Bob@Example.com"}
 	carol := &oidcauth.Identity{Sub: "sub-carol", Email: carolEmail}
 	project := multiui.ProjectEntry{Name: "payments", Path: "/srv/payments", Owner: aliceEmail}
@@ -756,4 +798,45 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+b.token)
 	return http.DefaultTransport.RoundTrip(r)
+}
+
+// TestMembers_AMaintainerByShareSharesUpToTheirOwnRole (Task 20478): on a
+// project alice owns, carol holds maintainer only because alice shared it with
+// her. She may share it further, with people and teams, up to maintainer, and
+// may not create an admin or touch one — the owner is the project's
+// administrator, and only she, an admin member or a hub admin makes another.
+func TestMembers_AMaintainerByShareSharesUpToTheirOwnRole(t *testing.T) {
+	f := newMemberFixture(t, true)
+	members := f.membersURL(t, f.alice)
+	if code, body := f.call(t, f.alice, http.MethodPost, members, map[string]any{"identity": carolEmail, "role": "maintainer"}); code != http.StatusCreated {
+		t.Fatalf("alice shares with carol: %d %v", code, body)
+	}
+	if code, body := f.call(t, f.alice, http.MethodPost, members, map[string]any{"identity": "dana@example.com", "role": "admin"}); code != http.StatusCreated {
+		t.Fatalf("the owner makes dana an admin: %d %v", code, body)
+	}
+	carolMembers := f.membersURL(t, f.carol)
+	code, body := f.call(t, f.carol, http.MethodGet, carolMembers, nil)
+	if code != http.StatusOK || body["your_role"] != "maintainer" || body["can_share"] != true {
+		t.Fatalf("carol's view of the roster: %d %v", code, body)
+	}
+	if roles := body["grantable_roles"].([]any); len(roles) != 3 || roles[2] != "maintainer" {
+		t.Errorf("carol is offered %v, want up to maintainer", roles)
+	}
+	for name, c := range map[string]struct {
+		method, path string
+		body         map[string]any
+		want         int
+	}{
+		"a person at maintainer": {http.MethodPost, carolMembers, map[string]any{"identity": bobEmail, "role": "maintainer"}, http.StatusCreated},
+		"a person at admin":      {http.MethodPost, carolMembers, map[string]any{"identity": "erin@example.com", "role": "admin"}, http.StatusForbidden},
+		"everyone at admin":      {http.MethodPost, carolMembers, map[string]any{"team": "everyone", "role": "admin"}, http.StatusForbidden},
+		"everyone at viewer":     {http.MethodPost, carolMembers, map[string]any{"team": "everyone", "role": "viewer"}, http.StatusCreated},
+		"demoting the admin":     {http.MethodPatch, carolMembers + "?identity=dana%40example.com", map[string]any{"role": "viewer"}, http.StatusForbidden},
+		"removing the admin":     {http.MethodDelete, carolMembers + "?identity=dana%40example.com", nil, http.StatusForbidden},
+		"adding the owner":       {http.MethodPost, carolMembers, map[string]any{"identity": aliceEmail, "role": "viewer"}, http.StatusConflict},
+	} {
+		if code, body := f.call(t, f.carol, c.method, c.path, c.body); code != c.want {
+			t.Errorf("carol, %s: %d %v, want %d", name, code, body, c.want)
+		}
+	}
 }

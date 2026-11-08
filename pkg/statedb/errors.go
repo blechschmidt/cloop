@@ -169,6 +169,16 @@ var (
 	// reports as 404 and the CLI as a plain sentence.
 	ErrProjectMemberNotFound = errors.New("statedb: project member not found")
 
+	// ErrTeamNotFound indicates no teams row has the requested slug (Task
+	// 20478). Returned when a team is changed, deleted or given a member, and
+	// when a project is shared with a team that does not exist — a share
+	// naming a missing team would grant nothing today and, should somebody
+	// later create a team under that slug, everything to its members.
+	ErrTeamNotFound = errors.New("statedb: team not found")
+
+	// ErrTeamExists indicates a team with the requested slug already exists.
+	ErrTeamExists = errors.New("statedb: team already exists")
+
 	// ErrSecretLeaseNotFound indicates no secret_leases row names the lease
 	// (Task 20382): it was released, swept, or recorded by a binary that
 	// predates the table.

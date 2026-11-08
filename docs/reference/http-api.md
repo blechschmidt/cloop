@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-348 endpoints, by the permission each one requires:
+354 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -115,7 +115,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `session.admin` | 2 |
 | `task.mutate` | 42 |
 | `token.admin` | 6 |
-| `user.manage` | 24 |
+| `user.manage` | 30 |
 | `view.prefs` | 2 |
 
 | Method | Path | Permission | Scope |
@@ -412,6 +412,12 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/tasks/{id}/reproduce` | `run.start` | project |
 | GET | `/api/tasks/{id}/reproductions` | `project.read` | project |
 | POST | `/api/tasks/{id}/revise` | `task.mutate` | project |
+| GET | `/api/teams` | `user.manage` | global |
+| POST | `/api/teams` | `user.manage` | global |
+| PATCH | `/api/teams/{slug}` | `user.manage` | global |
+| DELETE | `/api/teams/{slug}` | `user.manage` | global |
+| POST | `/api/teams/{slug}/members` | `user.manage` | global |
+| DELETE | `/api/teams/{slug}/members` | `user.manage` | global |
 | GET | `/api/telemetry` | `audit.read` | global |
 | POST | `/api/telemetry` | `public` | global |
 | GET | `/api/telemetry/config` | `public` | global |

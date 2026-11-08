@@ -730,6 +730,29 @@ const (
 	// to change.
 	SourceProjectMember Source = "project_member"
 
+	// SourceProjectOwner means the caller created the project, which makes
+	// them its administrator (Task 20478). Distinct from SourceProjectMember
+	// because ownership is not a row anyone added: it is recorded when the
+	// project is created, and it is why a project needs no sharing at all for
+	// the person who made it.
+	SourceProjectOwner Source = "project_owner"
+
+	// SourceProjectTeam means a team the project was shared with is what
+	// granted the caller this decision (Task 20478). Its own source because it
+	// is withdrawn in two places — removing the team from the project, or the
+	// person from the team (or from the identity-provider group the team
+	// follows) — and the audit row has to send an investigator to both.
+	SourceProjectTeam Source = "project_team"
+
+	// SourceProjectPrivate means the decision is about a project the caller
+	// was not given (Task 20478): projects are private to their owner, the
+	// people and teams they are shared with, the role mappings that name them,
+	// and the hub's administrators. A role held hub-wide decides what a
+	// caller may do across the hub — create a project, read the fleet — but
+	// does not reach into somebody else's project, so a denial recorded under
+	// this source means "not shared with you", not "your role is too low".
+	SourceProjectPrivate Source = "project_private"
+
 	// SourceDefaultRole means no binding matched and oidc.default_role
 	// applied.
 	SourceDefaultRole Source = "default_role"
@@ -768,6 +791,19 @@ type Decision struct {
 	// permissions are automatically included.
 	perms    map[Permission]struct{}
 	allowAll bool
+}
+
+// ProjectPinned reports whether the decision came from a binding that names a
+// project — a role mapping or runtime binding with Project set — rather than
+// one that applies hub-wide or from the default role (Task 20478).
+//
+// Projects are private: a hub-wide role decides what a caller may do across the
+// hub, and reaches into a project only for the hub's administrators. A binding
+// pinned to a project is the operator naming that project in policy, so it is
+// the one kind of policy answer that counts there for everybody else.
+func (d Decision) ProjectPinned() bool {
+	return d.Binding != nil && strings.TrimSpace(d.Binding.Project) != "" && !d.Binding.Deny &&
+		(d.Source == SourceBinding || d.Source == SourceAdminEmail || d.Source == SourceRuntimeBinding)
 }
 
 // Allows reports whether the decision grants p. PermPublic is always
@@ -1457,6 +1493,55 @@ func (r *Resolver) withDirectory(subject *Subject) *Subject {
 // HasDirectory reports whether a provisioning directory takes part in this
 // resolver's decisions.
 func (r *Resolver) HasDirectory() bool { return r != nil && r.directory != nil }
+
+// DirectoryGroups returns the groups the provisioning directory places subject
+// in now, or nil on a hub that is not provisioned (Task 20478). It is the same
+// answer a scim_group binding is matched against, exported for the other thing
+// that follows a provisioned group: a team linked to one.
+func (r *Resolver) DirectoryGroups(subject *Subject) []string {
+	if r == nil || r.directory == nil || subject == nil {
+		return nil
+	}
+	return r.directory.DirectoryGroups(subject)
+}
+
+// PinsProjects reports whether any binding in force — configured or runtime —
+// names a project (Task 20478). Such a binding is the one kind of policy that
+// can make a private project visible to somebody it was not shared with, so a
+// hub where none exists skips asking.
+func (r *Resolver) PinsProjects() bool {
+	if r == nil {
+		return false
+	}
+	for _, b := range r.bindings {
+		if b.Project != "" && !b.Deny {
+			return true
+		}
+	}
+	for _, b := range r.runtimeBindings() {
+		if b.Project != "" && !b.Deny {
+			return true
+		}
+	}
+	return false
+}
+
+// ClaimValueIn reports whether values holds want, compared the way a group or
+// role binding compares them: trimmed, a leading "/" dropped (Keycloak's group
+// paths), case-insensitively. Exported so that a team following an
+// identity-provider group matches exactly the identities a binding on that
+// group would.
+func ClaimValueIn(values []string, want string) bool {
+	want = normalizeClaimValue(want)
+	if want == "" {
+		return false
+	}
+	return containsFold(values, want)
+}
+
+// NormalizeClaimValue is the canonical spelling of a group or role value: the
+// form ClaimValueIn and binding matching compare.
+func NormalizeClaimValue(v string) string { return normalizeClaimValue(v) }
 
 // DeniedBy returns the runtime deny binding that withdraws subject's authority
 // within scope, or nil.

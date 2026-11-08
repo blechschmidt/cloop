@@ -223,12 +223,13 @@ func (g *grant) decide(scope authz.Scope) authz.Decision {
 		}
 	}
 	if g.bypass != "" {
-		// A project membership (Task 20366) is consulted ahead of the bypass,
-		// for the deny's reason turned around: the bypass says this deployment
-		// has not asked cloop to decide, and for this identity on this project
-		// a maintainer did decide — they wrote down a name and a role. It binds
-		// only where the identity could not see the project without it, so it
-		// never takes away an allow-all anybody held.
+		// A project is private (Task 20478): on a hub without a role policy the
+		// bypass is everything only on the projects the identity owns or
+		// administers as a hub admin, and on anybody else's it is what their
+		// shares grant — or nothing. Consulted ahead of the bypass for the
+		// deny's reason turned around: the bypass says this deployment has not
+		// asked cloop to decide, and for this identity on this project somebody
+		// did — by creating it, or by writing down who else may reach it.
 		if g.subject != nil {
 			if m, ok := g.server.membershipBinds(g.subject, scope); ok {
 				return m
@@ -536,7 +537,10 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, perm authz.Pe
 // address another tenant's data by supplying a wild index.
 //
 // Only enforced when RBAC is active; with OIDC disabled the historical
-// fallback behavior is preserved exactly.
+// fallback behavior is preserved exactly. (Without a policy the index falls
+// back to the hub's own project, which nobody owns and every signed-in user
+// may act on there; an owned project is reached only through an index the
+// caller can see.)
 func (s *Server) requireVisibleProject(w http.ResponseWriter, r *http.Request) bool {
 	if !s.authzActiveFor(r) {
 		return true
@@ -555,6 +559,20 @@ func (s *Server) requireVisibleProject(w http.ResponseWriter, r *http.Request) b
 }
 
 // ── Audit ───────────────────────────────────────────────────────────────────
+
+// projectAccessSource reports whether d was decided by project access — a
+// share, a team, or the project being private (Tasks 20366, 20478). Such a
+// decision is recorded on every hub with sign-on: on one without a role policy
+// it is the only decision there is, and "a viewer member tried to start a run"
+// or "a signed-in user reached for a project nobody shared with them" is
+// exactly the event worth keeping.
+func projectAccessSource(src authz.Source) bool {
+	switch src {
+	case authz.SourceProjectMember, authz.SourceProjectTeam, authz.SourceProjectPrivate:
+		return true
+	}
+	return false
+}
 
 // isPrivileged reports whether granting perm is worth an audit record.
 // Reads are excluded: every dashboard poll would otherwise append a row and
@@ -598,7 +616,7 @@ func (s *Server) auditAuthz(r *http.Request, d authz.Decision, perm authz.Permis
 	// 20366): on one without role mappings it is the only decision there is,
 	// and "a viewer member tried to start a run" is exactly the event worth
 	// keeping.
-	if !s.authzActiveFor(r) && d.Source != authz.SourceProjectMember {
+	if !s.authzActiveFor(r) && !projectAccessSource(d.Source) {
 		return
 	}
 	if allowed && !isPrivileged(perm) {

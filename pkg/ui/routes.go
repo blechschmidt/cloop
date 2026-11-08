@@ -908,6 +908,20 @@ func (s *Server) routeTable() []routeSpec {
 		// (Task 20395): default_role none plus an admin mapping for the caller.
 		{Pattern: "POST /api/config/oidc/enforce", Handler: s.handleOIDCEnforce, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 
+		// Teams (Task 20478): named groups of people a project can be shared
+		// with. userMgmt on all of them, the read included: whoever decides
+		// who is on a team decides who reaches every project shared with it,
+		// and the list says who is on which. A project's administrator picks
+		// teams from the Members card, which lists their names. Taking one
+		// person off a team withdraws access and does not ask for a recent
+		// sign-in; every other write does. See teams_api.go.
+		{Pattern: "GET /api/teams", Handler: s.handleTeams, Perm: userMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/teams", Handler: s.handleTeamCreate, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "PATCH /api/teams/{slug}", Handler: s.handleTeamUpdate, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/teams/{slug}", Handler: s.handleTeamDelete, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/teams/{slug}/members", Handler: s.handleTeamMemberAdd, Perm: userMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/teams/{slug}/members", Handler: s.handleTeamMemberRemove, Perm: userMgmt, Scope: scopeGlobal},
+
 		{Pattern: "POST /api/options/toggle", Handler: s.handleOptionsToggle, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/max-parallel", Handler: s.handleMaxParallelSet, Perm: cfgWrite, Scope: scopeProject},
 		{Pattern: "POST /api/options/step-timeout", Handler: s.handleStepTimeoutSet, Perm: cfgWrite, Scope: scopeProject},

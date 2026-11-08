@@ -179,6 +179,31 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Projects are private to whoever creates them, and can be shared with
+  people and teams at a role.** On a hub with single sign-on, a project you
+  create is visible only to you and the hub's administrators until you share
+  it, and you are its administrator (`admin` on it) whatever role you hold
+  elsewhere. The project's Members card now shares with a person or a team, at
+  `viewer`, `operator`, `maintainer` or `admin`, and shows the owner and whether
+  the project is private. A share's role is what somebody may do on a project
+  somebody owns: a role held hub-wide no longer reaches it, except for the hub's
+  administrators, so sharing with a hub-wide maintainer as viewer means view. A
+  role mapping that names a project admits whom it names to it, owned or not.
+  **Teams** are new: named groups of people, kept by administrators under
+  Settings → Teams, `/api/teams` or `cloop hub team`, whose members are the
+  people added by name plus everyone in the identity-provider group
+  (`idp_group`) or SCIM group (`scim_group`) the team follows. The built-in team
+  `everyone` is every signed-in identity. Share with a team from the Members
+  card or `cloop project members add <project> team:<slug>`. Deleting a team
+  removes every share naming it in the same commit, a share cannot name a team
+  that does not exist, taking somebody off a team closes their open dashboards
+  on its projects, and offboarding removes the person's named team
+  memberships. Team changes are audited as `team.create`, `team.update`,
+  `team.delete`, `team.member.add` and `team.member.remove`. A project created
+  through an API token acting for a person is now owned by that person instead
+  of nobody. Teams are two new tables (migration 0098, additive). See
+  `docs/security/model.md#project-members` (Task 20478).
+
 - **Human review gates in the task list.** A gate is an entry in the queue that
   no agent runs. When a run reaches one, which means every task above it has
   finished, the run pauses with *waiting for human review at gate #N*, sends a
@@ -902,6 +927,17 @@ schema and the hub's HTTP API may change in any release.
   and then refused with the same sentence (Task 20452).
 
 ### Changed
+
+- **A role held hub-wide no longer reaches a project somebody else created.**
+  Before, a project shared with a hub-wide operator at `viewer` left them an
+  operator there, and only `oidc.admin_emails` could see other people's
+  projects, so an administrator made `admin` by a group mapping could not. Now a non-administrator's authority on an owned project is what its
+  shares and any mapping naming it give, and every hub administrator sees and
+  administers every project. Projects nobody owns (the hub's own directory,
+  paths named on `cloop ui --projects`, projects registered before sign-on)
+  still follow the role mappings as before, and a share there still only adds.
+  A refusal because a project is private is audited as `authz.denied` with the
+  source `project_private` (Task 20478).
 
 - **A draft requirement is checked by nothing until a person approves it.**
   Before, a check that named a draft ran its tests, `--all` and *Check all*

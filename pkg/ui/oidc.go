@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +57,10 @@ func identityFromOwner(o *apitoken.Owner) *oidcauth.Identity {
 		Name:   o.Name,
 		Groups: o.Groups,
 		Roles:  o.Roles,
+		// What a SCIM directory matches a person by, so a team following a
+		// provisioned group finds the link's owner too (Task 20478).
+		Username: o.Username,
+		OID:      o.OID,
 	}
 }
 
@@ -493,26 +498,15 @@ func permissionStrings(perms []authz.Permission) []string {
 
 // ── Per-user project scoping ────────────────────────────────────────────────
 
-// identityCanSeeEntry reports whether user may see entry. Shared projects
-// (no owner) are visible to everyone; owned projects to their owner, the hub's
-// admins, and the identities the project was shared with (Task 20366). A nil
-// user means either OIDC is off or the caller authenticated via the static
-// bearer token — both see everything.
+// identityCanSeeEntry reports whether user may see entry (Task 20478,
+// access.go). A project somebody owns is private: visible to its owner, the
+// hub's administrators, the people and teams it was shared with, and whoever a
+// binding naming it admits. A project nobody owns is visible to everyone, and
+// the role policy decides what each may do there. A nil user means either OIDC
+// is off or the caller authenticated via the static bearer token — both see
+// everything.
 func (s *Server) identityCanSeeEntry(user *oidcauth.Identity, entry multiui.ProjectEntry) bool {
-	return s.identityCanSeeWithoutMembership(user, entry) || s.identityHoldsMembership(user, entry)
-}
-
-// identityCanSeeWithoutMembership is identityCanSeeEntry before memberships:
-// ownership and admin_emails alone. A feature carries its project's owner, so
-// it answers for the project.
-func (s *Server) identityCanSeeWithoutMembership(user *oidcauth.Identity, entry multiui.ProjectEntry) bool {
-	if !s.oidcEnabled() || user == nil || entry.Owner == "" {
-		return true
-	}
-	if s.OIDC.IsAdmin(user) {
-		return true
-	}
-	return strings.EqualFold(entry.Owner, user.OwnerKey())
+	return s.viewerSees(s.viewerFor(user), entry, nil)
 }
 
 // filterEntriesForIdentity returns the subset of entries visible to user,
@@ -522,9 +516,14 @@ func (s *Server) filterEntriesForIdentity(user *oidcauth.Identity, entries []mul
 	if !s.oidcEnabled() || user == nil {
 		return entries
 	}
+	v := s.viewerFor(user)
+	if v.all || v.admin {
+		return entries
+	}
+	names := projectNamesByPath(entries)
 	visible := entries[:0:0]
 	for _, e := range entries {
-		if s.identityCanSeeEntry(user, e) {
+		if s.viewerSees(v, e, names) {
 			visible = append(visible, e)
 		}
 	}
@@ -593,10 +592,20 @@ func filterEntriesForToken(tok *apitoken.Token, entries []multiui.ProjectEntry) 
 // A token minted on a user's behalf contributes its *owner* here, because
 // callers resolve it through recipientIdentity: two links owned by different
 // users must not share a payload any more than two browser sessions would.
+//
+// The key carries the identity's group claims too (Task 20478): a team that
+// follows an identity-provider group, or a role mapping on a group that names a
+// project, makes what one identity sees depend on its groups, and two sessions
+// that disagree about them must not share a payload.
 func (s *Server) visibilityKey(user *oidcauth.Identity, tok *apitoken.Token) string {
 	key := ""
-	if s.oidcEnabled() && user != nil && !s.OIDC.IsAdmin(user) {
+	if s.oidcEnabled() && user != nil && !s.identityIsHubAdmin(user) {
 		key = user.OwnerKey()
+		if len(user.Groups) > 0 {
+			groups := append([]string(nil), user.Groups...)
+			sort.Strings(groups)
+			key += "\x00groups:" + strings.Join(groups, "\x00")
+		}
 	}
 	if tok != nil && len(tok.ProjectScope) > 0 {
 		key += "\x00tok:" + tok.ID
@@ -713,12 +722,17 @@ func markHiddenFor(viewer string, entries []multiui.ProjectEntry, statuses []mul
 // plus the aggregate stats recomputed over that subset. entries supplies
 // the ownership metadata (statuses themselves don't carry Owner).
 func (s *Server) filterStatusesForIdentity(user *oidcauth.Identity, entries []multiui.ProjectEntry, statuses []multiui.ProjectStatus) ([]multiui.ProjectStatus, multiui.AggregateStats) {
-	if !s.oidcEnabled() || user == nil || s.OIDC.IsAdmin(user) {
+	if !s.oidcEnabled() || user == nil {
 		return statuses, multiui.Aggregate(statuses)
 	}
+	v := s.viewerFor(user)
+	if v.all || v.admin {
+		return statuses, multiui.Aggregate(statuses)
+	}
+	names := projectNamesByPath(entries)
 	visiblePaths := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		if s.identityCanSeeEntry(user, e) {
+		if s.viewerSees(v, e, names) {
 			visiblePaths[e.Path] = true
 		}
 	}

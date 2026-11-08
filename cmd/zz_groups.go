@@ -387,6 +387,7 @@ var hubCommandGroups = map[string]string{
 	"grant":   groupHubAccess,
 	"session": groupHubAccess,
 	"role":    groupHubAccess,
+	"team":    groupHubAccess,
 	"quota":   groupHubAccess,
 	"limits":  groupHubAccess,
 	"token":   groupHubAccess,

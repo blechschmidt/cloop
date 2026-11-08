@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 239 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 244 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 206 |
+| `control-plane` | the hub's own state.db | 211 |
 | `project` | the project's .cloop/state.db | 29 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-239 actions in 51 families. Every action is listed: this section is the whole
+244 actions in 52 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -932,7 +932,7 @@ Payload keys, on every action above: `scope`
 | `user.offboard_grant` | `user` | control-plane | stable | Offboarding revokes every live grant over the identity's personal secrets, under a legal hold too. |
 | `user.offboard_hold` | `user` | control-plane | stable | An offboarding runs under a legal hold (`--keep-credentials`): access is severed and the stored credentials are kept. |
 | `user.offboard_lease` | `user` | control-plane | stable | Offboarding releases secret leases held on the identity's behalf. |
-| `user.offboard_membership` | `user` | control-plane | stable | Offboarding drops the identity's project memberships. |
+| `user.offboard_membership` | `user` | control-plane | stable | Offboarding drops the identity's project memberships, and the teams it was named on. |
 | `user.offboard_project` | `user` | control-plane | stable | Offboarding reports projects that need a new owner; it does not reassign them. |
 | `user.offboard_request` | `user` | control-plane | stable | Offboarding withdraws the self-service grant requests the identity left pending. |
 | `user.offboard_secret` | `user` | control-plane | stable | Offboarding destroys the identity's personal secrets through the broker. |
@@ -945,14 +945,14 @@ Payload keys:
 - `user.claude_home_swept` — `identity`, `member`, `host`, `dir`, `denies`, `had_login`, `login_cancelled`, `logged_out`, `logout`, `removed`, `error`, `trigger`
 - `user.hold_place` — `identity`, `hold_reason`, `placed_at`, `reason`, `via`, `os_user`, `identity_input`, `subjects`, `emails`
 - `user.hold_release` — `identity`, `hold_reason`, `placed_at`, `placed_by`, `reason`, `via`, `os_user`
-- `user.offboard` — `sessions`, `tokens`, `glasses`, `denies`, `leases`, `tasks`, `projects`, `memberships`, `personal_secrets`, `personal_grants`, `grant_requests`, `claude_homes`, `legal_hold`, `warnings`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
+- `user.offboard` — `sessions`, `tokens`, `glasses`, `denies`, `leases`, `tasks`, `projects`, `memberships`, `teams`, `personal_secrets`, `personal_grants`, `grant_requests`, `claude_homes`, `legal_hold`, `warnings`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_claude` — `copies`, `removed`, `logged_out`, `logins_cancelled`, `unreached`, `kept`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_deny` — `count`, `bindings`, `claims`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_glasses` — `count`, `links`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_grant` — `count`, `grants`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_hold` — `secrets`, `claude_homes`, `grants_revoked`, `requests_withdrawn`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_lease` — `count`, `leases`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
-- `user.offboard_membership` — `count`, `projects`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
+- `user.offboard_membership` — `count`, `projects`, `teams`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_project` — `count`, `projects`, `action`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_request` — `count`, `requests`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
 - `user.offboard_secret` — `count`, `secrets`, `action`, `identity`, `identity_input`, `subjects`, `emails`, `reason`, `via`
@@ -1047,12 +1047,29 @@ Payload keys:
 | `project.member.leave` | `project_member` | control-plane | beta | A member removes themselves from a project. |
 | `project.member.revoke` | `project_member` | control-plane | beta | A member is removed from a project, or the project itself is removed from the hub. |
 
-Payload keys, on every action above: `project`, `project_path`, `identity`, `role`, `previous_role`, `reason`, `via`, `left`
+Payload keys, on every action above: `project`, `project_path`, `identity`, `team`, `role`, `previous_role`, `reason`, `via`, `left`
 
 - `project.member.change` — `previous_role` is the role replaced; a change in either direction is recorded.
 - `project.member.grant` — `via` is "api" or "cli". A membership only adds access: the hub unions its role with whatever the identity already holds.
 - `project.member.leave` — Separate from project.member.revoke so "was this person removed or did they leave" stays answerable.
 - `project.member.revoke` — `role` is the role the member held. A project removed from the hub drops its whole roster, one row per member, with `reason` saying so.
+
+### team.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `team.create` | `team` | control-plane | beta | An administrator creates a team. |
+| `team.delete` | `team` | control-plane | beta | An administrator deletes a team. |
+| `team.member.add` | `team` | control-plane | beta | An administrator adds a person to a team by name. |
+| `team.member.remove` | `team` | control-plane | beta | An administrator takes a person off a team. |
+| `team.update` | `team` | control-plane | beta | An administrator renames a team, or changes the groups it follows. |
+
+Payload keys, on every action above: `team`, `name`, `idp_group`, `scim_group`, `previous`, `identity`, `members`, `shares`, `via`, `reason`, `os_user`
+
+- `team.create` — `via` is "api" or "cli". `idp_group` and `scim_group` name the groups whose members are on the team without being added by name.
+- `team.delete` — `members` lists the people it named and `shares` counts the projects it was shared with. Each of those shares is removed in the same commit and recorded as its own project.member.revoke, with `reason` saying the team was deleted.
+- `team.member.remove` — Removes the person's named membership only: somebody on the team through its identity-provider or SCIM group stays on it until the group changes.
+- `team.update` — `previous` holds the name and links replaced. Relinking a team changes who is on it, and so who reaches every project shared with it.
 
 ### audit.*
 

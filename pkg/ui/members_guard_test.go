@@ -37,7 +37,11 @@ import (
 // newClaimFreshnessFixture), so every privileged request re-asserts them at
 // the provider — or, when the provider hands out no refresh token, cannot.
 // alice owns a project there and is signed in.
-func newStaleClaimsMemberHub(t *testing.T, idp *uiFakeIdP, resolver *authz.Resolver) *memberFixture {
+//
+// owner is whose project it is: alice's, or "" for one nobody owns, on which
+// the role policy decides her authority — the case a test of her ceiling needs,
+// since on her own project she is its administrator (Task 20478).
+func newStaleClaimsMemberHub(t *testing.T, idp *uiFakeIdP, resolver *authz.Resolver, owner string) *memberFixture {
 	t.Helper()
 	t.Setenv(multiui.EnvRoot, t.TempDir())
 	srv := New(setupProjectDir(t, cloopGoal, nil), 0, "")
@@ -67,7 +71,7 @@ func newStaleClaimsMemberHub(t *testing.T, idp *uiFakeIdP, resolver *authz.Resol
 	srv.RPS, srv.Burst = 10000, 10000
 
 	project := setupProjectDir(t, "alice's goal", nil)
-	registerOwned(t, project, aliceEmail)
+	registerOwned(t, project, owner)
 	idp.email, idp.sub, idp.name = aliceEmail, "sub-alice", "alice"
 	alice := jarClient(t)
 	login(t, alice, ts)
@@ -94,7 +98,7 @@ func TestMembers_TheCeilingIsTheRoleTheProviderAssertsNow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := newStaleClaimsMemberHub(t, idp, resolver)
+	f := newStaleClaimsMemberHub(t, idp, resolver, "")
 	members := f.membersURL(t, f.alice)
 
 	idp.groups = []string{"maintainers"}
@@ -118,7 +122,7 @@ func TestMembers_TheCeilingIsTheRoleTheProviderAssertsNow(t *testing.T) {
 // problem there. Sharing one project must not change that for everybody.
 func TestMembers_SharingLeavesClaimFreshnessAloneWithoutRoleMappings(t *testing.T) {
 	idp := newUIFakeIdP(t) // no refresh token: claims can never be re-asserted
-	f := newStaleClaimsMemberHub(t, idp, nil)
+	f := newStaleClaimsMemberHub(t, idp, nil, aliceEmail)
 	if f.srv.authzActive() {
 		t.Fatal("test assumption broken: role mappings are configured")
 	}
@@ -144,7 +148,9 @@ func TestMembers_SharingLeavesClaimFreshnessAloneWithoutRoleMappings(t *testing.
 // against the cache must not re-admit someone removed meanwhile, overwrite
 // someone added meanwhile, or reach someone raised above the caller meanwhile.
 func TestMembers_ARosterChangeIsCheckedAgainstTheTable(t *testing.T) {
-	f := newMemberFixture(t, true)
+	// A project nobody owns, so alice's ceiling is her maintainer binding: on
+	// a project she created she would be its administrator (Task 20478).
+	f := newMemberFixtureOwnedBy(t, true, "")
 	// A cache only an explicit reload moves, so it stays behind the table
 	// for as long as the test needs — as it can for up to its TTL in use.
 	f.srv.closeMemberStore()

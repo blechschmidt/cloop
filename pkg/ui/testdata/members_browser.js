@@ -8,8 +8,8 @@
 // projects that remain — the hub closes their socket with 1008 and the page
 // has to act on it.
 //
-// Two people, one browser, one after the other: alice (a maintainer, the
-// owner) manages the roster; bob, a member, watches the project while the Go
+// Two people, one browser, one after the other: alice (the owner, so the
+// project's administrator) manages the roster, people and a team; bob, a member, watches the project while the Go
 // test revokes him through its control endpoint, then is re-admitted and
 // leaves on his own. Their sessions come from the Go test, which signed both
 // in through the fake identity provider before Chrome started; the driver only
@@ -245,6 +245,25 @@ const ROSTER = `(() => {
 
 const row = (who) => `(${ROSTER}).find(m => m.identity === ${JSON.stringify(who)})`;
 
+// shot saves a PNG of the element sel as <MEMBERS_SHOTS>/<name>.png, for a
+// person to look at; a no-op unless MEMBERS_SHOTS names a directory.
+async function shot(cdp, sel, name) {
+  const dir = process.env.MEMBERS_SHOTS;
+  if (!dir) return;
+  const r = await cdp.eval(`(() => {
+    const e = document.querySelector(${JSON.stringify(sel)});
+    if (!e) return null;
+    // Centred, so the sticky header covers none of it.
+    e.scrollIntoView({block: 'center'});
+    const b = e.getBoundingClientRect();
+    return {x: Math.max(0, b.left - 8), y: Math.max(0, b.top - 8 + window.scrollY), width: b.width + 16, height: b.height + 16};
+  })()`);
+  if (!r) return;
+  const img = await cdp.send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true,
+    clip: {x: r.x, y: r.y, width: r.width, height: r.height, scale: 1}});
+  fs.writeFileSync(path.join(dir, name + '.png'), Buffer.from(img.data, 'base64'));
+}
+
 async function main() {
   const {cdp, proc, dir} = await launchChrome();
   const out = {};
@@ -318,6 +337,38 @@ async function main() {
     await waitFor(cdp, `!${row('bob@example.com')}`, "bob's row to go");
     out.server_after_remove = await ctl('GET', '/members');
 
+    // A team (Task 20478): the form switches to the hub's teams, Everyone
+    // first, and the share lands as a team row the card can remove.
+    await cdp.eval(`(() => {
+      const k = document.getElementById('memberKind');
+      k.value = 'team';
+      k.dispatchEvent(new Event('change', {bubbles: true}));
+      return true;
+    })()`);
+    out.team_picker_visible = await cdp.eval(`document.getElementById('memberTeam').getClientRects().length > 0 &&
+      document.getElementById('memberIdentity').getClientRects().length === 0`);
+    out.teams_offered = await cdp.eval(`[...document.querySelectorAll('#memberTeam option')].map(o => o.value)`);
+    await cdp.eval(`(() => {
+      document.getElementById('memberTeam').value = 'payments';
+      document.getElementById('memberRole').value = 'operator';
+      return true;
+    })()`);
+    await click(cdp, '#memberAddBtn');
+    await waitFor(cdp, `(() => { const m = ${row('team:payments')}; return !!m && m.role === 'operator'; })()`,
+      "the team's row as operator");
+    out.team_row_text = await cdp.eval(`document.querySelector('#membersList [data-member="team:payments"]').textContent`);
+    await shot(cdp, '#membersSection', 'members-card-team-share');
+    out.server_after_team = await ctl('GET', '/members');
+    await click(cdp, '#membersList [data-member="team:payments"] button[data-act="remove"]');
+    await waitFor(cdp, `!${row('team:payments')}`, "the team's row to go");
+    out.server_after_team_remove = await ctl('GET', '/members');
+    await cdp.eval(`(() => {
+      const k = document.getElementById('memberKind');
+      k.value = 'person';
+      k.dispatchEvent(new Event('change', {bubbles: true}));
+      return true;
+    })()`);
+
     // ── bob: a member watching the project loses it while he watches ──
     await ctl('POST', '/grant?role=viewer');
     await signIn(cdp, 'bob');
@@ -352,6 +403,33 @@ async function main() {
     await waitFor(cdp, `document.getElementById('tab-projects').classList.contains('active')`, 'bob back on his projects');
     await waitFor(cdp, `${PROJECT_IDX} === -1`, 'the project gone after leaving');
     out.server_after_leave = await ctl('GET', '/members');
+
+    // ── root: Settings → Teams (Task 20478) ──
+    // The hub's administrator keeps the teams: the panel lists Everyone and
+    // the hub's teams, creates one from its form, adds and removes a person,
+    // and deletes it, each through the panel's own controls.
+    await signIn(cdp, 'root');
+    await cdp.eval(`window.switchTab('settings')`);
+    await waitFor(cdp, `(() => { const l = document.getElementById('teamsList');
+      return !!l && l.getClientRects().length > 0 && !!l.querySelector('[data-team-row="everyone"]'); })()`,
+      'the Teams section to list Everyone');
+    out.settings_teams_initial = await cdp.eval(`[...document.querySelectorAll('#teamsList [data-team-row]')].map(r => r.getAttribute('data-team-row'))`);
+    await type(cdp, '#teamSlug', 'ops');
+    await type(cdp, '#teamName', 'Operations');
+    await click(cdp, 'button[data-act="teamCreate"]');
+    await waitFor(cdp, `!!document.querySelector('#teamsList [data-team-row="ops"]')`, 'the new team in the list');
+    await type(cdp, '#teamsList [data-team-add="ops"]', 'Carol@Example.com');
+    await click(cdp, '#teamsList button[data-act="teamAddMember"][data-arg="ops"]');
+    await waitFor(cdp, `!!document.querySelector('#teamsList button[data-act="teamRemoveMember"][data-identity="carol@example.com"]')`,
+      'carol on the team');
+    out.server_teams_after_add = await ctl('GET', '/teams');
+    await shot(cdp, '#teamsSection', 'settings-teams');
+    await click(cdp, '#teamsList button[data-act="teamRemoveMember"][data-identity="carol@example.com"]');
+    await waitFor(cdp, `!document.querySelector('#teamsList button[data-act="teamRemoveMember"][data-identity="carol@example.com"]')`,
+      'carol off the team');
+    await click(cdp, '#teamsList button[data-act="teamDelete"][data-arg="ops"]');
+    await waitFor(cdp, `!document.querySelector('#teamsList [data-team-row="ops"]')`, 'the team to go');
+    out.server_teams_after_delete = await ctl('GET', '/teams');
 
     process.stdout.write(JSON.stringify(out, null, 2));
   } catch (e) {

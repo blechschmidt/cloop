@@ -120,6 +120,11 @@ type snapshot struct {
 	at      time.Time
 	members []Member // ordered by path, then identity
 	byPair  map[pair]int
+	// byPath indexes members by project, for the visibility checks that ask
+	// about every project in a list (Task 20478).
+	byPath map[string][]int
+	// teams reports whether any project is shared with a team.
+	teams bool
 }
 
 type pair struct{ path, key string }
@@ -289,20 +294,47 @@ func (s *Store) RoleFor(projectPath, identityKey string) (authz.Role, bool) {
 	return m.Role, true
 }
 
-// MembersOf returns projectPath's members ordered by identity.
+// MembersOf returns projectPath's members ordered by identity: the people and
+// the teams it is shared with.
 func (s *Store) MembersOf(projectPath string) []Member {
 	if s == nil {
 		return nil
 	}
 	path := NormalizePath(projectPath)
+	snap := s.current()
+	idx := snap.byPath[path]
+	if len(idx) == 0 {
+		return nil
+	}
+	out := make([]Member, 0, len(idx))
+	for _, i := range idx {
+		out = append(out, snap.members[i])
+	}
+	return out
+}
+
+// TeamSharesOf returns the teams projectPath is shared with, as memberships
+// whose IdentityKey is "team:<slug>" (Task 20478).
+func (s *Store) TeamSharesOf(projectPath string) []Member {
+	if s == nil {
+		return nil
+	}
+	snap := s.current()
+	if !snap.teams {
+		return nil
+	}
 	var out []Member
-	for _, m := range s.current().members {
-		if m.ProjectPath == path {
-			out = append(out, m)
+	for _, i := range snap.byPath[NormalizePath(projectPath)] {
+		if IsTeamKey(snap.members[i].IdentityKey) {
+			out = append(out, snap.members[i])
 		}
 	}
 	return out
 }
+
+// SharesWithTeams reports whether any project is shared with a team, so a hub
+// where none is skips working out which teams an identity is on.
+func (s *Store) SharesWithTeams() bool { return s != nil && s.current().teams }
 
 // ProjectsOf returns identityKey's memberships ordered by project.
 func (s *Store) ProjectsOf(identityKey string) []Member {
@@ -513,9 +545,14 @@ func newSnapshot(members []Member, at time.Time) *snapshot {
 		}
 		return members[i].IdentityKey < members[j].IdentityKey
 	})
-	snap := &snapshot{at: at, members: members, byPair: make(map[pair]int, len(members))}
+	snap := &snapshot{at: at, members: members, byPair: make(map[pair]int, len(members)),
+		byPath: make(map[string][]int)}
 	for i, m := range members {
 		snap.byPair[pair{m.ProjectPath, m.IdentityKey}] = i
+		snap.byPath[m.ProjectPath] = append(snap.byPath[m.ProjectPath], i)
+		if IsTeamKey(m.IdentityKey) {
+			snap.teams = true
+		}
 	}
 	return snap
 }
@@ -572,11 +609,20 @@ func sortedKeys(m map[string]bool) []string {
 
 // ── normalisation ───────────────────────────────────────────────────────────
 
+// IsTeamKey reports whether key names a team rather than a person (Task
+// 20478): "team:<slug>".
+func IsTeamKey(key string) bool { return strings.HasPrefix(NormalizeKey(key), statedb.TeamKeyPrefix) }
+
 // KeyFor derives the membership key for an identity's claims, exactly as
 // oidcauth.Identity.OwnerKey does: the lowercased email, or "sub:" and the
 // subject when the identity provider released no email. "" when it has
 // neither. One definition, because the key is the namespace project owners
 // and members share, and a second spelling would match nobody.
+//
+// A key spelled like a team's ("team:…", which no email address is) is a
+// person's key that callers deciding authority treat as no key at all, so an
+// identity provider releasing such an "email" can never match a share made to
+// a team; pkg/ui and pkg/hubteam check IsTeamKey.
 func KeyFor(email, sub string) string {
 	if email = strings.TrimSpace(email); email != "" {
 		return strings.ToLower(email)
@@ -604,16 +650,22 @@ func NormalizeKey(key string) string {
 }
 
 // ParseKey normalises a key typed by an operator and refuses one that could
-// never match a signed-in identity: OwnerKey is always an email or "sub:"
-// and a subject, so anything else would be stored, listed, and grant nobody
-// anything.
+// never match: a person's key is always an email or "sub:" and a subject
+// (OwnerKey), and a team's is "team:" and its slug (Task 20478), so anything
+// else would be stored, listed, and grant nobody anything.
 func ParseKey(raw string) (string, error) {
 	key := NormalizeKey(raw)
 	switch {
 	case key == "":
-		return "", errors.New(`projectmember: an identity is required — the member's email, or "sub:<subject>" when the identity provider releases no email`)
+		return "", errors.New(`projectmember: an identity is required — the member's email, "sub:<subject>" when the identity provider releases no email, or "team:<slug>" for a team`)
 	case len(key) > MaxKeyLen:
 		return "", fmt.Errorf("projectmember: an identity is at most %d characters", MaxKeyLen)
+	}
+	if slug, isTeam := statedb.TeamSlugOfKey(key); isTeam || strings.HasPrefix(key, statedb.TeamKeyPrefix) {
+		if !statedb.ValidTeamSlug(slug) {
+			return "", fmt.Errorf("projectmember: %q does not name a team — a team's slug is lowercase letters, digits, '-', '_' and '.'", raw)
+		}
+		return key, nil
 	}
 	for _, r := range key {
 		if unicode.IsSpace(r) || unicode.IsControl(r) {

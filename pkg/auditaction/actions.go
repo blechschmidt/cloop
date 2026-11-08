@@ -784,6 +784,19 @@ const (
 	// ActionProjectMemberLeave records a member removing themselves.
 	ActionProjectMemberLeave Action = "project.member.leave"
 
+	// ── team ───────────────────────────────────────────────────────────────
+
+	// ActionTeamCreate records an administrator creating a team (Task 20478).
+	ActionTeamCreate Action = "team.create"
+	// ActionTeamUpdate records a team renamed, or relinked to another group.
+	ActionTeamUpdate Action = "team.update"
+	// ActionTeamDelete records a team deleted, with every project share naming it.
+	ActionTeamDelete Action = "team.delete"
+	// ActionTeamMemberAdd records a person added to a team by name.
+	ActionTeamMemberAdd Action = "team.member.add"
+	// ActionTeamMemberRemove records a person taken off a team.
+	ActionTeamMemberRemove Action = "team.member.remove"
+
 	// ── audit ──────────────────────────────────────────────────────────────
 
 	// ActionAuditGap records audit events that could not be appended to the

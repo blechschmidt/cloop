@@ -1709,9 +1709,10 @@ as `none`. A hub with single sign-on and no policy at all runs with RBAC
   `secret.own` to connect, and `project.write` on a project to bind it there.
   See [knowledge sources](#knowledge-sources).
 - `project.share` lets you change who else may reach a project (its
-  [members](#project-members)), and belongs to `maintainer`. It is separate
-  from `project.write`, which is on the same rung, because every other project
-  permission is about the work and this one is about who can reach it.
+  [members](#project-members), people and teams), and belongs to `maintainer`.
+  It is separate from `project.write`, which is on the same rung, because every
+  other project permission is about the work and this one is about who can reach
+  it. A project's owner holds `admin` on it, so holds this too.
 - `secret.request` and `secret.own` are the two secret permissions below
   `maintainer`. `secret.request` lets you ask for one of the organisation's
   credentials, which gives you nothing by itself (see
@@ -3033,92 +3034,189 @@ When enabled:
 
 ### Project members
 
-An owned project is visible only to its owner and the hub's admins. Leaving a
-project unowned shares it with every signed-in user. A **membership** is the
-narrower option: one identity admitted to one project at one role
-(`pkg/projectmember`, stored in the control plane's `project_members` table).
+On a hub with single sign-on, a project you create is private. Only you, as its
+owner, and the hub's administrators can see it until you share it. The owner is
+recorded when the project is created, from the signed-in user or from the person
+an API token acts for, and the owner is the project's administrator: they hold
+`admin` on it whatever role they hold elsewhere on the hub.
 
-**It only adds.** The hub combines the membership's role with whatever the
-identity already holds (`authz.Union`). Sharing a project at `viewer` with
-someone who is an `operator` everywhere leaves them an operator there, and an
-admin named as a member stays an admin. That is why a membership is not a
-runtime role binding: a project-scoped binding wins its tier outright even when
-it grants less, which for sharing would demote people without anyone asking.
+A **member** is one more person or team admitted to the project at a role
+(`pkg/projectmember`, stored in the control plane's `project_members` table):
 
-What the role means depends on whether role mappings are configured:
-
-| Hub | A member's authority on the project |
+| Role | On the project they may |
 | --- | --- |
-| Role mappings configured (RBAC) | the role policy's answer for them, combined with the membership's role |
-| `admin_emails` alone | the membership's role. Everyone else who can see the project (its owner, the admins, every user for an unowned project) keeps the allow-all such a hub gives them, which is why a grant to any of them is refused as one that would add nothing |
+| `viewer` | see the project, its tasks, history and analytics |
+| `operator` | also start and stop runs, and add, edit and reorder tasks |
+| `maintainer` | also change its goal, settings and credentials, delete it, and change its members |
+| `admin` | everything, including opening a terminal in its sandbox and choosing its executor |
+
+**Who can see a project somebody owns:**
+
+- its owner;
+- the hub's administrators: identities in `oidc.admin_emails`, and identities
+  the role policy makes `admin` hub-wide;
+- the people it is shared with;
+- the members of the [teams](#teams) it is shared with, including the built-in
+  team `everyone`, which is every signed-in identity;
+- whoever a role mapping or runtime binding that names the project admits at
+  `viewer` or above.
+
+Everyone else gets `404` for it, the same answer as for a project that does not
+exist. A role held hub-wide does not reach into somebody else's project. If Bob
+is a `maintainer` hub-wide and you share your project with him as `viewer`, he
+can view it and nothing more. A hub-wide role decides what Bob may do across the
+hub, such as create projects of his own, read the executor fleet or keep
+personal secrets. The hub's administrators are the exception: they hold their
+policy role on every project, so a share at `viewer` never demotes an admin
+(`TestMembers_AShareDecidesOnAnOwnedProject`, `TestTeams_PrivateByDefault`).
+When somebody has several grants on one project, such as a share by name and a
+team, the strongest one applies.
+
+**A project nobody owns** follows the hub's role policy, as projects did before
+ownership existed. That covers the hub's own directory, paths named on
+`cloop ui --projects`, and projects registered before sign-on was turned on.
+Where role mappings are configured they decide who can see it and at which role,
+and a share adds to what they give: sharing at `viewer` with somebody who is an
+`operator` everywhere leaves them an operator there
+(`TestMembers_NeverDemoteOnAProjectNobodyOwns`). On a hub whose `default_role` is
+`none`, that means only the identities a mapping names. On a hub without role
+mappings (`admin_emails` alone) every signed-in user can see it and act on it,
+so sharing it adds nothing and is refused.
+
+**What a member's role means without role mappings.** On a hub running on
+`admin_emails` alone, the owner and the hub's admins hold everything on a
+project, and a member's role is all they may do on it. Everyone else does not
+see it.
 
 **Visibility follows the membership.** A member sees the project in their list,
 in the broadcasts pushed to their dashboard (through the per-recipient filter),
 on their glasses link, and through any token minted on their behalf, since a
-delegated token is limited by its owner's authority, memberships included. A
-**feature** is shared with its project: a member of the project reaches its
-features, and the member list is edited on the project. A caller who holds
-`project.read` only on shared projects (a member on a hub whose `default_role`
-is `none`) reaches the project list through the `project-list` scope and is
-shown only the projects they can read, never the unowned ones their role
-doesn't cover. A signed-in caller who can read no project at all gets an empty
-list instead of a refusal, since there is nothing in it to withhold. The
-refusal behind it is still audited as `authz.denied`, and the hub does no work
-to produce the list, so an identity with no role can't make it reload every
-project. The dashboard's live stream, which also carries hub-wide event
-notices, still needs a project they can read. On the projects page, such a
-member receives their project list and nobody's name: who else has the page
-open is hub-wide information, so the presence list is withheld from them.
+delegated token is limited by its owner's authority, memberships and teams
+included. A **feature** is shared with its project: a member of the project
+reaches its features, and the member list is edited on the project. A caller who
+holds `project.read` only on shared projects (a member on a hub whose
+`default_role` is `none`) reaches the project list through the `project-list`
+scope and is shown only the projects they can read. A signed-in caller who can
+read no project at all gets an empty list instead of a refusal, since there is
+nothing in it to withhold. The refusal behind it is still audited as
+`authz.denied`, and the hub does no work to produce the list, so an identity with
+no role can't make it reload every project. The dashboard's live stream, which
+also carries hub-wide event notices, still needs a project they can read. On the
+projects page, such a member receives their project list and nobody's name: who
+else has the page open is hub-wide information, so the presence list is withheld
+from them.
 
-**The ceiling.** Changing the member list needs `project.share` on that
-project, and nobody can grant a role above their own there, or change or
-remove a member whose role is above their own. So a maintainer can't create an
-admin and act through them. The caller's role is the one the gate decided,
-after re-checking their claims at the provider (which `project.share`
-requires), so someone recently removed from an admin group has the role they
-hold now, not the one their session started with. The checks against the
-member are repeated inside the write's transaction, against the row in the
-table at that moment instead of the cached one. A change based on a cache that
-another hub or the CLI has since updated therefore can't re-admit someone
-removed in the meantime, overwrite a membership added in the meantime, or reach
-a member who was raised above the caller in the meantime. Nobody can edit their
-own membership except to leave it
-(`DELETE /api/projects/{idx}/members/self`, at `view.prefs`).
+**The ceiling.** Changing the member list needs `project.share` on that project
+(`maintainer` and up), and nobody can grant a role above their own there, or
+change or remove a member whose role is above their own. So a maintainer can't
+create an admin and act through them, and only the owner, an admin member or a
+hub admin can make somebody else a project admin. The caller's role is the one
+the gate decided, after re-checking their claims at the provider (which
+`project.share` requires), so someone recently removed from an admin group has
+the role they hold now, not the one their session started with. The checks
+against the member are repeated inside the write's transaction, against the row
+in the table at that moment instead of the cached one. A change based on a cache
+that another hub or the CLI has since updated therefore can't re-admit someone
+removed in the meantime, overwrite a membership added in the meantime, or reach a
+member who was raised above the caller in the meantime. Nobody can edit their
+own membership except to leave it (`DELETE /api/projects/{idx}/members/self`, at
+`view.prefs`).
 
 **Revocation is immediate and reaches open streams.** Reads go through a cache
 refreshed every 10 seconds, but a write through a hub takes effect on that hub
 when the request returns, every other hub member reloads on the cluster bus,
-`cloop project members` announces its writes on the same bus, and every hub
-reads the table again every 5 seconds regardless. Each reload that finds a
-change re-checks every live WebSocket and SSE stream and closes the ones whose
-identity can no longer read the project they are attached to. The client is
-removed from the project's room first, so nothing broadcast afterwards reaches
-it, and a WebSocket is sent an `access_withdrawn` message before its `1008`
-close. The dashboard responds to that message by returning to the projects that
-remain. The message is what a browser reliably sees: the WebSocket library
-answers the browser's reply to a server-initiated close with a second close
-frame, which a browser treats as a protocol error and reports as `1006`. A
-stream authorized shortly before a revocation, and not yet in its room when the
-reload checked, checks again once it has joined, so no stream slips between the
-two. Removing a project closes every stream attached to it or to its features,
-including its owner's, because rooms are keyed by path too.
+`cloop project members` and `cloop hub team` announce their writes on the same
+bus, and every hub reads the tables again every 5 seconds regardless. Each reload
+that finds a change re-checks every live WebSocket and SSE stream and closes the
+ones whose identity can no longer read the project they are attached to. That
+includes somebody taken off a team, or out of the identity-provider group a team
+follows, the next time their claims are read (`TestTeams_LeavingATeamClosesTheLiveSocket`).
+The client is removed from the project's room first, so nothing broadcast
+afterwards reaches it, and a WebSocket is sent an `access_withdrawn` message
+before its `1008` close. The dashboard responds to that message by returning to
+the projects that remain. The message is what a browser reliably sees: the
+WebSocket library answers the browser's reply to a server-initiated close with a
+second close frame, which a browser treats as a protocol error and reports as
+`1006`. A stream authorized shortly before a revocation, and not yet in its room
+when the reload checked, checks again once it has joined, so no stream slips
+between the two. Removing a project closes every stream attached to it or to its
+features, including its owner's, because rooms are keyed by path too.
 
 **It leaves evidence.** Every change commits in the same transaction as its
 audit row: [`project.member.grant`](../reference/audit-events.md#projectmember),
 [`project.member.change`](../reference/audit-events.md#projectmember),
 [`project.member.revoke`](../reference/audit-events.md#projectmember) and
 [`project.member.leave`](../reference/audit-events.md#projectmember), with `via`
-saying whether the API or the CLI made it. A project removed from the hub drops
-its member list with it, because memberships are keyed by path, and a list that
-outlived its project would admit those people to whatever is registered at that
-path next. Offboarding removes every membership of the departing identity under
-each of its spellings, in the credential transaction
+saying whether the API or the CLI made it and `team` naming the team of a team
+share. A decision a share or a team made, and a refusal because a project is
+private to somebody else, is recorded as `authz.granted` or `authz.denied` with
+the source `project_member`, `project_team` or `project_private`, on every hub
+with sign-on. A project removed from the hub drops its member list with it,
+because memberships are keyed by path, and a list that outlived its project would
+admit those people to whatever is registered at that path next. Offboarding
+removes every membership of the departing identity under each of its spellings,
+and every team they were named on, in the credential transaction
 ([`user.offboard_membership`](../reference/audit-events.md#user)).
 
 ```bash
 cloop project members list payments
 cloop project members add payments bob@example.com --role operator --reason "pairing on the ledger"
+cloop project members add payments team:payments-devs --role viewer --reason "the whole team reads it"
 cloop project members remove payments bob@example.com --reason "moved teams"
+```
+
+### Teams
+
+A **team** is a named group of people a project can be shared with
+(`pkg/hubteam`, stored in the control plane's `teams` and `team_members`
+tables). Sharing a project with a team is one `project_members` row naming
+`team:<slug>`, so "the payments team may operate this project" stays true as
+people join and leave the team.
+
+A team's members are:
+
+- the people added to it by name;
+- if it follows an identity-provider group (`idp_group`), everyone whose ID
+  token carries that group, matched exactly as a `group` role mapping is matched;
+- if it follows a provisioned group (`scim_group`), everyone the identity
+  provider placed in that group over [SCIM](../guides/scim-provisioning.md),
+  matched as a `scim_group` role mapping is.
+
+Following a group keeps membership where the organisation already manages it.
+Removing an engineer from the group at the identity provider takes them off the
+team, and off every project shared with it, without anybody editing the hub
+(`TestTeams_ATeamFollowsAnIdentityProviderGroup`). The built-in team
+`everyone` has every signed-in identity as its member and no definition: sharing
+a project with it opens the project to the whole hub at the role you choose
+(`TestTeams_EveryoneOpensAProjectToTheWholeHub`).
+
+**Only the hub's administrators keep teams.** Creating, relinking and deleting a
+team, and adding or removing its people, needs `user.manage`, under
+Settings → Teams, `/api/teams` or `cloop hub team`
+(`TestTeams_OnlyTheHubsAdministratorsKeepThem`). Whoever decides who is on a team
+decides who reaches every project shared with it. If a project's maintainer could
+edit a team, they could add themselves to it and reach every other project the
+team was given. A project's administrator chooses which teams the project is
+shared with, from the teams the hub has, and nothing else about them. Granting a
+team a role follows the same ceiling as granting a person one.
+
+**Deleting a team unshares every project it reached.** The team, its named
+members and every share naming it are removed in one commit, and each project's
+own trail records a `project.member.revoke` for it with the reason "the team was
+deleted". A share naming a team that does not exist is refused inside its own
+transaction. Together these mean a team created later under a deleted team's
+slug starts with no projects (`TestTeams_DeletingATeamUnsharesEveryProjectItReached`).
+Team changes are audited as [`team.create`](../reference/audit-events.md#team),
+[`team.update`](../reference/audit-events.md#team),
+[`team.delete`](../reference/audit-events.md#team),
+[`team.member.add`](../reference/audit-events.md#team) and
+[`team.member.remove`](../reference/audit-events.md#team).
+
+```bash
+cloop hub team create payments-devs --name "Payments" --idp-group payments-devs --reason "payments squad"
+cloop hub team add payments-devs dana@example.com --reason "contractor, no IdP group"
+cloop hub team show payments-devs
+cloop hub team delete payments-devs --reason "squad dissolved"
 ```
 
 ### Configuring role mappings
@@ -3155,6 +3253,13 @@ directory at every decision. Removing someone from the group at the provider
 therefore demotes them at its next sync, with no group overage and no claim for
 a client to forge. `project` matches either a project's registry name or its
 filesystem path.
+
+**Mappings and private projects.** A project somebody creates is private to
+them (see [Project members](#project-members)). An unscoped mapping, one with no
+`project`, gives hub-wide permissions such as creating projects, and reaches the
+projects nobody owns. It reaches somebody else's project only for an `admin`
+mapping, which makes its holders the hub's administrators. A mapping that names a
+project admits whom it names to that project, owned or not, at its role.
 
 **Precedence.** Only mappings whose scope the request satisfies apply. They are
 ranked by specificity (project+executor, then executor, then project, then
@@ -4588,6 +4693,9 @@ reports it uses that function ([when RBAC is in force](#when-rbac-is-in-force)).
 | Enforce deny-by-default keeps every current admin an admin, reuses the no-administrator check, and is audited under the signed-in user | `pkg/ui: TestOIDCEnforce_KeepsEveryCurrentAdminAnAdmin`, `TestOIDCEnforce_ReusesTheNoAdministratorGate`, `TestAuditNamesTheSignedInUserWhenRBACIsOff` |
 | An owner-less API token minted with no role policy in force, or before the hub recorded this, is refused under an enforced policy until an administrator who holds its roles approves it. An approval needs a policy in force. Tokens minted under the policy, at the control plane, or acting for an owner keep working. The enforce prompt names every token it will suspend, and the doctor fails while one is unapproved | `pkg/ui: TestTokens_APolicyEnforcedAfterTheMintSuspendsTheToken`, `TestTokens_NoApprovalWithoutAPolicy`, `TestTokens_WhatIsNeverSuspended`, `TestDashboard_OIDCPanelShowsTheHubsRBACVerdict`; `pkg/hubdoctor: TestUnapprovedTokensAcrossTheMatrix` |
 | :8888's own `ui.oidc` keeps the same access as before | `pkg/ui: TestHub8888AccessIsUnchanged`, `pkg/hubdoctor: TestHub8888IsReportedEnforced`, `cmd: TestReportRBACOnHub8888` |
+| A project somebody creates is private: its owner is its administrator, a hub-wide role reaches it only for an administrator, a mapping naming it admits whom it names, and a share's role is what a non-administrator may do there | `pkg/ui: TestTeams_PrivateByDefault`, `TestMembers_AShareDecidesOnAnOwnedProject`; `pkg/authz: TestProjectPinnedTellsABindingNamingTheProjectFromAHubWideOne` |
+| A project nobody owns follows the role policy, and a share there only adds | `pkg/ui: TestMembers_NeverDemoteOnAProjectNobodyOwns` |
+| Teams are kept by administrators only; a team's members are its named people and the IdP or SCIM group it follows; deleting a team unshares its projects; leaving a team closes the streams it gave | `pkg/ui: TestTeams_OnlyTheHubsAdministratorsKeepThem`, `TestTeams_AProjectSharedWithATeamReachesItsMembers`, `TestTeams_ATeamFollowsAnIdentityProviderGroup`, `TestTeams_DeletingATeamUnsharesEveryProjectItReached`, `TestTeams_LeavingATeamClosesTheLiveSocket`; `pkg/hubteam: TestWhoIsOnATeam`, `TestAShareNeedsItsTeam` |
 
 ### Sessions — `sessions_test.go` and the package suites
 

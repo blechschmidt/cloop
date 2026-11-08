@@ -214,6 +214,13 @@ Examples:
 				break
 			}
 		}
+		// And the named team memberships (Task 20478).
+		for _, m := range rep.TeamMembershipsRevoked {
+			if err := ui.AnnounceTeamsChange(db, cliOrigin(), m.Team); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not notify running hubs of the removed team memberships: %v\n", err)
+				break
+			}
+		}
 		// So did the sessions, tokens and glasses links: tell running hubs
 		// to drop them and close every stream and terminal they opened
 		// (Task 20398), as `cloop hub session revoke` does.
@@ -307,6 +314,7 @@ func printOffboardReport(rep offboard.Report, announced bool) {
 	row("secret leases", len(rep.Leases), done(len(rep.LeasesReleased)))
 	row("running tasks", len(rep.Tasks), done(len(rep.TasksStopped)))
 	row("project memberships", len(rep.Memberships), done(len(rep.MembershipsRevoked)))
+	row("team memberships", len(rep.TeamMemberships), done(len(rep.TeamMembershipsRevoked)))
 	// The stored footprint says what happened to it in its own verbs: a
 	// secret is destroyed or kept, not "severed".
 	doneAs := func(n int, verb string) string {
@@ -365,6 +373,12 @@ func printOffboardReport(rep offboard.Report, announced bool) {
 		memberships = append(memberships, fmt.Sprintf("%s  %-10s as %s", m.Path, m.Role, m.Identity))
 	}
 	detail("Project memberships (removed, not reported):", memberships)
+
+	var teams []string
+	for _, m := range rep.TeamMemberships {
+		teams = append(teams, fmt.Sprintf("%s  as %s", m.Team, m.Identity))
+	}
+	detail("Team memberships (removed):", teams)
 
 	var tasks []string
 	for _, t := range rep.Tasks {

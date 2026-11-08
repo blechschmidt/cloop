@@ -35,24 +35,32 @@ type membersBrowserResult struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
-	MetaNamesScript      bool              `json:"meta_names_script"`
-	LoadedBeforeOverview bool              `json:"loaded_before_overview"`
-	LoadedAfterOverview  int               `json:"loaded_after_overview"`
-	AliceInitial         []memberRow       `json:"alice_initial"`
-	AliceFormVisible     bool              `json:"alice_form_visible"`
-	AliceRolesOffered    []string          `json:"alice_roles_offered"`
-	AfterAdd             []memberRow       `json:"after_add"`
-	ServerAfterAdd       map[string]string `json:"server_after_add"`
-	ServerAfterChange    map[string]string `json:"server_after_change"`
-	Refusal              []string          `json:"refusal"`
-	ServerAfterRemove    map[string]string `json:"server_after_remove"`
-	BobMe                string            `json:"bob_me"`
-	BobProjects          []string          `json:"bob_projects"`
-	BobView              []memberRow       `json:"bob_view"`
-	BobFormVisible       bool              `json:"bob_form_visible"`
-	BobAfterRevokeToasts []string          `json:"bob_after_revoke_toasts"`
-	Readmitted           bool              `json:"readmitted"`
-	ServerAfterLeave     map[string]string `json:"server_after_leave"`
+	MetaNamesScript       bool                `json:"meta_names_script"`
+	LoadedBeforeOverview  bool                `json:"loaded_before_overview"`
+	LoadedAfterOverview   int                 `json:"loaded_after_overview"`
+	AliceInitial          []memberRow         `json:"alice_initial"`
+	AliceFormVisible      bool                `json:"alice_form_visible"`
+	AliceRolesOffered     []string            `json:"alice_roles_offered"`
+	AfterAdd              []memberRow         `json:"after_add"`
+	ServerAfterAdd        map[string]string   `json:"server_after_add"`
+	ServerAfterChange     map[string]string   `json:"server_after_change"`
+	Refusal               []string            `json:"refusal"`
+	ServerAfterRemove     map[string]string   `json:"server_after_remove"`
+	TeamPickerVisible     bool                `json:"team_picker_visible"`
+	TeamsOffered          []string            `json:"teams_offered"`
+	TeamRowText           string              `json:"team_row_text"`
+	ServerAfterTeam       map[string]string   `json:"server_after_team"`
+	ServerAfterTeamRemove map[string]string   `json:"server_after_team_remove"`
+	SettingsTeamsInitial  []string            `json:"settings_teams_initial"`
+	ServerTeamsAfterAdd   map[string][]string `json:"server_teams_after_add"`
+	ServerTeamsAfterDel   map[string][]string `json:"server_teams_after_delete"`
+	BobMe                 string              `json:"bob_me"`
+	BobProjects           []string            `json:"bob_projects"`
+	BobView               []memberRow         `json:"bob_view"`
+	BobFormVisible        bool                `json:"bob_form_visible"`
+	BobAfterRevokeToasts  []string            `json:"bob_after_revoke_toasts"`
+	Readmitted            bool                `json:"readmitted"`
+	ServerAfterLeave      map[string]string   `json:"server_after_leave"`
 }
 
 func TestMembersCardInBrowser(t *testing.T) {
@@ -69,6 +77,11 @@ func TestMembersCardInBrowser(t *testing.T) {
 	// the IdP's claims are never flipped while the browser runs.
 	f := newMemberFixture(t, true)
 	members := f.membersURL(t, f.alice)
+	// A team for the card to offer (Task 20478), made by the hub's admin.
+	if code, body := f.call(t, f.root, http.MethodPost, "/api/teams",
+		map[string]any{"slug": "payments", "name": "Payments"}); code != http.StatusCreated {
+		t.Fatalf("root creates a team: %d %v", code, body)
+	}
 
 	// The driver's levers: what the hub holds, and the changes another
 	// maintainer would make while bob watches. Each answers rather than
@@ -100,6 +113,17 @@ func TestMembersCardInBrowser(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(out)
 	})
+	control.HandleFunc("GET /teams", func(w http.ResponseWriter, r *http.Request) {
+		out := map[string][]string{}
+		for _, team := range f.srv.teamStore().All() {
+			people := []string{}
+			for _, m := range team.Members {
+				people = append(people, m.IdentityKey)
+			}
+			out[team.Slug] = people
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	})
 	control.HandleFunc("GET /room", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]int{"clients": f.srv.roomSize(f.project)})
 	})
@@ -126,6 +150,7 @@ func TestMembersCardInBrowser(t *testing.T) {
 	cookies, _ := json.Marshal(map[string]string{
 		"alice": sessionCookie(t, f.alice, f.ts.URL),
 		"bob":   sessionCookie(t, f.bob, f.ts.URL),
+		"root":  sessionCookie(t, f.root, f.ts.URL),
 	})
 	cmd := exec.Command(node, mustAbs(t, "testdata/members_browser.js"), chrome, f.ts.URL, ctl.URL, f.project)
 	cmd.Env = append(os.Environ(), "MEMBERS_COOKIES="+string(cookies))
@@ -155,9 +180,21 @@ func TestMembersCardInBrowser(t *testing.T) {
 	if len(got.AliceInitial) != 1 || got.AliceInitial[0].Identity != aliceEmail || got.AliceInitial[0].Role != "owner" {
 		t.Errorf("alice's initial roster: %+v, want the owner row alone", got.AliceInitial)
 	}
-	if !got.AliceFormVisible || strings.Join(got.AliceRolesOffered, ",") != "viewer,operator,maintainer" {
-		t.Errorf("a maintainer's add form: visible %v, roles %v — want viewer, operator, maintainer and never admin",
+	// The owner is the project's administrator (Task 20478), so every role
+	// is hers to grant.
+	if !got.AliceFormVisible || strings.Join(got.AliceRolesOffered, ",") != "viewer,operator,maintainer,admin" {
+		t.Errorf("the owner's add form: visible %v, roles %v — want every role up to admin",
 			got.AliceFormVisible, got.AliceRolesOffered)
+	}
+	if !got.TeamPickerVisible || strings.Join(got.TeamsOffered, ",") != "everyone,payments" {
+		t.Errorf("the team picker: visible %v, teams %v — want Everyone, then the hub's teams",
+			got.TeamPickerVisible, got.TeamsOffered)
+	}
+	if got.ServerAfterTeam["team:payments"] != "operator" || !strings.Contains(got.TeamRowText, "Payments") {
+		t.Errorf("after sharing with a team the hub holds %v and the row reads %q", got.ServerAfterTeam, got.TeamRowText)
+	}
+	if _, still := got.ServerAfterTeamRemove["team:payments"]; still {
+		t.Errorf("after removing the team the hub still holds %v", got.ServerAfterTeamRemove)
 	}
 	if got.ServerAfterAdd[bobEmail] != "operator" {
 		t.Errorf("after adding through the card the hub holds %v", got.ServerAfterAdd)
@@ -195,6 +232,16 @@ func TestMembersCardInBrowser(t *testing.T) {
 	}
 	if len(got.ServerAfterLeave) != 0 {
 		t.Errorf("after bob left the hub still holds %v", got.ServerAfterLeave)
+	}
+	// Settings → Teams, driven by the hub's administrator.
+	if strings.Join(got.SettingsTeamsInitial, ",") != "everyone,payments" {
+		t.Errorf("the Teams section listed %v, want Everyone and payments", got.SettingsTeamsInitial)
+	}
+	if people, ok := got.ServerTeamsAfterAdd["ops"]; !ok || strings.Join(people, ",") != carolEmail {
+		t.Errorf("after creating ops and adding carol the hub holds %v", got.ServerTeamsAfterAdd)
+	}
+	if _, still := got.ServerTeamsAfterDel["ops"]; still {
+		t.Errorf("after deleting ops the hub still holds %v", got.ServerTeamsAfterDel)
 	}
 }
 

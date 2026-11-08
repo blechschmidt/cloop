@@ -2014,17 +2014,21 @@ cloop project members list                                   # every membership 
 cloop project members list payments --json
 cloop project members add payments bob@example.com --role operator --reason "pairing on the ledger"
 cloop project members add payments bob@example.com --role viewer --reason "read-only from now on"
+cloop project members add payments team:payments-devs --role operator --reason "the payments squad"
+cloop project members add payments team:everyone --role viewer --reason "open to the whole hub"
 cloop project members remove payments bob@example.com --reason "moved teams"
 ```
 
 `<project>` is a registered project's name or its directory. A feature shares
-its project's members, so a feature is refused. `<identity>` is an email or
-`sub:<subject>`. `add` on an existing member changes their role. A membership
-only adds access; see [Project members](../security/model.md#project-members)
-for what a role means with and without role mappings. Each change is committed
-together with its audit row and announced on the hub cluster's bus, so running
-hub processes apply it at once and close a removed member's open dashboards.
-They also re-read the table every few seconds.
+its project's members, so a feature is refused. `<identity>` is an email,
+`sub:<subject>`, or `team:<slug>` for a team (`team:everyone` is every signed-in
+identity; the other teams are kept with [`cloop hub team`](#cloop-hub-team)).
+`add` on an existing member changes their role. On a project somebody owns, the
+role is what the member may do there; on a project nobody owns it adds to what
+the hub's role mappings give. See [Project members](../security/model.md#project-members)
+for both. Each change is committed together with its audit row and announced on
+the hub cluster's bus, so running hub processes apply it at once and close a
+removed member's open dashboards. They also re-read the table every few seconds.
 
 | Flag | Applies to | Description |
 |------|-----------|-------------|
@@ -2032,6 +2036,43 @@ They also re-read the table every few seconds.
 | `--reason` | `add`, `remove` | Required. Stored with the membership and recorded in the audit trail |
 | `--workdir` | all | Hub directory holding `.cloop/state.db` |
 | `--json` | `list` | Machine-readable output |
+
+### `cloop hub team`
+
+Keep the teams projects are shared with. A team's members are the people added
+to it by name, plus everyone whose ID token carries the identity-provider group
+it follows (`--idp-group`) and everyone the identity provider provisioned into
+the SCIM group it follows (`--scim-group`). This is the command-line counterpart
+of Settings → Teams, which needs `user.manage`; like the other `cloop hub`
+commands it writes the control-plane database directly and checks no role.
+
+```bash
+cloop hub team list
+cloop hub team show payments-devs --json
+cloop hub team create payments-devs --name "Payments" --idp-group payments-devs --reason "payments squad"
+cloop hub team update payments-devs --scim-group "Payments Engineering" --reason "moved to SCIM"
+cloop hub team add payments-devs dana@example.com --reason "contractor without the group"
+cloop hub team remove payments-devs dana@example.com --reason "contract ended"
+cloop hub team delete payments-devs --reason "squad dissolved"
+```
+
+`everyone` is built in and can't be created, changed or given people.
+`update` changes only the flags you pass; an empty value (`--idp-group ""`)
+clears a link. `remove` takes away a person's named membership only: somebody in
+the group a team follows stays on it until the group drops them. `delete`
+removes the team and every project share naming it, in one commit, and prints the
+projects it unshared. Every change is committed with its audit row (`team.*`,
+`via` `cli`, with your `--reason`) and announced on the hub cluster's bus, so
+running hubs close the open dashboards of anybody who lost a project through it.
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--name`, `--description` | `create`, `update` | How the team is shown, and what it is for |
+| `--idp-group` | `create`, `update` | The ID-token group whose members are on the team |
+| `--scim-group` | `create`, `update` | The provisioned group whose members are on the team |
+| `--reason` | every change | Required. Recorded in the audit trail |
+| `--workdir` | all | Hub directory holding `.cloop/state.db` |
+| `--json` | `list`, `show` | Machine-readable output |
 
 ### `cloop hub telemetry`
 

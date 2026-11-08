@@ -38,6 +38,7 @@ var sudoExempt = map[string]string{
 	// first would slow down the person pulling a leaked credential at the
 	// moment it matters, and each is undone by the action that does ask.
 	"DELETE /api/projects/{idx}/members":    "withdraws a membership; granting one at maintainer asks",
+	"DELETE /api/teams/{slug}/members":      "takes a person off a team; adding one asks",
 	"POST /api/executors/{id}/cordon":       "stops new work landing on an executor; uncordoning asks",
 	"POST /api/executors/{id}/drain":        "moves work off an executor and revokes its leases; uncordoning asks",
 	"POST /api/leases/{id}/revoke":          "pulls a lease back before it lapses; granting asks",

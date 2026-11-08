@@ -573,13 +573,28 @@ func hubMakes(p projectPlace) bool {
 // operator added since the check — `cloop ui --projects` on another hub
 // sharing this registry — is not something a claim in this control plane
 // could have seen.
+//
+// The project is owned by whoever created it (Task 20478): the signed-in user,
+// or the person a token minted on their behalf acts for — never left unowned
+// because the request came through a token, which on a hub with sign-on would
+// hide it from its own creator. A hub without sign-on records no owner.
 func (s *Server) admitToRegistry(r *http.Request, p projectPlace) error {
 	cp := canonicalDir(s.WorkDir)
-	return multiui.AdmitOwned(p.Path, s.sessionIdentity(r).OwnerKey(), func(existing []multiui.ProjectEntry) error {
+	return multiui.AdmitOwned(p.Path, s.creatorKey(r), func(existing []multiui.ProjectEntry) error {
 		policy := projectconfine.Policy{ControlPlane: cp, ProjectsRoot: p.Root, Projects: projectDirsOf(existing)}
 		_, err := policy.Check(p.Path)
 		return err
 	})
+}
+
+// creatorKey is the owner a project created by r is recorded under: the
+// recipient identity's owner key, or "" where there is none (no sign-on, the
+// static token, a service token with no owner).
+func (s *Server) creatorKey(r *http.Request) string {
+	if !s.oidcEnabled() {
+		return ""
+	}
+	return identityMemberKey(s.recipientIdentity(r))
 }
 
 // auditProjectCreate records a creation or its refusal in the control plane.
@@ -596,7 +611,7 @@ func (s *Server) auditProjectCreate(r *http.Request, p projectPlace, detail map[
 	if p.Root != "" {
 		detail["projects_root"] = p.Root
 	}
-	if owner := s.sessionIdentity(r).OwnerKey(); owner != "" {
+	if owner := s.creatorKey(r); owner != "" {
 		detail["owner"] = owner
 	}
 	s.auditProjectLifecycle(r, auditaction.ActionProjectCreate, path, detail)
