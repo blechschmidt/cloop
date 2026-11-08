@@ -1,12 +1,13 @@
 # Your first project
 
-One walkthrough, start to finish: a directory, a goal, a task plan, and a run
-you can watch, steer and interrupt.
+This page takes you through a first project from start to finish. You set a
+goal, look at the plan cloop makes from it, run the plan, and then watch,
+change and stop the run.
 
-The shape to hold in your head is that **cloop never executes a goal directly.**
-It decomposes the goal into a numbered plan of tasks, saves that plan, and then
-works through it one task at a time. The plan is the thing you review, edit and
-argue with; the run is just what happens to it.
+cloop doesn't work on your goal directly. It first splits the goal into a
+numbered list of tasks, saves the list, and then works through it one task at a
+time. You can read and change the list at any point, including while a run is
+going.
 
 - [Setting a goal](#setting-a-goal)
 - [What `.cloop/` now holds](#what-cloop-now-holds)
@@ -19,8 +20,9 @@ argue with; the run is just what happens to it.
 
 ## Setting a goal
 
-Work inside the repository you want changed. cloop edits the directory it is
-run from, so a scratch clone is a reasonable place to start.
+Run cloop inside the repository you want to change. cloop edits the files in
+the directory you run it from, so a scratch clone is a good place for a first
+try.
 
 ```console
 $ cd ~/src/demo-api
@@ -28,36 +30,34 @@ $ cloop init "Add a health check endpoint to the HTTP server"
 ✓ cloop initialized
   Goal: Add a health check endpoint to the HTTP server
   Max steps: 0
-  State: /home/you/src/demo-api/.cloop/state.json
+  State: /home/you/src/demo-api/.cloop/state.db
   Config: /home/you/src/demo-api/.cloop/config.yaml
   Provider: claudecode (default)
 
-Run 'cloop run' to start.
 Run 'cloop run' to decompose your goal into tasks and execute them.
 ```
 
-A goal is a sentence, not a prompt. It is stored once and every task prompt is
-derived from it, so vagueness here is amplified across every task in the plan.
+The goal is a sentence that describes the result you want. cloop stores it and
+builds every task's prompt from it, so a vague goal leads to vague tasks.
 
-The flags worth knowing on the first project:
+These `cloop init` flags are useful for a first project:
 
-| Flag | Does |
+| Flag | What it does |
 | --- | --- |
-| `--provider` | `anthropic`, `openai`, `ollama` or `claudecode`. Also written into `config.yaml` so later commands inherit it |
-| `--model` | provider-specific model override |
-| `--instructions` | standing constraints applied to *every* task — "Use chi, no ORM, table-driven tests" |
-| `--template` | start from a built-in plan instead of asking the AI. `cloop templates` lists them |
-| `--max-steps` | ceiling on steps for the project; `0` (the default) is unlimited |
-| `--max-minutes` | per-task wall-clock budget; a task that overruns is interrupted and marked timed out |
-| `--skip-clarify` | skip the interactive question round described below — the flag automation wants |
-| `-i` / `--interactive` | the step-by-step setup wizard |
+| `--provider` | `claudecode` (the default), `copilot`, `anthropic`, `openai` or `ollama`. It is saved in `config.yaml`, so later commands use it too |
+| `--model` | use a particular model from that provider |
+| `--instructions` | rules for *every* task, such as "Use chi, no ORM, table-driven tests" |
+| `--template` | start from a built-in plan instead of having the model write one. `cloop templates` lists them |
+| `--max-steps` | the most steps the project may take; `0` (the default) means no limit |
+| `--max-minutes` | a time limit per task; a task that takes longer is stopped and marked as timed out |
+| `--skip-clarify` | skip the questions described below, which is what you want in a script |
+| `-i` / `--interactive` | a step-by-step setup wizard |
 
-The wizard also starts on its own if you run `cloop init` with no goal, no
-`--template`, no `--provider` and a terminal attached — so a bare `cloop init`
-in a script is not the same thing as one in a shell. `--template` is the flag
-that changes what happens next: a templated project starts with its tasks
-already in the plan, so `cloop run` executes them directly instead of calling
-the provider to decompose anything.
+If you run `cloop init` in a terminal with no goal, no `--template` and no
+`--provider`, the wizard starts by itself. In a script, with no terminal
+attached, it doesn't. With `--template`, the project starts with the
+template's tasks already in the plan, and `cloop run` starts on them right away
+instead of asking the model for a plan.
 
 ---
 
@@ -69,26 +69,24 @@ the provider to decompose anything.
   config.yaml     provider, model, API keys, and everything else you can set
 ```
 
-**`state.db` is SQLite, and it is the only source of truth.** `state.db-wal` and
-`state.db-shm` appear beside it as soon as anything writes; they are WAL
-sidecars, they belong to the database, and they must never be copied or moved on
-their own.
+`state.db` is a SQLite database, and everything cloop knows about the project
+is in it. As soon as anything writes to it, two more files appear next to it,
+`state.db-wal` and `state.db-shm`. They are part of the database, so never copy
+or move them on their own.
 
-`state.json` is **legacy**, which makes the `State:` line printed above
-misleading — no such file is created. The name survives only so that a project
-made by an older cloop is detected and migrated into `state.db` on first load,
-and `cloop doctor` warns that it was not found for the same reason. Trust `ls`,
-not the banner.
+Older versions of cloop kept the project in `state.json`. cloop no longer
+writes that file. If it finds one, it moves the contents into `state.db` the
+first time it opens the project.
 
-`init` also appends `.cloop/env.yaml` to your `.gitignore`, because that file is
-where per-project environment secrets land. `config.yaml` is safe to commit only
-if you have kept API keys out of it — see
-[Configuration](../reference/configuration.md) for the full key list and
-[Secrets](../guides/secrets.md) for the credential model proper.
+`init` also adds `.cloop/env.yaml` to your `.gitignore`, because that is where
+per-project environment secrets are stored. You can commit `config.yaml` as long
+as you keep API keys out of it. See [Configuration](../reference/configuration.md)
+for every key, and [Secrets](../guides/secrets.md) for how cloop handles
+credentials.
 
-More appears as you use it: `plan-history/` (a snapshot per plan mutation),
-`tasks/<id>-<slug>.md` (one artifact per completed task), `clarification.json`,
-`checkpoints/`.
+More files appear as you go: `plan-history/` (a snapshot each time the plan
+changes), `tasks/<id>-<slug>.md` (a record of each completed task),
+`clarification.json` and `checkpoints/`.
 
 ---
 
@@ -98,18 +96,19 @@ More appears as you use it: `plan-history/` (a snapshot per plan mutation),
 cloop run
 ```
 
-Three things happen, in order.
+Three things happen.
 
-**A round of questions**, if stdin is a terminal and you did not pass
-`--skip-clarify`. cloop asks the provider to generate clarifying questions about
-your goal and puts them to you before spending anything on a plan, under a
-`Goal clarification` heading and a `Q1:` prompt per question. Enter skips one.
-Answers are saved to `.cloop/clarification.json` and reused: the next run prints
-`(Using goal clarification from previous session)` instead of asking again.
+**cloop asks you a few questions**, if you are in a terminal and didn't pass
+`--skip-clarify`. It has the model come up with questions about your goal and
+asks them before it spends anything on a plan, under a `Goal clarification`
+heading with a `Q1:` prompt for each question. Press Enter to skip a question.
+Your answers are saved in `.cloop/clarification.json` and reused, so the next
+run prints `(Using goal clarification from previous session)` instead of asking
+again.
 
-**Decomposition.** The provider turns the goal, your standing instructions and
-those answers into a prioritised plan, which is saved before any of it is
-executed:
+**The model writes the plan.** From your goal, your standing instructions and
+your answers, it produces a list of tasks in priority order. cloop saves the
+plan before running any of it:
 
 ```
 🧠 cloop PM — AI Product Manager Mode
@@ -123,9 +122,9 @@ Task Plan (3 tasks):
        …
 ```
 
-**Execution.** Tasks are taken in priority order, skipping any whose
-dependencies are not yet satisfied, and each one is a separate provider call
-whose result is written back to the plan:
+**cloop works through the tasks** in priority order, skipping any task whose
+dependencies aren't finished yet. Each task is a separate call to the provider,
+and its result is saved in the plan:
 
 ```
 ━━━ Task 1/3: Add a /healthz handler returning 200 and a JSON body ━━━
@@ -133,27 +132,27 @@ whose result is written back to the plan:
 ✓ Task 1 complete: Add a /healthz handler returning 200 and a JSON body
 ```
 
-A task that reports failure is retried with a mutated prompt (`--no-heal` turns
-that off), and three consecutive failures stop the run — `--max-failures`
-changes the number. When the queue drains:
+If a task fails, cloop retries it with a modified prompt (`--no-heal` turns
+this off). Three failures in a row stop the run, and `--max-failures` changes
+that number. When every task is finished you see:
 
 ```
 🎉 All tasks complete! Goal achieved.
 ```
 
-Two flags are worth using on a first run: `--plan-only` stops after
-decomposition so you can read the plan before anything touches your files, and
-`--dry-run` prints the prompts cloop *would* send without calling the provider
-at all. The long tail — parallelism, verification passes, budgets, git
-integration — is in `cloop run --help` and the
+Two flags are useful on a first run. `--plan-only` stops once the plan is
+written, so you can read it before anything touches your files. `--dry-run`
+prints the prompts cloop would send, without calling the provider at all.
+Parallel tasks, verification, budgets, git integration and the rest are
+described in `cloop run --help` and the
 [command reference](../reference/commands.md#cloop-run).
 
 ---
 
 ## Watching it
 
-`cloop status` is the one-screen answer. Here it is on a project whose plan
-exists but has not been executed yet:
+`cloop status` gives you an overview on one screen. Here it is for a project
+whose plan has been written but not run yet:
 
 ```console
 $ cloop status
@@ -169,33 +168,35 @@ Created:  2026-09-08 23:47
 Updated:  2026-09-08 23:47
 ```
 
-`cloop log` is the history — every step, with the provider's output. It is
-verbose by default, so the flags matter: `--last 5` for the tail, `--lines 20`
-to cap each step's output, `--step 3` for one in full, `--grep <text>` to find
-the step that mentions something, and `--json` for a machine.
+`cloop log` shows the history: every step, with the provider's output. It
+prints a lot by default, so these flags help: `--last 5` for the last five
+steps, `--lines 20` to shorten each step's output, `--step 3` for one step in
+full, `--grep <text>` to find the steps that mention something, and `--json`
+for machine-readable output.
 
-For anything longer than a few tasks, run the dashboard in a second terminal:
+For anything longer than a few tasks, start the dashboard in a second terminal:
 
 ```console
 $ cloop ui
 cloop dashboard running at http://127.0.0.1:8080, listening on 127.0.0.1:8080
 ```
 
-`--port` moves it, `--no-browser` stops it opening a tab. It streams progress
-live and can start and stop runs. It is **unauthenticated by default, and so
-listens on loopback only** — correct for your own machine. If it needs to be
-reachable, configure sign-in first — OIDC (`ui.oidc`) for people — and
-terminate TLS (`--tls-cert`/`--tls-key`, or `ui.tls` in the config). A scoped
-token from `cloop hub token create` is not sign-in: it restricts a script that
-presents it, and does not stop a request that presents none. The
-[dashboard guide](web-ui.md) covers it properly, and the
-[security model](../security/model.md) explains what the boundary is worth.
+`--port` changes the port and `--no-browser` stops it from opening a browser
+tab. The dashboard shows progress as it happens and can start and stop runs.
+**It has no sign-in by default, so it only listens on loopback**, which is fine
+on your own machine. If other people need to reach it, set up sign-in first
+(OIDC under `ui.oidc`) and TLS (`--tls-cert`/`--tls-key`, or `ui.tls` in the
+config). A token from `cloop hub token create` doesn't replace sign-in: it
+limits what a script that presents it may do, but it doesn't stop a request
+that presents no token at all. The [dashboard guide](web-ui.md) covers this in
+detail, and the [security model](../security/model.md) explains what sign-in
+protects.
 
 ---
 
 ## Steering the plan
 
-The plan is data. You are meant to edit it.
+You can change the plan whenever you like.
 
 ```console
 $ cloop task list
@@ -206,58 +207,59 @@ Tasks: 0/3 tasks complete
   [ ] #3 [P3] Document the endpoint in the README
 ```
 
-`cloop task next` shows what the scheduler will pick up next; `cloop task show
-<id>` prints one task in full, including its result and the artifact written for
-it. Adding work is a sentence, which the provider structures into a title,
-description, priority, role and suggested dependencies and shows you before it
-is appended:
+`cloop task next` shows which task cloop will pick up next, and
+`cloop task show <id>` prints one task in full, including its result and the
+record written for it. To add work, describe it in a sentence. The provider
+turns it into a title, a description, a priority, a role and suggested
+dependencies, and shows you the result before adding it:
 
 ```bash
 cloop task add "the healthz handler should report the database connection state"
 ```
 
-`--auto` skips the confirmation, `--no-ai` takes your text as the title
-verbatim, and `--priority`, `--role`, `--deadline`, `--max-minutes` and
-`--depends-on '1,2'` set fields directly. The rest of the vocabulary is
+`--auto` adds the task without asking, `--no-ai` uses your text as the title
+unchanged, and `--priority`, `--role`, `--deadline`, `--max-minutes` and
+`--depends-on '1,2'` set fields directly. To change tasks there are
 `cloop task edit`, `move`, `remove`, `skip`, `done`, `fail`, `reset`, `tag` and
-`annotate` — plus a large set of AI-assisted operations (`split`, `merge`,
-`decompose`, `reorder`) documented under
+`annotate`, plus commands that ask the model for help, such as `split`,
+`merge`, `decompose` and `reorder`. They are all described under
 [`cloop task`](../reference/commands.md#cloop-task).
 
-New tasks join the same queue the run is working through, so you can add one
-while a run is in progress and it will be picked up in priority order.
+New tasks join the queue the run is working through, so you can add a task
+while a run is going and it will be picked up in priority order.
 
 ---
 
 ## Stopping and resuming
 
-Ctrl+C is a pause, not a kill: cloop prints
+Ctrl+C pauses the run. cloop prints
 `⏸ Stopping — the task in progress goes back to pending and the next run picks it up...`,
-interrupts the task it was working on, and returns that task to `pending` with
-a note saying so. A stopped task is not a failed one, so nothing that depends
-on it is skipped. Tasks that had already finished keep their results. The Stop
-button in the dashboard does the same, wherever the run executes. Because the
-plan lives in `state.db` rather than in the process, resuming is just running
-the same command again — the next `cloop run` opens with
-`Resuming plan: 1/3 tasks complete` and starts the interrupted task over.
+interrupts the task it was working on, and sets that task back to `pending`
+with a note saying why. A stopped task doesn't count as failed, so nothing that
+depends on it is skipped, and tasks that had already finished keep their
+results. The Stop button in the dashboard does the same, wherever the run is
+executing. Because the plan is stored in `state.db`, you resume by running the
+same command again: the next `cloop run` starts with
+`Resuming plan: 1/3 tasks complete` and begins the interrupted task again.
 
-Other ways to stop deliberately: `--steps N` runs at most N steps this session,
-`--timeout 30m` bounds the whole session, and `--token-budget` or `--cost-limit`
-stop on spend. The step and token ceilings say so on the way out —
-`⏸ Reached --steps limit (5). Run 'cloop run' to continue.` — and all of them
-leave the plan exactly as resumable as Ctrl+C does.
+You can also set limits in advance. `--steps N` runs at most N steps in this
+session, `--timeout 30m` limits the length of the whole session, and
+`--token-budget` or `--cost-limit` stop the run once it has spent that much.
+The step and token limits tell you when they stop a run
+(`⏸ Reached --steps limit (5). Run 'cloop run' to continue.`), and all of them
+leave the plan ready to resume, just as Ctrl+C does.
 
-For recovering rather than pausing:
+To recover from a problem rather than pause:
 
-| Command | Does |
+| Command | What it does |
 | --- | --- |
-| `cloop run --retry-failed` | reset failed tasks to pending and try them again |
-| `cloop run --replan` | discard the plan and decompose the goal from scratch |
-| `cloop goal "<new goal>"` | change the goal without reinitialising |
-| `cloop reset` | clear progress, keep the goal |
-| `cloop clean` | remove `.cloop/` entirely |
+| `cloop run --retry-failed` | set failed tasks back to pending and try them again |
+| `cloop run --replan` | throw the plan away and make a new one from the goal |
+| `cloop goal "<new goal>"` | change the goal without starting over |
+| `cloop reset` | clear the progress but keep the goal |
+| `cloop clean` | delete `.cloop/` completely |
 
 ---
 
-**Next:** [Concepts](concepts.md) — goals, plans, tasks, steps and providers,
-and how they fit together.
+**Next:** [How cloop works](concepts.md): goals, plans, tasks, steps and
+providers, and how they fit together.

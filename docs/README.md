@@ -1,336 +1,270 @@
 # cloop documentation
 
-Written from the code, and gated against drifting from it. A CI check
-(`docs-drift`) fails the build when a new executor backend, a new grantable
-secret kind, or a new RBAC role ships without appearing here — see
-[`tests/docs/drift_test.go`](../tests/docs/drift_test.go).
+These pages are written from the code, and CI checks that they keep up with it.
+For example, the `docs-drift` check fails the build when a new executor
+backend, a new kind of secret or a new role ships without being documented
+here (see [`tests/docs/drift_test.go`](../tests/docs/drift_test.go)).
 
 New to cloop? Read [your first project](getting-started/first-project.md), then
-[how cloop works](getting-started/concepts.md). Everything else on this page
-assumes you have run it once.
+[how cloop works](getting-started/concepts.md). The rest of this page assumes
+you have run cloop at least once.
 
-This file is also the site's table of contents: the published navigation is
-generated from the sections and links below, so a page joins the menu the
-moment it is listed here and nowhere else.
+This page is also the site's table of contents: the menu on the published site
+is generated from the sections and links below, so a new page appears in the
+menu as soon as it is listed here.
 
 ## Getting started
 
-Seven pages in order, indexed at
-**[getting started](getting-started/README.md)**:
+Seven pages, best read in order. They are also listed on the
+**[getting started](getting-started/README.md)** page.
 
-- **[Installation](getting-started/installation.md)** — prerequisites,
-  `go install`, building from source, the container image, shell completion.
-- **[Your first project](getting-started/first-project.md)** — one walkthrough:
-  a goal, the plan cloop derives from it, running it, watching it, steering it.
-- **[How cloop works](getting-started/concepts.md)** — the loop itself: what a
-  task is, how one is picked, how completion is detected, what happens on
-  failure, and what auto-evolve does once the plan drains.
-- **[Providers](getting-started/providers.md)** — the backends, how provider
-  and model are actually resolved, and the environment variables that override
-  them.
-- **[Web dashboard](getting-started/web-ui.md)** — `cloop ui`, what each screen
-  shows, and the authentication default to know before exposing it.
-- **[Dashboard walkthrough](getting-started/walkthrough.md)** — the same three
-  things in the order you meet them, in screenshots: choose where work is
-  allowed to run, create a project that runs there, fill it with tasks and
-  start it. Includes enrolling a remote device.
-- **[Working from a terminal](getting-started/terminal.md)** — `cloop login`
-  on a hub with single sign-on: a code approved from your signed-in browser
-  gives the terminal a session of its own, on the browser's rules — then
-  `cloop remote` (projects, tasks, run, stop, live logs), `cloop task attach`,
-  `cloop whoami` and `cloop logout`, the credential file and what refuses it,
-  and [what the approval page is telling you](getting-started/terminal.md#what-the-approval-page-is-telling-you).
+- **[Installation](getting-started/installation.md)**: what you need,
+  `go install`, building from source, the container image and shell
+  completion.
+- **[Your first project](getting-started/first-project.md)**: a complete first
+  run. You set a goal, cloop turns it into a plan and works through it, and you
+  watch it, change it and stop it.
+- **[How cloop works](getting-started/concepts.md)**: what a task is, how cloop
+  picks the next one, how it knows a task is finished, what happens when one
+  fails, and what auto-evolve does when the plan runs out.
+- **[Providers](getting-started/providers.md)**: the model backends cloop can
+  use, how it decides which provider and model to use, and the environment
+  variables that override that choice.
+- **[Web dashboard](getting-started/web-ui.md)**: `cloop ui`, what each screen
+  shows, and what to set up before anyone else can reach it.
+- **[Dashboard walkthrough](getting-started/walkthrough.md)**: the dashboard in
+  screenshots. Choose where work may run, create a project that runs there, add
+  tasks and start it. Includes enrolling a remote machine.
+- **[Working from a terminal](getting-started/terminal.md)**: signing your
+  terminal in to a hub with `cloop login` (you approve a code in your browser),
+  then using `cloop remote` for projects, tasks, runs and live logs,
+  `cloop task attach`, `cloop whoami` and `cloop logout`. Also covers where the
+  credential is stored and
+  [what the approval page tells you](getting-started/terminal.md#what-the-approval-page-is-telling-you).
 
 ## Architecture
 
-- **[Component and security architecture](architecture/README.md)** — the whole
-  system on one page: the processes cloop runs as, what each of its packages is
-  for, what the hub keeps and where, the path a run takes from **Start** to a
-  landed commit, and the security architecture around it — the design rules,
-  every trust boundary and what authenticates it, the request pipeline and the
-  credentials a caller can hold, the key hierarchy and how a secret becomes a
-  lease, sandbox containment, the credential guards that keep forge, cluster
-  and model credentials on the hub, transport, supply chain, audit, and the
-  suites that keep it true. Start here; every other page in this section and
-  under Security goes deep on one piece of it.
-- **[Executors](architecture/executors.md)** — how a task travels from the
-  orchestrator to a sandbox and back. The `Executor` interface, the four
-  backends (`localprocess`, `container`, `remote`, `kubernetes`), registry and
-  binding, capability-aware placement, workspace provisioning, health
-  supervision, and exactly-once failover. Includes
+- **[Component and security architecture](architecture/README.md)**: an
+  overview of the whole system. It covers the processes cloop runs as, what
+  each package does, what the hub stores, how a run gets from **Start** to a
+  commit, and how the security pieces fit together: trust boundaries, keys,
+  sandboxes, and the proxies that keep credentials on the hub. Start here; the
+  other pages in this section and under Security each go into one part in
+  depth.
+- **[Executors](architecture/executors.md)**: how a task gets from the hub to a
+  sandbox and back. The `Executor` interface, the four backends (`localprocess`,
+  `container`, `remote`, `kubernetes`), how a backend is chosen for a task,
+  how the project's code gets into the sandbox, health checks and failover. It
+  also explains
   [sandbox network isolation](architecture/executors.md#sandbox-network-isolation)
-  — the `--internal` network, the host-side nftables ruleset, the per-Pod
-  `NetworkPolicy` and why the filter is installed before the workload — and the
-  outbound agent enrollment flow for NAT'd edge devices.
-- **[Git proxy architecture](architecture/git-proxy.md)** — how the git
-  interception proxy (under Security, below) is put together inside the hub and
-  how every kind of sandbox reaches it: why the process that mints a
-  session must be the one that serves it, the two paths through it — cloop's own
-  workspace fetch on a pinned session, the workload's git on a scoped session
-  its GitHub lease rewrites to the proxy — what each executor backend
-  contributes, the files and variables a sandbox holds, which credential each
-  kind of hub delivers, the network a sandbox needs, how long a session really
-  lives, and the
+  (the `--internal` network, the host's nftables rules and the per-Pod
+  `NetworkPolicy`) and how machines behind NAT enroll as executors.
+- **[Git proxy architecture](architecture/git-proxy.md)**: how the git
+  interception proxy (see Security, below) is built into the hub and how each
+  kind of sandbox reaches it. Covers the two ways git traffic goes through it,
+  what each executor backend does, which files and variables a sandbox gets,
+  how long a session lasts, and the
   [limits that remain](architecture/git-proxy.md#limits-that-remain).
-- **[Kubernetes access monitor](architecture/kubernetes-access.md)** — how a
-  sandbox is allowed to read one namespace of a cluster and nothing else,
-  without ever holding a credential that could reach the rest of it: why a
-  minimised kubeconfig cannot express either a namespace bound or read-only,
-  the proxy that parses every API request into (verb, group, resource,
-  subresource, namespace, name) before the cluster credential is attached, the
-  subresources that are refused for every verb because they are a shell rather
-  than data, and [operating it](architecture/kubernetes-access.md#turning-it-on)
-  — `executors.kube_guard`, the grant's `--verbs`, and what a leaked session
-  token is worth. Off by default.
-- **[Hub cluster](architecture/hub-cluster.md)** — several `cloop ui`
-  processes serving one control plane behind a load balancer with no
-  stickiness: what a cluster requires (one database, one kernel), what the
-  members share — membership, a leader for the work that must happen once, an
-  event bus, and ownership of what only one process can hold — which requests
-  are forwarded to which member over the signed peer channel, what happens to
-  a run when its member is killed or upgraded, and the
-  [limits](architecture/hub-cluster.md#limits).
+- **[Kubernetes access monitor](architecture/kubernetes-access.md)**: how a
+  sandbox can be allowed to read one namespace of a cluster, and nothing else,
+  without ever holding a credential for the cluster. A proxy on the hub checks
+  every API request before adding the real credential. Also covers
+  [turning it on](architecture/kubernetes-access.md#turning-it-on) with
+  `executors.kube_guard` and the grant's `--verbs`. Off by default.
+- **[Hub cluster](architecture/hub-cluster.md)**: running several `cloop ui`
+  processes as one hub behind a load balancer. What a cluster needs (one
+  database, one kernel), what the members share, which requests are forwarded
+  to which member, what happens to a run when its member dies or is upgraded,
+  and the [limits](architecture/hub-cluster.md#limits).
 
 ## Reference
 
-- **[Per-project sandbox](reference/sandbox.md)** — `.cloop/sandbox.yaml`: the
-  repo-committed image, setup steps, environment allowlist, resource ceilings,
-  capabilities and mounts one project's tasks run under. What a spec can narrow
-  and what it can never widen, which executor honours which field, and the
-  digest pin that keeps a run reproducible after the tag moves.
-- **[Configuration](reference/configuration.md)** — executors, sandbox images,
-  transport security, SSO and TLS, including
-  [IP-layer egress filtering](reference/configuration.md#ip-layer-egress-filtering):
-  the `egress_filter` keys for both the container and Kubernetes backends, why
-  they are off by default, and what a hostname allowlist compiles to at layer 3.
-- **[Decision records](reference/adr.md)** — `cloop adr`: recording why the
-  system is shaped the way it is, how that differs from the per-task journal,
-  and the Proposed → Accepted → Superseded lifecycle, in which a reversal is a
-  new record linked to the one it replaces rather than an edit to it.
-- **[Commands](reference/commands.md)** — every CLI subcommand, including
+- **[Per-project sandbox](reference/sandbox.md)**: `.cloop/sandbox.yaml`, a
+  file committed to the repository that sets the image, setup steps, allowed
+  environment variables, resource limits, capabilities and mounts for one
+  project's tasks. What a project can tighten but never loosen, which executor
+  supports which field, and how pinning an image digest keeps runs
+  reproducible.
+- **[Configuration](reference/configuration.md)**: executors, sandbox images,
+  transport security, single sign-on and TLS, including
+  [IP-layer egress filtering](reference/configuration.md#ip-layer-egress-filtering)
+  with the `egress_filter` keys for the container and Kubernetes backends.
+- **[Decision records](reference/adr.md)**: `cloop adr`, for recording why the
+  system is built the way it is. A decision moves from Proposed to Accepted to
+  Superseded; reversing one means writing a new record that replaces it.
+- **[Commands](reference/commands.md)**: every CLI command, including
   [`cloop egress firewall`](reference/commands.md#cloop-egress-firewall), which
-  renders the packet filter an authorisation compiles to and answers
-  "would this address get out" with the verdict in its exit status.
-- **[HTTP API](reference/http-api.md)** — every endpoint of both HTTP surfaces,
-  with the permission each one requires and the scope that permission is
-  evaluated against. Generated from the route tables themselves and gated
-  against them, so a new route cannot ship undocumented. The hub serves the
-  machine-readable form at `GET /api/openapi.json`.
-- **[Audit events](reference/audit-events.md)** — every action name the hub can
-  write to the `event_type` column of `audit_events`, with what fires it, the
-  payload keys it carries, the permission that gates reading it, and how far a
-  consumer may rely on the name. Read this before writing a SIEM detection
-  rule: it is the whole vocabulary rather than the part someone remembered to
-  write down. Generated from the registry the emitters reference and gated
-  against it, so an action cannot ship undocumented — and an action name cited
-  anywhere else in these docs cannot outlive the code that emits it.
-- **[Credential patterns](reference/credential-patterns.md)** — every
-  credential shape `cloop audit`, the provider-call audit, the secret broker's
-  audit reasons and browser telemetry recognise, from one registry: GitHub
-  tokens in both forms, cloop's own tokens, cloud and model-provider keys,
-  JWTs, private keys, kubeconfig credentials. Generated from the registry and
-  gated against it.
+  shows the packet filter a grant turns into and tells you whether a given
+  address would be let out.
+- **[HTTP API](reference/http-api.md)**: every endpoint of both HTTP servers,
+  with the permission each one requires. Generated from the route tables, so a
+  new route cannot ship undocumented. The hub also serves it as OpenAPI at
+  `GET /api/openapi.json`.
+- **[Audit events](reference/audit-events.md)**: every action the hub can write
+  to the `event_type` column of `audit_events`: what triggers it, what it
+  records, who may read it, and how stable its name is. Read this before you
+  write detection rules for a SIEM. Generated from the code, like the HTTP API
+  page.
+- **[Credential patterns](reference/credential-patterns.md)**: every kind of
+  credential that `cloop audit`, the provider-call audit, the secret broker and
+  browser telemetry recognise and redact: GitHub tokens, cloop's own tokens,
+  cloud and model provider keys, JWTs, private keys and kubeconfig credentials.
+  Generated from the code.
 
 ## Security
 
-- **[Security model](security/model.md)** — the four trust boundaries and what
-  each authenticates with, the strict no-host-execution guarantee, lease
-  revocation, how a workspace credential reaches one process and nothing else,
-  roles and permissions, and a table mapping every stated guarantee to the test
-  in `tests/security/` that machine-checks it. Read
-  [the network the sandbox sits on](security/model.md#the-network-the-sandbox-sits-on)
-  for what the HTTP proxy binds, what the packet filter binds, and the one thing
-  neither can do, and
-  [who spent it](security/model.md#who-spent-it-per-identity-attribution) for
-  how a daily budget is attributed to an identity, enforced between tasks, and
-  read back — including the one number in it that is self-reported. Read
-  [knowledge sources](security/model.md#knowledge-sources) for where a
-  Confluence or Jira credential goes, how one project is kept from another's
-  knowledge, what fencing and redaction do and do not stop when retrieved text
-  tries to instruct an agent, and what the account the hub reads with can see
-  that the people searching it cannot.
-- **[Threat model](security/threat-model.md)** — STRIDE per boundary, with the
-  concrete mitigation that exists and an honest residual-risk column, plus the
+- **[Security model](security/model.md)**: the trust boundaries and how each
+  one is authenticated, why nothing runs on the hub's host, how revoking access
+  works, how a credential reaches exactly one process, roles and permissions,
+  and a table that lists the test in `tests/security/` behind each guarantee.
+  It also covers
+  [the network a sandbox sits on](security/model.md#the-network-the-sandbox-sits-on),
+  [how spending is attributed to people](security/model.md#who-spent-it-per-identity-attribution),
+  and [knowledge sources](security/model.md#knowledge-sources): where a
+  Confluence or Jira credential is kept, how projects are kept apart, and what
+  happens when retrieved text tries to give an agent instructions.
+- **[Threat model](security/threat-model.md)**: the threats at each trust
+  boundary, what mitigates them and what risk remains, plus
   [two vulnerabilities found while building the egress filter](security/threat-model.md#vulnerabilities-found-while-building-this).
-- **[Per-user Claude Code logins](security/claude-code-identity.md)** — what a
-  hub with SSO does about the `claudecode` provider's one shared sign-in: a
-  private Claude CLI configuration directory per identity, per-caller login,
-  logout, status and subscription usage, and
-  [the ambient token that outranks all of it](security/claude-code-identity.md#the-ambient-token-outranks-the-directory)
-  — why an exported `CLAUDE_CODE_OAUTH_TOKEN` turns the isolation into an
-  illusion. Includes the isolating-executor boundary and deprovisioning.
-  Automatic when OIDC is on; nothing to configure.
-- **[Per-person Copilot credentials](security/copilot-identity.md)** — the same
-  for the `copilot` provider: why each person's Copilot credential is a
-  personal secret granted to the project rather than a login on the hub, how
-  every run, model call, resume and failover on the hub's own host signs the
-  CLI in as its person and never with the hub's `copilot login`, `GH_TOKEN` or
-  `GITHUB_TOKEN`, the per-person Copilot home, deprovisioning, and the gates
-  that keep a new path from skipping it.
-- **[Git interception proxy](git-interception-proxy.md)** — how a sandbox is
-  allowed to push to some branches and not others without ever holding a
-  credential that could reach the others: the branch allowlist enforced on the
-  push's own ref-update list by a proxy the hub runs, the session model, what a
-  leaked token is worth, and [operating it](git-interception-proxy.md#operating-it)
-  — `executors.git_proxy`, the certificate the sandbox has to trust, and why
-  there is no standalone command. Off by default.
+- **[Per-user Claude Code logins](security/claude-code-identity.md)**: on a hub
+  with single sign-on, each person gets their own Claude Code login for the
+  `claudecode` provider, instead of everyone sharing one. Explains why an
+  exported `CLAUDE_CODE_OAUTH_TOKEN`
+  [overrides all of this](security/claude-code-identity.md#the-ambient-token-outranks-the-directory),
+  and what happens to a login when someone leaves. Automatic when OIDC is on.
+- **[Per-person Copilot credentials](security/copilot-identity.md)**: the same
+  for the `copilot` provider. Each person's Copilot credential is a personal
+  secret granted to a project, and work on the hub's host never uses the hub's
+  own `copilot login`, `GH_TOKEN` or `GITHUB_TOKEN`.
+- **[Git interception proxy](git-interception-proxy.md)**: letting a sandbox
+  push to some branches and not others without giving it a credential that
+  could reach the others. A proxy run by the hub checks every branch a push
+  updates. Includes [how to run it](git-interception-proxy.md#operating-it)
+  with `executors.git_proxy`. Off by default.
 
 ## Guides
 
-- **[Device forwarders](guides/device-forwarders.md)** — a minimal on-prem
-  binary that bridges one USB device or network interface to the hub over a
-  single outbound connection and does nothing else, so an agent in an isolated
-  cloud sandbox can reach on-prem hardware without that machine running the
-  agent. How to enroll one, bind its device to a project (or ask for that), what
-  happens at dispatch — the executor that runs the sandbox attaches the device
-  itself, with no listener anywhere — how it is detached, how a cluster relays
-  it, and what a forwarder cannot do.
-- **[Developing features in parallel](guides/features.md)** — several lines of
-  work on one repository at once: a git worktree per feature on its own branch,
-  each with its own task list and its own auto-evolve and innovate settings,
-  running concurrently and proposed as a GitHub pull request when done. What a
-  feature inherits from its project (executor, grants, roles) and why, where it
-  may run, and how removal protects uncommitted work.
-- **[Requirements](guides/requirements.md)** — what a project must keep doing,
-  with or without tests, and whether it still does: adding them from the
-  Requirements tab or `cloop requirements`, checking them on the project's
-  executor (and as a CI gate), asking the model about the ones nothing tests,
-  recorded verdicts, when a verdict goes stale, and turning a failure into a
-  task. Requirements as code: `.cloop/requirements.yaml` beside the code, its
-  statuses, export and three-way import, and checking it in CI with no hub.
-- **[Knowledge sources: Confluence and Jira](guides/knowledge-sources.md)** —
-  letting agents read what your organisation wrote down: a least-privilege
-  account and token for Confluence and Jira, Cloud or Data Center, connecting
-  it, scoping it by spaces, projects, CQL or JQL, why restricted pages and
-  secured issues stay out, binding sources to projects, what turning on
-  semantic search sends where, how a run is given fenced, cited reference
-  material and a search tool, and what a failed sync is telling you. The trust
-  model is in the [security model](security/model.md#knowledge-sources).
-- **[Task attachments](guides/attachments.md)** — the files a run makes for a
-  person to look at — reports, charts, screenshots, exports, logs — attached to
-  its task: the outbox an agent copies them into, `cloop task attachments`, the
-  previews and downloads in a task's details, what comes back from a remote
-  executor, the limits, and how the hub serves a run's files without letting
-  one script the dashboard.
-- **[Reviewing tasks before they are published](guides/review-gate.md)** — the
-  review gate: a second model, configured per project and free to differ from
-  the one doing the work, that reads each task's changes before anything is
-  pushed or merged. How the agent's pushes are held and replayed only at
-  reviewed commits, the `fix`, `block` and `advisory` modes, why it fails
-  closed, what the reviewer sees, and the limits of a guardrail.
-- **[Done means committed](guides/done-means-committed.md)** — holding every
-  task to something cloop can check instead of the agent's word: its changes
-  committed, and optionally pushed. How the turn is handed back naming the
-  paths and commits, what is never blamed on a task (what was already in the
-  tree, `.cloop/`), how retries are bounded, held review-gate pushes, and where
-  the check runs in parallel, feature and sandboxed runs.
-- **[Secrets and egress](guides/secrets.md)** — granting a GitHub repo/PAT (for
-  a running task, and for the workspace fetch that happens before one), a
-  kubeconfig, a registry login, environment variables, and an Internet egress
-  lease, with TTLs, constraints, and real command output.
-- **[Running an agent in CI](guides/ci-pipelines.md)** — letting a GitHub
-  Actions job use Claude through the hub instead of through an `ANTHROPIC_API_KEY`
-  repository secret: OIDC federation, the pipeline allowlist and its CEL
-  conditions, the workflow step to paste, what a session may do, and how to
-  diagnose a refusal from the exchange log.
-- **[Proving a commit reproduces](guides/reproduce.md)** — `cloop task
-  reproduce`: re-running a task in a fresh sandbox and comparing the commit it
-  returns against the original. The four verdicts, why equivalence is gated on
-  your own test suite rather than an LLM's opinion, how the base commit is
-  recovered, and the non-destructive contract.
-- **[Kata Containers](guides/kata.md)** — giving a sandbox its own kernel:
-  installing Kata, registering it with docker or podman, the `/dev/kvm` and
-  nested-virtualization prerequisite, the Kubernetes RuntimeClass path, and how
-  to tell whether a workload is really running in a VM.
-- **[Critical hosts as executors](guides/enterprise-hosts.md)** — running agent
-  tasks on a high-performance machine without letting them reach the rest of the
-  estate: per-project repository access, an IP-layer firewall that allows the
-  Internet and drops all private address space, a gVisor sandbox whose only view
-  of the filesystem is a bind mount, and passing a serial port, GPU or TUN device
-  in. Includes the topology table, and what a read-only device grant does and
-  does not enforce.
-- **[Virtual executors](guides/virtual-executors.md)** — several differently
-  contained sandboxes on one enrolled device: each with its own engine and
-  runtime, an IP firewall with an allowlist and a denylist, and USB devices chosen
-  from the device's inventory — a hardware security module, a serial adapter — by
-  vendor, product and serial. What the agent needs (the installer's
-  `CAP_NET_ADMIN` grant, and how it stays out of workloads), udev groups for
-  device access, and why hardware and gVisor do not combine.
-- **[Firewall rules: devices, virtual executors and projects](guides/firewall.md)**
-  — an admin's rule set per device as the superset of what any sandbox on it may
-  reach, and the virtual executors' firewalls and projects' rule sets that may
-  only narrow it: how containment is decided and where it is checked, what
-  tightening a device does to what was saved under it, and which executors can
-  enforce rules.
-- **[Following the hub's build: the edge channel](guides/edge-channel.md)** —
-  moving devices onto the hub's own commit, signed by CI, from the Executors
-  panel: what `edge.yml` publishes and the separate identity it is trusted by,
-  opting a device in on the device itself, the root helper that lets a hardened
-  agent upgrade itself, why the dialog says a build is not offered, rolling
-  back, and what the channel does not promise.
-- **[SCIM provisioning](guides/scim-provisioning.md)** — Microsoft Entra ID or
-  Okta keeping the hub's users and groups current at `/scim/v2`, so a person
-  disabled there is suspended here in one request — sessions, API tokens,
-  glasses links, leases and running tasks ended, a deny binding written —
-  without an administrator: matching provisioned users to signed-in identities,
-  what a suspension keeps, deletion and `offboard_after_days`, provisioned
-  groups as the `scim_group` claim, legal holds, the credential, and setting up
-  each provider.
+- **[Device forwarders](guides/device-forwarders.md)**: a small program you
+  install on an on-premises machine to share one USB device or network
+  interface with the hub over a single outbound connection, so that an agent
+  in a cloud sandbox can use local hardware.
+- **[Developing features in parallel](guides/features.md)**: several lines of
+  work on one repository at once, each in its own git worktree and branch, with
+  its own task list and settings, and opened as a GitHub pull request when
+  done.
+- **[Requirements](guides/requirements.md)**: writing down what the project
+  must do, with or without tests, and checking that it still does. Covers the
+  Requirements tab and `cloop requirements`, letting the model draft
+  requirements from a specification, holding tasks to their requirements, and
+  keeping requirements as code in `.cloop/requirements.yaml`.
+- **[Knowledge sources: Confluence and Jira](guides/knowledge-sources.md)**:
+  letting agents read what your organisation has written down. Setting up a
+  read-only account, connecting Confluence or Jira (Cloud or Data Center),
+  choosing which spaces or projects to index, binding sources to projects, and
+  what an agent sees during a run.
+- **[Task attachments](guides/attachments.md)**: files a run produces for
+  people to look at (reports, charts, screenshots, exports, logs), attached to
+  the task. Where an agent puts them, `cloop task attachments`, and how they
+  appear in the dashboard.
+- **[Reviewing tasks before they are published](guides/review-gate.md)**: the
+  review gate, where a second model (which can differ from the one doing the
+  work) reads each task's changes before anything is pushed or merged. Covers
+  the `fix`, `block` and `advisory` modes.
+- **[Done means committed](guides/done-means-committed.md)**: counting a task as
+  done only once its changes are committed, and optionally pushed, instead of
+  taking the agent's word for it. Changes that were already there and files
+  under `.cloop/` are never held against a task.
+- **[Secrets and egress](guides/secrets.md)**: giving tasks access to a GitHub
+  repository or token, a kubeconfig, a registry login, environment variables
+  or the Internet, with expiry times and limits, and real command output.
+- **[Running an agent in CI](guides/ci-pipelines.md)**: letting a GitHub
+  Actions job use Claude through the hub, so the repository doesn't need an
+  `ANTHROPIC_API_KEY` secret. Covers OIDC federation, which pipelines are
+  allowed, the workflow step to paste, and how to find out why a job was
+  refused.
+- **[Proving a commit reproduces](guides/reproduce.md)**:
+  `cloop task reproduce` runs a task again in a fresh sandbox and compares the
+  resulting commit with the original, using your own test suite to judge
+  whether they are equivalent.
+- **[Kata Containers](guides/kata.md)**: running each sandbox in its own
+  lightweight VM with its own kernel. Installing Kata, setting it up with docker
+  or podman, what it needs from the host, the Kubernetes path, and how to check
+  that a workload really runs in a VM.
+- **[Critical hosts as executors](guides/enterprise-hosts.md)**: running agent
+  tasks on a powerful machine without letting them reach the rest of your
+  network. Per-project repository access, a firewall that allows the Internet
+  but blocks private addresses, a gVisor sandbox that only sees one mounted
+  directory, and passing a serial port, GPU or TUN device into it.
+- **[Virtual executors](guides/virtual-executors.md)**: several sandboxes on one
+  enrolled machine, each with its own container engine and runtime, its own
+  firewall rules, and its own USB devices (a hardware security module or a
+  serial adapter, for example). Explains why the agent needs `CAP_NET_ADMIN`.
+- **[Firewall rules: devices, virtual executors and projects](guides/firewall.md)**:
+  how an administrator's rules for a machine set the limit for every sandbox on
+  it, and how virtual executors and projects can only narrow those rules
+  further.
+- **[Following the hub's build: the edge channel](guides/edge-channel.md)**:
+  keeping enrolled machines on the same build as the hub, signed by CI and
+  upgraded from the Executors panel. Covers `edge.yml`, opting a machine in,
+  rolling back, and what the channel does not promise.
+- **[SCIM provisioning](guides/scim-provisioning.md)**: letting Microsoft Entra
+  ID or Okta keep the hub's users and groups up to date at `/scim/v2`, so that
+  disabling someone there also locks them out of the hub: their sessions,
+  tokens and running tasks end straight away. Covers `offboard_after_days`,
+  the `scim_group` claim, and setting up each provider.
 
 ## Operations
 
-- **[Operator runbook](operations/runbook.md)** — backup and restore, database
-  maintenance, audit chain verification and SIEM export, key rotation, upgrade,
-  rollback, fleet operations, and incident playbooks.
-- **[Metrics](operations/metrics.md)** — the `/metrics` endpoint and how to
-  authenticate a scraper against it, every exported metric with its labels,
-  the alerts worth writing, and what the cardinality ceiling does when an
-  instrumentation bug reaches it.
-- **[Front-end telemetry](operations/telemetry.md)** — the diagnostic trail the
-  dashboard and the display-glasses page record: off by default, how to switch
-  it on for one front end or both, how to read a session back from the CLI or
-  the Telemetry tab, what is scrubbed before storage and why, and the limits
-  that bound a public ingest route.
-- **[Live sandbox attach](operations/attach.md)** — the RBAC-gated, audited
-  shell into a running task's sandbox: the two deny-by-default permissions and
-  how to bind them, why a host-process task can never be entered, what each
-  driver supports, how a read-only session is enforced inside the sandbox
-  rather than at the hub, and the limits that stop a debugging tool becoming a
-  denial-of-service primitive.
-- **[Multi-tenant soak](operations/soak.md)** — the concurrency suite that
-  fails on cross-tenant bleed, leaked containers, credentials or goroutines,
-  and superlinear growth; how to run it, what it substitutes for an agent and
-  why, and the two operator-facing findings it surfaced.
+- **[Operator runbook](operations/runbook.md)**: backups and restores,
+  database maintenance, checking and exporting the audit trail, key rotation,
+  upgrades, rollbacks, managing executors, and what to do in an incident.
+- **[Metrics](operations/metrics.md)**: the `/metrics` endpoint, how to let a
+  scraper in, every metric and its labels, which alerts are worth setting up,
+  and what happens when a metric produces too many series.
+- **[Front-end telemetry](operations/telemetry.md)**: an optional diagnostic
+  trail recorded by the dashboard and the display-glasses page. Off by default.
+  How to switch it on, how to read a session back, and what is removed before
+  anything is stored.
+- **[Live sandbox attach](operations/attach.md)**: opening a shell inside a
+  running task's sandbox. Who may do it, why a task running directly on a host
+  can never be entered, what each executor supports, and how read-only sessions
+  work.
+- **[Multi-tenant soak](operations/soak.md)**: a long-running concurrency test
+  that looks for data leaking between tenants, leaked containers, credentials
+  or goroutines, and growth that gets out of hand. How to run it and what it
+  found.
 
 ## Elsewhere in the repository
 
-- [`README.md`](../README.md) — overview, install, quick start, command index
-- [`deploy/README.md`](../deploy/README.md) — container image, docker-compose
-  evaluation stack, Helm chart
-- [`deploy/terraform/azure-entra-id/`](../deploy/terraform/azure-entra-id/README.md)
-  — a worked Terraform module for SSO on Microsoft Entra ID: the app
-  registration, the four cloop roles as app roles, and the five non-obvious
-  things (the pinned issuer, the `/v2.0` suffix, the post-logout redirect URI,
-  `offline_access`, and why group claims are the worse instrument on Entra)
-- [`tests/security/`](../tests/security/) — the executable specification of the
-  threat model
+- [`README.md`](../README.md): what cloop is, how to install it, and a quick
+  start.
+- [`deploy/README.md`](../deploy/README.md): the container image, a
+  docker-compose stack for trying cloop out, and the Helm chart.
+- [`deploy/terraform/azure-entra-id/`](../deploy/terraform/azure-entra-id/README.md):
+  a Terraform module that sets up single sign-on with Microsoft Entra ID,
+  including cloop's four roles as app roles and the Entra settings that are
+  easy to get wrong.
+- [`tests/security/`](../tests/security/): the tests behind the security
+  guarantees in the threat model.
 
 ---
 
 ### Reading order
 
-Understanding how it fits together:
+To understand how cloop fits together: the
 [component and security architecture](architecture/README.md), then whichever
-piece it points you to.
+page it points you to.
 
-Operating a hub: [runbook](operations/runbook.md) → [secrets guide](guides/secrets.md).
+To run a hub: the [runbook](operations/runbook.md), then the
+[secrets guide](guides/secrets.md).
 
-Assessing the security posture:
-[component and security architecture](architecture/README.md#security-architecture) →
-[security model](security/model.md) → [threat model](security/threat-model.md) —
-the last is only meaningful with the boundaries from the one before it.
+To assess cloop's security:
+[component and security architecture](architecture/README.md#security-architecture),
+then the [security model](security/model.md), then the
+[threat model](security/threat-model.md). The threat model builds on the
+boundaries the security model defines.
 
-Extending cloop: [executors](architecture/executors.md) →
-[security model](security/model.md#the-no-host-execution-guarantee), because a
-new backend must declare its isolation level truthfully; the policy engine
-believes it.
+To extend cloop: [executors](architecture/executors.md), then the
+[no-host-execution guarantee](security/model.md#the-no-host-execution-guarantee).
+A new backend has to report its isolation level truthfully, because the policy
+that decides where work may run relies on it.

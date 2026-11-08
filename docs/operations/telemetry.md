@@ -1,28 +1,27 @@
 # Front-end telemetry
 
-The hub collects a diagnostic trail from the browser dashboard and from the
-display-glasses page, so that a front-end defect can be investigated from the
+The hub can collect a diagnostic trail from the browser dashboard and from the
+display-glasses page, so that you can investigate a front-end defect from the
 outside.
 
-It is **off by default**. Nothing is collected, and nothing is sent, until an
-operator switches it on — see [turning it on](#turning-it-on).
+It is **off by default**. Nothing is collected or sent until an operator
+switches it on (see [turning it on](#turning-it-on)).
 
 ## Why it exists
 
 The hub's front ends run on machines it cannot inspect. For the dashboard that
-is inconvenient. For the Meta Ray-Ban Display page it is total: those glasses
-have no developer tools, no console, no network inspector, and the wearer's
-only reporting channel is a sentence of prose.
+is inconvenient. For the Meta Ray-Ban Display page there is no other way in:
+the glasses have no developer tools, no console and no network inspector, and
+the wearer can only describe the problem in words.
 
-Three tasks in this project's own history were spent reproducing such a
-sentence by simulation — "swiping right selects the first element once and then
-does not move again" was diagnosed by building a model of the device and
-guessing until the guess matched the prose.
+Without a trail, a report such as "swiping right selects the first element once
+and then does not move again" has to be diagnosed by building a model of the
+device and guessing until the guess matches the description.
 
-So the unit of collection is not the exception. Almost none of those failures
-threw. It is the **breadcrumb**: an ordered trail of what the page did — the
-gesture it received, the view it opened, the request it issued and the status
-that came back — with errors as one kind of entry among several.
+Almost none of those failures throw an exception, so telemetry records
+**breadcrumbs**: an ordered trail of what the page did, such as the gesture it
+received, the view it opened, the request it sent and the status that came
+back. Errors are one kind of entry among several.
 
 A trail answers "the cursor never moved past the first row" directly, because
 the gesture events are in it and the focus changes are not:
@@ -32,7 +31,7 @@ the gesture events are in it and the focus changes are not:
 08:46:47.104    4 gesture    next → 2   {"after":2,"ring":28}
 ```
 
-`at` is where the cursor was when the gesture arrived; `after` is where it
+`at` is where the cursor was when the gesture arrived, and `after` is where it
 ended up. Two consecutive entries with the same value are the reported bug.
 
 ## What is recorded
@@ -41,56 +40,55 @@ ended up. Two consecutive entries with the same value are the reported bug.
 | --- | --- |
 | `error` | an uncaught exception, with its stack |
 | `rejection` | an unhandled promise rejection |
-| `gesture` | an input the page received — a key, swipe, pinch or click |
+| `gesture` | an input the page received: a key, swipe, pinch or click |
 | `input` | an input the page received and did **not** act on |
 | `view` | a tab or screen the page opened |
-| `fetch` | a request the page issued, with status and duration |
+| `fetch` | a request the page sent, with status and duration |
 | `lifecycle` | page load, visibility change, a link reaching its terminal state |
 | `note` | anything else, and where an unrecognised kind lands |
-| `csp` | something the hub's Content-Security-Policy blocked, from the report the **browser** sent to `POST /api/csp-report` rather than from the page's script: its directive, the blocked URL or `inline`, the source line. Recorded under the front end whose document it was, so it follows that front end's collection switch, under the signed-in user whose browser sent it or nobody, and within hub-wide budgets — 60 a minute for signed-in browsers' reports, one a minute for anonymous ones, so a flood of forged reports cannot turn the table over; [the metric](metrics.md#what-the-pages-policy-blocked) counts every one |
+| `csp` | something the hub's Content-Security-Policy blocked, taken from the report the browser sent to `POST /api/csp-report` (not from the page's script): its directive, the blocked URL or `inline`, and the source line. It is recorded under the front end whose document it was, so that front end's collection switch applies, and under the signed-in user whose browser sent it, or nobody. Hub-wide budgets apply: 60 a minute for signed-in browsers' reports and one a minute for anonymous ones, so a flood of forged reports can't push everything else out of the table. [The metric](metrics.md#what-the-pages-policy-blocked) counts every report |
 
 ### Reading a glasses trail
 
-Three fields on a `gesture` carry most of the diagnostic weight, and each was
-added because an investigation stalled without it.
+Besides `at` and `after`, two fields on a `gesture` do most of the diagnostic
+work.
 
-`ch` is the channel the input arrived on — `key`, `touch` or `wheel`. The first
-real Ray-Ban Display trail recorded a pinch as `Enter` and, for a sideways
-swipe, nothing at all: the page listened only for keydown, so a gesture that
-came in as touch left no trace and "the swipe did nothing" could not be
-distinguished from "the swipe never happened". Every gesture now names its
-channel, so that question is a query.
+`ch` is the channel the input arrived on: `key`, `touch` or `wheel`. It tells
+"the swipe did nothing" apart from "the swipe never arrived". The first real
+Ray-Ban Display trail recorded a pinch as `Enter` and a sideways swipe not at
+all, because the page listened only for keydown and the swipe came in as touch.
+Every gesture now records its channel, so you can query for this.
 
-`ae` is `document.activeElement` at the moment of the gesture. The page does not
-*trust* focus — it owns the cursor in a variable, because the device's focus
-model cannot be relied on — but the device does aim its key events at whatever
-is focused. An `ae` of `body` while controls are on screen is a page with
-nowhere to receive the next gesture.
+`ae` is `document.activeElement` at the moment of the gesture. The page keeps
+its own cursor in a variable, because the device's focus model is unreliable,
+but the device still sends key events to whatever has focus. An `ae` of `body`
+while controls are on screen means the page has nowhere to receive the next
+gesture.
 
-A row of kind `input` is the complement: the page saw something and could not
-name it. Taps and vertical drags are excluded, because those are meant to end
-up unhandled; what is left is a gesture arriving on a channel nothing handles
-yet — which is exactly the shape of the failure above, and the first thing to
-look for when a wearer reports that a gesture does nothing.
+A row of kind `input` is the opposite case: the page saw an input and could not
+identify it. Taps and vertical drags are left out, because they are meant to go
+unhandled. What remains is a gesture arriving on a channel that nothing handles
+yet, which is the failure described above. Look for these rows first when a
+wearer reports that a gesture does nothing.
 
-Silence is also evidence, but only alongside `lifecycle`. A trail that stops
-has two readings — the wearer looked away, or the page stopped receiving input
-— and they call for opposite fixes. A `lifecycle` row of `hidden` means the
-first; missing gestures with no such row means the second.
+A trail that stops can mean two things, and they need opposite fixes: the
+wearer looked away, or the page stopped receiving input. Check `lifecycle`. A
+`lifecycle` row of `hidden` means the first. Missing gestures with no such row
+mean the second.
 
 Each event carries the session (one page load), a monotonic sequence number,
 the page's own clock, the view it happened in, and a small free-form detail
-blob. The hub adds what the page does not get to assert: the arrival time, the
+blob. The hub adds the fields the page can't vouch for: the arrival time, the
 client address, the user agent, the authenticated identity, and the hub build
 that served the page.
 
-**Sequence numbers, not timestamps, are the ordering.** Events are batched,
-batches race in flight, and a wearable's absolute clock is routinely wrong. A
-gap in `seq` means a batch was lost, which is itself a finding.
+Order events by sequence number, not by timestamp. Events are sent in batches,
+batches can overtake each other, and a wearable's clock is often wrong. A gap
+in `seq` means a batch was lost, which is useful to know in itself.
 
 ## Reading a trail
 
-From a terminal, which is usually where an investigation starts:
+From a terminal:
 
 ```bash
 cloop hub telemetry sessions                   # recent page loads, newest first
@@ -101,17 +99,16 @@ cloop hub telemetry list --kind error          # recent errors across all sessio
 cloop hub telemetry list --grep /api/tasks     # anything touching an endpoint
 ```
 
-Start with `sessions`. An investigation arrives as "somebody reported a problem
-around ten past four" and has to become a session id before anything else is
-useful.
+Start with `sessions`. A report like "somebody had a problem around ten past
+four" has to be matched to a session id before anything else helps.
 
-Run these from the hub's own directory, or pass `--workdir`. They refuse to
-create a database they cannot find rather than reporting an empty one — "no
-telemetry recorded" from the wrong directory reads as "the instrument is
-broken".
+Run these from the hub's own directory, or pass `--workdir`. If they can't find
+the database, they exit with an error instead of creating an empty one,
+because "no telemetry recorded" from the wrong directory would look like
+broken telemetry.
 
-In the dashboard, the same data is under the **Telemetry** tab, gated on
-`audit.read`. Clicking a session row filters the events below it.
+In the dashboard, the same data is in the **Telemetry** tab, which needs
+`audit.read`. Click a session row to filter the events below it.
 
 Over HTTP:
 
@@ -120,68 +117,63 @@ GET /api/telemetry?source=&kind=&session=&q=&since=&limit=&offset=
 GET /api/telemetry/sessions?source=&limit=
 ```
 
-Both require **`audit.read`** and are global in scope — the same permission and
-the same reasoning as the audit trail. A trail carries URLs, view names, user
-agents and error text from other people's sessions, which is the same class of
-cross-tenant operational record.
+Both need `audit.read` and are global in scope, like the audit trail: a trail
+carries URLs, view names, user agents and error text from other people's
+sessions, the same kind of cross-tenant operational record.
 
 ## What is not stored
 
 Credentials are stripped at ingest, before anything reaches the database.
 
-The load-bearing case is the display-glasses link, which carries its bearer
-token **in the page URL** and is valid for thirty days. `location.href` is the
-natural value for an event's URL field, so without scrubbing the first trail a
-wearer produced would copy a live credential into a table that a different
-permission can read.
+The most important case is the display-glasses link, which carries its bearer
+token in the page URL and is valid for thirty days. An event's URL field
+naturally holds `location.href`, so without scrubbing, the first trail a wearer
+produced would copy a live credential into a table that a different permission
+can read.
 
-Scrubbing runs in two passes, over the message, the stack, the URL and the
-detail alike — inside a message or a stack frame as much as in a well-formed
-URL.
+Scrubbing runs in two passes over the message, the stack, the URL and the
+detail, and finds credentials inside a message or a stack frame as well as in a
+well-formed URL.
 
-The first is the credential registry `cloop audit` and both audit trails use
-too: cloop's own tokens, GitHub tokens in both forms, Anthropic and OpenAI keys,
-JWTs, private keys, Authorization values, passwords in URLs — every shape on the
-[credential patterns](../reference/credential-patterns.md) page. Until it
-was shared, this scrubber knew only cloop's two prefixes, and a page that
-reported a failed fetch with a GitHub token in its URL had that token stored.
+The first pass uses the credential registry that `cloop audit` and both audit
+trails also use: cloop's own tokens, GitHub tokens in both forms, Anthropic and
+OpenAI keys, JWTs, private keys, Authorization values, passwords in URLs, and
+every other shape on the [credential patterns](../reference/credential-patterns.md)
+page.
 
-The second is telemetry's own, and deliberately over-eager: the value of any
-sensitive query parameter (`token`, `code`, `id_token`, `secret`, `key`,
-`password`, `authorization`, and others) is replaced without asking whether it
-looks like a credential. It runs second because it ends a value at a space:
-run first over `authorization=Bearer <token>`, it replaced `Bearer` alone — the
-word the registry needs to find the token behind it.
+The second pass is telemetry's own, and it removes more than strictly needed:
+it replaces the value of any sensitive query parameter (`token`, `code`,
+`id_token`, `secret`, `key`, `password`, `authorization`, and others) whether or
+not it looks like a credential. It runs second because it ends a value at a
+space. Run first over `authorization=Bearer <token>`, it would replace only
+`Bearer`, the word the registry needs to find the token behind it.
 
 ```
 /glasses?token=cloop_pat_0f3a…_9c1d…            →  /glasses?token=[redacted]
 fetch failed: 401 for Bearer eyJhbGciOiJSUzI1…  →  fetch failed: 401 for Bearer [redacted]
 ```
 
-The path survives, and so does whatever identified the credential, because
-that is the part worth reading.
-
-A redacted field you can ask a colleague about is recoverable. A leaked
-credential in a table is not.
+The path is kept, and so is whatever identified the credential, because those
+are the parts you need to read.
 
 ## Limits
 
-Telemetry is bounded at every layer, because ingest is the one route that
+Telemetry is limited at every layer, because ingest is the one route that
 accepts a body without requiring a permission.
 
 | Bound | Value | Where |
 | --- | --- | --- |
-| Request body | 2 MiB | `telemetryMaxBodyBytes` — deliberately below the 10 MiB default |
+| Request body | 2 MiB | `telemetryMaxBodyBytes`, below the 10 MiB default |
 | Events per batch | 64 | `telemetry.MaxBatchEvents` |
 | Message / stack / URL / detail | 2 / 8 / 1 / 4 KiB | `pkg/telemetry` |
 | Events per page load | 500, of which 150 routine | the browser reporter |
 | Rows in the table | 50,000 | `statedb.TelemetryMaxRows` |
 
-The row ceiling is enforced **on the write path**, not by the hourly retention
-janitor: a bound that only holds once an hour is not a bound against an
-endpoint that takes unauthenticated-by-permission writes. The table trims its
-oldest rows once it drifts past the ceiling, so it cannot grow without limit
-and pruning is never required for disk.
+The row limit is enforced on the write path, not by the hourly retention
+janitor, because a limit checked once an hour doesn't hold against an endpoint
+that accepts writes without a permission. Once the table goes past the limit,
+it trims its oldest rows, so it can't grow without bound and you never have to
+prune it to save disk.
 
 To delete a trail sooner than it would age out:
 
@@ -189,22 +181,22 @@ To delete a trail sooner than it would age out:
 cloop hub telemetry prune --before 7d
 ```
 
-Unlike the audit trail, telemetry is not hash-chained and nothing verifies its
-continuity, so deletion needs no seal and leaves no gap to explain.
+Unlike the audit trail, telemetry is not hash-chained and nothing checks its
+continuity, so deleting needs no seal and leaves no gap to explain.
 
 ## Authentication
 
-Ingest declares **no permission**, for the same reason `POST /api/client-error`
-does not: an instrument that records only while the page is healthy records
-nothing about the failures worth investigating, and a user whose role grants
-nothing still has a broken page to report.
+The ingest routes require no permission, for the same reason
+`POST /api/client-error` doesn't: a page that can only report while it is
+healthy reports nothing about the failures you need to investigate, and a user
+whose role grants nothing can still have a broken page to report.
 
-Public here means *no permission*, not *no credential*. Both ingest routes
-still sit behind the authentication middleware, so they reach exactly the
-people already entitled to load a page and never an anonymous scanner.
+No permission does not mean no credential. Both ingest routes sit behind the
+authentication middleware, so only people who may already load a page can
+reach them, and an anonymous scanner can't.
 
-There are two ingest routes rather than one, and a matching pair that answer
-"may I send at all":
+There are two ingest routes, and a matching pair that answer "may I send at
+all":
 
 ```
 POST /api/telemetry                   the dashboard
@@ -213,46 +205,44 @@ GET  /api/telemetry/config            may I send?
 GET  /api/glasses/telemetry/config    may I send?
 ```
 
-Each front end asks the second before it uses the first, once per page load, and
-holds its events until the answer arrives. That is what makes "off" mean *not
-submitted* rather than *submitted and refused*: a page that posted first and
-read the `404` would already have sent the trail — over the network and past
-whatever sits in between — on exactly the hub that wanted none of it.
+Each front end asks its config route once per page load, before it uses the
+ingest route, and holds its events until the answer arrives. So when telemetry
+is off, nothing is sent at all. A page that posted first and then read the
+`404` would already have sent the trail over the network, through whatever
+sits in between, to the hub that wanted none of it.
 
-The probe discloses one boolean about the asking page and fails closed: an
-answer that is missing, refused or unparseable leaves the trail off for that
-page load. The hub still refuses the ingest independently, so a hand-written
-client that skips the question gains nothing.
+The config route reveals one boolean about the asking page and fails closed: if
+the answer is missing, refused or unparseable, the trail stays off for that page
+load. The hub also refuses ingest on its own, so a hand-written client that
+skips the question gains nothing.
 
-A display-glasses token is pinned to the `/glasses` and `/api/glasses/`
-prefixes, and that pin is load-bearing — it is what stops a credential living
-in a URL from reaching the routes that return agent transcripts. Widening it so
-the glasses could post to `/api/telemetry` would trade the whole of that
-containment for one endpoint, so the wearable gets its own path inside the
-prefix it already has.
+A display-glasses token works only under the `/glasses` and `/api/glasses/`
+prefixes, which stops a credential that lives in a URL from reaching the routes
+that return agent transcripts. Widening that so the glasses could post to
+`/api/telemetry` would give up all of this protection for one endpoint, so the
+wearable has its own route inside the prefix it already has.
 
-One consequence is worth knowing: a glasses link that has already been revoked
-cannot deliver its final events, because its credential stops working first.
-Everything up to that point has been flushed, and the terminal state is what
-the page reports to the wearer in plain words anyway.
+As a result, a glasses link that has already been revoked can't deliver its
+final events, because its credential stops working first. Everything up to
+that point has been sent, and the page tells the wearer about the final state
+in plain words anyway.
 
 Both routes answer `204` for everything they accept **and** everything they
-drop. A page must not learn from a status code whether its events were kept —
-a client that retried on failure would amplify exactly the runaway-loop case
-the caps exist to contain.
+drop, so a page can't learn from the status code whether its events were kept.
+A client that retried on failure would make the runaway-loop case, which the
+limits exist to contain, worse.
 
 ## Turning it on
 
-In the dashboard: **Settings → Telemetry**, tick the box, Save. It applies to
-the next page load — there is nothing to restart — and records a
-`telemetry.config.updated` audit row naming who turned it on.
+In the dashboard, open **Settings → Telemetry**, tick the box and click
+**Save**. The change applies from the next page load, with nothing to restart,
+and records a `telemetry.config.updated` audit row naming who turned it on.
 
-Each front end can be enabled separately. `glasses` alone is a sensible
-deployment posture: the display-glasses page is the one that cannot be debugged
-any other way, and the dashboard is the one that produces most of the volume and
-holds most of the privacy cost.
+You can enable each front end separately. Enabling `glasses` alone is a
+sensible setup: the display-glasses page can't be debugged any other way, while
+the dashboard produces most of the volume and carries most of the privacy cost.
 
-The same thing in config, if you would rather deploy it than click it:
+To set the same thing in the configuration file:
 
 ```yaml
 ui:
@@ -261,52 +251,50 @@ ui:
     sources: [glasses]   # optional; omit for every front end
 ```
 
-The panel needs `user.manage`, which is admin-only — one step stronger than the
-`config.write` the rest of Settings uses. Reading a trail back is `audit.read`,
-also admin-only, and switching the recording on is the same decision taken one
-step earlier.
+The panel needs `user.manage`, which only admins have. That is one step
+stronger than the `config.write` the rest of Settings uses. Reading a trail
+back needs `audit.read`, also admin-only, and switching recording on is the
+same decision made one step earlier.
 
-Collection is a setting of the hub, not of a project. A hub that has a
-[per-instance overlay](../reference/configuration.md#two-dashboards-in-one-directory) —
-`.cloop/config.ui-<port>.yaml`, for two dashboards sharing one working
-directory — reads it through that overlay and the panel saves it there, so each
-of the two decides for itself, and an older binary rewriting the shared
-`config.yaml` (which drops keys it does not know) cannot switch it off.
+Collection is a hub setting, not a project setting. A hub with a
+[per-instance overlay](../reference/configuration.md#two-dashboards-in-one-directory)
+(`.cloop/config.ui-<port>.yaml`, for two dashboards sharing one working
+directory) reads the setting through that overlay, and the panel saves it
+there. Each of the two hubs decides for itself, and an older binary that
+rewrites the shared `config.yaml` (dropping keys it doesn't know) can't switch
+it off.
 
 ### Where the events go
 
-To this hub, and only to this hub. There is deliberately no setting that points
-the front ends at a third-party collector, for two reasons that are worth
-stating rather than leaving to be rediscovered:
+Only to this hub. There is no setting that points the front ends at a
+third-party collector, for two reasons:
 
 - The dashboard is served under `Content-Security-Policy: connect-src 'self'`.
-  A cross-origin POST is refused by the browser, so such a setting would need
-  the hub to weaken its own CSP for every page it serves.
+  The browser refuses a cross-origin POST, so such a setting would need the hub
+  to weaken its own CSP for every page it serves.
 - Scrubbing happens at ingest, in the hub. The display-glasses page carries its
   bearer token in the page URL, so a trail sent anywhere else would take a live
-  credential with it — which is precisely the leak `Scrub` exists to prevent.
+  credential with it, which is the leak `Scrub` exists to prevent.
 
-A fleet that wants one collector should relay hub-side, after scrubbing, rather
-than from the browser. Nothing does that today.
+A fleet that wants one collector should relay from the hub, after scrubbing,
+not from the browser. Nothing does that today.
 
 ## Why off by default
 
-This shipped on by default, and the argument was a real one: an instrument that
-has to be switched on in advance is never on when the failure it was built for
-happens.
+Telemetry first shipped switched on, because telemetry that has to be switched
+on in advance is off when the failure it was built for happens.
 
-It weighs the wrong interest. A trail carries the URLs somebody visited, the
-views they opened, their user agent and their address. Collecting that is a
-decision about other people's data, and on a hosted hub the operator and the
-recorded person are not the same person. A deployment that has never heard of
-this setting has not made that decision — and defaulting to collection makes it
-silently, on behalf of an operator who would in many jurisdictions have to
-disclose it.
+That argument puts the wrong interest first. A trail carries the URLs somebody
+visited, the views they opened, their user agent and their address. Collecting
+that is a decision about other people's data, and on a hosted hub the operator
+and the recorded person are different people. A deployment that has never
+heard of this setting has not made that decision, and collecting by default
+would make it for them without telling them, although in many jurisdictions the
+operator would have to disclose it.
 
-So the instrument is opt-in, and the cost of that is paid in the one place it
-shows: the first report of a glasses defect on a fresh hub arrives with no trail
-behind it. Switch collection on, ask the wearer to reproduce it once, and the
-second report has one.
+The cost of opt-in is that the first report of a glasses defect on a fresh hub
+arrives without a trail. Switch collection on, ask the wearer to reproduce the
+problem once, and the second report will have one.
 
 ## Turning it off again
 
@@ -318,15 +306,15 @@ ui:
     enabled: false
 ```
 
-Both ingest routes then answer `404` rather than silently discarding, so the
-setting is verifiable, and the front ends stop posting at all. Reading
-previously-collected events still works — **switching collection off deletes
-nothing**. Use `cloop hub telemetry prune` to remove what was already gathered;
-the panel shows how much that is.
+Both ingest routes then answer `404` instead of discarding events without an
+error, so you can check that the setting took effect, and the front ends stop
+posting altogether. You can still read events collected earlier: switching
+collection off deletes nothing. Use `cloop hub telemetry prune` to remove them;
+the panel shows how much there is.
 
 ## Where errors also go
 
-Events of kind `error` and `rejection` are additionally written to the
-structured logger as `client_error` entries, so an operator who reads the
-journal and never opens the panel still sees browser errors. This preserves the
-behaviour that predated the trail.
+Events of kind `error` and `rejection` are also written to the structured
+logger as `client_error` entries, so an operator who reads the journal and
+never opens the panel still sees browser errors. This keeps the behaviour from
+before the trail existed.

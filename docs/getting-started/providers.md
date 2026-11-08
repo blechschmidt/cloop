@@ -1,9 +1,9 @@
 # Choosing and configuring a provider
 
-A **provider** is the thing cloop talks to when it needs a model: a local CLI,
-a hosted API, or a server on your own machine. Everything else — the plan, the
-tasks, the executors — is the same whichever one you pick, so this is a
-decision you can change later with one command.
+A **provider** is what cloop uses when it needs a model: a local CLI, a hosted
+API, or a server on your own machine. The plan, the tasks and the executors work
+the same whichever provider you pick, and you can switch to another one later
+with a single command.
 
 - [The backends](#the-backends)
 - [Setting one up](#setting-one-up)
@@ -22,50 +22,50 @@ decision you can change later with one command.
 
 | Name | Talks to | Credential | Default model |
 | --- | --- | --- | --- |
-| `claudecode` | the `claude` CLI as a subprocess | whatever the CLI is already signed in with | none — the CLI decides |
-| `copilot` | the GitHub Copilot CLI (`copilot`) as a subprocess | whatever the CLI is already signed in with | none — the CLI decides |
+| `claudecode` | the `claude` CLI as a subprocess | whatever the CLI is already signed in with | none (the CLI decides) |
+| `copilot` | the GitHub Copilot CLI (`copilot`) as a subprocess | whatever the CLI is already signed in with | none (the CLI decides) |
 | `anthropic` | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` | `claude-opus-4-6` |
 | `openai` | `https://api.openai.com/v1` (Chat Completions) | `OPENAI_API_KEY` | `gpt-4o` |
 | `ollama` | `http://localhost:11434` | none | `llama3.2` |
 
-**`claudecode` is the default**, and with `copilot` one of the two backends
-that hold no credential of their own. It runs the `claude` binary once per call, so it inherits
-that CLI's existing sign-in — a Claude Code subscription rather than metered API
-billing. cloop looks for `claude` on `PATH` first, then at
+**`claudecode`** is the default. Like `copilot`, it holds no credential of its
+own. It runs the `claude` binary once per call and uses the sign-in that CLI
+already has, so you pay through a Claude Code subscription instead of metered
+API billing. cloop looks for `claude` on `PATH` first, then at
 `~/.local/bin/claude`, `~/.npm-global/bin/claude` and `/usr/local/bin/claude`,
-which is what makes it work when the dashboard is started from a service manager
-with a thin environment. It reports no default model: cloop passes `--model`
-only when one is set, and otherwise lets the CLI choose. "Existing sign-in"
-means the machine's on a single-user install and the *requesting user's* on a
-hub with SSO, where each identity has its own Claude login — see
-[per-user Claude Code logins](../security/claude-code-identity.md).
+so it also works when the dashboard is started by a service manager with a
+minimal environment. `claudecode` has no default model. cloop passes `--model`
+only when one is set, and otherwise the CLI chooses. On a single-user install
+the sign-in is the machine's. On a hub with SSO it is the sign-in of the user
+who made the request, because each identity has its own Claude login (see
+[per-user Claude Code logins](../security/claude-code-identity.md)).
 
-**`copilot`** is the same idea with GitHub Copilot: it runs the
+**`copilot`** works the same way with GitHub Copilot. It runs the
 [GitHub Copilot CLI](#github-copilot) once per call, as an agent with its own
-tools in the project directory, under the sign-in that CLI already has — a
-Copilot seat rather than per-token billing.
+tools in the project directory, using the sign-in that CLI already has. You pay
+through a Copilot seat instead of per token.
 
-**`anthropic`** is the same family of models over the HTTP API, billed per
-token — the one to pick when you want an API key rather than a subscription.
-**`openai`** speaks Chat Completions, and `openai.base_url` makes it speak it to
-something else: any server implementing the same endpoint (Azure OpenAI, a
-llama.cpp server, a gateway) is reachable that way, which is the supported route
-for OpenAI-compatible backends. **`ollama`** needs no key at all and talks to a
-server on your own machine, so nothing leaves it.
+**`anthropic`** gives you the same family of models as `claudecode` over the
+HTTP API, billed per token. Pick it when you want to use an API key instead of a
+subscription. **`openai`** uses the Chat Completions API. Set `openai.base_url`
+to use any other server that implements the same endpoint, such as Azure
+OpenAI, a llama.cpp server or a gateway. This is the supported way to use
+OpenAI-compatible backends. **`ollama`** needs no key and talks to a server on
+your own machine, so nothing leaves it.
 
-A fifth provider, **`mock`**, is accepted by `cloop config set provider` and by
-`cloop run --mock`. It answers from `.cloop/mock_responses.yaml` (or
-`mock.responses_file`) and defaults to returning `TASK_DONE`. It calls nothing
-and costs nothing, which makes it right for testing a plan's shape or a CI
-pipeline and wrong for anything else.
+There is also a **`mock`** provider, accepted by `cloop config set provider` and
+by `cloop run --mock`. It answers from `.cloop/mock_responses.yaml` (or
+`mock.responses_file`) and by default returns `TASK_DONE`. It makes no calls and
+costs nothing. Use it to test the shape of a plan or a CI pipeline, and for
+nothing else.
 
 ---
 
 ## Setting one up
 
-Configuration lives in `.cloop/config.yaml`, written mode `0600` because it may
-hold an API key. `cloop config set` is the safe way to edit it — it validates
-each value before saving, and refuses an unknown key rather than writing it.
+Configuration lives in `.cloop/config.yaml`. cloop writes the file with mode
+`0600` because it may contain an API key. Use `cloop config set` to change it:
+it checks each value before saving and rejects unknown keys.
 
 ```bash
 cloop config set provider anthropic
@@ -73,33 +73,36 @@ cloop config set anthropic.api_key sk-ant-...
 cloop config set anthropic.model claude-opus-4-6
 ```
 
-These are the provider keys the setter accepts, in full:
+These are all the provider keys that `cloop config set` accepts:
 
 | Key | Notes |
 | --- | --- |
-| `provider` | one of `anthropic`, `openai`, `ollama`, `claudecode`, `copilot`, `mock` — anything else is rejected |
+| `provider` | one of `anthropic`, `openai`, `ollama`, `claudecode`, `copilot`, `mock`. Anything else is rejected |
 | `anthropic.api_key` / `.model` / `.base_url` | |
 | `openai.api_key` / `.model` / `.base_url` | `base_url` is how you reach an OpenAI-compatible server |
 | `ollama.base_url` / `.model` | |
 | `claudecode.model` | |
-| `claudecode.effort` | `low`, `medium`, `high`, `xhigh`, `max` — see [Reasoning effort](#reasoning-effort) |
+| `claudecode.effort` | `low`, `medium`, `high`, `xhigh`, `max` (see [Reasoning effort](#reasoning-effort)) |
 | `copilot.model` | `auto` lets Copilot pick per request |
-| `copilot.effort` | as `claudecode.effort` |
+| `copilot.effort` | the same values as `claudecode.effort` |
 | `mock.responses_file` / `mock.default` | |
 
-Some provider settings exist in the file but have no setter, so they are edited
-in `.cloop/config.yaml` directly: the inference parameters (`temperature`,
-`top_p`, `max_tokens`, and `frequency_penalty` for OpenAI), the Claude Code
-subscription caps (`claudecode.max_weekly_pct`, `max_five_hour_pct`,
-`max_weekly_opus_pct`, `max_weekly_sonnet_pct` — also editable from the
-dashboard; a run they stop resumes by itself when the window reopens, see
-[Resuming a capped run](../reference/configuration.md#resuming-a-capped-run)), and
-[`claudecode.background.*`](../reference/configuration.md#background-work-left-by-an-agent)
-and its twin `copilot.background.*`.
+Some provider settings have no `cloop config set` key, so you edit them in
+`.cloop/config.yaml` directly:
 
-`cloop config show` prints the effective configuration with API keys masked.
-Every save is also mirrored into `.cloop/state.db`, so `cloop config diff` and
-`cloop config sync` exist to reconcile the two if they drift.
+- the inference parameters: `temperature`, `top_p`, `max_tokens`, and
+  `frequency_penalty` for OpenAI
+- the Claude Code subscription caps: `claudecode.max_weekly_pct`,
+  `max_five_hour_pct`, `max_weekly_opus_pct` and `max_weekly_sonnet_pct`. You
+  can also edit these in the dashboard. A run stopped by a cap resumes by itself
+  when the window reopens (see
+  [Resuming a capped run](../reference/configuration.md#resuming-a-capped-run)).
+- [`claudecode.background.*`](../reference/configuration.md#background-work-left-by-an-agent)
+  and the matching `copilot.background.*`
+
+`cloop config show` prints the configuration in effect, with API keys masked.
+Every save is also copied into `.cloop/state.db`. If the two drift apart,
+`cloop config diff` compares them and `cloop config sync` reconciles them.
 
 ---
 
@@ -111,76 +114,76 @@ cloop providers --test   # ...and does it actually answer
 ```
 
 The listing marks the default with `*` and shows each backend's endpoint and
-resolved model. Read "configured" narrowly: it means *a credential is present*,
-and `claudecode` and `ollama` are always reported as configured because neither
-needs one; `copilot` is reported configured when its CLI is installed. It is
-`--test` that proves anything — it builds each provider for real and asks it to
-reply `OK`, with a 30-second timeout, so a missing `claude` binary, a `copilot`
-that is not signed in or an unreachable Ollama shows up as `FAIL` with the
-underlying error.
+resolved model. "Configured" only means that a credential is present.
+`claudecode` and `ollama` always show as configured because neither needs one,
+and `copilot` shows as configured when its CLI is installed. To find out whether
+a provider works, add `--test`. It creates each provider and asks it to reply
+`OK`, with a 30-second timeout. A missing `claude` binary, a `copilot` that
+isn't signed in or an unreachable Ollama shows up as `FAIL` with the underlying
+error.
 
-One caveat before you debug a surprise: `cloop providers` reads configuration
-through the same loader as every other command, and that loader applies only the
-unprefixed environment variables. A key exported as `CLOOP_ANTHROPIC_API_KEY` is
-picked up by `cloop run` and **not** here — see
-[Environment variables](#environment-variables).
+`cloop providers` reads the configuration through the same loader as every
+other command, and that loader only applies the unprefixed environment
+variables. A key exported as `CLOOP_ANTHROPIC_API_KEY` is used by `cloop run`
+but doesn't show up here. See [Environment variables](#environment-variables).
 
 ---
 
 ## How a provider is chosen
 
-`cloop run` resolves the name in this order, first non-empty answer wins:
+`cloop run` uses the first of these that is set:
 
 1. **`--provider`** on the command line (`--mock` is shorthand for
    `--provider mock`).
 2. **`provider:` in `.cloop/config.yaml`**, after `CLOOP_PROVIDER` and any
    `--profile` overlay have been applied to it.
-3. **The provider persisted in project state** — set by `cloop init --provider`
-   or by the dashboard's Provider picker.
+3. **The provider saved in project state**, set by `cloop init --provider` or
+   by the dashboard's Provider picker.
 4. **Auto-detection**: `ANTHROPIC_API_KEY` or `CLOOP_ANTHROPIC_API_KEY` selects
-   `anthropic`; failing that, `OPENAI_API_KEY` or `CLOOP_OPENAI_API_KEY`
-   selects `openai`; otherwise `claudecode`.
+   `anthropic`. Otherwise `OPENAI_API_KEY` or `CLOOP_OPENAI_API_KEY` selects
+   `openai`. If neither is set, cloop uses `claudecode`.
 
-Step 2 almost always answers, which is worth understanding rather than being
-surprised by: when `.cloop/config.yaml` is absent the loader returns built-in
-defaults with `provider: claudecode` already filled in. Steps 3 and 4 are
-therefore reached only when the file exists *and* its `provider:` key is empty —
-so leave that key blank if you want the project's own saved provider to win.
+In practice step 2 almost always decides. When `.cloop/config.yaml` doesn't
+exist, the loader returns the built-in defaults, which already contain
+`provider: claudecode`. Steps 3 and 4 are only reached when the file exists and
+its `provider:` key is empty. If you want the provider saved in project state to
+be used, leave that key blank.
 
-The resolved name is written back into project state at the start of the run, so
-the next `cloop run` with no flags repeats the same choice.
+At the start of the run cloop saves the chosen provider in project state, so the
+next `cloop run` without flags uses the same one.
 
 ---
 
 ## How a model is chosen
 
-Independently of the provider, and in this order:
+cloop chooses the model separately from the provider. It uses the first of these
+that is set:
 
 | | Source |
 | --- | --- |
 | 1 | `--model` on the command line |
 | 2 | `CLOOP_MODEL` in the environment |
 | 3 | the per-provider key: `anthropic.model`, `openai.model`, `ollama.model`, `claudecode.model`, `copilot.model` |
-| 4 | the model persisted in project state (`cloop init --model`, or the dashboard's picker) |
+| 4 | the model saved in project state (`cloop init --model`, or the dashboard's picker) |
 | 5 | the provider's own default |
 
 The provider's own default is `claude-opus-4-6` for `anthropic`, `gpt-4o` for
-`openai` and `llama3.2` for `ollama`. `claudecode` and `copilot` have none:
-with no model resolved, cloop passes no `--model` to the CLI and the CLI's own
-default applies.
+`openai` and `llama3.2` for `ollama`. `claudecode` and `copilot` have none. If
+no model is set, cloop passes no `--model` to the CLI, and the CLI uses its own
+default.
 
-The per-provider key is only consulted for the provider actually in use, so
-setting `openai.model` changes nothing while the project runs on `anthropic` —
-which is what lets you keep all four configured at once.
+cloop only reads the per-provider key of the provider in use. Setting
+`openai.model` changes nothing while the project runs on `anthropic`, so you can
+keep all of them configured at once.
 
 ---
 
 ## Reasoning effort
 
-`claudecode` and `copilot` accept a reasoning-effort level, passed straight
-through to the CLI — as `--effort` to `claude`, as `--reasoning-effort` to
-`copilot`. Valid values are `low`, `medium`, `high`, `xhigh` and `max`; empty
-means the CLI's default.
+`claudecode` and `copilot` accept a reasoning-effort level and pass it to the
+CLI unchanged: as `--effort` to `claude`, and as `--reasoning-effort` to
+`copilot`. Valid values are `low`, `medium`, `high`, `xhigh` and `max`. If no
+level is set, the CLI uses its default.
 
 ```bash
 cloop run --effort high
@@ -188,24 +191,24 @@ cloop config set claudecode.effort high     # the project-wide default
 cloop init --effort high "…"                # saved into project state
 ```
 
-Resolution is `--effort` > `claudecode.effort` (or `copilot.effort`) in the
-config > the effort persisted in project state. An invalid `--effort` is a hard
-error; an invalid value in the file is reported on stderr and ignored, so a bad
-value in YAML cannot make every CLI invocation fail.
+`--effort` takes precedence over `claudecode.effort` (or `copilot.effort`) in
+the config, which takes precedence over the effort saved in project state. An
+invalid `--effort` is an error. An invalid value in the file is reported on
+stderr and ignored, so a bad value in the YAML can't make every CLI call fail.
 
-The other backends ignore this setting entirely — only the `claudecode` and
-`copilot` providers read it. OpenAI's o-series models do get a `reasoning_effort`, but it
-is derived separately from cloop's extended-thinking budget rather than from
-`--effort`, and only for models whose name begins `o1`, `o3` or `o4-mini`.
+The other backends ignore this setting. OpenAI's o-series models do get a
+`reasoning_effort`, but cloop derives it from its extended-thinking budget, not
+from `--effort`, and only for models whose name begins with `o1`, `o3` or
+`o4-mini`.
 
 ---
 
 ## GitHub Copilot
 
 The `copilot` provider runs the [GitHub Copilot
-CLI](https://docs.github.com/copilot/how-tos/copilot-cli) — an agent harness
-like `claude`, which edits files, runs commands and searches the project
-itself. Install it and sign it in once, as the user cloop runs as:
+CLI](https://docs.github.com/copilot/how-tos/copilot-cli). Like `claude`, it is
+an agent harness: it edits files, runs commands and searches the project
+itself. Install it and sign in once, as the user that cloop runs as:
 
 ```bash
 npm install -g @github/copilot          # or: curl -fsSL https://gh.io/copilot-install | bash
@@ -214,104 +217,114 @@ cloop config set provider copilot
 cloop providers --test                  # copilot … OK
 ```
 
-cloop looks for `copilot` on `PATH`, then at `~/.local/bin/copilot` (the
-install script, as a user), `~/.npm-global/bin/copilot`,
+cloop looks for `copilot` on `PATH`, then at `~/.local/bin/copilot` (where the
+install script puts it when run as a normal user), `~/.npm-global/bin/copilot`,
 `/usr/local/bin/copilot` and `/opt/homebrew/bin/copilot`.
 
-**Its sign-in is its own.** cloop keeps no Copilot credential of its own, and
-on a hub without single sign-on adds none to a run on its host: the CLI uses, in
-this order, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, the account
-`copilot login` stored, and the GitHub CLI's. On a hub with single sign-on each
-person's runs sign in with their own credential instead — see below. A token must act for
-a person with a Copilot seat — a fine-grained personal access token with the
-*Copilot Requests* permission, or an OAuth token; classic `ghp_` tokens are not
-accepted. Export `COPILOT_GITHUB_TOKEN` rather than `GH_TOKEN` when the
-environment may also hold a GitHub token for something else: it is read first.
-With `COPILOT_PROVIDER_BASE_URL` set the CLI talks to a model provider of your
-own instead (bring your own key: OpenAI-compatible, Azure or Anthropic
-endpoints, Ollama included) and needs no GitHub sign-in; see `copilot help
-providers`.
+**Signing in.** cloop keeps no Copilot credential of its own, and on a hub
+without single sign-on it adds none to a run on its host. The CLI uses the first
+of these it finds: `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, the
+account stored by `copilot login`, and the GitHub CLI's account. On a hub with
+single sign-on, each person's runs sign in with their own credential instead
+(see below).
 
-**How cloop runs it.** Once per call, in prompt mode, with the prompt on stdin
-and `--silent`, so cloop reads the agent's answer and nothing else — the
-`TASK_DONE` / `TASK_FAILED` / `TASK_SKIPPED` signal included. Every tool is
-allowed (`--allow-all-tools --allow-all-paths --allow-all-urls`), as
-`claudecode` runs with `bypassPermissions`: nobody is there to approve one.
-`--no-ask-user` keeps the agent from stopping to ask, and `COPILOT_AUTO_UPDATE`
-is `false` unless your environment says otherwise, so a run uses the CLI that
-was installed. The model and effort pass through as `--model` and
-`--reasoning-effort`; each conversation gets an ID (`--session-id`), so a task
-whose agent ended its turn early is handed it back in the same conversation
-(`--resume`), as with `claudecode`. The tokens a call used come from the CLI's
-own usage report and are recorded like any provider's, with the model `auto`
-resolved to the one Copilot chose. The review gate's reviewer runs with the
-reading tools only (`view`, `grep`, `glob`), no built-in MCP servers, and the
-CLI's path and URL checks left on. Work the agent leaves running in the
-background is waited for exactly as `claudecode`'s is, under
-`copilot.background` — see [Background work left by an
-agent](../reference/configuration.md#background-work-left-by-an-agent).
+A token must act for a person with a Copilot seat. Use a fine-grained personal
+access token with the *Copilot Requests* permission, or an OAuth token. Classic
+`ghp_` tokens are not accepted. If the environment may also contain a GitHub
+token for something else, export `COPILOT_GITHUB_TOKEN` instead of `GH_TOKEN`,
+because the CLI reads it first. With `COPILOT_PROVIDER_BASE_URL` set, the CLI
+uses a model provider of your own and needs no GitHub sign-in. This is "bring
+your own key", and it works with OpenAI-compatible, Azure or Anthropic
+endpoints, including Ollama. See `copilot help providers`.
 
-**Models.** Copilot's catalog depends on your plan: `copilot`, then `/model`,
-lists it. The dashboard's picker suggests `auto`, `claude-sonnet-4.5`,
-`claude-opus-4.5`, `claude-haiku-4.5`, `gpt-5.4` and `gpt-5-mini`, and keeps a
-model saved on the project that it does not list. A model your plan does not
-offer fails the call with the CLI's own error.
+**How cloop runs it.** cloop starts the CLI once per call in prompt mode, with
+the prompt on stdin and `--silent`, so it reads only the agent's answer,
+including the `TASK_DONE` / `TASK_FAILED` / `TASK_SKIPPED` signal. Every tool is
+allowed (`--allow-all-tools --allow-all-paths --allow-all-urls`), in the same
+way that `claudecode` runs with `bypassPermissions`, because nobody is there to
+approve tool use. `--no-ask-user` stops the agent from pausing to ask questions.
+`COPILOT_AUTO_UPDATE` is `false` unless your environment sets it, so a run uses
+the CLI version that was installed.
 
-**In a sandbox.** A `copilot` project bound to an executor that isolates from
-the hub needs the CLI where it runs, and a credential granted to the project.
+The model and effort are passed as `--model` and `--reasoning-effort`. Each
+conversation gets an ID (`--session-id`), so when an agent ends its turn before
+the task is finished, cloop hands the task back to it in the same conversation
+(`--resume`), as with `claudecode`. Token usage comes from the CLI's own usage
+report and is recorded like any other provider's, with the model `auto`
+replaced by the model Copilot chose. The review gate's reviewer runs with only
+the reading tools (`view`, `grep`, `glob`), no built-in MCP servers, and the
+CLI's path and URL checks left on. Background work the agent leaves running is
+waited for in the same way as for `claudecode`, under `copilot.background` (see
+[Background work left by an
+agent](../reference/configuration.md#background-work-left-by-an-agent)).
 
-- **In a container** — a container executor, a device in container mode, a
-  virtual executor: use `ghcr.io/blechschmidt/cloop-harness-copilot`, the
-  published harness image with the Copilot CLI added. It is a variant because
-  the CLI nearly doubles the image (+445 MB unpacked, +217 MB pulled; see [the
-  published images](../reference/sandbox.md#the-published-images-and-what-an-image-carries)).
-  The default `cloop-harness` image carries `claude` only and says so in its
-  `org.cloop.harnesses` label, so the hub refuses a `copilot` project in it
-  before the run starts (409 `sandbox_image_lacks_harness`), naming the variant.
-- **On a device's own host**, the device installs the CLI on request, as it
-  does `claude`: from GitHub's documented installer (`https://gh.io/copilot-install`)
-  into the agent user's `~/.local/bin`, the first time a dispatch needs it —
-  unless [`executors.auto_install_harness`](../reference/configuration.md#automatic-harness-installation)
-  is off, when the dispatch is refused naming the remedies. An agent built
-  before this release has no installer for `copilot` and says so; upgrade it,
-  or install the CLI on the device by hand. A device advertises `copilot` when
-  it is on the agent's `PATH`.
+**Models.** Which models you can use depends on your Copilot plan. To list them,
+start `copilot` and type `/model`. The dashboard's picker suggests `auto`,
+`claude-sonnet-4.5`, `claude-opus-4.5`, `claude-haiku-4.5`, `gpt-5.4` and
+`gpt-5-mini`, and it also keeps a model saved on the project that isn't in that
+list. If your plan doesn't offer the model, the call fails with the CLI's own
+error.
 
-The credential is `COPILOT_GITHUB_TOKEN`, or `COPILOT_PROVIDER_BASE_URL` for a
-provider of the project's own. The hub refuses the dispatch without one, and
-the Overview's *Copilot credential* card grants one in a step; see [the
-credential of a sandboxed
-run](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run). The CLI
+**In a sandbox.** A `copilot` project bound to an executor that isolates it from
+the hub needs the CLI installed where the task runs, and a credential granted to
+the project.
+
+- **In a container** (a container executor, a device in container mode, or a
+  virtual executor), use `ghcr.io/blechschmidt/cloop-harness-copilot`, the
+  published harness image with the Copilot CLI added. It is a separate variant
+  because the CLI nearly doubles the image size (+445 MB unpacked, +217 MB
+  pulled; see [the published
+  images](../reference/sandbox.md#the-published-images-and-what-an-image-carries)).
+  The default `cloop-harness` image contains only `claude`, and its
+  `org.cloop.harnesses` label says so. If a `copilot` project uses it, the hub
+  refuses the run before it starts (409 `sandbox_image_lacks_harness`) and the
+  error names the variant.
+- **On a device's own host**, the device installs the CLI the first time a task
+  sent to it needs one, as it does for `claude`. It uses GitHub's documented
+  installer (`https://gh.io/copilot-install`) and installs into the agent user's
+  `~/.local/bin`. If
+  [`executors.auto_install_harness`](../reference/configuration.md#automatic-harness-installation)
+  is off, the task is refused instead, and the error lists the ways to fix it.
+  An agent built before this release has no installer for `copilot` and reports
+  that. Upgrade the agent, or install the CLI on the device yourself. A device
+  advertises `copilot` when the CLI is on the agent's `PATH`.
+
+The credential is `COPILOT_GITHUB_TOKEN`, or `COPILOT_PROVIDER_BASE_URL` if the
+project uses its own model provider. Without one, the hub refuses to start the
+task. The *Copilot credential* card on the Overview grants one in a single step
+(see [the credential of a sandboxed
+run](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run)). The CLI
 keeps its token out of the environment of the commands the agent runs.
 
-**On a hub with single sign-on, each person's own.** A `copilot` run on the
-hub's own host, the dashboard's model calls on a `copilot` project (Split,
-Revise, the blocker analysis, the plan assistant, the replays) and every resume
-or failover of a run act for a person, and sign the CLI in with a credential
-granted to the project that counts for that person: their own token, pasted
-into the project's *Copilot credential* card and kept as their personal secret,
-or one an administrator shared with the project. Never the host's `copilot
+**On a hub with single sign-on, each person uses their own credential.** This
+covers a `copilot` run on the hub's own host, the dashboard's model calls on a
+`copilot` project (Split, Revise, the blocker analysis, the plan assistant, the
+replays), and every resume or failover of a run. Each of these acts for a
+person, and the hub signs the CLI in with a credential granted to the project
+for that person. That is either their own token, pasted into the project's
+*Copilot credential* card and stored as their personal secret, or one that an
+administrator shared with the project. The CLI never uses the host's `copilot
 login`, `GH_TOKEN` or `GITHUB_TOKEN`: the hub strips every `COPILOT_*`
-variable, `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` from what the CLI inherits,
-and gives each person a Copilot home of their own for its sessions and logs.
-Someone with no credential is refused with the dialog that grants one, and a
-run the hub would carry on for them waits paused instead. See [per-person
-Copilot credentials](../security/copilot-identity.md).
+variable, `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` from the environment the CLI
+inherits, and gives each person their own Copilot home for its sessions and
+logs. Someone without a credential is refused and shown the dialog that grants
+one, and a run the hub would continue for them is paused instead. See
+[per-person Copilot credentials](../security/copilot-identity.md).
 
-**What does not apply.** The Claude Code usage caps and the model relay are
-Claude's: a `copilot` run is not paused by `claudecode.max_*_pct`, and its
-model calls go to GitHub (or your own provider) directly. The hub's own host is
-not a boundary between people: a run there executes as the user the hub runs as,
-and its agent can read what that user can — to keep people's agents apart, bind
-`copilot` projects to an isolating executor, where the same personal grant
+**What does not apply.** The Claude Code usage caps and the model relay only
+apply to Claude. A `copilot` run is not paused by `claudecode.max_*_pct`, and
+its model calls go directly to GitHub (or to your own provider). The hub's own
+host doesn't keep people apart: a run there uses the hub's own user account, and
+its agent can read anything that account can. To keep people's agents apart,
+bind `copilot` projects to an isolating executor, where the same personal grant
 signs the sandbox in.
 
 ---
 
 ## Environment variables
 
-There are two sets, and they are not interchangeable. The first is applied by
-the configuration loader, so it affects **every** command:
+There are two sets of variables, and they behave differently. The configuration
+loader applies the first set, so these affect every command:
 
 | Variable | Overrides |
 | --- | --- |
@@ -324,7 +337,7 @@ the configuration loader, so it affects **every** command:
 | `GITHUB_TOKEN` | `github.token` |
 | `CLOOP_OIDC_CLIENT_SECRET` | `ui.oidc.client_secret` |
 
-The second set is applied by `cloop run` only, on top of the first:
+Only `cloop run` applies the second set, on top of the first:
 
 | Variable | Overrides |
 | --- | --- |
@@ -335,31 +348,31 @@ The second set is applied by `cloop run` only, on top of the first:
 | `CLOOP_OLLAMA_BASE_URL` | `ollama.base_url` |
 | `CLOOP_MODEL` | the model for this run (also read by `cloop mcp`) |
 
-`CLOOP_PROVIDER` appears in both, which is why it works everywhere. The rest of
-the `CLOOP_`-prefixed set does not: `cloop providers`, `cloop config show` and
-the dashboard will not see a key exported that way. **Prefer the unprefixed
-names** unless you specifically need an override scoped to one `cloop run`.
+Both the loader and `cloop run` apply `CLOOP_PROVIDER`, which is why it works
+everywhere. The other `CLOOP_`-prefixed variables don't: `cloop providers`,
+`cloop config show` and the dashboard won't see a key exported that way. Use the
+unprefixed names unless you need an override for a single `cloop run`.
 
-Two more, below the config layer. The `anthropic` and `openai` providers read
-`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` themselves when they are constructed
-without a key, so those work even on a path that never loaded a config file.
-And the `claudecode` provider seeds missing variables — including
-`CLAUDE_CODE_OAUTH_TOKEN` — from `~/.openclaw/workspace/.env`, `~/.env` and
-`./.env`, without overwriting anything already set in the environment.
+Two more sources sit below the config layer. The `anthropic` and `openai`
+providers read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` themselves when they are
+created without a key, so those variables work even where no config file was
+loaded. The `claudecode` provider fills in missing variables, including
+`CLAUDE_CODE_OAUTH_TOKEN`, from `~/.openclaw/workspace/.env`, `~/.env` and
+`./.env`. It never overwrites a variable that is already set.
 
-Prefer the environment over `.cloop/config.yaml` for credentials in any shared
-or hosted setting. For a hub that brokers credentials to sandboxes rather than
-holding them in a file, see [the secrets guide](../guides/secrets.md).
+On shared or hosted machines, keep credentials in the environment instead of in
+`.cloop/config.yaml`. To have a hub broker credentials to sandboxes instead of
+keeping them in a file, see [the secrets guide](../guides/secrets.md).
 
 ---
 
 ## Named profiles
 
-A profile is a saved bundle of provider, model, base URL and API key, kept
-outside the project in `~/.cloop/profiles.yaml` and managed with
-`cloop profile create | use | list | show | delete`. It is overlaid onto the
-loaded configuration *before* command-line flags, so `--provider` and `--model`
-still win:
+A profile is a saved set of provider, model, base URL and API key. Profiles are
+kept outside the project in `~/.cloop/profiles.yaml`, and you manage them with
+`cloop profile create | use | list | show | delete`. cloop applies a profile to
+the loaded configuration before the command-line flags, so `--provider` and
+`--model` still take precedence:
 
 ```bash
 cloop profile create work --provider anthropic --model claude-opus-4-6
@@ -367,15 +380,15 @@ cloop profile use work          # make it the active profile
 cloop run --profile work        # or override the active one for a single run
 ```
 
-`--api-key` writes the key in plain text into that file.
+`--api-key` stores the key in that file as plain text.
 
 ---
 
 ## Role-based routing
 
-Every task the planner produces carries a role — `backend`, `frontend`,
-`testing`, `security`, `devops`, `data`, `docs` or `review`. The router binds a
-role to a provider, so one plan can execute across several backends:
+Every task the planner creates has a role: `backend`, `frontend`, `testing`,
+`security`, `devops`, `data`, `docs` or `review`. The router assigns a provider
+to a role, so the tasks of one plan can run on several backends:
 
 ```bash
 cloop router set backend anthropic
@@ -385,24 +398,24 @@ cloop router clear docs
 cloop router clear --all
 ```
 
-Routes live under `router.routes` in `.cloop/config.yaml`, and roles without a
-route use the project's resolved provider. `set` validates both arguments and
-accepts `anthropic`, `openai`, `ollama`, `claudecode` and `copilot` — not
-`mock`. If a
-routed provider cannot be built, the run fails at startup naming the role rather
-than partway through.
+Routes are stored under `router.routes` in `.cloop/config.yaml`. Roles without
+a route use the project's provider. `set` checks both arguments and accepts
+`anthropic`, `openai`, `ollama`, `claudecode` and `copilot`, but not `mock`. If
+a routed provider can't be created, the run fails at startup with an error that
+names the role, so it doesn't fail partway through.
 
-One thing to know before using it: the **model is resolved once for the whole
-project**, and every routed provider is called with that same model name. Route
-across providers with no model set — letting each fall back to its own default —
-rather than pinning a model only one of them understands.
+The model is chosen once for the whole project, and every routed provider is
+called with that same model name. So when you route across providers, leave the
+model unset and let each provider use its own default. Don't set a model that
+only one of them understands.
 
-For a run that falls back rather than fans out, `cloop run --fallback
-anthropic,openai` tries each named provider in order after the primary fails.
+To fall back to other providers instead of splitting the work between them, use
+`cloop run --fallback anthropic,openai`. It tries each named provider in turn
+after the primary one fails.
 
 ---
 
-**Next:** [The web dashboard](web-ui.md) — running cloop and its projects from a
-browser instead of a terminal. See also [core concepts](concepts.md),
-[your first project](first-project.md), and the
+**Next:** [The web dashboard](web-ui.md) shows how to run cloop and its projects
+from a browser instead of a terminal. See also [core concepts](concepts.md),
+[your first project](first-project.md) and the
 [command reference](../reference/commands.md).

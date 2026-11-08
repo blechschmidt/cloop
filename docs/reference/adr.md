@@ -1,45 +1,44 @@
 # Decision records
 
-`cloop adr` keeps Architectural Decision Records: one file per significant
-design choice, holding the context that forced it, the decision itself, and the
-consequences that follow.
+`cloop adr` keeps Architectural Decision Records (ADRs). Each record is a file
+about one significant design choice: the context that led to it, the decision,
+and its consequences.
 
-Records live in `.cloop/adr/` as markdown with YAML frontmatter, so they review
-in a pull request like any other change and travel with the repository rather
-than with whoever remembers the discussion.
+Records live in `.cloop/adr/` as Markdown with YAML frontmatter, so you review
+them in pull requests like any other change.
 
 ## Why this is not the journal
 
-cloop has two places a rationale can go, and they answer different questions.
+cloop has two places to record why something was done, and they answer
+different questions.
 
 | | [Task journal](commands.md) (`cloop task journal`) | Decision record (`cloop adr`) |
 |---|---|---|
 | Scope | One task | The project |
-| Lifetime | As long as the task is interesting | Outlives every task that motivated it |
+| Lifetime | As long as the task is relevant | Outlives the tasks that led to it |
 | Shape | Append-only entries | One document with a status |
 | Question | "Why did this task go the way it did?" | "Why is the system built this way?" |
 
-A journal entry explaining that a task switched from polling to a watcher is
-useful for a week. That the project uses SQLite with WAL as its single state
-store — and what was given up to get there — is worth a record that a reader
-finds two years later, still says who decided it, and says whether it still
-holds.
+A journal entry explaining that a task switched from polling to a file watcher
+is useful for a week or so. A decision such as using SQLite with WAL as the only
+state store belongs in a record, which tells a reader two years later who made
+it, what was given up for it, and whether it still holds.
 
 ## The lifecycle
 
-A decision is never edited away. It moves through a status, and a reversal is
-recorded as a new record that supersedes the old one:
+You don't delete or rewrite a decision. You change its status, and you record a
+reversal as a new record that supersedes the old one. The statuses are:
 
-- `Proposed` — written, not yet agreed. The default for a new record.
-- `Accepted` — in force. This is what the system does.
-- `Deprecated` — no longer the way to do things, with no direct replacement.
-- `Superseded` — replaced by a later record, which is linked from this one.
-- `Rejected` — considered and declined. Worth keeping: it stops the same
-  proposal arriving again with the same answer.
+- `Proposed`: written but not yet agreed. New records start here.
+- `Accepted`: in force. The system works this way.
+- `Deprecated`: no longer how things are done, and nothing directly replaces it.
+- `Superseded`: replaced by a later record, which this one links to.
+- `Rejected`: considered and declined. Keeping it saves the next person from
+  proposing the same thing and getting the same answer.
 
-Keeping the losing record is the point. The reason a decision was reversed is
-usually more valuable than the decision, and deleting it leaves the next reader
-to rediscover the constraint the hard way.
+Keep superseded and rejected records. The reason a decision was reversed is
+often more useful than the decision itself, and without the record the next
+reader has to rediscover the constraint.
 
 ## Commands
 
@@ -52,15 +51,15 @@ cloop adr supersede <new> <old>  Record that one decision replaces another
 ```
 
 `new` accepts `--deciders` and `--tags` as comma-separated lists, `--status` to
-open a record at something other than `Proposed`, and `--body` for the markdown
-body — `--body -` reads it from stdin, which is how to pipe in a record written
-in an editor. With no body, a template with Context / Decision / Consequences /
-Alternatives Considered sections is used.
+start a record at a status other than `Proposed`, and `--body` for the Markdown
+body. `--body -` reads the body from stdin, so you can pipe in a record you
+wrote in an editor. Without a body, the record gets a template with Context,
+Decision, Consequences and Alternatives Considered sections.
 
-`list` takes `--status` to filter and `--json` for machine-readable output;
-`show` takes `--json`. A status is matched case-insensitively and anything
-outside the five values above is refused, so a typo cannot be persisted as a
-sixth status that every filter then misses.
+`list` takes `--status` to filter and `--json` for machine-readable output, and
+`show` takes `--json`. Statuses are case-insensitive. Any value other than the
+five above is refused with an error, so a typo can't be saved as a sixth status
+that no filter would match.
 
 ## A worked example
 
@@ -73,8 +72,8 @@ $ cloop adr status 1 accepted
 ADR-0001 is now Accepted
 ```
 
-A year later the decision changes. Write the new record and link it; the old
-one is not touched by hand:
+A year later the decision changes. Write a new record and link the two. You
+don't edit the old record by hand:
 
 ```console
 $ cloop adr new "Move state to Postgres"
@@ -89,9 +88,9 @@ ID    STATUS      DATE        TITLE
 0002  Proposed    2027-04-11  Move state to Postgres
 ```
 
-`supersede` writes both files: the new record gains a `supersedes` link, and the
-old one gains the reverse link and moves to `Superseded`. Both directions are
-stored so a reader arriving at either record can find the other.
+`supersede` updates both files. The new record gets a `supersedes` link, and
+the old one gets the reverse link and moves to `Superseded`. Because both links
+are stored, a reader who opens either record can find the other.
 
 ## File format
 
@@ -112,13 +111,13 @@ superseded_by: [2]
 ...
 ```
 
-Every field except `id` and `title` is optional, and a file with no frontmatter
-at all still lists — the id and title are then read from the filename, which is
-`<zero-padded-id>-<slug>.md`. That keeps a record written by hand, or by a
-generator that predates this command, from being silently ignored.
+Every field except `id` and `title` is optional. A file with no frontmatter at
+all is still listed: cloop reads the id and title from the filename, which has
+the form `<zero-padded-id>-<slug>.md`, so records written by hand or by older
+tools aren't skipped.
 
-Writes are atomic (staged in a sibling temporary file, then renamed), so an
-interrupted status change cannot leave half-written frontmatter that would drop
-the record from every listing.
+Writes are atomic (a temporary file next to the record, then a rename), so an
+interrupted status change can't leave half-written frontmatter that would drop
+the record from listings.
 
 The implementation is [`pkg/adr/adr.go`](../../pkg/adr/adr.go).

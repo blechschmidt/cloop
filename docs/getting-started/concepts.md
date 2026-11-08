@@ -1,15 +1,14 @@
 # How cloop works
 
-You have run `cloop init` and `cloop run` once. Something decomposed your goal
-into a numbered list, worked through it, and printed a lot of green ticks. This
-page explains what that loop is, so the next time it stops, skips a task, or
-invents work you did not ask for, you know which of its rules you are looking
-at.
+You have run `cloop init` and `cloop run` once: cloop turned your goal into a
+numbered list of tasks and worked through it. This page explains the rules
+behind that loop, so that when a run stops, skips a task or adds work you
+didn't ask for, you know why.
 
-There is one execution model. Early versions had a "PM mode" flag that turned
-the task pipeline on; it no longer exists, and neither does `--pm`. Every unit
-of work cloop does is a task in a plan, and every plan lives in the project's
-database.
+Every piece of work cloop does is a task in a plan, and every plan is stored in
+the project's database. Early versions had a "PM mode" that you switched on
+with `--pm`. That flag no longer exists, because the task loop is now the only
+way cloop works.
 
 - [The loop at a glance](#the-loop-at-a-glance)
 - [The goal and the plan](#the-goal-and-the-plan)
@@ -102,104 +101,109 @@ flowchart TD
 
 ## The goal and the plan
 
-`cloop init "…"` records a goal and plans nothing. The first `cloop run` calls
-the provider with a decomposition prompt asking for a JSON list of concrete,
-independently executable tasks — aiming for 5 to 15, each with a priority, an
-optional role, an optional `depends_on` list and a time estimate
-(`pm.DecomposePrompt`). If stdin is a terminal and `--skip-clarify` is not set,
-a short clarification Q&A runs first and its answers are folded into that
-prompt.
+`cloop init "…"` records the goal and does nothing else. The first `cloop run`
+sends the goal to the provider and asks for a JSON list of concrete tasks that
+can each be done on their own, usually 5 to 15 of them. Each task has a
+priority, an optional role, an optional `depends_on` list and a time estimate
+(the prompt is built by `pm.DecomposePrompt`). If you are in a terminal and
+haven't passed `--skip-clarify`, cloop first asks you a few questions about the
+goal and adds your answers to that prompt.
 
-The parsed result is a `Plan` — the goal, a slice of tasks and a version number
-— saved immediately, because **the plan is the durable state of the project**,
-not a cache and not a log. A second `cloop run` does not re-plan; it sees a
-non-empty plan and resumes it. `--replan` is the explicit way to discard it and
-decompose again.
+The result is saved straight away as a `Plan`: the goal, the tasks and a
+version number. A second `cloop run` doesn't plan again. It finds the saved
+plan and carries on with it. To throw the plan away and plan again, use
+`--replan`.
 
-Everything lives in **`.cloop/state.db`**, a SQLite database (`pkg/state`,
-`pkg/statedb`) holding the goal, the plan, the step history, token and cost
-counters, the activity queue and the event journal. A legacy `.cloop/state.json`
-from an older binary is migrated into it on first open and is no longer
-written. Task artifacts — the full provider response for each attempt — are
-separate Markdown files under `.cloop/tasks/`; plan snapshots go to
-`.cloop/plan-history/`. Because the plan is durable and re-read from disk at
-the top of every iteration, anything else that edits it is picked up mid-run:
-`cloop task add`, the dashboard's plan editor, `cloop listen` and
-`cloop import` all write to the same plan.
+Everything is stored in **`.cloop/state.db`**, a SQLite database (`pkg/state`,
+`pkg/statedb`). It holds the goal, the plan, the step history, token and cost
+counters, the activity queue and the event journal. If cloop finds a
+`.cloop/state.json` written by an older version, it moves the contents into the
+database the first time it opens the project, and doesn't write the file again.
+Each attempt at a task also leaves a Markdown file under `.cloop/tasks/` with
+the provider's full response, and plan snapshots go to `.cloop/plan-history/`.
+
+cloop reads the plan from disk at the start of every iteration, so changes made
+elsewhere are picked up during a run. `cloop task add`, the dashboard's plan
+editor, `cloop listen` and `cloop import` all write to the same plan.
 
 ---
 
 ## A task
 
-A task is a struct with a large optional surface and a small mandatory core
-(`pm.Task` in `pkg/pm/pm.go`). The fields the loop itself reads are:
+A task (`pm.Task` in `pkg/pm/pm.go`) has many optional fields, but the loop
+itself reads only these:
 
 | Field | Meaning |
 | --- | --- |
-| `id` | integer, unique within the plan; renumbered on collision when new tasks are injected |
-| `title`, `description` | what the executing agent is told to do |
-| `priority` | **1 is highest**. Selection compares numerically, so P1 beats P2 |
+| `id` | a number, unique within the plan; a new task whose number is taken is renumbered |
+| `title`, `description` | what the agent is told to do |
+| `priority` | **1 is the highest**. Priorities are compared as numbers, so P1 runs before P2 |
 | `status` | see below |
-| `depends_on` | task IDs that must reach `done` or `skipped` first |
-| `tags` | free-form labels; `--tags` restricts a run to matching tasks |
-| `role` | one of `backend`, `frontend`, `testing`, `security`, `devops`, `data`, `docs`, `review` — prepends a specialist system prompt and can route the task to a different provider |
-| `condition` | a gate evaluated before execution: `$cmd` runs a shell check, anything else is an AI yes/no question |
-| `deadline` | an overdue task is auto-boosted to P1 at the top of each iteration |
-| `on_success`, `on_failure` | task IDs to activate, or skip, depending on this task's outcome |
+| `depends_on` | the IDs of tasks that must be `done` or `skipped` first |
+| `tags` | labels of your choice; `--tags` limits a run to the tasks that have them |
+| `role` | one of `backend`, `frontend`, `testing`, `security`, `devops`, `data`, `docs`, `review`. It adds a specialist system prompt, and can send the task to a different provider |
+| `condition` | a check made before the task runs: `$cmd` runs a shell command, anything else is a yes/no question for the model |
+| `deadline` | a task past its deadline is raised to P1 at the start of each iteration |
+| `on_success`, `on_failure` | the tasks to start, or skip, depending on how this task ends |
 
-The rest is bookkeeping the loop writes as it goes — `result`, `started_at`,
-`completed_at`, `actual_minutes`, `artifact_path`, `fail_count`,
-`heal_attempts`, `failure_diagnosis`, and `annotations`, a timestamped audit
-trail of every decision cloop made about this task — plus opt-in fields for
-approval, recurrence, per-task time budgets, story points and links.
+The loop fills in the rest as it goes: `result`, `started_at`, `completed_at`,
+`actual_minutes`, `artifact_path`, `fail_count`, `heal_attempts`,
+`failure_diagnosis`, and `annotations`, a timestamped log of every decision
+cloop made about the task. There are also optional fields for approval,
+recurring tasks, per-task time limits, story points and links.
 
-There are **six** statuses: `pending`, `in_progress`, `done`, `skipped`,
-`failed`, and `timed_out` for a task that exceeded its wall-clock budget.
-`in_progress` also means "left behind by a run that died", which is why a fresh
-run reconciles those before scheduling anything. Reconciling takes cloop's own
-decision first — every outcome is written to `.cloop/artifacts/<id>_verdict.json`
-before it is stored — so a task the review gate or a verification had rejected
-comes back rejected, not as the agent's `TASK_DONE`; failing that, it adopts the
-terminal signal at the end of the agent's live output, and a task with neither
-runs again. The two that decide what
-happens next are `skipped` and `failed`: a `skipped` dependency counts as
-**satisfied**, because a task that was not applicable should not strand the
-work after it, while a `failed` or `timed_out` dependency leaves the dependant
-*permanently blocked* — and the loop then marks it `skipped` with a reason
-rather than leaving it forever unrunnable.
+A task has one of **six** statuses: `pending`, `in_progress`, `done`,
+`skipped`, `failed`, and `timed_out` for a task that ran past its time limit.
+
+`in_progress` can also mean that the run working on the task died, so a new run
+first sorts out every task left `in_progress`. It goes by what cloop itself
+decided about the task, which is written to `.cloop/artifacts/<id>_verdict.json`
+before the outcome is stored. A task that the review gate or a verification
+step rejected therefore stays rejected, even if the agent printed `TASK_DONE`.
+Without such a record, cloop uses the final signal in the agent's live output.
+If there is none of that either, the task runs again.
+
+`skipped` and `failed` decide what happens to the tasks that depend on a task.
+A `skipped` dependency counts as **satisfied**, because a task that turned out
+not to be needed shouldn't hold up the work after it. A `failed` or `timed_out`
+dependency blocks the tasks that depend on it for good, so the loop marks them
+`skipped`, with the reason, instead of leaving them waiting forever.
 
 ---
 
 ## The execution loop
 
-Each iteration, before any provider call, the loop checks its **stop
-conditions** — cancellation (Ctrl-C), `--steps`, `--token-budget`, the
-project's `max_steps`, `--cost-limit`, the daily `budget` config, and on the
-`claudecode` provider the project's share of the Anthropic subscription. Any of
-them sets the run to `paused` and returns; `cloop run` resumes it. A
-cancellation that lands while a task is executing interrupts that task, and
-the task goes back to `pending` rather than being judged `failed`: resuming
-starts it again, and its dependants are not skipped. The loop
-then **re-reads the plan from disk**, merging externally-added tasks and
-resetting recurring tasks whose cron schedule has fired, and applies
-**deadlines**: overdue tasks are boosted to P1, and with `--auto-promote` tasks
-approaching a deadline are escalated too.
+At the start of each iteration, before it calls the provider, the loop checks
+whether it should stop: whether you pressed Ctrl-C, or whether the run has
+reached `--steps`, `--token-budget`, the project's `max_steps`,
+`--cost-limit`, the daily `budget` setting or, with the `claudecode` provider,
+the project's share of the Anthropic subscription. If any of these applies, the
+run is set to `paused` and stops, and `cloop run` resumes it. If you cancel
+while a task is running, that task is interrupted and goes back to `pending`
+instead of being marked `failed`. Resuming starts it again, and the tasks that
+depend on it are not skipped.
 
-**Selection** is `Plan.NextTask()`: the pending task with the lowest `priority`
-number whose dependencies are all `done` or `skipped`. Ties keep plan order,
-and pinning affects how lists are displayed rather than what runs next. The
-chosen task passes through the gates in the diagram — tag filter, condition,
-optional risk check, optional approval — and is executed by building a prompt
-with `pm.ExecuteTaskPrompt` and calling the provider. That prompt carries the
-goal and constraints, this task, the completed tasks with short result
-summaries, the upcoming tasks marked *do not work on these*, keyword-matched
-snippets from your codebase, relevant knowledge-base entries, and — if this
-task failed before — the previous diagnosis.
+Next the loop **reads the plan from disk again**, adding tasks that were added
+elsewhere and resetting recurring tasks whose cron schedule is due. Then it
+applies **deadlines**: overdue tasks are raised to P1, and with
+`--auto-promote`, tasks that are close to their deadline are raised too.
+
+**Choosing the next task** is the job of `Plan.NextTask()`: it picks the pending
+task with the lowest `priority` number whose dependencies are all `done` or
+`skipped`. When priorities are equal, the task that comes first in the plan
+wins. Pinning a task changes how lists are displayed, not what runs next. The
+chosen task then passes the checks shown in the diagram (tag filter,
+condition, optional risk check, optional approval) and runs: cloop builds a
+prompt with `pm.ExecuteTaskPrompt` and calls the provider. The prompt contains
+the goal and your constraints, this task, the completed tasks with short
+summaries of their results, the upcoming tasks marked *do not work on these*,
+matching snippets from your code, relevant knowledge-base entries and, if this
+task failed before, the diagnosis from last time.
 
 ### The signal protocol
 
-There is no structured output format. Completion is detected by asking the
-agent to end its response with a bare token, and then looking for it:
+cloop doesn't use a structured output format. It asks the agent to end its
+answer with one of three words on a line of its own, and then looks for it:
 
 ```
 TASK_DONE      the task is complete
@@ -207,221 +211,225 @@ TASK_SKIPPED   the task is not applicable, or was already done
 TASK_FAILED    the task could not be completed
 ```
 
-`pm.CheckTaskSignal` trims the output, splits it into lines, and examines
-**only the last 5 lines**. A line matches only if, after trimming whitespace,
-it equals the token exactly — `TASK_DONE.` or `Result: TASK_DONE` does not
-count. The first match in those five lines wins.
+`pm.CheckTaskSignal` trims the output, splits it into lines and looks at
+**only the last 5 lines**. A line counts only if, after trimming spaces, it is
+the word and nothing else: `TASK_DONE.` and `Result: TASK_DONE` don't count.
+The first match in those five lines wins.
 
-**No signal needs positive evidence.** An unsignalled response is given the
-benefit of the doubt — marked `done` with an annotation saying it was
-implicitly completed, so a chatty agent that ends on a summary paragraph is not
-punished for it — but only if there is something to show for the run: a change
-in the repository, or a non-empty artifact. The agent process exiting is not
-evidence. Before that rule existed, every provider refusal became a completed
-task, and fourteen tasks in cloop's own ledger are recorded as done whose entire
-summary is "You've hit your limit" (`pkg/orchestrator/abort.go`).
+**A missing signal needs evidence.** If the agent doesn't print a signal, cloop
+still marks the task `done`, with a note that it was completed implicitly, so
+an agent that ends with a summary paragraph isn't penalized. But it does this
+only if there is something to show for the run: a change in the repository, or
+a non-empty artifact. The agent's process exiting is not enough, because
+otherwise every refusal from a provider would count as a finished task
+(`pkg/orchestrator/abort.go`).
 
-An unsignalled output that is a recognisable refusal — a usage limit, an
-exhausted quota, a rejected credential, a harness declining to start — is
-classified as an **abort** rather than a failure. The distinction matters: a
-failed task is a judgement about the work, an aborted one is the absence of any
-work to judge. It resets to `pending`, is journalled under its own event type,
-and the run waits out the window or pauses for an operator rather than burning
-the rest of the plan against the same wall.
+If the output has no signal and is a recognisable refusal (a usage limit, a
+used-up quota, a rejected credential, a harness that wouldn't start), cloop
+treats it as an **abort**, not a failure. A failure says something about the
+work; an abort means there was no work to judge. The task goes back to
+`pending`, the event is logged under its own type, and the run waits for the
+limit to reset or pauses for you, instead of running the rest of the plan into
+the same limit.
 
-An unsignalled output that reads as a *question* is re-prompted (twice) to
-decide for itself, and failed if that does not resolve, rather than laundered
-into "done". The parallel loop skips the re-prompt and fails it immediately.
+If the output has no signal and is a *question*, cloop asks the agent, at most
+twice, to decide for itself. If that doesn't settle it, the task fails; cloop
+doesn't count it as done. In parallel mode there is no second prompt and the
+task fails right away.
 
-An unsignalled output that says the agent is **waiting** — "the suite is still
-running; I'll commit once it reports", "my monitor is armed" — gets its turn
-handed back, up to twice, in both loops. The agent behaved as it would in an
-interactive session, where the harness wakes it when the job finishes; a cloop
-run is not one, the harness stops what it left running, and nothing reports
-back. With the `claudecode` provider the turn is resumed in the same
-conversation (`--resume`), so the agent still knows what it was waiting for;
-other providers are re-prompted with their previous answer. A turn that still
-ends waiting is an `unfinished_turn` abort — back to `pending`, not `done` —
-because the work it describes was never finished, and was often left
-uncommitted (`pkg/orchestrator/unfinished.go`).
+If the output has no signal and says the agent is **waiting** for something
+("the suite is still running; I'll commit once it reports", "my monitor is
+armed"), cloop hands the turn back, up to twice, in both modes. The agent is
+behaving as it would in an interactive session, where the harness wakes it up
+when the job finishes. In a cloop run nothing wakes it: the harness stops
+whatever it left running, and nothing reports back. With the `claudecode`
+provider the turn continues in the same conversation (`--resume`), so the agent
+still knows what it was waiting for; other providers get their previous answer
+back in a new prompt. If the turn still ends with the agent waiting, the task
+is aborted as `unfinished_turn` and goes back to `pending`, not `done`, because
+the work it describes never finished and was often never committed
+(`pkg/orchestrator/unfinished.go`).
 
-Phrase matching keeps missing new wordings, so a project can also make the
-working tree itself the signal: with **[done means
-committed](../guides/done-means-committed.md)** on (`cloop require-committed`,
-or the Overview's *Done = Committed* badge), a turn that ends — `TASK_DONE` or
-unsignalled — with changes this attempt made still uncommitted, or with
-*pushed* its commits not on the branch's upstream, is handed back naming them,
-sharing the same limit of two. One that still ends that way is an
-`uncommitted_work` abort: back to `pending` with the work left in the tree,
-untouched, and the next attempt held to it (`pkg/orchestrator/committed.go`).
+Matching phrases will always miss some new wording, so a project can also use
+the working tree itself as the signal. With
+**[done means committed](../guides/done-means-committed.md)** switched on
+(`cloop require-committed`, or the *Done = Committed* badge on the Overview), a
+turn that ends with changes from this attempt still uncommitted is handed back
+with a list of them, whether it ended with `TASK_DONE` or without a signal.
+With *pushed* also set, the same happens when its commits are not on the
+branch's upstream. The same limit of two applies. If the turn still ends that
+way, the task is aborted as `uncommitted_work`: it goes back to `pending`, the
+work stays in the tree untouched, and the next attempt is held to the same rule
+(`pkg/orchestrator/committed.go`).
 
 One rule overrides even an explicit `TASK_DONE`. If the agent left processes
-running — a build, a test suite, a training job — cloop waits for them, and a
-task whose background work never drained is **not** accepted as complete
-regardless of what it printed, because its output describes work that had not
-finished (`pkg/orchestrator/background.go`).
+running, such as a build, a test suite or a training job, cloop waits for them.
+If they never finish, the task is **not** accepted as complete, whatever the
+agent printed, because its output describes work that hadn't finished
+(`pkg/orchestrator/background.go`).
 
-With `--verify`, a `done` task gets a second AI pass that inspects the real
-files and answers `VERIFY_PASS` / `VERIFY_FAIL`, parsed by the same
-last-5-lines rule; a failure re-queues the task as `pending` up to
-`--max-verify-retries` times (default 2) before failing it.
+With `--verify`, a task marked `done` gets a second pass from the model, which
+looks at the actual files and answers `VERIFY_PASS` or `VERIFY_FAIL`, read with
+the same last-5-lines rule. A failure sets the task back to `pending`, up to
+`--max-verify-retries` times (2 by default), and then fails it.
 
 ---
 
 ## When a task fails
 
-`TASK_FAILED` does not immediately mark the task failed. In the sequential
-loop, **auto-heal** runs first: each attempt calls the provider for a diagnosis
-of what went wrong, records it on the task as `failure_diagnosis` and as a
-`[HEAL n/m]` annotation, switches to the next-best prompt variant if A/B
-statistics suggest one, and re-executes the task with the diagnosis attached to
-the prompt. The default is **2 attempts** (`--heal-retries`; `0` means the
-default), and `--no-heal` turns the loop off. A provider error or an empty
-response during a heal attempt is treated as a transient miss rather than a
-verdict — the task stays failed and the next attempt runs.
+`TASK_FAILED` doesn't mark the task failed straight away. In sequential mode,
+**auto-heal** runs first. Each attempt asks the provider to diagnose what went
+wrong, saves the diagnosis on the task as `failure_diagnosis` and as a
+`[HEAL n/m]` annotation, switches to a better prompt variant if the A/B
+statistics suggest one, and runs the task again with the diagnosis added to the
+prompt. By default there are **2 attempts** (`--heal-retries`; `0` means the
+default), and `--no-heal` turns auto-heal off. If the provider returns an error
+or an empty response during a heal attempt, cloop treats it as a temporary
+problem: the task stays failed and the next attempt runs.
 
-When heal is exhausted the task is marked `failed`, `fail_count` is
-incremented, and the opt-in recovery machinery gets its turn: `--diagnose`
-stores a fresh root-cause analysis for the next retry, `--auto-split` asks the
-AI to decompose a task that has now failed twice into 2–5 subtasks that replace
-it, and `--adaptive-replan` re-thinks all remaining pending work around the
-failure. A successful split or replan resets the failure counter, because the
-plan has genuinely changed.
+When the heal attempts run out, the task is marked `failed` and its
+`fail_count` goes up. Then the optional recovery features get their turn:
+`--diagnose` saves a fresh analysis of the cause for the next retry,
+`--auto-split` asks the model to split a task that has now failed twice into
+2–5 smaller tasks that replace it, and `--adaptive-replan` rethinks all the
+remaining pending work in light of the failure. A successful split or replan
+resets the failure count, because the plan is now different.
 
-**The consecutive-failure stop.** The loop counts consecutive failures; any
-success or skip resets it to zero, and reaching the limit — **3** by default,
-`--max-failures` — sets the run's status to `failed` and returns an error. It
-is consecutive rather than cumulative, so a plan can absorb many failures as
-long as it is still making progress between them, and every failing path trips
-it: signals, verification, shell verification, per-task timeouts and provider
-errors alike. A timed-out task takes the same counter but a different status,
-and gets a marker artifact carrying whatever partial output existed. There is
-no default time budget; it is opt-in per task (`max_minutes`), per project, or
-per process.
+**Stopping after repeated failures.** The loop counts failures in a row. Any
+success or skip resets the count to zero. When it reaches the limit, **3** by
+default (`--max-failures`), the run's status is set to `failed` and cloop exits
+with an error. Because only failures in a row count, a plan can get through
+many failures as long as tasks keep succeeding in between. Every kind of
+failure counts: failure signals, failed verifications (by the model or by a
+script), tasks that run out of time, and provider errors. A task that runs out
+of time counts towards the same limit but gets a status of its own, and a
+marker artifact with whatever output it had produced. There is no time limit by
+default; you can set one per task (`max_minutes`), per project or per process.
 
 ---
 
 ## Auto-evolve
 
-When no task is runnable and the plan is complete, the run normally ends with
-status `complete`. With `--auto-evolve` it does not: the queue draining is the
-trigger for a new round of work.
+When no task can run and the plan is complete, the run normally ends with the
+status `complete`. With `--auto-evolve` it doesn't: an empty queue starts a new
+round of work instead.
 
-Before either can happen, the loop sweeps the plan for tasks it believes it
-finished whose stored summary is a refusal rather than work
-(`pkg/orchestrator/abort_sweep.go`). This is the historical half of the rule
-above: aborts have been recognised live since the evidence rule landed, but
-everything recorded before it stayed marked `done`, and a plan resting on those
-entries is not finished. Each one found is reset to `pending`, and the
-classification is persisted on the task, so the reason survives a reload and the
-dashboard can show it without re-reading the prose.
+Before either happens, the loop looks through the plan for tasks marked done
+whose saved summary is a refusal and not a description of work
+(`pkg/orchestrator/abort_sweep.go`). Refusals are recognised as they happen,
+but tasks recorded before cloop could recognise them may still be marked
+`done`, and a plan that relies on them isn't really finished. Each one it finds
+is set back to `pending`, and the reason is saved on the task, so it survives a
+reload and the dashboard can show it.
 
-The audit does not run in only one direction. A refusal summary is genuine
-evidence that *that run* produced nothing, but the work may exist anyway because
-a later task re-landed it — nine of cloop's own fourteen turned out that way. So
-a finding can be **cleared**, with a note recording where the work actually
-landed; a cleared entry stays visible as a bad ledger entry but stops blocking
-completion. Both verdicts are available from the Tasks tab and from
-`cloop task audit-ledger --reopen|--clear`. An evolve round calls the provider with
-`pm.EvolveDiscoverPrompt`, which shows the completed tasks and their result
-summaries and asks for **1 to 5 new improvement tasks** focused on features,
-tests, documentation, performance, security, UX and refactoring. `--innovate`
-does not change that focus list — it prepends a short instruction to think
-creatively and unconventionally about novel capabilities.
+A refusal summary shows that *that run* produced nothing, but the work may
+still exist because a later task did it. So you can also **clear** a finding,
+with a note saying where the work actually is. A cleared entry stays visible as
+a bad record but no longer stops the plan from completing. You can do either
+from the Tasks tab, or with `cloop task audit-ledger --reopen|--clear`.
 
-A project with approved [requirements](../guides/requirements.md) is evolved
-with them in view: the round is shown where each stands, every task it adds
-links the requirements it closes, and an open **must** gap is closed before
-anything new — the gap-closing tasks run first, and a must gap the model left
-open gets a task of its own. See
+An evolve round calls the provider with `pm.EvolveDiscoverPrompt`. The prompt
+lists the completed tasks with their result summaries and asks for
+**1 to 5 new improvement tasks** covering features, tests, documentation,
+performance, security, UX and refactoring. `--innovate` keeps that list but
+adds a short instruction to think creatively about new capabilities.
+
+If the project has approved [requirements](../guides/requirements.md), the
+round takes them into account. The model sees where each requirement stands,
+every task it adds is linked to the requirements it addresses, and open
+**must** requirements come before anything new: the tasks that close them run
+first, and if the model leaves a must requirement open, cloop adds a task for
+it. See
 [Planning from the requirements](../guides/requirements.md#auto-evolve-and-the-suggestions-panel).
 
-The candidates are then filtered. Semantic deduplication is **on by default**:
-a second provider call compares them against the existing plan and drops
-anything already covered, even when the wording differs; a candidate that links
-only requirements an open task already implements is dropped before it is
-asked. It fails open — a
-provider error keeps all candidates rather than silently dropping novel work —
-and `--no-dedup` skips it. Survivors are renumbered to avoid ID collisions and
-appended to the plan, at which point they are ordinary tasks: visible in
-`cloop status`, editable, dependable, executed by the same loop. Discovered
-work never happens invisibly.
+The suggested tasks are then filtered. Semantic deduplication is **on by
+default**: a second call to the provider compares the suggestions with the
+existing plan and drops anything the plan already covers, even if it is worded
+differently. A suggestion linked only to requirements that an open task already
+implements is dropped before the provider is asked. If the provider call fails,
+all suggestions are kept, so new work isn't lost by mistake; `--no-dedup` skips
+the step. The remaining tasks are renumbered so their IDs don't clash, and
+added to the plan. From then on they are ordinary tasks: they show up in
+`cloop status`, you can edit them and make other tasks depend on them, and the
+same loop runs them. Everything auto-evolve adds is visible in the plan.
 
-Two things bound this. Every round increments `evolve_step` and is recorded in
-the activity log even when it finds nothing; and if **three consecutive rounds
-discover no new tasks** while no `--token-budget` or `--steps` limit is set,
-the run stops on its own. When a budget *is* set, the budget is the abort
-condition and evolving continues until it trips.
+Two things limit auto-evolve. Every round increases `evolve_step` and is
+written to the activity log, even when it finds nothing. And if
+**three rounds in a row find no new tasks** while no `--token-budget` or
+`--steps` limit is set, the run stops by itself. When a budget *is* set, the
+budget decides when to stop, and evolving continues until it runs out.
 
 ---
 
 ## Parallel execution
 
-`--parallel` (or `--max-parallel N` / `-j N`, which implies it) switches the
-dispatcher from `Plan.NextTask()` to `Plan.ReadyTasks()`: every pending task
-whose dependencies are satisfied is launched at once, capped by the live
-`max_parallel` value. That cap is re-read from state each round, so changing it
-from the dashboard takes effect on the next batch; toggling parallelism mid-run
-makes the loop hand control back and re-dispatch into the other mode without
-restarting the process. Results are consumed as each worker finishes rather
-than at the end of the batch, and a panic inside a provider becomes that one
-task's failure instead of taking down its peers.
+`--parallel` (or `--max-parallel N` / `-j N`, which also turn it on) changes
+how tasks are chosen, from `Plan.NextTask()` to `Plan.ReadyTasks()`: every
+pending task whose dependencies are met starts at once, up to the current
+`max_parallel` value. cloop reads that limit again every round, so a change you
+make in the dashboard applies to the next batch. If you switch parallel mode on
+or off during a run, the loop switches over without restarting the process.
+Each result is handled as soon as its task finishes, without waiting for the
+rest of the batch, and a crash inside a provider fails only that one task.
 
-By default all workers share one working directory, which is fine for tasks
-that touch different files and not fine otherwise. `--worktree-parallel` fixes
-that when the project is a git repository:
+By default all tasks share one working directory. That works when they touch
+different files, and goes wrong when they don't. If the project is a git
+repository, `--worktree-parallel` solves this:
 
-- Each task gets its own worktree at `.cloop/worktrees/task-<id>/` on a branch
-  named `cloop/task-<id>-<slug>` (`pkg/worktree`), and the provider is pointed
-  at that directory, so concurrent edits cannot overwrite each other.
-- On `done` the worktree is committed and its branch is submitted to a **merge
-  queue** (`pkg/mergequeue`) — one goroutine draining requests in FIFO order,
-  so each merge sees the previous one already on the base branch. The loop
-  waits for its merge before starting the next round. A conflict is first
-  offered to an AI resolver; if that declines, resolves too few files, or
-  leaves conflict markers behind, the merge is aborted and the branch is left
-  for manual resolution, with the reason annotated on the task.
-- On `failed` or `skipped` nothing is merged. Either way the worktree directory
-  is removed and **the branch is kept**, so the work is still inspectable.
+- Each task gets its own worktree at `.cloop/worktrees/task-<id>/`, on a branch
+  named `cloop/task-<id>-<slug>` (`pkg/worktree`), and the provider works in
+  that directory, so tasks can't overwrite each other's changes.
+- When a task is `done`, its worktree is committed and its branch goes into a
+  **merge queue** (`pkg/mergequeue`). The queue merges one branch at a time, in
+  order, so each merge starts from the previous one. The loop waits for its
+  merge before starting the next round. If there is a conflict, an AI resolver
+  gets the first try. If it gives up, resolves too few files or leaves conflict
+  markers behind, the merge is aborted and the branch is left for you to
+  resolve, with the reason noted on the task.
+- When a task is `failed` or `skipped`, nothing is merged. In every case the
+  worktree directory is removed but **the branch is kept**, so you can still
+  look at the work.
 
-A project that is not a git repository, or whose base branch cannot be
-resolved, gets a printed notice and the shared directory instead of an error.
+If the project isn't a git repository, or its base branch can't be found, cloop
+prints a notice and uses the shared directory instead of failing.
 
-The parallel loop is deliberately leaner. Auto-heal, AI verification, script
-verification, failure diagnosis, auto-split, adaptive replan, the approval
-gate, interactive review, coaching, risk checks and the multi-agent pipeline
-are all **sequential-only** — in parallel mode a `TASK_FAILED` is a failure on
-the first attempt. Choose parallelism when the tasks are genuinely independent
-and you want throughput; choose sequential when you want the recovery
-machinery.
+Parallel mode leaves a lot out. Auto-heal, verification by the model or by a
+script, failure diagnosis, auto-split, adaptive replanning, the approval gate,
+interactive review, coaching, risk checks and the multi-agent pipeline all work
+in **sequential mode only**. In parallel mode a `TASK_FAILED` fails the task on
+the first attempt. Use parallel mode when the tasks really are independent and
+you want them done sooner; use sequential mode when you want cloop to recover
+from failures.
 
 ---
 
 ## Where execution happens
 
-Everything above describes the orchestrator's decisions and says nothing about
-*which machine* the agent runs on. That is a separate axis. A `cloop run` typed
-at your own terminal is the orchestrator in your own shell, calling a provider
-from that process. A run started from the hub or the Web dashboard is
-different: the harness is never forked next to the control plane. `cloop run`
-is itself the workload, handed to whichever **executor** the project is bound
-to — a local process, a container, a Kata VM, an enrolled edge device, an
-ephemeral Kubernetes Pod — along with a declaration of how the source tree gets
-there and a short-lived lease carrying any credentials the task needs. When the
-sandbox does not share the hub's filesystem, a completed task records
-`write_back_branch` and `write_back_commit` so a reviewer can find the work.
+Everything above is about what the orchestrator decides. Where the agent
+actually runs is a separate question. When you type `cloop run` in your own
+terminal, the orchestrator runs in your shell and calls the provider from
+there. A run started from the hub or the web dashboard is different, because
+the hub never starts the harness next to itself. Instead, `cloop run` itself
+becomes the workload. It is handed to whichever **executor** the project is
+bound to (a local process, a container, a Kata VM, an enrolled edge device or a
+short-lived Kubernetes Pod), together with instructions for getting the source
+code there and a short-lived lease holding any credentials the task needs. When
+the sandbox doesn't share the hub's filesystem, a completed task records
+`write_back_branch` and `write_back_commit` so that you can find the work.
 
-That whole path — the `Executor` interface, the four backends, placement,
-workspace provisioning, health and failover — is
-[the executor architecture](../architecture/executors.md).
+[The executor architecture](../architecture/executors.md) describes all of
+this: the `Executor` interface, the four backends, how an executor is chosen,
+how the code gets into the sandbox, health checks and failover.
 
 ---
 
 ## See also
 
-- [Your first project](first-project.md) — empty directory to finished plan
-- [Providers](providers.md) — which backend runs the prompts, and how the model
-  is chosen
-- [Command reference](../reference/commands.md) — every flag named above
-- [Executor architecture](../architecture/executors.md) — where a task really
+- [Your first project](first-project.md): from an empty directory to a finished
+  plan
+- [Providers](providers.md): which backend handles the prompts, and how the
+  model is chosen
+- [Command reference](../reference/commands.md): every flag mentioned on this
+  page
+- [Executor architecture](../architecture/executors.md): where a task actually
   runs

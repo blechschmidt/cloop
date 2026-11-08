@@ -1,13 +1,12 @@
 # Installation
 
-cloop is a single static Go binary. There is no daemon to register, no database
-to provision and nothing to configure before the first run — the state a project
-needs is created inside that project, the first time you run `cloop init` in it.
+cloop is a single static Go binary. You don't have to set up a daemon, a
+database or any configuration before the first run. The first time you run
+`cloop init` in a project, cloop creates the state it needs inside that project.
 
-What you do have to decide before installing is **which AI provider you intend
-to use**, because one of the four needs a second program on the machine and the
-other three need a credential. That is the only prerequisite that is not "a Go
-toolchain".
+Before you install, decide which AI provider you want to use. Two of the five
+need a second program on the machine that you sign in to, two need a
+credential, and Ollama needs a local server.
 
 - [Prerequisites](#prerequisites)
 - [Download a release binary](#download-a-release-binary)
@@ -22,32 +21,33 @@ toolchain".
 ## Prerequisites
 
 **Go 1.26 or newer.** `go.mod` declares `go 1.26.0` and pins
-`toolchain go1.26.10`. Any Go 1.21 or later toolchain honours that line and
-downloads the pinned one on its own, so in practice "a recent Go" is enough;
-anything older refuses the module outright.
+`toolchain go1.26.10`. Go 1.21 and later read that line and download the pinned
+toolchain automatically, so any recent Go works. Older versions refuse to build
+the module.
 
-**One provider.** cloop registers four backends, and the default is the one that
-is *not* an API key:
+**One provider.** cloop has five backends. The default one and `copilot` use a
+program you sign in to, and the others use an API key or a local server:
 
 | Provider | What it talks to | What it needs |
 | --- | --- | --- |
 | `claudecode` (default) | the local `claude` CLI, over a pipe | the `claude` binary on `PATH` (`~/.local/bin` and `~/.npm-global/bin` are also searched), already signed in |
+| `copilot` | the local `copilot` CLI (GitHub Copilot) | the `copilot` binary on `PATH`, signed in with `copilot login` or given `COPILOT_GITHUB_TOKEN` |
 | `anthropic` | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY`, or `cloop config set anthropic.api_key …` |
 | `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY`, or `cloop config set openai.api_key …`. `openai.base_url` points it at any OpenAI-compatible server |
-| `ollama` | `http://localhost:11434` | nothing — a local Ollama server with a pulled model |
+| `ollama` | `http://localhost:11434` | nothing but a local Ollama server with a pulled model |
 
-`cloop providers` prints that table for your machine, with each provider marked
-configured or not, and `cloop providers --test` additionally makes one live call
-to each. See [Providers](providers.md) for choosing between them.
+`cloop providers` prints this table for your machine and marks each provider as
+configured or not. `cloop providers --test` also makes one live call to each.
+[Providers](providers.md) helps you choose between them.
 
 ---
 
 ## Download a release binary
 
-The only install path that needs no Go toolchain at all. Each release publishes
-a static binary per platform, a `checksums.txt` covering all of them, and a
-Sigstore signature bundle (`<asset>.sigstore.json`) for every one of those
-files:
+This is the only way to install cloop without a Go toolchain. Each release
+publishes a static binary for each platform, a `checksums.txt` that covers all
+of them, and a Sigstore signature bundle (`<asset>.sigstore.json`) for each of
+those files:
 
 | Platform | Asset |
 | --- | --- |
@@ -57,11 +57,13 @@ files:
 | macOS Intel | `cloop_darwin_amd64.tar.gz` |
 | macOS Apple silicon | `cloop_darwin_arm64.tar.gz` |
 
-Asset names carry no version. That is deliberate: it lets
-`releases/latest/download/<asset>` resolve to the current release, which is the
-only URL that stays valid across releases and the one the executor bootstrap
-installer uses. The version is in the binary, not the filename — `cloop version`
-prints it.
+Asset names don't include the version, so `releases/latest/download/<asset>`
+always points at the current release. It is the only URL that stays valid from
+one release to the next, and the executor bootstrap installer uses it. To see
+which version a binary is, run `cloop version`.
+
+These commands download the x86-64 archive for your operating system, verify it
+and install it:
 
 ```bash
 ASSET="cloop_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz"
@@ -90,40 +92,39 @@ sudo install -m 0755 cloop /usr/local/bin/cloop
 
 ### Verifying provenance
 
-The `cosign verify-blob` above is the check worth understanding, because the
-`sha256sum` beside it cannot substitute for it.
+Of the two checks above, only `cosign verify-blob` tells you who built the
+binary. `sha256sum` only shows that the download arrived intact.
+`checksums.txt` comes from the same GitHub release as the archive, so anyone who
+can replace the archive can also replace the checksum file, and the comparison
+then passes against their list.
 
-`checksums.txt` is served from the same GitHub release as the archive it vouches
-for. Anyone who can replace the archive can replace its checksum in the same
-breath, and the comparison then succeeds against their own list. A checksum
-proves the download arrived intact; it can never prove where it came from.
+cloop's releases are signed with [Sigstore][sigstore] keyless signing. The release workflow authenticates to
+Fulcio with GitHub's OIDC token and receives a short-lived certificate that
+names the workflow, repository and ref that requested it. The project has no
+long-lived private key that could leak or would need rotating. To produce a
+signature that matches the identity in the command above, someone would have
+to run this repository's release workflow on a tag.
 
-The signature can. cloop's releases are signed with [Sigstore][sigstore]
-keyless signing: the release workflow proves its identity to Fulcio with
-GitHub's OIDC token and receives a short-lived certificate naming the workflow,
-repository and ref that asked for it. There is no long-lived private key
-anywhere in the project to leak or rotate — and producing a signature that
-satisfies the identity above requires being able to run *this repository's
-release workflow on a tag*.
+You need both flags. If you leave either one off, the check proves nothing:
 
-Both flags are required, and leaving either off makes the check meaningless:
+- `--certificate-oidc-issuer`: without it, cosign accepts a certificate from
+  any issuer that Fulcio federates with.
+- `--certificate-identity-regexp`: without it, any valid Sigstore signature
+  passes, and anyone can make one. The identity is what ties the signature to
+  cloop's release workflow.
 
-- `--certificate-oidc-issuer` — without it, a certificate from any issuer
-  Fulcio federates with is admissible.
-- `--certificate-identity-regexp` — without it, **any** valid Sigstore
-  signature passes. Anyone can sign anything; the identity is what matters.
-
-Install cosign from [its releases page][cosign]. The signature is also recorded
-in the public Rekor transparency log, so a signature that was ever issued for a
-cloop release is publicly auditable after the fact.
+Install cosign from [its releases page][cosign]. Signatures are also recorded
+in the public Rekor transparency log, so anyone can check afterwards which
+signatures were issued for cloop releases.
 
 [sigstore]: https://www.sigstore.dev/
 [cosign]: https://github.com/sigstore/cosign/releases
 
 ### When verification is not possible
 
-An air-gapped site mirroring releases internally may not be able to reach
-Sigstore. Both self-installing paths take `--insecure-skip-verify`:
+An air-gapped site that mirrors releases internally may not be able to reach
+Sigstore. Both self-installing commands, and the install script, take
+`--insecure-skip-verify`:
 
 ```bash
 cloop upgrade --insecure-skip-verify
@@ -131,37 +132,37 @@ cloop executor agent install --upgrade --from ./cloop --insecure-skip-verify
 sh install.sh --insecure-skip-verify        # or CLOOP_INSECURE_SKIP_VERIFY=1
 ```
 
-It disables the signature check only — the checksum still runs. Every path that
-uses it says so in its output, so an unverified install is greppable in a
-provisioning log rather than indistinguishable from a verified one.
+The flag turns off the signature check only. The checksum is still verified.
+Every command that uses the flag says so in its output, so you can find
+unverified installs by searching your provisioning logs.
 
-A fork that builds and signs cloop itself has a better option than switching
-verification off: repoint the trust root with `CLOOP_PROVENANCE_ISSUER` and
-`CLOOP_PROVENANCE_IDENTITY`, which keeps a signature required and only changes
-whose signature satisfies it.
+A fork that builds and signs its own cloop shouldn't turn verification off. Set
+`CLOOP_PROVENANCE_ISSUER` and `CLOOP_PROVENANCE_IDENTITY` to the fork's signing
+identity instead, so that a signature is still required.
 
-To pin a specific release instead of tracking the newest, swap `latest/download`
-for `download/v<version>` — for example
+To install a specific release instead of the newest one, replace
+`latest/download` with `download/v<version>`, for example
 `https://github.com/blechschmidt/cloop/releases/download/v0.0.1`. Releases up to
-and including v0.0.1 published versioned asset names
-(`cloop_0.0.1_linux_amd64.tar.gz`); `cloop upgrade` still recognises those, so an
-older binary can upgrade forward.
+and including v0.0.1 used versioned asset names
+(`cloop_0.0.1_linux_amd64.tar.gz`). `cloop upgrade` still recognises those
+names, so an older binary can still upgrade.
 
-Unlike `go install`, these binaries carry a real version string, so
-`cloop upgrade` works from here: it queries the releases API, downloads the
-asset for the running OS and architecture, verifies its SHA-256 against the
-same `checksums.txt`, verifies its signature against the identity above, and
-only then swaps the running binary atomically. It needs `cosign` on `PATH` and
-refuses to upgrade without it rather than silently skipping the check.
-`cloop upgrade --check` reports whether an update exists and does nothing else.
+Release binaries carry a real version string (a `go install` build doesn't), so
+`cloop upgrade` works with them. It queries the releases API, downloads the
+asset for the running OS and architecture, checks its SHA-256 against
+`checksums.txt` and its signature against the identity above, and only then
+replaces the running binary atomically. It needs `cosign` on `PATH`, and it
+refuses to upgrade without it instead of skipping the signature check.
+`cloop upgrade --check` only reports whether an update exists.
 
-**There is no Windows build.** The process-group supervision cloop stops
-harnesses with is POSIX-only, so releases carry Linux and macOS binaries only.
+There is no Windows build. cloop stops harnesses by supervising their process
+groups, which only works on POSIX systems, so releases include Linux and macOS
+binaries only.
 
-Release archives are reproducible: the same tag rebuilt from the same commit
-produces byte-identical tarballs, so the checksums above can be regenerated
-locally with `make release-dist VERSION=v<version>` and compared against the
-published ones.
+Release archives are reproducible. Rebuilding the same tag from the same commit
+produces byte-identical tarballs, so you can run
+`make release-dist VERSION=v<version>` locally and compare the checksums with
+the published ones.
 
 ---
 
@@ -171,19 +172,19 @@ published ones.
 go install github.com/blechschmidt/cloop@latest
 ```
 
-The binary lands in `$(go env GOPATH)/bin`, which must be on your `PATH`.
+The binary goes into `$(go env GOPATH)/bin`, which needs to be on your `PATH`.
 
-A binary installed this way reports its version as `dev` (plus the short commit
-it was built from, when the toolchain recorded one — `dev+g4f7b5bc`). That is not
-a bug: the version string is a build-time linker flag
-(`-X github.com/blechschmidt/cloop/pkg/version.Version=…`) and `go install` does
-not set it.
+A binary installed this way reports its version as `dev`, followed by the short
+commit it was built from if the toolchain recorded one (for example
+`dev+g4f7b5bc`). This is expected. The version string is set at build time by a
+linker flag (`-X github.com/blechschmidt/cloop/pkg/version.Version=…`), and
+`go install` doesn't set it.
 
-Three things read the value: the version banner, `cloop upgrade --check`, and —
-on a device running as an executor agent — the build version reported to the
-control plane, which the hub's Executors panel uses to flag version skew across
-a fleet. An unstamped agent is reported as running an unreleased build rather
-than being silently assumed current.
+Three things use the version: the version banner, `cloop upgrade --check`, and,
+on a device running as an executor agent, the build version the agent reports to
+the control plane. The hub's Executors panel uses that to flag version skew
+across a fleet. An agent without a version is shown as running an unreleased
+build, so the hub never assumes it is current.
 
 ---
 
@@ -195,8 +196,8 @@ cd cloop
 make build            # equivalent to: go build -o cloop .
 ```
 
-To stamp a real version into the binary, set the same linker flag the container
-build uses:
+To give the binary a real version, set the same linker flag the container build
+uses:
 
 ```bash
 go build -trimpath \
@@ -204,36 +205,36 @@ go build -trimpath \
   -o cloop .
 ```
 
-Once a versioned binary is installed, `cloop upgrade` replaces it in place: it
-queries the GitHub releases API, downloads the asset for the current OS and
-architecture, verifies its SHA-256 and swaps the running binary atomically.
-`cloop upgrade --check` reports whether an update exists and does nothing else.
+A binary with a version can replace itself with `cloop upgrade`. It downloads
+the asset for the current OS and architecture from the GitHub releases API,
+verifies its SHA-256 and swaps the running binary atomically.
+`cloop upgrade --check` only reports whether an update exists.
 
 ---
 
 ## The container image
 
-The image in this repository runs the **hub** — the dashboard, the REST API and
-the endpoint remote executor agents dial into. It is not a packaged CLI for
-local use; for that, install the binary. The [operator
-runbook](../operations/runbook.md) and `deploy/README.md` cover running one for
-real.
+The image built from this repository runs the **hub**: the dashboard, the REST
+API and the endpoint that remote executor agents connect to. To use cloop on
+your own machine, install the binary instead. The
+[operator runbook](../operations/runbook.md) and `deploy/README.md` explain how
+to run a hub in production.
 
 ```bash
 docker build -t cloop-hub:dev .
 ```
 
-The default target is distroless: no shell, no package manager, no `curl` and no
-`git`. That is deliberate — a hub that promises never to execute a harness on
-its own host should contain no way to execute one — and it has a practical
-consequence, which is that `docker exec … sh` does not work and the container's
-`HEALTHCHECK` is the binary probing itself with `cloop hub healthcheck`.
+The default target is distroless: it has no shell, no package manager, no `curl`
+and no `git`. The hub never runs a harness on its own host, so its image
+contains nothing that could run one. As a result, `docker exec … sh` doesn't
+work, and the container's `HEALTHCHECK` runs the binary itself as
+`cloop hub healthcheck`.
 
-The image runs as UID 65532, exposes 8080, and its default command is
-`ui --port 8080 --no-browser`. `.cloop` is resolved relative to the working
-directory, so `WORKDIR` *is* the state-directory selector: the volume has to be
-mounted at `/var/lib/cloop` or the hub writes its database into the read-only
-layer and fails.
+The image runs as UID 65532, exposes port 8080, and its default command is
+`ui --port 8080 --no-browser`. cloop finds `.cloop` relative to the working
+directory, so `WORKDIR` decides where the state is kept. Mount the volume at
+`/var/lib/cloop`. Otherwise the hub tries to write its database into the
+read-only layer and fails.
 
 ```bash
 docker run --rm -p 8080:8080 \
@@ -244,73 +245,78 @@ docker run --rm -p 8080:8080 \
   -e CLOOP_UI_TOKEN=… cloop-hub:dev
 ```
 
-The root key goes in as a file — owned by UID 65532, mode `0400` — rather than
-as `-e CLOOP_SECRET_KEY=…`, which `docker inspect` shows to anyone who can run it
-(see [the root key](../operations/runbook.md#the-root-key)).
+Pass the root key in as a file, owned by UID 65532 with mode `0400`. Don't pass
+it as `-e CLOOP_SECRET_KEY=…`: `docker inspect` shows environment variables to
+anyone who can run it (see [the root key](../operations/runbook.md#the-root-key)).
 
-A second target builds the executor agent, which is Alpine rather than
-distroless because materialising a source tree and committing what a task
-changed both need `git`:
+A second target builds the executor agent. It is based on Alpine instead of
+distroless, because the agent needs `git` to materialise a project's source tree
+and to commit what a task changed:
 
 ```bash
 docker build --target executor -t cloop-executor:dev .
 ```
 
-To see SSO, RBAC and TLS working together without writing any configuration,
-bring up the evaluation stack — a hub, dex as a mock identity provider, and
-nginx terminating TLS:
+To try SSO, RBAC and TLS together without writing any configuration, start the
+evaluation stack. It runs a hub, dex as a mock identity provider, and nginx to
+terminate TLS:
 
 ```bash
 docker compose up --build     # then open https://cloop.localtest.me:8443/
 docker compose down -v        # resets everything
 ```
 
-A third target builds the **harness image** — the sandbox a container or
-Kubernetes executor actually runs a task inside, and the default for both:
+A third target builds the **harness image**, the sandbox that container and
+Kubernetes executors run each task in:
 
 ```bash
 docker build --target harness -t cloop-harness:dev .
 ```
 
-You rarely need to build it yourself. It is published, and the executor defaults
-already point at it:
+You rarely need to build it yourself. It is published, and both kinds of
+executor use the published image by default:
 
 ```bash
 docker pull ghcr.io/blechschmidt/cloop-harness:latest
 ```
 
-It carries the `claude` CLI. For projects on the `copilot` provider there is a
-variant with the GitHub Copilot CLI added — `--target harness-copilot`,
-published as `ghcr.io/blechschmidt/cloop-harness-copilot` — kept separate
-because the CLI nearly doubles the image; see [the published
+The image includes the `claude` CLI. For projects that use the `copilot`
+provider there is a variant that adds the GitHub Copilot CLI
+(`--target harness-copilot`, published as
+`ghcr.io/blechschmidt/cloop-harness-copilot`). It is a separate image because
+the Copilot CLI nearly doubles its size. See [the published
 images](../reference/sandbox.md#the-published-images-and-what-an-image-carries).
 
-What makes an image usable as a harness is a contract, not just a base OS: it
-carries `cloop` at `/usr/local/bin/cloop`, the `claude` CLI on `PATH` for the
-default provider, `git` and a CA bundle, **no `ENTRYPOINT`** (the driver
-denylists `--entrypoint`, so the image must exec the argv it is handed), and a
-`HOME` that is writable by any UID — the driver derives `--user` from the
-project directory's owner, so nothing can be baked in. Build your own when a
-task needs a toolchain this one lacks, and point `executors.container.image` at
-it. Credentials are never baked in: provider keys and brokered secrets are
-injected as environment at start, which is what makes one image safe to share
-across tenants.
+When a task needs a toolchain this image lacks, build your own and point
+`executors.container.image` at it. Any base OS works, as long as the image has:
 
-For Kubernetes there is a chart at `deploy/helm/cloop-hub`. Its default
-`image.repository` is `ghcr.io/blechschmidt/cloop` and `image.tag` defaults to
-the chart's `appVersion`. Both images are published to GHCR by
-`.github/workflows/publish-images.yml` on every release tag, with `:edge`
-tracking `main`, and every digest it pushes is signed by that workflow, keyless
-(Task 20453): `cloop hub verify-image ghcr.io/blechschmidt/cloop:<tag>` checks
-one, and a hub checks cloop's images itself before a sandbox runs one. For
-production, pin by digest rather than by tag — a floating tag means the thing
-that runs your agents can change without a deploy.
+- `cloop` at `/usr/local/bin/cloop`
+- the `claude` CLI on `PATH`, for the default provider
+- `git` and a CA bundle
+- no `ENTRYPOINT`. The driver denylists `--entrypoint`, so the image has to run
+  the argv it is given.
+- a `HOME` that any UID can write to. The driver sets `--user` from the owner of
+  the project directory, so the user can't be baked into the image.
+
+Credentials never go into the image. Provider keys and brokered secrets are
+passed in as environment variables when the sandbox starts, which is why one
+image can be shared safely between tenants.
+
+For Kubernetes there is a Helm chart at `deploy/helm/cloop-hub`. Its default
+`image.repository` is `ghcr.io/blechschmidt/cloop`, and `image.tag` defaults to
+the chart's `appVersion`. `.github/workflows/publish-images.yml` publishes both
+images to GHCR for every release tag, with `:edge` following `main`, and signs
+every digest it pushes with keyless signing. To check an image yourself, run
+`cloop hub verify-image ghcr.io/blechschmidt/cloop:<tag>`. A hub also checks
+cloop's images before a sandbox runs one. In production, pin images by digest. A
+tag can move, so the image that runs your agents could change without a deploy.
 
 ---
 
 ## Verifying the install
 
-There is no `--version` flag; the version is a subcommand.
+To check which version you installed, run `cloop version`. There is no
+`--version` flag.
 
 ```console
 $ cloop version
@@ -318,12 +324,12 @@ cloop dev
 Go go1.26.3 linux/amd64
 ```
 
-The second line reports the Go toolchain the binary was built with, which is
-what you want when a bug report has to be reproduced.
+The second line shows the Go toolchain that built the binary, which helps when
+a bug has to be reproduced.
 
-`cloop doctor` is the broader check. Run outside a project it verifies the
-environment; run inside one it also checks the state database's integrity, the
-config file, and whether the YAML config and its SQLite mirror still agree.
+`cloop doctor` checks more. Outside a project it checks your environment. Inside
+a project it also checks the integrity of the state database, the config file,
+and whether the YAML config still matches its SQLite mirror.
 
 ```console
 $ cloop doctor
@@ -331,38 +337,35 @@ cloop doctor — environment health check
 
   [WARN] .cloop/ directory                    .cloop/ directory not found — project may not be initialized
          fix: Run: cloop init "<your goal>"
-  [WARN] .cloop/state.json                    state.json not found — no session has been run yet
-         fix: Run: cloop run to start a session
   [PASS] Go binary                            go version go1.26.3 linux/amd64
   [PASS] claude binary (claudecode provider)  claude CLI binary found in PATH
   [WARN] config validate: config.yaml         config file not found — using defaults
-  [PASS] .cloop/ disk usage                   .cloop/ directory uses 0.0 MB
+  [PASS] .cloop/ disk usage                   .cloop/ uses 0 B
 
-Result: 3 passed, 3 warnings, 0 failed
+Result: 3 passed, 2 warnings, 0 failed
 
 Tip: run 'cloop doctor --providers' to also test live provider connectivity.
 ```
 
-Those warnings are the expected result in an empty directory — they are telling
-you there is no project here yet, which is true. Exit status is 1 only if
-something **fails**; warnings exit 0, so `cloop doctor` is usable as a CI gate
-without tuning it first. `--providers` adds a live connectivity test per
-configured provider, which is slower and costs a token or two.
+In an empty directory these warnings are expected: there is no project here yet.
+The exit status is 1 only if a check fails. Warnings exit with 0, so you can use
+`cloop doctor` as a CI gate without configuring it first.
+`--providers` adds a live connectivity test for each configured provider, which
+is slower and uses a token or two.
 
-`cloop hub doctor` is a different command with a different question — it audits
-a *hosted* hub's configuration (issuer discovery, TLS material, RBAC, sealing
-key) and is documented in the [runbook](../operations/runbook.md).
+`cloop hub doctor` is a separate command. It audits the configuration of a
+hosted hub (issuer discovery, TLS material, RBAC, sealing key) and is documented
+in the [runbook](../operations/runbook.md).
 
 ---
 
 ## Shell completion
 
-Completions are generated by the binary for **bash**, **zsh**, **fish** and
-**PowerShell**. They cover subcommands and flags, and dynamic values such as
-provider names, template names and the task IDs that currently exist in the
-project you are standing in.
+cloop generates shell completions for bash, zsh, fish and PowerShell. They
+complete subcommands and flags, and also values such as provider names, template
+names and the IDs of the tasks in the project you are in.
 
-For the current session:
+To turn them on for the current session:
 
 ```bash
 source <(cloop completion bash)     # bash
@@ -389,10 +392,10 @@ cloop completion zsh > "${fpath[1]}/_cloop"
 cloop completion fish > ~/.config/fish/completions/cloop.fish
 ```
 
-`cloop completion <shell> --help` prints the same instructions for that shell,
-which is the copy that stays correct if these ever diverge.
+`cloop completion <shell> --help` prints the same instructions for that shell.
+If they ever differ from this page, the command's output is the up-to-date one.
 
 ---
 
-**Next:** [Your first project](first-project.md) — from an empty directory to a
-task plan the AI has executed.
+**Next:** [Your first project](first-project.md) takes you from an empty
+directory to a plan the agent has worked through.

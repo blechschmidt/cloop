@@ -1,19 +1,18 @@
 # Command reference
 
-Every `cloop` command and its flags. For conceptual documentation see the
-[documentation index](../README.md); for the executor and security
-configuration keys see [Configuration](configuration.md).
+Every `cloop` command and its flags. For concepts, see the
+[documentation index](../README.md). For the executor and security
+configuration keys, see [Configuration](configuration.md).
 
 ## Finding a command
 
-`cloop --help` groups its commands rather than listing them flat. The nine
-groups, and what belongs in each:
+`cloop --help` lists the commands in nine groups:
 
 | Group | What is in it |
 |-------|---------------|
 | **Core workflow** | `init`, `run`, `status`, `log`, `goal`, `queue`, `watch`, `reset`, `clean` |
-| **Plan and tasks** | `task`, `plan`, `requirements`, `milestone`, `sprint`, `suggest`, `scope`, and the rest of the plan-shaping commands |
-| **Hub, executors and serving** | `ui`, `serve`, `hub`, `executor`, `egress`, `agent`, `daemon`, `workspace`, `session`, and a terminal's `login`, `remote` and `knowledge` |
+| **Plan and tasks** | `task`, `plan`, `requirements`, `milestone`, `sprint`, `suggest`, `scope`, and the other commands that shape the plan |
+| **Hub, executors and serving** | `ui`, `serve`, `hub`, `executor`, `egress`, `agent`, `daemon`, `workspace`, `session`, and `login`, `remote` and `knowledge` for working with a hub from a terminal |
 | **Secrets, access and spend** | `secret`, `env`, `config`, `budget`, `cost`, `audit`, `audit-log`, `events`, `project` |
 | **Insight and reporting** | `report`, `retro`, `standup`, `insights`, `metrics`, `search`, `trace`, and other read-only views |
 | **AI assistants** | `ask`, `chat`, `shell`, `do`, `ai-pair`, `kb`, `memory`, `skill`, `recipe`, `flow` |
@@ -21,9 +20,10 @@ groups, and what belongs in each:
 | **Integrations and delivery** | `github`, `sync`, `ci`, `release`, `pr`, `review`, `notify`, `plugin` |
 | **Maintenance and diagnostics** | `doctor`, `db`, `migrate`, `compact`, `snapshot`, `upgrade`, `version` |
 
-`cloop task` and `cloop plan` are grouped the same way — run `cloop task --help`.
+`cloop task` and `cloop plan` group their subcommands the same way. Run
+`cloop task --help` to see them.
 
-Three health checks are worth knowing before anything else goes wrong:
+There are three health checks:
 
 ```bash
 cloop doctor            # environment, configuration, and provider reachability
@@ -33,13 +33,13 @@ cloop hub doctor        # control-plane readiness for a hosted hub
 
 ### Hidden AI advisories
 
-The single-shot `ai-*` wrappers under `cloop task` and `cloop plan` each make one
-provider call and print a report. Where one can mutate the plan it does so only
-behind `--apply`. Four of them have no `--apply` at all — `task ai-coach`,
-`task ai-standup`, `plan ai-brief` and `plan ai-roadmap` are advisory only — and
-`plan ai-roadmap` writes to `.cloop/roadmaps/` unless you pass `--no-save`.
-They are hidden from the help listing so they stop crowding it, and they remain
-fully callable and scriptable at the paths they always had:
+The `ai-*` commands under `cloop task` and `cloop plan` each make one provider
+call and print a report. The ones that can change the plan only do so with
+`--apply`. Four have no `--apply` at all and only give advice: `task ai-coach`,
+`task ai-standup`, `plan ai-brief` and `plan ai-roadmap`. `plan ai-roadmap`
+writes to `.cloop/roadmaps/` unless you pass `--no-save`. They are hidden from
+the help listing to keep it short, but you can still run and script them at the
+same paths:
 
 ```bash
 cloop task ai-acceptance-criteria   cloop task ai-blocker      cloop task ai-coach
@@ -50,11 +50,11 @@ cloop plan ai-brief                 cloop plan ai-epic         cloop plan ai-roa
 
 ### Model calls the dashboard dispatches
 
-The dashboard does not call a project's model itself: its Split preview,
-dictation's Revise, the blocker analysis and the plan assistant run these on
-the project's executor, with the caller's Claude account, and read the result
-back from a framed JSON payload (`pkg/clijson`). `cloop task revise` and
-`cloop plan chat` are hidden — their arguments are the hub's to build — and with
+The dashboard doesn't call a project's model itself. Its Split preview,
+dictation's Revise, the blocker analysis and the plan assistant run these
+commands on the project's executor, with the caller's Claude account, and read
+the result from a framed JSON payload (`pkg/clijson`). `cloop task revise` and
+`cloop plan chat` are hidden, because only the hub builds their arguments. With
 `--json`, `cloop task ai-blocker <id>` frames its report too:
 
 ```bash
@@ -79,14 +79,14 @@ cloop init --model claude-opus-4-6 --instructions "Use Go, no external deps" "Bu
 cloop init "Build a full REST API"
 ```
 
-> Every project runs in Product Manager mode: cloop decomposes the goal into a
-> visible task plan and works through it. The legacy free-form feedback loop
-> (`--pm`/non-PM) was removed in Task 20067 so all changes flow through the task
-> pipeline and remain auditable in the UI.
+> Every project runs in Product Manager mode: cloop splits the goal into a task
+> plan you can see, and works through it. The old free-form feedback loop
+> (`--pm`/non-PM) has been removed, so all changes go through the task pipeline
+> and can be audited in the UI.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--max-steps` | `0` (unlimited) | Max autonomous steps |
+| `--max-steps` | `0` (unlimited) | Maximum number of autonomous steps |
 | `--instructions` | | Additional constraints for the AI |
 | `--model` | | Model override |
 | `--effort` | | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode and copilot) |
@@ -117,7 +117,7 @@ cloop run --follow-builds     # adopt newly deployed builds at task boundaries (
 | `--effort` | from state/config | Model reasoning-effort level: `low`, `medium`, `high`, `xhigh`, `max` (claudecode and copilot) |
 | `--auto-evolve` | `false` | After goal completion, keep discovering new tasks |
 | `--innovate` | `false` | Innovation mode: push evolve toward novel capabilities |
-| `--step-timeout` | `0` (disabled) | Timeout per step (e.g. `10m`); falls back to `step_timeout` in config when unset |
+| `--step-timeout` | `0` (disabled) | Timeout per step (e.g. `10m`). When unset, `step_timeout` from the config applies |
 | `--max-tokens` | `0` | Max output tokens per step |
 | `--add-steps` | `0` | Add more steps to max before running |
 | `--steps` | `0` | Run at most N steps this session (not persisted) |
@@ -125,7 +125,7 @@ cloop run --follow-builds     # adopt newly deployed builds at task boundaries (
 | `--plan-only` | `false` | Decompose tasks but don't execute |
 | `--retry-failed` | `false` | Retry failed tasks |
 | `--replan` | `false` | Discard existing plan and re-decompose |
-| `--max-failures` | `3` | PM mode: consecutive task failures before stopping |
+| `--max-failures` | `3` | Consecutive task failures before the run stops |
 | `--context-steps` | `3` | Recent steps to include in prompts (0 = none) |
 | `--step-delay` | | Delay between steps (e.g. `5s`, `1m`) |
 | `--on-complete` | | Shell command to run on goal completion (e.g. `notify-send done`) |
@@ -133,27 +133,29 @@ cloop run --follow-builds     # adopt newly deployed builds at task boundaries (
 | `--notify` | `false` | Send OS desktop notifications on task done, task failed, and session complete |
 | `--require-committed[=VALUE]` | | Set [done means committed](../guides/done-means-committed.md) for the project, then run: `committed` (the bare flag), `pushed`, or `off`. Stored with the project, like `cloop require-committed` |
 | `--requirements-gate=MODE` | | Set the [requirements gate](../guides/requirements.md#requirement-gated-completion) for the project, then run: `linked`, `linked+must` or `off`. Stored with the project, like `cloop requirements gate`; a `requirements.gate` declared in `config.yaml` is applied first |
-| `--follow-builds[=false]` | off | Follow new builds: when a newer cloop build is deployed at the path this run was started from, adopt it at the next task boundary — same process, same live log — instead of running the old build until the run ends. Host-process runs on Linux. Stored with the project, like the Overview's *Follow New Builds* badge; see [Following new builds](configuration.md#following-new-builds) |
+| `--follow-builds[=false]` | off | When a newer cloop build is deployed at the path this run was started from, adopt it at the next task boundary, in the same process and with the same live log, instead of running the old build until the run ends. Host-process runs on Linux only. Stored with the project, like the Overview's *Follow New Builds* badge; see [Following new builds](configuration.md#following-new-builds) |
 | `-v, --verbose` | `false` | Show full step output (no truncation) |
 
 **Stopping:** Press `Ctrl+C` to pause gracefully. Run `cloop run` again to resume.
 
 **A new build while it runs:** a run keeps the build it started with until it
-ends — or, with `--follow-builds` or the Overview's *Adopt at next task
-boundary*, until its next task boundary, where it validates the deployed binary
-(`version --json`: a strictly higher `sequence`, a `schema` at least the
-database's) and re-executes itself on it. Refusals are journalled
-(`run_adoption`) and the run carries on. See the runbook's *Long-lived runs
-after an upgrade*.
+ends. With `--follow-builds`, or after *Adopt at next task boundary* on the
+Overview, it adopts the new build at its next task boundary instead. It first
+checks the deployed binary (`version --json` must report a strictly higher
+`sequence` and a `schema` at least as new as the database's), then re-executes
+itself with it. If the check fails, the refusal is written to the journal
+(`run_adoption`) and the run carries on. See *Long-lived runs after an upgrade*
+in the runbook.
 
 ### `cloop require-committed`
 
-Show or set **done means committed**: a task whose agent says it is done is
-accepted only once the changes it made are committed — with `pushed`, also on
-the upstream of the branch they are on. Paths the attempt left uncommitted (or
-commits not pushed) hand the turn back, naming them, at most twice; a task that
-still ends that way goes back to `pending` as an `uncommitted_work` abort, its
-work left in the tree. See [Done means committed](../guides/done-means-committed.md).
+Show or set **done means committed**: when an agent says a task is done, cloop
+accepts it only once the agent's changes are committed (with `pushed`, also
+pushed to the upstream of their branch). If the attempt left paths uncommitted,
+or commits unpushed, the task goes back to the agent with a list of them, at
+most twice. A task that still ends that way goes back to `pending` as an
+`uncommitted_work` abort, with its work left in the tree. See
+[Done means committed](../guides/done-means-committed.md).
 
 ```bash
 cloop require-committed              # show the setting
@@ -163,20 +165,21 @@ cloop require-committed off          # off (remembers "pushed" for next time)
 cloop require-committed --json
 ```
 
-The setting lives in the project's state, travels to isolating executors with
-it, and reaches a running `cloop run` at its next task. The dashboard sets it
-with the *Done = Committed* and *…and Pushed* badges on a project's Overview.
+The setting is stored in the project's state, goes with it to isolating
+executors, and takes effect in a running `cloop run` at its next task. In the
+dashboard, use the *Done = Committed* and *…and Pushed* badges on a project's
+Overview.
 
 ### `cloop status`
 
-Show current project status including provider, progress, and token usage —
-and, once it has been set, what "done" requires (`Done:     only once committed
+Show the project's status: provider, progress and token usage, and, once it has
+been set, what "done" requires (`Done:     only once committed
 and pushed`; see `cloop require-committed`). While a run is executing, it also
-says which build that run is on, against the build of the `cloop` you ran
+shows which build that run is on, compared with the build of the `cloop` you ran
 (`Build:    running dev+g4e35bf6 (sequence 831 on main) (pid 4242), 132 builds
 behind this cloop`), whether the project follows new builds (`Follow:`), and a
-pending adoption request (`Adopt:`). `--json` carries the same as `run_build`,
-`run_owner`, `follow_builds` and `adopt_request`.
+pending adoption request (`Adopt:`). With `--json`, the same information is in
+`run_build`, `run_owner`, `follow_builds` and `adopt_request`.
 
 ```
 Goal:     Build a REST API with auth
@@ -190,19 +193,19 @@ Updated:  2026-05-01 14:15
 
 ### `cloop version`
 
-Print the build: version, Go toolchain, platform, the executor protocol, and —
-for a stamped build — the commit and its place on main.
+Print the build: version, Go toolchain, platform, the executor protocol and,
+for a stamped build, the commit and its position on main.
 
 ```bash
 cloop version
 cloop version --json   # {"version","go","os","arch","protocol","min_protocol","commit","sequence","schema"}
 ```
 
-`--json` is what the device installer and a run adopting a new build execute to
-validate a binary before trusting it, so it has no side effects: it loads no
-configuration and opens no database. `schema` is the newest state-database
-migration the build embeds; a run refuses to adopt a build whose `schema` is
-behind its project's database.
+The device installer, and a run adopting a new build, run `--json` to check a
+binary before trusting it, so it has no side effects: it loads no configuration
+and opens no database. `schema` is the newest state-database migration the
+build contains. A run refuses to adopt a build whose `schema` is older than its
+project's database.
 
 ### `cloop log`
 
@@ -219,7 +222,7 @@ cloop log --grep "error"  # filter steps containing "error" (case-insensitive)
 
 ### `cloop goal`
 
-Show or update the project goal without reinitializing (preserves all steps, task plan, and settings).
+Show or change the project goal without initializing the project again. Steps, the task plan and settings are kept.
 
 ```bash
 cloop goal                        # show current goal
@@ -237,7 +240,7 @@ cloop export -o report.md     # write to file
 
 ### `cloop report`
 
-Generate a rich progress report with task completion status, timeline, token usage, and cost estimates.
+Generate a progress report with task completion status, timeline, token usage and cost estimates.
 
 ```bash
 cloop report                         # terminal report
@@ -275,7 +278,7 @@ Supported keys: `provider`, `anthropic.api_key`, `anthropic.model`, `anthropic.b
 
 ### `cloop task`
 
-Manage tasks in Product Manager mode.
+Manage the tasks in the plan.
 
 ```bash
 cloop task list                    # show all tasks with status
@@ -295,7 +298,7 @@ cloop task remove <id>             # remove from plan
 #### `cloop task attachments`
 
 The files attached to a task: what its runs left in their outbox
-(`.cloop/attachments/outbox/<task-id>/`, named to the agent in
+(`.cloop/attachments/outbox/<task-id>/`, which the agent finds in
 `$CLOOP_TASK_ATTACHMENTS`) and files attached by hand. See
 [Task attachments](../guides/attachments.md).
 
@@ -315,12 +318,12 @@ cloop task attachments remove <id> <attachment>  # delete (audited)
 | `--force` | `false` | `get`: overwrite an existing file |
 
 `<attachment>` is an attachment's id, an id prefix of at least six characters,
-or its name. Limits: 32 MiB a file, 100 files and 128 MiB a task, 1 GiB a
+or its name. Limits: 32 MiB per file, 100 files and 128 MiB per task, 1 GiB per
 project.
 
 ### `cloop requirements`
 
-What the project must keep doing, and whether it still does — see the
+What the project must keep doing, and whether it still does. See the
 [Requirements guide](../guides/requirements.md). Aliases: `requirement`, `req`,
 `reqs`.
 
@@ -348,7 +351,7 @@ cloop requirements trace [--json|--markdown|--csv] [--priority must|should|could
 | Flag (`check`) | Default | Description |
 |------|---------|-------------|
 | `--ai` | off | Ask the model about the requirements that have no tests; without it they are skipped |
-| `--status`, `--all` | `approved` | With no ids, the statuses checked; `--all` checks the approved and the deprecated ones. Named ones are checked whatever their status — but a draft is never checked until it is approved |
+| `--status`, `--all` | `approved` | With no ids, the statuses to check. `--all` checks approved and deprecated requirements. Named requirements are checked whatever their status, except that a draft is never checked until it is approved |
 | `--file` | none | Check the requirements in this spec file; needs no hub and no project database, and records nothing |
 | `--provider`, `--model` | the project's | The model `--ai` asks |
 | `--ai-timeout` | `5m` | How long the model may take over one requirement |
@@ -356,63 +359,68 @@ cloop requirements trace [--json|--markdown|--csv] [--priority must|should|could
 | `--json`, `--no-record`, `--spec` | off | How the hub runs it on a project's executor: a framed report, nothing recorded, the requirements it sends |
 
 `prove` runs each named requirement's tests at the commit before their
-implementation (or `--base`) and on the project's tree, and says whether they
-fail without the change and pass with it: proven, vacuous, broken or
-inconclusive. It never touches the project's checkout, and exits 1 when a proof
+implementation (or at `--base`) and on the project's tree, and reports whether
+they fail without the change and pass with it: proven, vacuous, broken or
+inconclusive. It never touches the project's checkout. It exits 1 when a proof
 is vacuous, broken or could not run. See
 [Red-green proofs](../guides/requirements.md#red-green-proofs).
 
-`plan` has the model plan the tasks that close the open gaps of the approved
-requirements — must first — each linked to the requirements it closes, and
-offers them for review; `--yes` adds them all, `--dry-run` none. See
+`plan` has the model plan tasks that close the open gaps of the approved
+requirements, must requirements first, each linked to the requirements it
+closes, and offers them for review. `--yes` adds them all, `--dry-run` adds
+none. See
 [Planning from the requirements](../guides/requirements.md#planning-from-the-requirements).
 
-`trace` prints the traceability matrix — each approved requirement with the
-tasks that implement it and their states, the commits those tasks produced,
-its latest verdict with its age and staleness, its latest proof and whether it
-is tested, model- or person-assessed or unverified — and the spec coverage of
-the musts: tested, proven, passing and linked. Without `--limit` it prints
-every row; `--after` continues from the cursor a page printed. See
+`trace` prints the traceability matrix and the spec coverage of the must
+requirements (tested, proven, passing and linked). For each approved
+requirement, the matrix shows the tasks that implement it and their states, the
+commits those tasks produced, its latest verdict with its age and staleness,
+its latest proof, and whether it is tested, assessed by the model or a person,
+or unverified. Without `--limit` it prints every row. `--after` continues from
+the cursor a page printed. See
 [Traceability and spec coverage](../guides/requirements.md#traceability-and-spec-coverage).
 
-`gate` shows or sets [requirement-gated completion](../guides/requirements.md#requirement-gated-completion):
-with it on, a task whose agent reports done is accepted only once its linked
-requirements — and with `linked+must` every approved must requirement that has
-tests — pass their tests on the project's executor. `--assess` asks the model
-about linked requirements without tests. When `config.yaml` declares
-`requirements.gate`, `gate` rewrites the declaration too.
+`gate` shows or sets [requirement-gated completion](../guides/requirements.md#requirement-gated-completion).
+With it on, when an agent reports a task done, cloop accepts it only once the
+task's linked requirements pass their tests on the project's executor (with
+`linked+must`, also every approved must requirement that has tests).
+`--assess` asks the model about linked requirements without tests. When
+`config.yaml` declares `requirements.gate`, `gate` rewrites the declaration
+too.
 
-`check` exits 1 when a requirement is unfulfilled or its check did not work —
-or, with `--file`, when the spec file does not validate — so a CI job can run it
-as a gate. `--test-timeout` on `add` and `edit` sets how long each test given
-may run (10 minutes by default).
+`check` exits 1 when a requirement is unfulfilled or its check did not work
+(or, with `--file`, when the spec file does not validate), so a CI job can use
+it as a gate. `--test-timeout` on `add` and `edit` sets how long each test may
+run (10 minutes by default).
 
 `draft` has the model draft requirements from the project's goal
-(`--from-goal`), a file (`--from-file`, `-` for stdin) or text piped to it —
-atomic, testable statements in EARS form with acceptance criteria, a priority,
-tags and, where the repository makes one obvious, a test — and stores them as
-drafts (`--dry-run` shows them and stores none; `--max` caps how many, 12 by
-default, 30 at most). The answer is read strictly and every proposal held to a
-requirement's bounds; one that does not fit, or asks to be anything but a
-draft, is refused and named. `approve` approves drafts — nothing checks a draft
-until then — and records who did. `lint` reports ambiguous wording, compound,
-duplicate and contradictory requirements and approved musts with no test, and
-exits 1 on an error (`--strict`: on a warning too); `--ai` asks the model about
-duplicates in other words and contradictions as well. See
+(`--from-goal`), a file (`--from-file`, `-` for stdin) or text piped to it. It
+writes atomic, testable statements in EARS form, each with acceptance criteria,
+a priority, tags and, where the repository makes one obvious, a test, and
+stores them as drafts. `--dry-run` shows them without storing any, and `--max`
+limits how many (12 by default, 30 at most). The model's answer is parsed
+strictly and every proposal must fit within a requirement's limits. A proposal
+that doesn't fit, or asks to be anything but a draft, is refused and named.
+`approve` approves drafts (nothing checks a draft until then) and records who
+approved them. `lint` reports ambiguous wording, compound, duplicate and
+contradictory requirements, and approved must requirements with no test. It
+exits 1 on an error (with `--strict`, on a warning too). `--ai` also asks the
+model about duplicates worded differently and about contradictions. See
 [Drafting requirements with the model](../guides/requirements.md#drafting-requirements-with-the-model).
-With `--json` (and `draft`'s hidden `--text`, `--goal` and `--existing`, `lint`'s
-`--spec`) they are how the hub runs them on a project's executor.
+The hub runs these commands on a project's executor with `--json` (and with
+`draft`'s hidden `--text`, `--goal` and `--existing`, and `lint`'s `--spec`).
 
 `export`, `import` and `validate` keep the requirements as code, in
-`.cloop/requirements.yaml` (`--file` for another path) — see
+`.cloop/requirements.yaml` (`--file` for another path). See
 [Requirements as code](../guides/requirements.md#requirements-as-code). `export`
-refuses to overwrite a file that has changes the hub does not (`--force`
-discards them; `--file -` prints the file). `import` merges the file three ways
-and imports nothing while a conflict is unsettled: `--resolve R-<n>=file` takes
-the file's version, `=hub` keeps the hub's, and `--prefer` settles every
-conflict not named; `--dry-run` only lists. `validate` reports every problem
-with its line and exits 1 when the file is missing or invalid; with `--json` it
-prints the file framed, which is how the hub reads it on a project's executor.
+refuses to overwrite a file that has changes the hub doesn't have (`--force`
+discards them; `--file -` prints the file). `import` does a three-way merge
+and imports nothing while a conflict is unresolved: `--resolve R-<n>=file`
+takes the file's version, `=hub` keeps the hub's, and `--prefer` resolves every
+conflict not named. `--dry-run` only lists the changes. `validate` reports
+every problem with its line number and exits 1 when the file is missing or
+invalid. With `--json` it prints the file framed, which is how the hub reads it
+on a project's executor.
 
 ### `cloop diff`
 
@@ -425,8 +433,9 @@ cloop diff --name-only  # just the list of changed files
 cloop diff --session    # diff from when the cloop session was initialized
 ```
 
-`--session` is useful for reviewing everything the AI changed during this session.
-It finds the last git commit that existed before `cloop init` was run, then diffs from there.
+Use `--session` to review everything the AI changed during this session. It
+finds the last git commit that existed before `cloop init` was run, and diffs
+from there.
 
 ### `cloop watch`
 
@@ -437,7 +446,7 @@ cloop watch              # refresh every 2s (default)
 cloop watch --interval 5s
 ```
 
-Shows: goal, status, provider, step/task progress, token counts, and the last step's output — automatically stopping when the session ends.
+It shows the goal, status, provider, step and task progress, token counts and the last step's output, and stops when the session ends.
 
 ### `cloop stats`
 
@@ -447,7 +456,7 @@ Show aggregated session statistics.
 cloop stats
 ```
 
-Includes step timing (total/avg/min/max), token usage, cost estimate for known models, and task breakdown in PM mode.
+Includes step timing (total, average, minimum, maximum), token usage, a cost estimate for known models, and a breakdown of tasks.
 
 ### `cloop reset`
 
@@ -458,24 +467,24 @@ Reset progress but keep the goal and configuration.
 Remove `.cloop/` directory entirely.
 
 A project with [features](../guides/features.md) keeps their worktrees under
-`.cloop/features/`, and each can hold uncommitted work. `clean` refuses while
-any exist; `cloop clean --force` removes them through git first (their
+`.cloop/features/`, and each can hold uncommitted work. `clean` refuses to run
+while any exist. `cloop clean --force` removes them through git first (their
 branches are kept), then the rest of `.cloop/`.
 
 ---
 
 ## Parallel features
 
-Several lines of work on one repository at once, each a git worktree on its
-own branch with its own task list and run settings. The
-[features guide](../guides/features.md) explains the model; these are the
-commands.
+Features let you work on several things in one repository at once. Each
+feature is a git worktree on its own branch, with its own task list and run
+settings. The [features guide](../guides/features.md) explains how they work;
+this section lists the commands.
 
 ### `cloop feature new <name>`
 
 Create a feature: a worktree at `.cloop/features/<slug>` on a new branch
-`cloop/feature/<slug>`, cut from the base branch, with its own `.cloop/`
-seeded from the project's provider, model, effort and instructions.
+`cloop/feature/<slug>`, created from the base branch, with its own `.cloop/`
+that starts with the project's provider, model, effort and instructions.
 
 ```bash
 cloop feature new "Dark mode" --description "Add a dark theme and a toggle"
@@ -487,8 +496,8 @@ cloop feature new hotfix --base release-2.1
 | Flag | Meaning |
 |------|---------|
 | `--description` | The feature's goal (default: the name). Its first run plans tasks from it unless `--task` gave some. |
-| `--task` | An initial task, in order; repeatable. |
-| `--base` | Branch to cut from and propose into (default: the remote's default branch, else `main`/`master`). |
+| `--task` | An initial task. Repeat the flag for more; they keep their order. |
+| `--base` | Branch to start from and to open the pull request against (default: the remote's default branch, else `main`/`master`). |
 | `--auto-evolve`, `--innovate` | The feature's own evolve settings, independent of the project's. |
 | `--parallel`, `--max-parallel` | Run the feature's independent tasks concurrently. |
 | `--auto-pr` | Have the dashboard open the pull request when the plan completes. |
@@ -499,14 +508,16 @@ have features.
 
 ### `cloop feature list`
 
-The project's features: status, task progress, commits ahead of and behind the
-base (`+3 -1`, with `*N` for uncommitted changes), and the pull request.
-`--no-git` skips the git status. Run inside a feature, it lists its siblings.
+Lists the project's features with their status, task progress, commits ahead of
+and behind the base (`+3 -1`, with `*N` for uncommitted changes) and pull
+request. `--no-git` skips the git status. Run inside a feature, it lists the
+other features of the same project.
 
 ### `cloop feature remove <name>`
 
-Remove the feature's worktree — and with it its task list and history. Refused
-while a run is in progress, or while the worktree has uncommitted changes.
+Remove the feature's worktree, along with its task list and history. This is
+refused while a run is in progress or while the worktree has uncommitted
+changes.
 
 ```bash
 cloop feature remove dark-mode                  # branch kept
@@ -516,9 +527,10 @@ cloop feature remove dark-mode --force --delete-branch  # discard and delete reg
 
 ### `cloop feature pr [name]`
 
-Push the feature's branch and open a GitHub pull request into its base. Run
-again while the pull request is open, it pushes new commits and reports the
-existing one; after a merge with nothing new committed, it reports the merge.
+Push the feature's branch and open a GitHub pull request against its base. If
+you run it again while the pull request is open, it pushes new commits and
+reports the existing pull request. After a merge with nothing new committed, it
+reports the merge.
 
 ```bash
 cloop feature pr dark-mode
@@ -526,12 +538,13 @@ cloop feature pr dark-mode --draft --title "Dark mode (WIP)"
 cd .cloop/features/dark-mode && cloop feature pr   # the feature you are in
 ```
 
-The API token is taken from `--token`, `GITHUB_TOKEN`, `GH_TOKEN`,
-`github.token` in the feature's config, git's credential helpers for the
-repository, `gh auth token`, then `CLOOP_GITHUB_TOKEN` — in that order, so the
-hub's own token, which it passes in that variable, never displaces a project's.
-`--api-url` (or `CLOOP_GITHUB_API_URL`) points it at GitHub Enterprise; a token
-from the environment or a config file is only sent to github.com or that host.
+The API token comes from the first of these that has one: `--token`,
+`GITHUB_TOKEN`, `GH_TOKEN`, `github.token` in the feature's config, git's
+credential helpers for the repository, `gh auth token`, then
+`CLOOP_GITHUB_TOKEN`. The hub passes its own token in `CLOOP_GITHUB_TOKEN`, so
+it never takes the place of a project's token. `--api-url` (or
+`CLOOP_GITHUB_API_URL`) points the command at GitHub Enterprise. A token from
+the environment or a config file is only sent to github.com or that host.
 
 ### `cloop feature pr-status [name]`
 
@@ -542,9 +555,9 @@ merged.
 
 ## Product Manager Mode
 
-cloop decomposes the goal into a structured task plan, then executes each task
-one at a time. This is the only mode, so there is no `--pm` flag to turn it on:
-it was removed in Task 20067 along with the free-form loop it selected between.
+cloop splits the goal into a structured task plan, then works on the tasks one
+at a time. This is the only mode, so there is no `--pm` flag to turn it on. The
+flag was removed along with the old free-form loop.
 
 ```bash
 # Initialize
@@ -566,14 +579,14 @@ cloop run --retry-failed
 cloop run --replan
 ```
 
-The AI signals task outcomes with terminal keywords:
-- `TASK_DONE` — task completed successfully
-- `TASK_SKIPPED` — task not applicable / already done
-- `TASK_FAILED` — task could not be completed
+The agent reports how a task ended with one of these keywords:
+- `TASK_DONE`: the task was completed
+- `TASK_SKIPPED`: the task doesn't apply or was already done
+- `TASK_FAILED`: the task could not be completed
 
-Tasks can declare dependencies on other tasks via `depends_on` in the JSON plan.
-A task will not start until all its dependencies are `done` or `skipped`.
-If a dependency fails, all tasks that depend on it are automatically skipped.
+A task can depend on other tasks through `depends_on` in the JSON plan. It
+doesn't start until all its dependencies are `done` or `skipped`. If a
+dependency fails, every task that depends on it is skipped.
 
 ---
 
@@ -581,7 +594,7 @@ If a dependency fails, all tasks that depend on it are automatically skipped.
 
 ### `cloop scope [goal]`
 
-AI-powered project scope analysis before you start. Estimates task count, complexity, risks, prerequisites, and recommends the best execution mode.
+Have the AI assess the project's scope before you start. It estimates the number of tasks, complexity, risks and prerequisites, and recommends an execution mode.
 
 ```bash
 cloop scope "Build a REST API with auth"
@@ -589,11 +602,11 @@ cloop scope                           # analyze current project goal
 cloop scope --provider anthropic "Add OAuth support"
 ```
 
-Output: task count estimate, complexity (low/medium/high/very_high), estimated AI invocations, risks, prerequisites, assumptions, and recommended execution mode.
+Output: estimated task count, complexity (low/medium/high/very_high), estimated number of AI calls, risks, prerequisites, assumptions and the recommended execution mode.
 
 ### `cloop forecast`
 
-AI-powered completion forecast with optimistic, expected, and pessimistic scenarios. Renders an ASCII burn-down chart and streams an AI narrative about delivery outlook and acceleration opportunities.
+Forecast when the project will be finished, with optimistic, expected and pessimistic scenarios. It draws an ASCII burn-down chart and streams the AI's commentary on the outlook and on ways to finish sooner.
 
 ```bash
 cloop forecast                       # full forecast (chart + AI narrative)
@@ -611,7 +624,7 @@ cloop forecast --provider anthropic  # use a specific provider
 
 ### `cloop insights`
 
-AI-powered project health analysis: task velocity, risk score, bottlenecks, role breakdowns, and AI-generated recommendations.
+Report on the project's health: task velocity, risk score, bottlenecks, a breakdown by role, and the AI's recommendations.
 
 ```bash
 cloop insights                       # full AI analysis
@@ -627,7 +640,7 @@ cloop insights --provider anthropic
 
 ### `cloop retro`
 
-AI-powered sprint retrospective: what went well, what went wrong, bottlenecks, velocity notes, key insights, and recommended next actions.
+Write a sprint retrospective with the AI: what went well, what went wrong, bottlenecks, notes on velocity, key insights and recommended next steps.
 
 ```bash
 cloop retro                          # terminal retrospective
@@ -648,7 +661,7 @@ cloop retro --provider anthropic
 
 ### `cloop standup`
 
-Generate an AI-powered daily standup report: what was accomplished, what's planned next, blockers, and delivery forecast. Can post to Slack via webhook.
+Write a daily standup report with the AI: what was done, what's next, blockers and a delivery forecast. It can post the report to Slack through a webhook.
 
 ```bash
 cloop standup                          # AI standup (last 24h)
@@ -681,7 +694,7 @@ cloop config set webhook.url https://hooks.slack.com/services/...
 
 ### `cloop backlog`
 
-AI-generated prioritized product backlog from your codebase. Surfaces the highest-value improvements ranked by impact-to-effort ratio.
+Have the AI build a prioritized product backlog from your codebase. It lists the most valuable improvements, ranked by impact relative to effort.
 
 ```bash
 cloop backlog                          # analyze current project
@@ -701,14 +714,14 @@ Each item includes:
 |------|---------|-------------|
 | `--format` | `terminal` | Output format: `terminal` or `md` |
 | `-o, --output` | | Write output to file |
-| `--as-tasks` | `false` | Add backlog items to the PM task plan |
+| `--as-tasks` | `false` | Add backlog items to the task plan |
 | `--max-items` | `0` (all) | Maximum number of items to show/add |
 | `--provider` | from config | Provider to use |
 | `--model` | from config | Model override |
 
 ### `cloop prioritize`
 
-AI-powered smart task reprioritization. Analyzes the current plan and suggests the optimal execution order based on the critical path, dependencies, risk factors, and value delivery.
+Have the AI reorder the tasks. It reviews the current plan and suggests an execution order based on the critical path, dependencies, risks and the value each task delivers.
 
 ```bash
 cloop prioritize                       # show AI priority suggestions
@@ -725,7 +738,7 @@ cloop prioritize --provider anthropic
 
 ### `cloop suggest`
 
-Brainstorm feature ideas for the project, or break a request of your own into a plan of tasks. Each proposal is reviewed interactively, and the accepted ones become PM tasks. The dashboard's **AI Feature Suggestions** panel on the Tasks tab runs the same command, and so does **Decompose** beside Add Task, which plans the task typed there and gives every task of the plan the priority and dependencies typed with it.
+Brainstorm feature ideas for the project, or break a request of your own into a plan of tasks. You review each proposal interactively, and the ones you accept become tasks. The dashboard's **AI Feature Suggestions** panel on the Tasks tab runs the same command. So does **Decompose** next to Add Task: it plans the task typed there and gives every task in the plan the priority and dependencies entered with it.
 
 ```bash
 cloop suggest                                      # brainstorm 5 ideas
@@ -735,7 +748,7 @@ cloop suggest --input "add OAuth login" --count 4  # plan it in exactly 4 tasks
 cloop suggest --yes                                # accept everything proposed
 ```
 
-With `--input`, the proposals are the ordered tasks of one plan, each naming the earlier tasks it depends on. `--count` then sets the plan's length, up to 20; leave it out and the plan is as long as the request needs — a small request may be a single task. Accepted tasks join the end of the run queue in plan order and keep their dependencies on each other, through any task you reject: if task 3 needs task 2 and task 2 needs task 1, rejecting task 2 makes task 3 wait for task 1.
+With `--input`, the proposals are the ordered tasks of one plan, each naming the earlier tasks it depends on. `--count` then sets the plan's length, up to 20. Without it, the plan is as long as the request needs, and a small request may be a single task. Accepted tasks are added to the end of the run queue in plan order and keep their dependencies on each other, even through a task you reject: if task 3 needs task 2 and task 2 needs task 1, rejecting task 2 makes task 3 wait for task 1.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -749,7 +762,7 @@ With `--input`, the proposals are the ordered tasks of one plan, each naming the
 
 ### `cloop milestone`
 
-Sprint and release planning. Organize PM tasks into milestones with deadlines and velocity-based forecasting.
+Plan sprints and releases. Group tasks into milestones with deadlines, and forecast completion from velocity.
 
 ```bash
 cloop milestone create "v1.0 Launch" --deadline 2026-06-15 --tasks 1,2,3
@@ -777,7 +790,7 @@ cloop milestone delete "Foundation"
 
 ### `cloop simulate <scenario>`
 
-AI what-if scenario analysis: simulate hypothetical changes before committing. Projects the impact on timeline, risk, and task priorities.
+Try out what-if scenarios with the AI before you commit to a change. It estimates the effect on the timeline, risk and task priorities.
 
 ```bash
 cloop simulate "what if we cut the authentication module?"
@@ -803,7 +816,7 @@ Output: summary, timeline delta, risk before/after, confidence, recommendations,
 
 ### `cloop review [commit-range]`
 
-AI-powered code review for git diffs. Returns a quality score, issues by severity, praise, and suggestions.
+Have the AI review git diffs. It returns a quality score, issues by severity, what was done well, and suggestions.
 
 ```bash
 cloop review                           # review all uncommitted changes
@@ -822,7 +835,7 @@ cloop review --provider anthropic
 | `--staged` | `false` | Review only staged changes |
 | `--last` | `false` | Review the last commit |
 | `--commit` | | Review a specific commit (hash) |
-| `--task` | `0` | Include PM task context in review (task ID) |
+| `--task` | `0` | Include this task's context in the review (task ID) |
 | `--format` | `terminal` | Output format: `terminal` or `md` |
 | `-o, --output` | | Write output to file |
 | `--quick` | `false` | Show diff stats only, no AI call |
@@ -830,13 +843,13 @@ cloop review --provider anthropic
 | `--provider` | from config | Provider to use |
 | `--model` | from config | Model override |
 
-Issues are graded as: `critical`, `major`, `minor`, `suggestion`.
+Issues are graded `critical`, `major`, `minor` or `suggestion`.
 
 ### `cloop review gate`
 
-Show or configure the project's review gate: a reviewer model — its own
-provider and model — that checks each task's changes before they are pushed or
-merged. The agent's pushes are held until the reviewer approves. See
+Show or configure the project's review gate: a reviewer, with its own provider
+and model, that checks each task's changes before they are pushed or merged.
+The agent's pushes are held until the reviewer approves them. See
 [Reviewing tasks before they are published](../guides/review-gate.md).
 
 ```bash
@@ -863,7 +876,7 @@ cloop review gate --disable
 
 ### `cloop ask <question>`
 
-Ask the AI anything about your project state, tasks, progress, or blockers. The AI has full context: goal, task plan, recent activity, and project memory.
+Ask the AI about your project's state, tasks, progress or blockers. It sees the goal, the task plan, recent activity and project memory.
 
 ```bash
 cloop ask "What are the remaining blockers?"
@@ -882,7 +895,7 @@ cloop ask --provider anthropic "Are there any risks in the current plan?"
 
 ### `cloop chat`
 
-Interactive conversational AI product manager. Ask questions, get suggestions, or let the AI update your task plan — all through natural conversation.
+Chat with an AI product manager. Ask questions, get suggestions, or have it update your task plan.
 
 ```bash
 cloop chat
@@ -901,7 +914,7 @@ cloop chat --save         # auto-save transcript on exit
 | `/save` | Save conversation transcript |
 | `/quit` | Exit the chat (also: `/exit`, Ctrl+D) |
 
-The AI can take PM actions on your behalf: mark tasks done, create new tasks, and add notes to project memory.
+The AI can change the plan for you: mark tasks done, create tasks and add notes to project memory.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -912,7 +925,7 @@ The AI can take PM actions on your behalf: mark tasks done, create new tasks, an
 
 ### `cloop compare [prompt]`
 
-Benchmark the same prompt across multiple AI providers simultaneously. Compare response quality, latency, token counts, and cost side-by-side.
+Send the same prompt to several AI providers at once, and compare response quality, latency, token counts and cost side by side.
 
 ```bash
 cloop compare "What is the best way to structure a Go project?"
@@ -928,7 +941,7 @@ cloop compare --full "Summarize microservices best practices"
 | `--providers` | all configured | Comma-separated providers to compare |
 | `--judge` | `false` | Use an AI judge to score each response (0-10) |
 | `--judge-provider` | first successful | Provider to use as judge |
-| `--task` | `0` | Use prompt from PM task #N |
+| `--task` | `0` | Use the prompt of task #N |
 | `--format` | `table` | Output format: `table` or `md` |
 | `-o, --output` | | Save output to file |
 | `--timeout` | `120` | Per-provider timeout in seconds |
@@ -959,11 +972,11 @@ cloop config set github.token ghp_...         # personal access token
 cloop config set github.repo owner/repo       # default repo
 ```
 
-The repo is auto-detected from the `origin` git remote if not configured. GitHub token is also read from `GITHUB_TOKEN` env var.
+If no repository is configured, it is taken from the `origin` git remote. The token can also come from the `GITHUB_TOKEN` environment variable.
 
 ### `cloop agent`
 
-Autonomous background agent: executes PM tasks without supervision at a regular interval.
+Run an agent in the background that works on tasks unattended, at a regular interval.
 
 ```bash
 # Start the agent
@@ -984,7 +997,7 @@ cloop agent stop
 cloop agent clear-logs                 # truncate the log file
 ```
 
-The agent executes one PM task per interval, records results, and stores a running state in `.cloop/agent-state.json`. Logs are written to `.cloop/agent.log`.
+The agent works on one task per interval, records the results and keeps its state in `.cloop/agent-state.json`. Logs go to `.cloop/agent.log`.
 
 ---
 
@@ -992,7 +1005,7 @@ The agent executes one PM task per interval, records results, and stores a runni
 
 ### `cloop memory`
 
-Manage the project's persistent memory stored in `.cloop/memory.json`. Memory entries are key learnings that are injected into future session prompts.
+Manage the project's memory, stored in `.cloop/memory.json`. Memory entries are lessons learned that are added to the prompts of future sessions.
 
 ```bash
 cloop memory list                      # list all stored memory entries
@@ -1001,13 +1014,13 @@ cloop memory delete <id>               # delete a specific entry by ID
 cloop memory clear                     # delete all memory entries
 ```
 
-Memory entries can be created automatically via:
-- `cloop retro --save-memory` — saves retro insights to memory
-- `cloop chat` — the AI can add notes via natural conversation
+Memory entries are also created by:
+- `cloop retro --save-memory`, which saves the retrospective's insights
+- `cloop chat`, where the AI can add notes during the conversation
 
 ### `cloop checkpoint`
 
-Save, restore, or list named snapshots of the project state. Useful before risky changes or experiments.
+Save, restore or list named snapshots of the project state, for example before a risky change or an experiment.
 
 ```bash
 cloop checkpoint save before-deploy    # save a named checkpoint
@@ -1017,7 +1030,7 @@ cloop checkpoint restore before-deploy # restore (current state auto-backed up)
 cloop checkpoint delete before-deploy  # delete a checkpoint
 ```
 
-Checkpoints are stored as `.json` files in `.cloop/checkpoints/`. Restoring a checkpoint automatically backs up the current state first.
+Checkpoints are stored as `.json` files in `.cloop/checkpoints/`. Restoring one backs up the current state first.
 
 ---
 
@@ -1025,9 +1038,9 @@ Checkpoints are stored as `.json` files in `.cloop/checkpoints/`. Restoring a ch
 
 ### `cloop mcp`
 
-Start cloop as an MCP server, exposing it as a set of tools to Claude Desktop, Cursor, Zed, and any other client that supports the [Model Context Protocol](https://modelcontextprotocol.io/specification).
+Run cloop as an MCP server, so that Claude Desktop, Cursor, Zed and any other client that supports the [Model Context Protocol](https://modelcontextprotocol.io/specification) can use it as a set of tools.
 
-The server speaks JSON-RPC 2.0 over newline-delimited stdio. All log output goes to stderr so it does not corrupt the MCP stream.
+The server speaks JSON-RPC 2.0 over newline-delimited stdio. Log output goes to stderr so that it doesn't corrupt the MCP stream.
 
 ```bash
 cloop mcp                          # use the configured/auto-detected provider
@@ -1040,10 +1053,10 @@ cloop mcp --provider openai --model gpt-4o
 | Tool | Description |
 |------|-------------|
 | `get_status` | Return current orchestrator state: goal, status, step counts, provider |
-| `get_plan` | Return the full PM-mode task plan as JSON with all task details |
+| `get_plan` | Return the full task plan as JSON, with all task details |
 | `add_task` | Append a new task to the current plan (title, description, priority) |
 | `complete_task` | Mark a task done by ID with an optional result summary |
-| `run_task` | Execute a one-shot AI prompt using the configured provider |
+| `run_task` | Run a one-off AI prompt with the configured provider |
 
 #### Claude Desktop Configuration
 
@@ -1061,7 +1074,7 @@ Add to `~/.claude/claude_desktop_config.json` (or the equivalent on your OS):
 }
 ```
 
-Once configured, Claude Desktop will offer the cloop tools in any conversation. You can ask Claude to check the plan status, add tasks, or run one-off AI prompts directly through cloop's provider.
+Claude Desktop then offers the cloop tools in every conversation. You can ask Claude to check the plan's status, add tasks, or run one-off prompts through cloop's provider.
 
 #### Cursor Configuration
 
@@ -1103,14 +1116,14 @@ In `.cursor/mcp.json` at the project root:
 
 ### `cloop ui`
 
-Start a web dashboard with real-time updates over a WebSocket (`/api/ws`),
-falling back to SSE where a WebSocket cannot be established.
+Start the web dashboard. It updates live over a WebSocket (`/api/ws`), or over
+SSE where a WebSocket can't be established.
 
-It authenticates nothing unless a token or OIDC is configured, and so,
-without either, listens on `127.0.0.1` only; with one it listens on every
-interface. `--listen` names an address instead, and an address beyond loopback
-is refused on a hub without sign-in unless `ui.allow_unauthenticated_network`
-is set — see [Web UI](configuration.md#web-ui-cloop-ui) before exposing it.
+Without a token or OIDC configured, nobody has to sign in, so it listens on
+`127.0.0.1` only. With either configured, it listens on every interface.
+`--listen` sets a different address. On a hub without sign-in, an address
+beyond loopback is refused unless `ui.allow_unauthenticated_network` is set.
+Read [Web UI](configuration.md#web-ui-cloop-ui) before exposing the dashboard.
 
 ```bash
 cloop ui                    # start on default port 8080
@@ -1119,17 +1132,18 @@ cloop ui --no-browser       # don't open the browser automatically
 cloop ui --listen 0.0.0.0   # every interface — needs sign-in (ui.oidc or CLOOP_UI_TOKEN)
 ```
 
-The dashboard shows: project goal, status, step history with outputs, task list (PM mode), live progress, and run/stop controls.
+The dashboard shows the project goal, status, step history with outputs, the task list, live progress, and controls to start and stop runs.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port` | `8080` | Port to listen on |
 | `--listen` | `127.0.0.1` without sign-in, every interface with it | Address to listen on, without the port (overrides `ui.listen`) |
 | `--no-browser` | `false` | Do not open the browser automatically |
-| `--advertise-url` | `http(s)://127.0.0.1:<port>`, or the bound address when `--listen` names one interface | Where the other hubs serving this directory reach this one (also `CLOOP_CLUSTER_ADVERTISE_URL`, or `CLOOP_CLUSTER_ADVERTISE_HOST` for the host alone) |
+| `--advertise-url` | `http(s)://127.0.0.1:<port>`, or the bound address when `--listen` names one interface | The URL at which the other hubs serving this directory reach this one (also `CLOOP_CLUSTER_ADVERTISE_URL`, or `CLOOP_CLUSTER_ADVERTISE_HOST` to set only the host) |
 
-Several `cloop ui` in one directory serve it together, as members of one
-[hub cluster](../architecture/hub-cluster.md) behind a load balancer:
+Several `cloop ui` processes started in one directory serve it together, as
+members of one [hub cluster](../architecture/hub-cluster.md) behind a load
+balancer:
 
 ```bash
 cloop ui --port 8080 --no-browser &
@@ -1137,26 +1151,27 @@ cloop ui --port 8081 --no-browser &
 cloop hub cluster status     # the members, the leader, and where each is reached
 ```
 
-`cloop hub cluster status [--json]` reads the database directly, so it also
-answers while every member is down, and lists members that stopped within the
-last day as gone.
+`cloop hub cluster status [--json]` reads the database directly, so it works
+even while every member is down. It lists members that stopped within the last
+day as gone.
 
 ## Working with a hub from a terminal
 
-A terminal signs in to a hub with single sign-on by device authorization and
-then works with its projects as the person who approved it. The walkthrough is
-[Working from a terminal](../getting-started/terminal.md); this is the
-reference.
+A terminal signs in to a hub with single sign-on, using device authorization,
+and then works with the hub's projects as the person who approved the sign-in.
+[Working from a terminal](../getting-started/terminal.md) is the walkthrough;
+this section is the reference.
 
 ### `cloop login <hub-url>`
 
-Signs this terminal in. It prints a code and the hub's approval page; a browser
-signed in to the hub approves the code there (after a fresh sign-in at the
-identity provider when its own is older than
-`ui.oidc.device_approval_max_age_minutes`), and the terminal gets a **CLI
-session** — a session of kind `cli` in the hub's store, on clocks never longer
-than a browser session's, re-checked with the identity provider on the same
-rule, listed and revoked like any session, ended by offboarding.
+Signs this terminal in. It prints a code and the hub's approval page. You
+approve the code on that page in a browser signed in to the hub (signing in
+again at the identity provider first if that sign-in is older than
+`ui.oidc.device_approval_max_age_minutes`). The terminal then gets a **CLI
+session**: a session of kind `cli` in the hub's store. Its time limits are
+never longer than a browser session's, it is re-checked with the identity
+provider on the same rule, it is listed and revoked like any session, and
+offboarding ends it.
 
 ```bash
 cloop login https://cloop.example.com
@@ -1166,17 +1181,17 @@ cloop login https://cloop.example.com --no-browser --hostname build-box-7
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--ca-file` | — | PEM bundle to trust for the hub's certificate; kept with the session |
-| `--no-browser` | `false` | Print the approval link without opening a browser (one is opened only on a desktop session) |
-| `--default` | `false` | Make this hub the default; the first hub signed in to already is |
+| `--ca-file` | | PEM bundle to trust for the hub's certificate, stored with the session |
+| `--no-browser` | `false` | Print the approval link without opening a browser (a browser is only opened on a desktop session) |
+| `--default` | `false` | Make this hub the default. The first hub you sign in to is the default anyway |
 | `--hostname` | the host name | What the approval page calls this machine |
 
-The terminal generates its session credential before asking for a code and
-sends the hub only its SHA-256; the approval writes the session under that
-digest, and the hub's answer to the terminal's poll carries the session's id and
-no secret. `cloop login` checks that id is its own digest and refuses anything
-else. A session this terminal already held for the hub is ended there when the
-new one replaces it.
+The terminal generates its session credential before asking for a code, and
+sends the hub only its SHA-256. The approval stores the session under that
+digest, and the hub's answer to the terminal's poll contains the session's id
+and no secret. `cloop login` checks that the id is its own digest and refuses
+anything else. If this terminal already had a session for the hub, the hub ends
+it when the new one replaces it.
 
 Exits non-zero when the code is denied (`the sign-in was denied`), expires
 (`the code expired before it was approved`), or the hub has no single sign-on or
@@ -1184,30 +1199,31 @@ has terminal sign-in turned off (`ui.oidc.device_login: false`).
 
 ### `cloop logout [hub-url]`
 
-Ends this terminal's session **at the hub**, then deletes it from the credential
+Ends this terminal's session at the hub, then deletes it from the credential
 file. Without a URL it signs out of the default hub.
 
 | Flag | Description |
 |------|-------------|
-| `--all` | Every hub this terminal is signed in to. Also reads a credential file other users can read — to revoke what may have been copied — which every other command refuses, `logout` of a single hub included: it would write the other hubs' credentials back into a file that looks private again |
+| `--all` | Sign out of every hub this terminal is signed in to. This also works on a credential file other users can read, so that you can revoke credentials that may have been copied. Every other command refuses such a file, including `logout` of a single hub, which would write the other hubs' credentials back into a file that looks private again |
 | `--force` | Delete the credentials even if the hub cannot be reached to end the session (which then stays valid there until it expires or is revoked from the dashboard) |
 
-A session the hub had already ended — revoked, expired, idle — is forgotten
-without complaint. The credential file is removed once it holds no hub.
+A session the hub has already ended (revoked, expired or idle) is removed
+without an error. The credential file is deleted once it holds no hubs.
 
 ### `cloop whoami [hub-url]`
 
-Asks the hub who this terminal's session is: identity, session kind and host
+Asks the hub about this terminal's session: identity, session kind and host
 name, role, hub-wide permissions, and how long the session has left. `--json`
-prints the hub's `/api/me` answer with the hub URL and session id added. Exits
-non-zero, saying so, when the session has ended.
+prints the hub's `/api/me` answer with the hub URL and session id added. If the
+session has ended, it says so and exits non-zero.
 
 ### `cloop remote`
 
-The projects on a hub, as the signed-in identity. Every subcommand is one of the
-dashboard's own calls, so the hub authorises it exactly as it would the
-dashboard's button. A `<project>` is a name, an index or a path, as `cloop
-remote projects` lists them; an ambiguous name is refused with the candidates.
+Work with a hub's projects as the signed-in identity. Each subcommand makes the
+same API call as the dashboard, so the hub authorises it as it would the
+dashboard's button. A `<project>` is a name, an index or a path, as
+`cloop remote projects` lists them. An ambiguous name is refused, and the error
+lists the matches.
 
 ```bash
 cloop remote init [--goal <text>] [--executor <id|name>] [--repo owner/name]... [--grant <secret>[,key=value]...]... [--run] [--json]
@@ -1229,7 +1245,7 @@ cloop remote logs <project> [--follow]
 | `init` | `GET /api/me`, `/api/executors`, `/api/secrets` and `/api/secrets/catalog` for its checks; `POST /api/projects/new` (with the executor and the grants you may make), then the `repos add` calls, `POST /api/grant-requests` for what needs an approver, `GET`/`POST /api/projects/{idx}/harness-credential`, and with `--run` `POST /api/run` | `project.write`; `executor.manage` with `--executor`; each grant's own |
 | `executors` | `GET /api/executors`, narrowed to the executors whose access list admits you | `executor.read` |
 | `repos list` | `GET /api/projects/{idx}/repositories` | `project.read` |
-| `repos add` | `GET /api/projects/{idx}/repositories` and `/repositories/available`, then `POST /api/projects/{idx}/repositories` — or `POST /api/grant-requests` where the grant is refused for want of `secret.grant` | `secret.grant` on the project, else `secret.request` |
+| `repos add` | `GET /api/projects/{idx}/repositories` and `/repositories/available`, then `POST /api/projects/{idx}/repositories`, or `POST /api/grant-requests` if the grant is refused for lack of `secret.grant` | `secret.grant` on the project, else `secret.request` |
 | `repos remove` | `DELETE /api/projects/{idx}/repositories`, or a replacing `POST` when the grant keeps other repositories | `secret.revoke`, `secret.grant` on the project |
 | `grants request` | `POST /api/grant-requests` | `secret.request` |
 | `grants list` | `GET /api/grant-requests` | `secret.request` |
@@ -1247,37 +1263,39 @@ cloop remote logs <project> [--follow]
 | `stop` | `POST /api/stop` | `run.stop` |
 | `logs` | `GET /api/livelog`; with `--follow`, the dashboard's WebSocket `/api/ws` | `project.read` |
 
-**A refusal is rendered, not dumped.** The hub's message and code come first,
-then each detail it sent as a line; for a missing permission, the permission and
-the scope it was decided at, your role there, and how to get it — from a
-maintainer of the project (its Members card) or an administrator (the role
-mappings), or for `secret.grant` by filing a request. A refusal whose claims
-were merely too old says to sign in again with `cloop login`.
+**Errors.** When the hub refuses a request, its message and code come first,
+then each detail it sent, one per line. For a missing permission, that is the
+permission and the scope it was checked at, your role there, and how to get it:
+from a maintainer of the project (its Members card) or an administrator (the
+role mappings), or, for `secret.grant`, by filing a request. If the refusal was
+only because your claims were too old, it tells you to sign in again with
+`cloop login`.
 
-`logs --follow` prints the run's output from the backlog the hub replays on
-connect onwards, notes on stderr when the run starts and stops, and runs until
-`Ctrl-C` — or until the hub closes the stream because the session ended or
-access to the project was withdrawn, which exits non-zero with the hub's reason.
+`logs --follow` prints the run's output, starting with the backlog the hub
+replays on connect, and notes on stderr when the run starts and stops. It runs
+until you press `Ctrl-C`, or until the hub closes the stream because the
+session ended or access to the project was withdrawn. Then it exits non-zero
+with the hub's reason.
 
 Persistent flags: `--hub <url>` (default: `CLOOP_HUB_URL`, else the default
 hub), and `--token <api-token>`, which replaces the stored session for scripts
-and needs `--hub`. `CLOOP_API_TOKEN` names no hub of its own: set beside
-`CLOOP_HUB_URL` it is that hub's token and no other's; set alone it is used only
-for a hub this terminal holds no session for — so a token exported for one hub
-is never sent to another named with `--hub`.
+and requires `--hub`. `CLOOP_API_TOKEN` isn't tied to a hub by itself. Set
+together with `CLOOP_HUB_URL`, it is used for that hub only. Set alone, it is
+used only for a hub this terminal has no session for. So a token exported for
+one hub is never sent to another hub named with `--hub`.
 
 **The credential file** is `$XDG_CONFIG_HOME/cloop/hubs.json`
 (`~/.config/cloop/hubs.json`), mode `0600` in a `0700` directory. Every command
-that would present a credential from it refuses a file its group or anybody
-else can read, and nothing prints a credential. [`cloop task attach`](../operations/attach.md)
-uses the stored session for the hub it targets — `--hub`, `CLOOP_HUB_URL` or the
-default hub — when no `--token` is given, on the same rule for
-`CLOOP_API_TOKEN`.
+that would use a credential from it refuses the file if its group or other
+users can read it, and no command prints a credential.
+[`cloop task attach`](../operations/attach.md) uses the stored session for the
+hub it targets (`--hub`, `CLOOP_HUB_URL` or the default hub) when no `--token`
+is given, with the same rule for `CLOOP_API_TOKEN`.
 
 ### `cloop remote init`
 
-Creates a hub project from the git checkout it is run in (Task 20417). The
-walkthrough is [From a checkout to a running project](../getting-started/terminal.md#from-a-checkout-to-a-running-project).
+Creates a hub project from the git checkout you run it in. The walkthrough is
+[From a checkout to a running project](../getting-started/terminal.md#from-a-checkout-to-a-running-project).
 
 ```bash
 cloop remote init --goal "Ship rate limiting for the public API"
@@ -1288,40 +1306,42 @@ cloop remote init --goal "…" --repo acme/api-docs --grant staging-cluster,name
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--goal` | asked at a terminal | What the project should achieve; required otherwise |
-| `--executor` | the hub's default | Bind the project to this executor, by id or name — one whose access list admits you. Binding takes `executor.manage` |
-| `--repo` | — | Another repository the project works on, as `owner/name` (repeatable, or comma-separated); the origin's is always included |
-| `--grant` | — | Another stored credential to give the project: `<secret>[,key=value…]` with keys `repo`, `access`, `permission`, `branch`, `namespace`, `context`, `host`, `registry`, `env`, `scope`, `writable`, `ttl`; repeat a key for several values |
+| `--executor` | the hub's default | Bind the project to this executor, by id or name. Its access list must admit you, and binding requires `executor.manage` |
+| `--repo` | | Another repository the project works on, as `owner/name` (repeatable, or comma-separated). The origin's repository is always included |
+| `--grant` | | Another stored credential to give the project: `<secret>[,key=value…]` with keys `repo`, `access`, `permission`, `branch`, `namespace`, `context`, `host`, `registry`, `env`, `scope`, `writable`, `ttl`. Repeat a key for several values |
 | `--repo-secret` | chosen | The GitHub App or token the repositories are granted through |
 | `--access` | `read` | `read`, or `write` (push branches and open pull requests) |
-| `--branch` | — | With `--access write`, limit pushes to these branches (globs) |
+| `--branch` | | With `--access write`, limit pushes to these branches (globs) |
 | `--name` | the repository's name | The project's name and its directory under the hub's projects root (`ui.projects_root`) |
-| `--dir` | — | The project's directory on the hub, instead of `--name`; inside the hub's projects root unless you hold `executor.manage` |
+| `--dir` | | The project's directory on the hub, instead of `--name`. It must be inside the hub's projects root unless you hold `executor.manage` |
 | `--provider`, `--model`, `--effort` | the hub's | As the New Project dialog's |
-| `--claude-secret` | your one complete Claude credential | The env secret the project's sandbox signs in to Claude with — or, for a `copilot` project, to Copilot with (`COPILOT_GITHUB_TOKEN`) — on an executor that isolates |
+| `--claude-secret` | your one complete Claude credential | The env secret the project's sandbox uses to sign in to Claude (for a `copilot` project, to Copilot, with `COPILOT_GITHUB_TOKEN`) on an executor that isolates |
 | `--justification` | the goal | The reason given for any credential requested from an approver |
 | `--run` | `false` | Start the project's first run once it is set up |
 | `--json` | `false` | Print what was created, granted and requested as one object |
 
-The origin remote is read in any of git's forms for GitHub — https, the scp form,
-`ssh://`, `ssh.github.com:443` — and refused, by name and without echoing it, when
-it is not on GitHub or embeds a credential. Before anything is created the executor
-is checked against your access lists, every `--grant` secret against what you can
-see or ask for, and the hub for some GitHub credential that could reach the
-repositories. The project is created with its binding and the grants you may make
-in one request, applied whole or not at all; a directory that already holds a
-project is refused (`CONFLICT`) rather than initialised again. Repositories are then
-granted through your GitHub App installation, the organisation's where you may grant
-it, or your own token where the hub's git proxy guards it — each App asked which
-repositories it reaches. What you may not grant is requested instead, and the
-request's id and approvers are printed. Exits non-zero when the project was created
-but a repository is unreached or `--run` could not start it.
+The origin remote can be in any of git's forms for GitHub (https, the scp form,
+`ssh://`, `ssh.github.com:443`). If it is not on GitHub or contains a credential,
+it is refused with an error that names the remote without printing it. Before
+anything is created, the command checks the executor against your access lists,
+every `--grant` secret against what you can see or request, and the hub for a
+GitHub credential that can reach the repositories. The project, its binding and
+the grants you may make are created in one request, which is applied completely
+or not at all. A directory that already holds a project is refused (`CONFLICT`)
+instead of being initialised again. Repositories are then granted through your
+GitHub App installation, the organisation's if you may grant it, or your own
+token if the hub's git proxy guards it; each App is asked which repositories it
+can reach. What you may not grant is requested instead, and the request's id and
+approvers are printed. The command exits non-zero if the project was created but
+a repository can't be reached or `--run` couldn't start it.
 
 ### `cloop remote executors`
 
-Lists the executors a project of yours may be bound to: every executor without an
-access list, and the restricted ones whose list admits you — each with its kind,
-isolation and status, the hub's default first, and why one that cannot run anything
-now cannot. `--json` prints them with the default's id.
+Lists the executors your projects may be bound to: every executor without an
+access list, and the restricted ones whose list admits you. Each is shown with
+its kind, isolation and status, with the hub's default first. For an executor
+that can't run anything right now, it shows why. `--json` prints them with the
+default's id.
 
 ### `cloop remote repos`
 
@@ -1331,12 +1351,12 @@ cloop remote repos add <project> <owner/name>... [--secret <name>] [--access rea
 cloop remote repos remove <project> <owner/name|grant-id>... [--json]
 ```
 
-`add` chooses the credential as `init` does unless `--secret` names one, leaves a
-repository the project already reaches alone, and turns a grant refused for want of
-`secret.grant` into a request (with `--justification`). `remove` by repository
-replaces a grant that covers others with one that does not, and revokes one that
-covers only it; a grant that reaches other projects too is refused, as the panel
-refuses it.
+`add` chooses the credential the way `init` does, unless `--secret` names one.
+It skips repositories the project can already reach, and turns a grant refused
+for lack of `secret.grant` into a request (with `--justification`). `remove`,
+given a repository, replaces a grant that also covers other repositories with
+one that doesn't, and revokes a grant that covers only that repository. A grant
+that also reaches other projects is refused, as it is in the panel.
 
 ### `cloop remote grants`
 
@@ -1349,13 +1369,14 @@ cloop remote grants list [--state pending|approved|denied|withdrawn|expired] [--
 cloop remote grants withdraw <request-id> [--json]
 ```
 
-A request names a stored credential and the narrowing its kind needs; asking
-confers nothing until an approver with `secret.grant` — never the requester —
-approves it. `request` and `list` print who can approve a pending request: the
-accounts and groups the hub's role policy gives `secret.grant` hub-wide (only
-administrators for a request aimed at every project or executor). `list` also
-says how each of yours ended: approved and by whom, denied with the approver's
-reason, or lapsed undecided.
+A request names a stored credential and the restrictions its kind requires. It
+grants nothing until an approver with `secret.grant` approves it, and the
+approver can never be the requester. `request` and `list` print who can approve
+a pending request: the accounts and groups that the hub's role policy gives
+`secret.grant` hub-wide (only administrators, for a request aimed at every
+project or executor). `list` also shows how each of your requests ended:
+approved and by whom, denied with the approver's reason, or lapsed without a
+decision.
 
 ### `cloop remote approvals`
 
@@ -1365,21 +1386,23 @@ cloop remote approvals approve <id> [--ttl <d>] [--note <text>] [--json]
 cloop remote approvals deny <id> --note <text> [--json]
 ```
 
-What waits on you (Task 20427): the access requests you may decide — filed by
-somebody else, for a subject you hold `secret.grant` on, and aimed at every
-project or executor only if you are an administrator — and, under an enforced
-role policy, the API tokens awaiting an administrator holding their roles.
-`list` prints them soonest deadline first, with each request's justification;
-the inbox is the hub's answer for your session, the same one the dashboard's
-header badge counts (`GET /api/approvals`). `approve` takes an id from the list,
-whole — a prefix that names one item when you list could name another once that
-one is decided: a request is approved as asked — `--ttl`, a minute or more, can
-only shorten the grant, and the answer says until when it runs — through
-`POST /api/grant-requests/{id}/approve`, a token through
-`POST /api/tokens/{id}/approve`. `deny` refuses a request with the
-reason its requester reads; a token is never denied, it is revoked. A request
-id that is not in your inbox is still sent, so the hub says why it may not be
-decided — somebody decided it first, it is your own, it lapsed.
+What is waiting for you: the access requests you may decide and, under an
+enforced role policy, the API tokens waiting for an administrator who holds
+their roles. You may decide a request that somebody else filed for a subject
+you hold `secret.grant` on; a request aimed at every project or executor also
+requires you to be an administrator. `list` prints them nearest deadline first,
+with each request's justification. It is the hub's inbox for your session, the
+same one the dashboard's header badge counts (`GET /api/approvals`).
+
+`approve` takes a whole id from the list, not a prefix, because a prefix that
+names one item now could name another once that one is decided. A request is
+approved as asked through `POST /api/grant-requests/{id}/approve`. `--ttl` (a
+minute or more) can only shorten the grant, and the answer says when it ends. A
+token is approved through `POST /api/tokens/{id}/approve`. `deny` refuses a
+request with a reason the requester can read. Tokens are never denied; they are
+revoked. A request id that isn't in your inbox is still sent, so that the hub
+can say why you can't decide it: somebody decided it first, it is your own, or
+it lapsed.
 
 ### `cloop remote features`
 
@@ -1390,20 +1413,21 @@ cloop remote features list <project> [--json]
 cloop remote features pr <project> <feature> [--title <t>] [--body <b>] [--draft] [--json]
 ```
 
-A feature is a branch of the project with its own worktree and task list
-([parallel features](../guides/features.md)); `start` prints the index it runs under
-(`cloop remote run <index>`), and `pr` pushes its branch and opens its pull request
-into the branch it was cut from, or reports the one already open.
+A feature is a branch of the project with its own worktree and task list (see
+[parallel features](../guides/features.md)). `start` prints the index the feature
+runs under (`cloop remote run <index>`). `pr` pushes its branch and opens a pull
+request against the branch it was created from, or reports the one already open.
 
 ### `cloop remote kube`
 
-Share a Kubernetes cluster with the hub through a least-privilege ServiceAccount
-(Task 20416) — the path for a cluster whose kubeconfig signs you in through an
+Share a Kubernetes cluster with the hub through a least-privilege
+ServiceAccount. Use this for a cluster whose kubeconfig signs you in through an
 exec credential plugin (`kubelogin`, `aws eks get-token`,
-`gke-gcloud-auth-plugin`), which the hub never runs. `share` runs the plugin on
-this machine, creates a labelled ServiceAccount bound to `view` (or `edit`) in
-the named namespaces, mints a bounded token through the TokenRequest API, and
-stores a static kubeconfig for it on the hub as a personal secret. See
+`gke-gcloud-auth-plugin`), since the hub never runs such plugins. `share` runs
+the plugin on this machine, creates a labelled ServiceAccount bound to `view`
+(or `edit`) in the named namespaces, mints a time-limited token through the
+TokenRequest API, and stores a static kubeconfig for it on the hub as a
+personal secret. See
 [the secrets guide](../guides/secrets.md#a-cluster-that-signs-you-in-through-a-plugin-aks-eks-gke).
 
 ```bash
@@ -1419,28 +1443,28 @@ cloop remote kube revoke <name> [--force] [--context <ctx>] [--kubeconfig <file>
 |------------|-------|------------|
 | `share` | the cluster as you; then `GET /api/secrets`, `POST /api/secrets` | `secret.own` (`secret.grant` with `--shared`) |
 | `list` | `GET /api/secrets` | `secret.own` |
-| `renew` | `POST /api/secrets/{id}/renew` — empty for the hub to renew it now; or `GET /api/secrets/{id}/authorize`, the cluster as you, then the renew with a token minted here and the server and CA it was minted at | `secret.own`, the share's owner |
+| `renew` | `POST /api/secrets/{id}/renew` with an empty body, for the hub to renew it now; or `GET /api/secrets/{id}/authorize`, the cluster as you, then the renew call with a token minted here and the server and CA it was minted at | `secret.own`, the share's owner |
 | `revoke` | `GET /api/secrets/{id}/authorize`; the cluster as you; then `DELETE /api/secrets/{id}` | `secret.own`, the share's owner |
 
-- **Write access** (`--access write`) needs `--sa-namespace`, a namespace outside
-  `--namespaces`: `edit` can mint a ServiceAccount's credential in its own
-  namespace. Cluster-wide write is refused.
-- **Renewal.** `auto` lets the hub renew the token at half its life when the hub
-  runs its Kubernetes access monitor, installing a Role that lets the
-  ServiceAccount create its own token and nothing else; the monitor refuses that
-  subresource to every sandbox. Elsewhere, or with `manual`, `renew` mints the next
-  token with your credentials and the hub checks it with the cluster.
-- **`--ttl`** is 10m to 7d; a cluster that caps it is reported.
-- **`revoke`** asks the hub first, then deletes the ServiceAccount, then its
-  bindings, then the hub's secret — and in the cluster only objects it reads
-  back with the share's label and its owner's annotation, by uid and
-  resourceVersion; the rest are reported and left (Task 20420). `--force`
-  deletes the secret even when the cluster's objects could not be.
+- **Write access** (`--access write`) requires `--sa-namespace`, a namespace
+  outside `--namespaces`, because `edit` can mint a ServiceAccount's credential
+  in its own namespace. Cluster-wide write access is refused.
+- **Renewal.** With `auto`, the hub renews the token at half its lifetime if it
+  runs its Kubernetes access monitor. It installs a Role that lets the
+  ServiceAccount create its own token and nothing else, and the monitor refuses
+  that subresource to every sandbox. Otherwise, or with `manual`, `renew` mints
+  the next token with your credentials, and the hub checks it with the cluster.
+- **`--ttl`** is between 10m and 7d. If the cluster caps it lower, you are told.
+- **`revoke`** asks the hub first, then deletes the ServiceAccount, its
+  bindings, and finally the hub's secret. In the cluster it deletes only objects
+  it reads back with the share's label and its owner's annotation, by uid and
+  resourceVersion. Anything else is reported and left alone. `--force` deletes
+  the secret even if the cluster's objects could not be deleted.
 - **The context** (`--context`, by default the one the share was made from) must
   reach the share's own API server through the CA the share trusts, or `renew`
-  and `revoke` refuse. `renew` mints only for the share's own ServiceAccount, read
-  back the same way, and the hub sends the token only to the server that minted
-  it.
+  and `revoke` refuse to run. `renew` mints tokens only for the share's own
+  ServiceAccount, read back the same way, and the hub sends the token only to
+  the server that minted it.
 
 ### `cloop knowledge`
 
@@ -1450,11 +1474,12 @@ cloop knowledge sync <source> [--wait] [--json]
 cloop knowledge search <project> <query...> [-k N] [--json]
 ```
 
-A hub's knowledge sources — Confluence spaces, Jira projects — from a terminal
-signed in with `cloop login`, or with `--token` / `CLOOP_API_TOKEN` (Task 20470).
-Like `cloop remote`, every subcommand is one of the dashboard's own calls, and
-`--hub` names the hub. A `<source>` is an id or a name, as `sources` lists them;
-a `<project>` a name, an index or a path, as `cloop remote projects` lists them.
+Work with a hub's knowledge sources (Confluence spaces, Jira projects) from a
+terminal signed in with `cloop login`, or with `--token` / `CLOOP_API_TOKEN`. As
+with `cloop remote`, each subcommand makes the same API call as the dashboard,
+and `--hub` names the hub. A `<source>` is an id or a name, as `sources` lists
+them. A `<project>` is a name, an index or a path, as `cloop remote projects`
+lists them.
 
 | Subcommand | Calls | Permission |
 |------------|-------|------------|
@@ -1462,33 +1487,34 @@ a `<project>` a name, an index or a path, as `cloop remote projects` lists them.
 | `sync` | `POST /api/knowledge/sources/{id}/sync`, then with `--wait` `GET /api/knowledge/sources/{id}` until the sync ends | `knowledge.admin`, or ownership of a personal source |
 | `search` | `GET /api/projects/{idx}/knowledge/search` | `project.read` on the project |
 
-`sources` prints each source's status — `never synced`, `syncing`, `ok`, `error`,
-`interrupted`, `disabled` — its documents, when it last synced and when the
-schedule syncs it next, and below the table the last error of each that failed,
-scrubbed of credentials by the hub. The hub-cluster leader syncs every enabled
-source on its interval — 30 minutes, or 5 minutes to 24 hours as the source sets
-(`sync_interval_minutes`) — and a sync that stopped short continues within a
-minute.
+`sources` prints each source's status (`never synced`, `syncing`, `ok`,
+`error`, `interrupted`, `disabled`), its documents, when it last synced and
+when it is next scheduled to sync. Below the table it prints the last error of
+each source that failed, with credentials removed by the hub. The hub-cluster
+leader syncs every enabled source on its interval: 30 minutes, or what the
+source sets between 5 minutes and 24 hours (`sync_interval_minutes`). A sync
+that stopped early continues within a minute.
 
 `sync` starts a sync now, on the hub member the request reached, and returns at
-once; `--wait` follows it to its end, says what it listed, created, updated and
-removed, and exits non-zero if it failed. One sync of a source runs at a time
-across every member: asked while another runs, the hub answers 409 naming the
-member running it, and `--wait` follows that one instead. The request is audited
-as [`knowledge.source.sync`](audit-events.md#knowledgesource).
+once. With `--wait` it follows the sync to the end, reports what it listed,
+created, updated and removed, and exits non-zero if it failed. Only one sync of
+a source runs at a time across all members. If one is already running, the hub
+answers 409 with the member that runs it, and `--wait` follows that sync
+instead. The request is audited as
+[`knowledge.source.sync`](audit-events.md#knowledgesource).
 
-`search` prints the best chunks of the knowledge bound to the project — where
-each sits at its source, its link, and the passage that matched with the terms
-marked « » — at most `-k` of them (10 by default, at most 50). With the hub's
-[semantic search](configuration.md#semantic-knowledge-search-knowledgeembeddings)
-on, the chunks are ranked by the query's meaning as well as its words; a search
-that had to rank by words alone — the embedding endpoint down, say — prints why
-on stderr. `--json` hits carry `found_by`.
+`search` prints the best-matching chunks of the knowledge bound to the project,
+at most `-k` of them (10 by default, at most 50): where each chunk is in its
+source, its link, and the matching passage with the terms marked « ». With the
+hub's [semantic search](configuration.md#semantic-knowledge-search-knowledgeembeddings)
+on, chunks are ranked by the query's meaning as well as its words. A search that
+had to rank by words alone (because the embedding endpoint is down, for
+example) says why on stderr. In `--json` output, hits have a `found_by` field.
 
 ### `cloop hub grant`
 
-Self-service access requests, and the grants they become (Task 20271). Run on the
-hub's host, or with `--workdir` naming the hub's directory.
+Self-service access requests, and the grants they turn into. Run it on the
+hub's host, or with `--workdir` set to the hub's directory.
 
 ```bash
 cloop hub grant request <secret> --to project:<path> --why "…" [constraint flags] [--ttl 8h] [--wait 72h]
@@ -1499,17 +1525,18 @@ cloop hub grant unguarded <grant-id> --reason "…" | --withdraw
 ```
 
 - **`list`** prints the request queue, then every kubeconfig grant delivered
-  without the Kubernetes access monitor on an administrator's acknowledgement —
-  who, when, why — and how many are refused for want of the monitor. `--grants`
-  lists the active grants instead, with what each kubeconfig grant amounts to on
-  a hub with no monitor.
-- **`unguarded`** (Task 20420) records that a kubeconfig grant naming namespaces,
-  or fewer than every verb, may be delivered on a hub that runs no monitor, where
-  it is otherwise refused: its namespaces become only `kubectl`'s default and its
-  verbs go unchecked. `--reason` is required; the acknowledgement is stored on
-  the grant, audited as `secret.unguarded_ack`, and shown in the Secrets panel,
-  `list` and `cloop hub doctor`. `--withdraw` takes it back. A share the hub
-  renews cannot be acknowledged.
+  without the Kubernetes access monitor because an administrator acknowledged
+  it (who, when and why), and how many grants are refused because there is no
+  monitor. `--grants` lists the active grants instead, with what each kubeconfig
+  grant allows in practice on a hub with no monitor.
+- **`unguarded`** records that a kubeconfig grant naming namespaces, or fewer
+  than every verb, may be delivered on a hub that runs no monitor, where it
+  would otherwise be refused. Without the monitor, its namespaces only set
+  `kubectl`'s default and its verbs are not checked. `--reason` is required.
+  The acknowledgement is stored on the grant, audited as
+  `secret.unguarded_ack`, and shown in the Secrets panel, in `list` and in
+  `cloop hub doctor`. `--withdraw` takes it back. A share that the hub renews
+  can't be acknowledged.
 
 ### `cloop hub`
 
@@ -1522,37 +1549,39 @@ cloop hub pin                    # SPKI pin of the configured certificate
 cloop hub pin --cert /path/to/fullchain.pem
 ```
 
-`tls-init` refuses to overwrite existing key material without `--force`:
-regenerating changes the hub's key, and every agent pinned to the old one stops
-connecting until it is re-pinned. See [TLS](configuration.md#tls) for the serving configuration
-and [Remote executors](configuration.md#remote-executors-edge-devices) for how the pin reaches
-a device.
+`tls-init` won't overwrite existing key material without `--force`. A new key
+stops every agent pinned to the old one from connecting until it is pinned
+again. See [TLS](configuration.md#tls) for the serving configuration and
+[Remote executors](configuration.md#remote-executors-edge-devices) for how the
+pin reaches a device.
 
 ### `cloop hub verify-image <image>`
 
-Checks one of cloop's own images — `ghcr.io/blechschmidt/cloop`, `cloop-harness`
-or `cloop-harness-copilot` — as a hub checks it before a sandbox runs it (Task
-20453): a tag is resolved to the digest its registry serves now, and cosign
-verifies the digest against the identity of `.github/workflows/publish-images.yml`
-on `main` or a release tag.
+Checks one of cloop's own images (`ghcr.io/blechschmidt/cloop`, `cloop-harness`
+or `cloop-harness-copilot`) the way a hub checks it before a sandbox runs it. A
+tag is resolved to the digest its registry currently serves, and cosign
+verifies the digest against the identity of
+`.github/workflows/publish-images.yml` on `main` or a release tag.
 
 ```bash
 cloop hub verify-image ghcr.io/blechschmidt/cloop-harness:latest
 cloop hub verify-image --json ghcr.io/blechschmidt/cloop-harness@sha256:…
 ```
 
-The verdict is `verified`, `unsigned` (no signature at all — an image published
-before signing began), `unverifiable` (no cosign, or the registry or Sigstore out
-of reach) or `mismatch` (signed by someone else, which a hub refuses to run). The
-exit status is 0 only for `verified`. See [Image provenance](configuration.md#image-provenance).
+The verdict is `verified`, `unsigned` (no signature at all, as for an image
+published before signing began), `unverifiable` (no cosign, or the registry or
+Sigstore can't be reached) or `mismatch` (signed by someone else; a hub refuses
+to run it). The exit status is 0 only for `verified`. See
+[Image provenance](configuration.md#image-provenance).
 
 ### `cloop hub key`
 
-Sealing-key inspection and online rotation. Stored credentials are sealed under
-a per-row data key (DEK); only the DEK is sealed under a key-encryption key
-(KEK) — derived from `CLOOP_SECRET_KEY`, or random and held wrapped by a KMS
-([`secrets.kms`](configuration.md#sealing-keys-in-a-kms-secrets)) — so rotating
-rewraps sixty bytes per row and never decrypts a payload.
+Inspect the sealing keys, and rotate them while the hub runs. Each stored
+credential is sealed under its own data key (DEK), and only the DEK is sealed
+under a key-encryption key (KEK). The KEK is derived from `CLOOP_SECRET_KEY`,
+or is random and kept wrapped by a KMS
+([`secrets.kms`](configuration.md#sealing-keys-in-a-kms-secrets)). So a
+rotation rewraps sixty bytes per row and never decrypts a payload.
 
 ```bash
 cloop hub key status                       # which key seals what, rotation progress, the KMS
@@ -1565,12 +1594,12 @@ cloop hub key rewrap                       # follow a rotation of the KMS key
 cloop hub key retire <key-id> --yes        # destroy an old key's salt or KMS ciphertext (irreversible)
 ```
 
-The roots are read as the hub reads them: `CLOOP_SECRET_KEY_FILE`, the systemd
-credential `cloop-secret-key`, or `CLOOP_SECRET_KEY`, with
-`CLOOP_SECRET_KEY_PREVIOUS` (or its file or credential) beside it during a change
-of root — see [the root key](configuration.md#the-root-key-cloop_secret_key) —
-and the KMS of the `secrets` section in `config.yaml`, with the overlay of the
-hub `--port` names merged.
+The roots are read the way the hub reads them: `CLOOP_SECRET_KEY_FILE`, the
+systemd credential `cloop-secret-key`, or `CLOOP_SECRET_KEY`, plus
+`CLOOP_SECRET_KEY_PREVIOUS` (or its file or credential) during a change of root
+(see [the root key](configuration.md#the-root-key-cloop_secret_key)). The KMS
+comes from the `secrets` section in `config.yaml`, merged with the overlay of
+the hub that `--port` names.
 
 | Flag | Applies to | Default | Description |
 |------|-----------|---------|-------------|
@@ -1580,31 +1609,32 @@ hub `--port` names merged.
 | `--dry-run` | `rotate` | `false` | Report what would be rewrapped without writing |
 | `--continue` | `rotate` | `false` | Resume onto the current primary instead of minting a new key |
 | `--batch` | `rotate` | `128` | Rows read per round |
-| `--retire-previous` | `rotate` | `false` | Finish a change of root: refuses until every live hub member advertises the new root as its current one and — for a new `CLOOP_SECRET_KEY` — an escrow of it is on record, or — for a KMS — the KMS answers; then rewraps everything onto a key of the current root and retires every key of the previous one. A plain `rotate` mid-change is refused |
+| `--retire-previous` | `rotate` | `false` | Finish a change of root. Refused until every live hub member advertises the new root as its current one and, for a new `CLOOP_SECRET_KEY`, an escrow of it is on record or, for a KMS, the KMS answers. Then it rewraps everything onto a key of the current root and retires every key of the previous one. A plain `rotate` during a change of root is refused |
 | `--yes` | `retire` | `false` | Confirm irreversible destruction of the key's salt |
 
-`rewrap` wraps every KEK the current KMS holds again under the KMS key it now
-encrypts under, after a rotation of the KMS key; one row per key changes and no
-secret does. A serving hub's cluster leader does the same within a minute of the
-KMS reporting the new key, and records `sealing_key.kms_rewrapped` either way.
+After the KMS key is rotated, `rewrap` wraps every KEK the current KMS holds
+again, under the KMS key it now encrypts with. One row per key changes, and no
+secret does. On a running hub, the cluster leader does the same within a minute
+of the KMS reporting the new key. Either way, `sealing_key.kms_rewrapped` is
+recorded.
 
-Rotation is safe to interrupt and safe to run against a serving hub; `retire` is
-a deliberate second step and refuses while any row still references the key. The
-full procedure, including upgrading a hub that predates envelope encryption and
+You can interrupt a rotation safely, and run it against a running hub.
+`retire` is a separate second step, and it refuses while any row still
+references the key. The full procedure, including upgrading a hub that predates
+envelope encryption and
 [changing `CLOOP_SECRET_KEY` itself](../operations/runbook.md#changing-cloop_secret_key-itself),
 is in the [runbook](../operations/runbook.md#key-rotation).
 
-These subcommands write to the state database directly rather than through the
-HTTP API, so they require filesystem access to it — the same root-shell caveat
-as `cloop hub token`.
+These subcommands write to the state database directly, not through the HTTP
+API, so they need filesystem access to it, as `cloop hub token` does.
 
 ### `cloop hub ca`
 
-The hub's own certificate authority — the one its git proxy's and Kubernetes
-monitor's certificates come from under `tls: auto` — replaced online, in steps
-(Task 20438). The full procedure, the emergency path and what moving an advertise
-URL costs are in the [runbook](../operations/runbook.md#rotating-the-hub-ca);
-Settings → Hub health takes the same steps from the dashboard.
+Replace the hub's own certificate authority in steps, while the hub runs. Under
+`tls: auto`, this CA issues the git proxy's and the Kubernetes monitor's
+certificates. The full procedure, the emergency path and the cost of moving an
+advertise URL are in the [runbook](../operations/runbook.md#rotating-the-hub-ca).
+**Settings → Hub health** takes the same steps from the dashboard.
 
 ```bash
 cloop hub ca rotate --status                        # where it stands (the default): CAs, members, runs a step waits for
@@ -1619,31 +1649,32 @@ cloop hub ca rotate --now --yes                     # emergency: replace every C
 
 | Flag | Applies to | Default | Description |
 |------|-----------|---------|-------------|
-| `--stage`, `--activate`, `--retire-previous`, `--status`, `--now`, `--abort` | — | `--status` | The step; exactly one |
+| `--stage`, `--activate`, `--retire-previous`, `--status`, `--now`, `--abort` | | `--status` | The step to take. Give exactly one |
 | `--force` | `--activate` | `false` | Activate although runs dispatched before the stage are still running; they stop verifying the monitors and are named on the rotation |
 | `--yes` | `--retire-previous`, `--now`, `--abort`, `--activate --force` | `false` | Confirm a step that destroys a key or breaks runs |
-| `--name` | `--stage`, `--now` | — | A name the new CA's X.509 name constraints permit, beside every name a certificate was issued for and the configured advertise URLs (repeatable) |
+| `--name` | `--stage`, `--now` | | A name the new CA's X.509 name constraints permit, in addition to every name a certificate was issued for and the configured advertise URLs (repeatable) |
 | `--no-name-constraints` | `--stage`, `--now` | `false` | Mint the new CA without name constraints |
-| `--reason` | `--abort` | — | Why, for the audit trail |
+| `--reason` | `--abort` | | Why, for the audit trail |
 | `--wait` | `--activate`, `--now` | `2m` | How long to wait for every hub member to serve certificates from the new CA (`0`: do not wait) |
 | `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
 | `--port` | all | `8080` | The hub whose per-instance overlay to merge over `config.yaml` when reading `secrets.kms` and the monitors' advertise URLs |
 | `--json` | all | `false` | Machine-readable output |
 
 `--activate` is refused while a run dispatched before the stage is still
-running, and — whatever the flags — while a live hub member has not adopted the
-stage or runs a build that predates rotation. `--retire-previous` is refused
-until every member serves certificates from the new CA. Like `cloop hub key`, it
-writes the state database directly and tells every member on the cluster bus.
+running. Whatever the flags, it is also refused while a live hub member hasn't
+adopted the stage or runs a build older than CA rotation. `--retire-previous` is
+refused until every member serves certificates from the new CA. Like
+`cloop hub key`, it writes the state database directly and notifies every
+member on the cluster bus.
 
 #### `cloop hub key escrow`
 
-Every key-encryption key derives from `CLOOP_SECRET_KEY` — unless a KMS holds it
-— so rotation cannot help if that value is lost. An escrow file holds it sealed
-under a passphrase you choose (argon2id, 64 MiB, then AES-256-GCM); the hub
-records only the escrow's id and the key's fingerprint. Keys held by a KMS are
-neither opened nor recovered by an escrow: `export` and `verify` list them as
-`KMS-HELD`, and only access to that KMS key recovers them.
+Every key-encryption key that a KMS doesn't hold is derived from
+`CLOOP_SECRET_KEY`, so rotation can't help if that value is lost. An escrow file
+holds it sealed under a passphrase you choose (argon2id, 64 MiB, then
+AES-256-GCM). The hub records only the escrow's id and the key's fingerprint.
+An escrow neither opens nor recovers keys held by a KMS: `export` and `verify`
+list them as `KMS-HELD`, and only access to that KMS key recovers them.
 
 ```bash
 cloop hub key escrow export --output /secure/cloop-hub.escrow   # seal the key in this environment
@@ -1655,28 +1686,29 @@ cloop hub key escrow import /secure/cloop-hub.escrow --stdout   # print CLOOP_SE
 
 | Flag | Applies to | Default | Description |
 |------|-----------|---------|-------------|
-| `--output` | `export` | — | Where to write the escrow file (required). A path inside a `.cloop/` directory is refused |
+| `--output` | `export` | | Where to write the escrow file (required). A path inside a `.cloop/` directory is refused |
 | `--force` | `export` | `false` | Replace an existing escrow file at `--output` |
 | `--force` | `import` | `false` | Replace a different key already in the key or env file; the old file is kept as `<file>.pre-import.<UTC>` |
 | `--passphrase-file` | all | the terminal | Read the passphrase from a file, or `-` for stdin. One trailing newline is stripped |
 | `--record` | `verify` | `false` | Record this escrow as the hub's, once it is proven to open the hub's sealing keys |
-| `--key-file` | `import` | `CLOOP_SECRET_KEY_FILE`, else `cloop-secret-key` in the hub's directory | The key file to put the key into, mode 0600 — not inside `.cloop/` |
+| `--key-file` | `import` | `CLOOP_SECRET_KEY_FILE`, else `cloop-secret-key` in the hub's directory | The key file to write the key to, with mode 0600. It must not be inside `.cloop/` |
 | `--env-file` | `import` | `.cloop/hub.env`, when the hub keeps its key there | The env file to put the key into instead; every other line is kept |
 | `--stdout` | `import` | `false` | Print the assignment instead of writing a file |
 | `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
 
-`export` escrows the current key and refuses one that — with
-`CLOOP_SECRET_KEY_PREVIOUS` beside it, mid-way through a change of root — does
-not open the hub's sealing keys, or a passphrase under 15 characters, and reads
-the file back and opens it before it reports success. `verify` exits 1 when the file does not open or does not open
-the hub. `cloop hub doctor` reports `secret_key.escrow`: a warning while no
-escrow is recorded, a failure when the one on record holds another key than the
-one in use. See the [runbook](../operations/runbook.md#escrowing-the-sealing-key).
+`export` escrows the current key. It refuses a key that doesn't open the hub's
+sealing keys (together with `CLOOP_SECRET_KEY_PREVIOUS`, during a change of
+root), and a passphrase shorter than 15 characters. Before it reports success,
+it reads the file back and opens it. `verify` exits 1 if the file doesn't open,
+or doesn't open the hub. `cloop hub doctor` reports `secret_key.escrow`: a
+warning while no escrow is recorded, and a failure when the recorded escrow
+holds a different key from the one in use. See the
+[runbook](../operations/runbook.md#escrowing-the-sealing-key).
 
 ### `cloop db backup` and `cloop db restore`
 
-Hot backups of `.cloop/state.db`, and a restore that checks a backup before it
-swaps anything.
+Back up `.cloop/state.db` while it is in use, and restore a backup after
+checking it.
 
 ```bash
 cloop db backup                                              # .cloop/backups/state-<UTC>.db
@@ -1686,23 +1718,24 @@ cloop db restore <backup> --force --reason "disk failure"    # restore over a li
 ```
 
 The backup's sidecar (`<backup>.meta.json`) records the SHA-256, the sealing
-keys the backup's secrets depend on and where its audit chain ends, all sealed
-under a key derived from `CLOOP_SECRET_KEY`. A restore refuses — changing
-nothing — a backup that fails its integrity check, does not match its sidecar,
-carries a seal that does not verify, or holds secrets the `CLOOP_SECRET_KEY` it
-runs with cannot open, and any restore while a hub still serves the database;
-then it records itself as an `audit.restored` row and a sealed restore record
-the audit checkpoints accept. A backup whose keys a KMS holds
-([`secrets.kms`](configuration.md#sealing-keys-in-a-kms-secrets)) restores only
-where that KMS answers: the preflight asks it, says so in its report either way,
-and refuses — naming the KMS — without it.
+keys the backup's secrets depend on, and where its audit chain ends, all sealed
+under a key derived from `CLOOP_SECRET_KEY`. A restore refuses, changing
+nothing, if the backup fails its integrity check, doesn't match its sidecar,
+carries a seal that doesn't verify, or holds secrets that the current
+`CLOOP_SECRET_KEY` can't open. It also refuses while a hub still serves the
+database. A successful restore is recorded as an `audit.restored` row and a
+sealed restore record that the audit checkpoints accept. A backup whose keys a
+KMS holds ([`secrets.kms`](configuration.md#sealing-keys-in-a-kms-secrets))
+can only be restored where that KMS answers. The preflight asks the KMS and
+reports the result either way; if the KMS doesn't answer, the restore refuses
+with an error naming it.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--reason` | — | Why (required); recorded with the restore |
+| `--reason` | | Why you are restoring (required). Recorded with the restore |
 | `--check` | `false` | Run the preflight only |
 | `--force` | `false` | Overwrite a live database; the old file is kept as `.pre-restore.<UTC>` |
-| `--skip-checksum` | `false` | Do not check the sidecar at all — for a backup whose sidecar was lost |
+| `--skip-checksum` | `false` | Don't check the sidecar at all, for a backup whose sidecar was lost |
 | `--allow-unsealed` | `false` | Accept a sidecar whose seal cannot be checked here; the digest is still checked |
 | `--accept-secret-loss` | `false` | Restore although the key cannot open the backup's sealing keys; retires them, losing what they seal (recorded). Needs a `CLOOP_SECRET_KEY` |
 | `--checkpoints` | `audit.checkpoints.file` | Where to look for superseded checkpoints and append the restore record |
@@ -1714,8 +1747,9 @@ the [runbook](../operations/runbook.md#backup-and-restore).
 
 ### `cloop hub token static`
 
-The deprecated static `--token` / `CLOOP_UI_TOKEN`: whether running hubs still
-accept it, its last use, and retiring it on every member without a restart.
+Manage the deprecated static `--token` / `CLOOP_UI_TOKEN`: see whether running
+hubs still accept it and when it was last used, and retire it on every member
+without a restart.
 
 ```bash
 cloop hub token static status                     # fingerprint, held by, last used, refusals
@@ -1728,24 +1762,24 @@ cloop hub token static retire --fingerprint 3f9c1e7a --reason "rotated, CHG-2291
 |------|-----------|---------|-------------|
 | `--workdir` | all | current directory | Hub directory holding `.cloop/state.db` |
 | `--json` | `status` | `false` | Machine-readable output |
-| `--reason` | `retire` | — | Required; recorded with the retirement and in the audit trail |
-| `--fingerprint` | `retire` | — | The token to retire, by at least 8 characters of the fingerprint `status` prints, when hubs hold several |
+| `--reason` | `retire` | | Required. Recorded with the retirement and in the audit trail |
+| `--fingerprint` | `retire` | | When hubs hold several tokens, the one to retire, given as at least 8 characters of the fingerprint `status` prints |
 | `--force` | `retire` | `false` | Retire it although a hub with no single sign-on and no active admin API token would be left with nobody able to administer it |
 
-The token is found without its value: every hub process holding one reports its
-fingerprint and last use to the control plane, and `CLOOP_UI_TOKEN` exported in
-this shell names one too. `retire` posts a notice on the hub bus; members refuse
-the token within about a second and close the dashboard streams and sandbox
-terminals it opened, and a member started with `ui.cluster.exclusive` refuses it
-within 30 seconds. Retirement is per value: deploying a new `CLOOP_UI_TOKEN`
-issues a new token, and the retired one is refused for good. See
+The command finds tokens without knowing their values: every hub process
+holding one reports its fingerprint and last use to the control plane, and a
+`CLOOP_UI_TOKEN` exported in this shell is included too. `retire` posts a
+notice on the hub bus. Members refuse the token within about a second and close
+the dashboard streams and sandbox terminals it opened. A member started with
+`ui.cluster.exclusive` refuses it within 30 seconds. Retirement applies to one
+value: deploying a new `CLOOP_UI_TOKEN` creates a new token, and the retired one
+stays refused permanently. See
 [Retiring the static token](../security/model.md#retiring-the-static-token).
 
 ### `cloop hub session`
 
-List and terminate signed-in dashboard sessions. Operates on the session table
-directly, so it keeps working when the HTTP listener does not — which is the
-situation that tends to produce the need for it.
+List and end signed-in dashboard sessions. It works on the session table
+directly, so it still works when the HTTP listener doesn't.
 
 ```bash
 cloop hub session list                                     # who is signed in
@@ -1756,26 +1790,27 @@ cloop hub session revoke --identity alice@example.com --reason "compromise INC-4
 cloop hub session revoke --all --reason "rotating IdP client secret"
 ```
 
-`list` shows each session's kind — `browser`, or `cli` for a terminal signed in
-with [`cloop login`](#cloop-login) — and `--json` adds the host name a
-terminal reported as `client`. A terminal session is revoked exactly as a
-browser's is, and closes what it holds open the same way.
+`list` shows each session's kind: `browser`, or `cli` for a terminal signed in
+with [`cloop login`](#cloop-login). `--json` adds the host name a terminal
+reported, as `client`. A terminal session is revoked the same way as a
+browser's, and what it holds open is closed the same way.
 
-`revoke` requires exactly one selector — an id, `--identity`, or `--all` — with
-no default, because the three differ by two orders of magnitude in blast radius.
-A revocation is announced to running hubs, which stop honouring the session and
-close the dashboard streams and sandbox terminals it opened within about a
-second. A hub started with `ui.cluster.exclusive` reads no announcements: it may
-serve a revoked session from its cache for up to 30 seconds, and closes what it
-opened at the next 30-second re-check after that. `cloop hub token revoke` and
+`revoke` requires exactly one selector: an id, `--identity` or `--all`. There
+is no default, because they affect very different numbers of sessions (one,
+one person's, or everyone's). A revocation is announced to running hubs, which
+stop accepting the session and close the dashboard streams and sandbox
+terminals it opened within about a second. A hub started with
+`ui.cluster.exclusive` reads no announcements. It may serve a revoked session
+from its cache for up to 30 seconds, and closes what the session opened at the
+next 30-second re-check after that. `cloop hub token revoke` and
 `cloop hub user offboard` announce what they revoke the same way.
 
 ### `cloop hub user offboard`
 
-Everything one identity can still do on the hub, ended in one operation, and
-everything they keep here destroyed. Resolves an email or an IdP subject to
-every identifier of the same person first; `--dry-run` prints exactly the set
-the write acts on.
+End everything one identity can still do on the hub in one operation, and
+destroy everything they keep there. It first resolves an email or IdP subject
+to every identifier of the same person. `--dry-run` prints the set it would act
+on.
 
 ```bash
 cloop hub user offboard alice@example.com --dry-run
@@ -1792,22 +1827,22 @@ cloop hub user offboard 'sub:8f14e45fce' --reason "contract ended" --json
 | `--json` | The report, for scripting |
 | `--workdir` | The hub directory, when not the current one |
 
-Severed in one transaction: sessions, API tokens, glasses links, project
-memberships, and a deny binding. Then, in order, each reporting its own failure:
-secret leases on their projects, the grants over their personal secrets
-(revoked), the secrets themselves (deleted through the broker, sealed bytes
-overwritten), pending grant requests (withdrawn), their running tasks (stopped),
-and their Claude Code login on every hub member (cancelled, logged out,
-removed). Projects they own are reported, never deleted. Needs no
-`CLOOP_SECRET_KEY`. A partial run exits non-zero. See the
-[runbook](../operations/runbook.md#somebody-leaves).
+In one transaction it ends their sessions, API tokens, glasses links and
+project memberships, and adds a deny binding. Then it handles these, in order,
+reporting each failure separately: secret leases on their projects, the grants
+over their personal secrets (revoked), the secrets themselves (deleted through
+the broker, sealed bytes overwritten), pending grant requests (withdrawn),
+their running tasks (stopped), and their Claude Code login on every hub member
+(cancelled, logged out, removed). Projects they own are reported, never
+deleted. It doesn't need `CLOOP_SECRET_KEY`. If only part of it succeeds, it
+exits non-zero. See the [runbook](../operations/runbook.md#somebody-leaves).
 
 ### `cloop hub user hold`
 
-Standing legal holds. Every offboarding of a held identity — this command's,
-the dashboard's, or one the identity provider triggers over SCIM — keeps the
-person's personal secrets and Claude Code homes, as `--keep-credentials` does,
-and records `user.offboard_hold`.
+Standing legal holds. Every offboarding of a held identity (by this command,
+from the dashboard, or by the identity provider over SCIM) keeps the person's
+personal secrets and Claude Code homes, as `--keep-credentials` does, and
+records `user.offboard_hold`.
 
 ```bash
 cloop hub user hold place alice@example.com --reason "litigation LH-17"
@@ -1816,9 +1851,10 @@ cloop hub user hold release alice@example.com --reason "LH-17 closed"
 ```
 
 An identity is an email or `sub:<subject>`. `--reason` is required to place or
-release a hold (at least four characters to place one — it is what the next
-administrator reads). Releasing destroys nothing: run the offboarding again to
-finish what the hold kept. `--json` prints the list for scripting.
+release a hold (at least four characters to place one, since it is what the
+next administrator reads). Releasing a hold destroys nothing. Run the
+offboarding again to remove what the hold kept. `--json` prints the list for
+scripting.
 
 ### `cloop hub scim`
 
@@ -1837,19 +1873,20 @@ cloop hub scim status                                   # credentials, directory
 | Command | Meaning |
 | --- | --- |
 | `credential create <name>` | Mint a credential. The name is the audit actor of every change the provider makes, `scim:<name>`. Accepted on `/scim/v2` only |
-| `credential rotate <name\|id>` | New secret, same name and id. `--grace` keeps the replaced secret working for that long, at most `168h`; without it the old one stops now |
+| `credential rotate <name\|id>` | New secret, same name and id. `--grace` keeps the old secret working for that long, at most `168h`. Without it, the old secret stops working at once |
 | `credential revoke <name\|id>` | Both secrets end at once. `--reason` is required |
 | `credential list` | Every credential, live and revoked, with when each was last used |
 | `status` | The credentials, the match claim, and the provisioned directory: users active and suspended, groups, and the users no hub identity matches or several do |
 
 Each takes `--workdir` and `--json`. The same operations are under
-**Settings → Provisioning (SCIM)** and `/api/scim`, gated on `user.manage`.
+**Settings → Provisioning (SCIM)** and `/api/scim`, which require
+`user.manage`.
 
 ### `cloop hub quota`
 
-Per-identity quota overrides: the one-off cap applied to a single tenant. Most
-quota policy belongs in `ui.quotas` in `.cloop/config.yaml`; this edits the
-exception.
+Per-identity quota overrides: a one-off limit for a single tenant. Most quota
+policy belongs in `ui.quotas` in `.cloop/config.yaml`; this command edits the
+exceptions.
 
 ```bash
 cloop hub quota list                                       # overrides and usage
@@ -1860,20 +1897,22 @@ cloop hub quota set alice@example.com --unset max_projects --reason "back to pol
 cloop hub quota clear alice@example.com --reason "INC-4413 closed"
 ```
 
-Resources are named rather than flagged, so a resource added later needs no CLI
-change: `max_projects`, `max_concurrent_tasks`, `max_concurrent_reproductions`,
-`max_executors`, `max_sessions`, `daily_token_budget`, `daily_cost_usd`.
+Resources are given by name, not as flags, so a resource added later needs no
+CLI change: `max_projects`, `max_concurrent_tasks`,
+`max_concurrent_reproductions`, `max_executors`, `max_sessions`,
+`daily_token_budget`, `daily_cost_usd`.
 
-`set` and `clear` **refuse while a hub holds the control-plane lease** and point
-at `PUT /api/quotas/{identity}`. The enforcer loads overrides once at startup, so
-a write behind a live hub would neither take effect nor survive the next edit
-made from the Quotas panel.
+`set` and `clear` refuse while a hub holds the control-plane lease, and point
+you to `PUT /api/quotas/{identity}` instead. The enforcer loads overrides once
+at startup, so a change written behind a running hub would neither take effect
+nor survive the next edit from the Quotas panel.
 
 ### `cloop hub limits`
 
-Per-project resource ceilings: how much CPU, memory, disk and how many processes
-one project's sandboxes may be given. The fleet-wide ceiling lives in
-`executors.limits` in `.cloop/config.yaml`; this holds a single project below it.
+Per-project resource ceilings: how much CPU, memory and disk, and how many
+processes, one project's sandboxes may be given. The fleet-wide ceiling is set
+in `executors.limits` in `.cloop/config.yaml`; this command holds a single
+project below it.
 
 ```bash
 cloop hub limits list                                      # both ceilings, and every capped project
@@ -1883,26 +1922,26 @@ cloop hub limits set /srv/projects/noisy --memory 0 --reason "memory cap lifted"
 cloop hub limits clear /srv/projects/noisy --reason "moved to its own node"
 ```
 
-`set` merges onto the stored ceiling, so capping memory leaves an existing CPU
-cap alone; pass a resource explicitly as `0` to uncap just that one. Sizes take
-the same grammar as the rest of the executor config (`512m`, `2g`, or a bare
-integer read as megabytes).
+`set` merges with the stored ceiling, so capping memory leaves an existing CPU
+cap alone. Set a single resource to `0` to remove only that cap. Sizes use the
+same format as the rest of the executor config (`512m`, `2g`, or a bare
+integer, read as megabytes).
 
-The two ceilings compose by getting tighter and neither can be raised by the
-project — a project's own `.cloop/sandbox.yaml` is a request, and a ceiling
-bounds it even when it asks for nothing, because an omitted key means *no limit*
-rather than "the default".
+When both ceilings apply, the tighter one wins, and the project can't raise
+either. A project's own `.cloop/sandbox.yaml` is only a request. A ceiling
+limits it even when it asks for nothing, because an omitted key means *no
+limit*, not "the default".
 
-Unlike `hub quota`, these **do not refuse while a hub is running**. Ceilings are
-read from the database on every dispatch rather than cached at startup, so an
-edit binds the next task to start.
+Unlike `hub quota`, these work while a hub is running. Ceilings are read from
+the database on every dispatch, not cached at startup, so a change applies to
+the next task that starts.
 
 ### `cloop hub role`
 
-Runtime role bindings that layer over `ui.oidc`. This is the emergency demotion
-path: `oidc.admin_emails` and `oidc.role_mappings` are read at startup, so
-without it, demoting a compromised administrator means editing config and
-redeploying.
+Role bindings that you can change at runtime, on top of `ui.oidc`. Use them to
+demote someone in an emergency: `oidc.admin_emails` and `oidc.role_mappings`
+are read at startup, so without this command, demoting a compromised
+administrator means editing the config and redeploying.
 
 ```bash
 cloop hub role list                                        # runtime and configured
@@ -1913,35 +1952,35 @@ cloop hub role revoke email contractor@example.com --project payments --reason "
 cloop hub role delete rb_e1be642bd28f --reason "investigation closed"
 ```
 
-`revoke` *writes* a deny binding rather than deleting a grant, which is what
-lets it work against authority this table never issued. `delete` removes a
-binding row and is the only way back from a deny.
+`revoke` writes a deny binding instead of deleting a grant, so it also works
+against access that this table never granted. `delete` removes a binding row,
+and is the only way to undo a deny.
 
-Precedence between the two layers is fixed: **deny wins, and the database
-overrides config**. A deny beats every other binding at every specificity,
-including the global admin binding `oidc.admin_emails` produces. Bindings are
-read on a 10-second TTL, so these take effect on a running hub without a restart
-and take no lease.
+The precedence between the two layers is fixed: a deny wins, and the database
+overrides the config. A deny beats every other binding at every level of
+specificity, including the global admin binding that `oidc.admin_emails`
+produces. Bindings are re-read every 10 seconds, so changes take effect on a
+running hub without a restart and need no lease.
 
 | Flag | Applies to | Description |
 |------|-----------|-------------|
 | `--reason` | every mutation | Required. Recorded in the audit trail with the operating OS user |
 | `--workdir` | all | Hub directory holding `.cloop/state.db` |
 | `--identity` | `session list/revoke`, `role list` | Email address or IdP subject |
-| `--project` / `--executor` | `role grant/revoke` | Narrow the binding instead of applying it everywhere |
+| `--project` / `--executor` | `role grant/revoke` | Limit the binding to one project or executor instead of applying it everywhere |
 | `--json` | every `list` | Machine-readable output |
 
-The three incident playbooks these compose into — stolen session, runaway
-tenant, compromised admin — are in the
-[runbook](../operations/runbook.md#access-emergencies).
+The [runbook](../operations/runbook.md#access-emergencies) has three incident
+playbooks built from these commands: a stolen session, a runaway tenant and a
+compromised administrator.
 
 ### `cloop project members`
 
-Who besides its owner may reach a project on a hub with single sign-on — the
-CLI side of the Members card on a project's Overview. It writes the hub's
-control-plane database directly, like `cloop hub role`, so it works while the
-listener does not, and it checks no role: whoever can run it can already write
-that database.
+Manage who besides its owner can access a project on a hub with single sign-on.
+This is the command-line counterpart of the Members card on a project's
+Overview. Like `cloop hub role`, it writes the hub's control-plane database
+directly, so it works even when the listener doesn't. It checks no role,
+because anyone who can run it can already write that database.
 
 ```bash
 cloop project members list                                   # every membership on the hub
@@ -1951,14 +1990,14 @@ cloop project members add payments bob@example.com --role viewer --reason "read-
 cloop project members remove payments bob@example.com --reason "moved teams"
 ```
 
-`<project>` is a registered project's name or its directory; a feature is shared
-with its project and is refused. `<identity>` is an email or `sub:<subject>`.
-`add` on an existing member changes their role. A membership only adds access —
-see [Project members](../security/model.md#project-members) for what a role means
-with and without role mappings. Each change commits with its audit row and is
-announced on the hub cluster's bus, so running hub processes apply it at once
-and close a removed member's open dashboards; they re-read the table every few
-seconds regardless.
+`<project>` is a registered project's name or its directory. A feature shares
+its project's members, so a feature is refused. `<identity>` is an email or
+`sub:<subject>`. `add` on an existing member changes their role. A membership
+only adds access; see [Project members](../security/model.md#project-members)
+for what a role means with and without role mappings. Each change is committed
+together with its audit row and announced on the hub cluster's bus, so running
+hub processes apply it at once and close a removed member's open dashboards.
+They also re-read the table every few seconds.
 
 | Flag | Applies to | Description |
 |------|-----------|-------------|
@@ -1969,11 +2008,10 @@ seconds regardless.
 
 ### `cloop hub telemetry`
 
-Read the diagnostic trail the dashboard and the display-glasses page record —
-the gestures they received, the views they opened, the requests they issued and
-any errors. It exists because those front ends run where the hub cannot look:
-the glasses have no console, no network inspector, and a wearer whose entire
-reporting channel is a sentence of prose.
+Read the diagnostic trail that the dashboard and the display-glasses page
+record: the gestures they received, the views they opened, the requests they
+made and any errors. These front ends run where the hub can't see them; the
+glasses, for example, have no console or network inspector.
 
 ```bash
 cloop hub telemetry sessions                    # recent page loads, newest first
@@ -1985,8 +2023,8 @@ cloop hub telemetry list --grep /api/tasks      # anything touching an endpoint
 cloop hub telemetry prune --before 7d           # delete old events now
 ```
 
-Start with `sessions`: an investigation arrives as "somebody reported a problem
-around ten past four" and has to become a session id first.
+Start with `sessions`, to turn a report such as "a problem around ten past
+four" into a session id.
 
 | Flag | Applies to | Description |
 |------|-----------|-------------|
@@ -1999,23 +2037,23 @@ around ten past four" and has to become a session id first.
 | `--yes` | `prune` | Skip the confirmation prompt |
 | `--workdir` | all | Hub directory holding `.cloop/state.db` (default: current directory) |
 
-Run it from the hub's own directory, or point `--workdir` at it. The command
-refuses to create a database it cannot find rather than reporting an empty one:
-"no telemetry recorded" from the wrong directory reads as "the instrument is
-broken", which is the one wrong answer a diagnostic tool must not give.
+Run it from the hub's own directory, or point `--workdir` at it. If the command
+can't find the database, it stops with an error instead of creating an empty
+one, so a wrong directory doesn't look like "no telemetry recorded".
 
-Collection is **off unless an operator turned it on** — switch it on in
-Settings → Telemetry in the dashboard, or with `ui.telemetry.enabled: true` —
-so an empty trail on a hub nobody configured is the expected answer rather than
-a fault. While on, credentials are scrubbed before storage and the table trims
-itself at 50,000 rows. The Telemetry tab shows the same data, gated on
-`audit.read`. See [front-end telemetry](../operations/telemetry.md).
+Collection is off until an operator turns it on, in **Settings → Telemetry**
+in the dashboard or with `ui.telemetry.enabled: true`. So on a hub where nobody
+has turned it on, an empty trail is expected. While collection is on,
+credentials are removed before storage, and the table is trimmed at 50,000
+rows. The Telemetry tab shows the same data and requires `audit.read`. See
+[front-end telemetry](../operations/telemetry.md).
 
 ### `cloop hub audit forward`
 
-Where the audit trail goes as it is written, and whether it gets there. The
-forwarding itself is the cluster leader's duty inside `cloop ui`; these read
-what it leaves in the control plane, so they answer with the hub up or down.
+Where the audit trail is sent as it is written, and whether it arrives. The
+cluster leader does the forwarding inside `cloop ui`. These commands read the
+state it leaves in the control plane, so they work whether the hub is up or
+down.
 
 ```bash
 cloop hub audit forward status            # each sink: backlog, lag, last error, per-chain cursors
@@ -2029,16 +2067,17 @@ cloop hub audit prune --before 90d --force
 |------|-----------|-------------|
 | `--port` | `status` | The hub whose configuration to read; its `config.ui-<port>.yaml` overlay is merged |
 | `--json` | `status`, `verify` | Emit JSON |
-| `--hub` | `prune` | Hub directory whose forwarding cursors bound the prune (default: this database, and the hub it names) |
-| `--force` | `prune` | Prune rows a sink has not acknowledged; it never receives them |
+| `--hub` | `prune` | Hub directory whose forwarding cursors limit the prune (default: this database, and the hub it names) |
+| `--force` | `prune` | Prune rows a sink hasn't acknowledged. The sink never receives them |
 
-`status` exits 1 when a sink is refused at load, has never delivered (a sink no
-hub has started yet included), or lags beyond `audit.forward.max_lag`. `verify`
-reads a JSON sink's file, a collector's export, HEC events or syslog lines, and
-exits 2 on a gap, a fork (one id with two hashes), a bad hash, a broken link,
-or a file holding no forwarded record (a CEF stream cannot be verified); a
-repeated row is counted, not reported. `cloop db maintain` takes `--audit-hub` and
-`--force-audit-prune` for the same hold. See
+`status` exits 1 when a sink was refused at load, has never delivered
+(including a sink no hub has started yet), or lags more than
+`audit.forward.max_lag`. `verify` reads a JSON sink's file, a collector's
+export, HEC events or syslog lines. It exits 2 on a gap, a fork (one id with
+two hashes), a bad hash, a broken link, or a file with no forwarded record (a
+CEF stream can't be verified). A repeated row is counted but not reported.
+`cloop db maintain` takes `--audit-hub` and `--force-audit-prune` for the same
+hold. See
 [forwarding the trail off the box](../operations/runbook.md#forwarding-the-trail-off-the-box).
 
 ---
@@ -2047,24 +2086,23 @@ repeated row is counted, not reported. `cloop db maintain` takes `--audit-hub` a
 
 `cloop egress grant / list / test / revoke` issue and inspect the leases that
 let an isolated sandbox reach the outside world through the control plane's
-proxy — see [the secrets guide](../guides/secrets.md#egress-leases). The
-subcommand below is about the other enforcement point.
+proxy; see [the secrets guide](../guides/secrets.md#egress-leases). The
+subcommand below covers the other enforcement point, the packet filter.
 
 ### `cloop egress firewall`
 
-Render the packet filter an egress authorisation compiles to, or ask what it
-would do to one address.
+Show the packet filter that an egress authorisation compiles to, or ask what it
+would do with one address.
 
-The two enforcement points answer different questions and an operator has to be
-able to see both. `cloop egress test` asks the *proxy* "may I connect to this
-URL", which is the layer-7 answer and depends on the workload choosing to use
-the proxy. This asks the *packet filter* "would this packet leave", which is the
-answer that binds a workload that does not.
+`cloop egress test` asks the proxy whether a connection to a URL is allowed.
+That is the layer-7 answer, and it only applies to a workload that uses the
+proxy. This command asks the packet filter whether a packet would leave the
+sandbox, which also applies to a workload that doesn't use the proxy.
 
-The rendered output is the same text the driver installs, so it can be diffed
-against `nft list table inet cloop_sbx_<id>` on a host or
-`kubectl get netpol -o yaml` in a cluster. Nothing here touches the host: it
-compiles and prints.
+The output is the same text the driver installs, so you can diff it against
+`nft list table inet cloop_sbx_<id>` on a host or `kubectl get netpol -o yaml`
+in a cluster. The command changes nothing on the host; it only compiles and
+prints.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -2078,16 +2116,16 @@ compiles and prints.
 | `--table` | `cloop_sbx_preview` | nft table / NetworkPolicy name |
 | `--bridge` | | Host interface to filter; required by `--format nft-bridge` |
 | `--check` | | Report the verdict for one `address:port` and exit 1 if denied |
-| `--drop-denied` | | Render every deny as a silent drop instead of a refusal |
+| `--drop-denied` | | Render every deny as a drop, with no reply, instead of a refusal |
 
-`--format nft` renders the in-namespace form (output, input and forward chains,
-all defaulting to drop); `nft-bridge` renders the host-side form that filters
-one bridge. `--check` accepts an optional `/tcp` or `/udp` suffix and defaults
-to TCP.
+`--format nft` renders the form used inside the namespace (output, input and
+forward chains, all defaulting to drop). `nft-bridge` renders the host-side
+form, which filters one bridge. `--check` accepts an optional `/tcp` or `/udp`
+suffix and defaults to TCP.
 
-**Previewing a configuration before writing it.** The rules are printed in
-evaluation order, first match wins, with the reason that will appear in the
-ruleset and in the audit trail:
+**Previewing a configuration before you write it.** The rules are printed in
+evaluation order (the first match wins), each with the reason that will appear
+in the ruleset and in the audit trail:
 
 ```console
 $ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --format rules
@@ -2125,17 +2163,17 @@ IP-layer egress filter  mode filtered, 35 rules, from flags
   every deny is refused at once: a TCP reset, or an ICMP "administratively prohibited"
 ```
 
-The granted `10.8.0.0/24` is allowed *before* `10.0.0.0/8` is dropped: that
-ordering is the waiver rule, and it is why the grant buys that prefix on that
-port and nothing else. Two kinds of drop sit *ahead* of the granted allow, so a
-granted range never opens them: the IPv6 encodings that carry an IPv4 address (a
-packet filter cannot unwrap one, so it drops the prefix whole), and each cloud
-metadata service the range contains — `169.254.0.0/16` would hold six of them —
-which only the service's own `/32` or `/128` in `--cidrs` opens.
+The granted `10.8.0.0/24` is allowed *before* `10.0.0.0/8` is dropped. This
+ordering is how a grant waives a blocked range, and it means the grant opens
+that prefix on that port and nothing else. Two kinds of drop come *before* the
+granted allow, so a granted range never opens them. One is the IPv6 encodings
+that carry an IPv4 address (a packet filter can't unwrap them, so it drops the
+whole prefix). The other is each cloud metadata service inside the range
+(`169.254.0.0/16` would contain six of them), which only the service's own
+`/32` or `/128` in `--cidrs` opens.
 
-**Seeing what a hostname allowlist became.** The warning is the point of the
-command, not decoration — it appears in every format, including the nft
-comments:
+**Seeing what a hostname allowlist turns into.** The warning appears in every
+format, including as comments in the nft output:
 
 ```console
 $ cloop egress firewall --internet --ports 443 --format rules
@@ -2146,14 +2184,12 @@ warning: every public address is reachable on port 443; only the private, loopba
 warning: no resolver is allowed, so DNS will fail: name lookups leave the sandbox on UDP/53 and this policy drops them. Pass the sandbox's resolvers, or use the broker, which resolves on its behalf.
 ```
 
-With `--grant <id>`, a grant whose allowlist is hostnames produces a warning
-naming those hostnames and the port they widened to, because that is the single
-most useful thing this command reports.
+With `--grant <id>`, a grant whose allowlist contains hostnames produces a
+warning that names those hostnames and the port they widened to.
 
-**Asking about one address — `--check`.** The verdict is on stdout and *also*
-in the exit status: **0** when the packet would leave, **1** when it would be
-denied. An operator automating "is this sandbox still confined" should not
-have to parse prose.
+**Asking about one address with `--check`.** The verdict is printed on stdout
+and also given as the exit status: 0 when the packet would leave, 1 when it
+would be denied. Scripts don't need to parse the output.
 
 ```console
 $ cloop egress firewall --internet --ports 443 --check 169.254.169.254:80
@@ -2172,15 +2208,14 @@ $ echo $?
 1
 ```
 
-The third is the useful one: the address is inside the granted range, and it is
-dropped anyway, because the waiver covers the prefix *on its ports*. The reason
-names the rule that decided, so "why can my sandbox not reach this" has an
-answer rather than a guess.
+In the third example, the address is inside the granted range but is still
+dropped, because the grant covers the prefix only *on its ports*. The reason
+names the rule that decided, so you can see why a sandbox can't reach an
+address.
 
 **Rendering what a host would run.** `nft-bridge` is the form the container
-driver installs, and both hooks carry the same rules — `forward` for
-destinations the host routes onward, `input` for destinations that belong to
-the host itself:
+driver installs. Both hooks carry the same rules: `forward` for destinations
+the host routes onward, and `input` for destinations on the host itself:
 
 ```console
 $ cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --resolver 10.88.0.1 \
@@ -2218,65 +2253,65 @@ table inet cloop_sbx_container {
 }
 ```
 
-Every deny path jumps to the `deny` chain, which refuses: a TCP reset, or an
-ICMP "administratively prohibited", so a blocked connect fails at once rather
-than after a timeout (`--drop-denied` renders a plain drop instead). The chain
-policy is `accept` and the deny is explicit, because base chains on the same
-hook all run: a `policy drop` here would take down every other container on the
-host. The driver installs the same ruleset with a rate-limited `log … group N`
-statement ahead of each deny path, which is how a run's refusals reach its
-history; this preview has no group to log to, so it shows none. Each chain returns immediately for traffic that is not
-from this sandbox's bridge. The `add table` / `delete table` / `table` preamble
-makes a re-apply replace rather than accumulate — `add` is a no-op on an
-existing table, which is what makes the `delete` safe on a first run — and
-`nft -f` commits the whole thing as one transaction. Every rule carries a
-`counter`, which is what makes
-`nft list table inet …` useful when a sandbox cannot reach something — see the
+Every deny path jumps to the `deny` chain, which refuses the connection with a
+TCP reset or an ICMP "administratively prohibited", so a blocked connection
+fails immediately instead of timing out (`--drop-denied` renders a plain drop
+instead). The chain policy is `accept` and the deny is explicit, because all
+base chains on the same hook run: a `policy drop` here would cut off every
+other container on the host. The driver installs the same ruleset with a
+rate-limited `log … group N` statement before each deny path, which is how a
+run's refusals get into its history. This preview has no group to log to, so it
+leaves those statements out. Each chain returns immediately for traffic that
+doesn't come from this sandbox's bridge. The `add table` / `delete table` /
+`table` preamble makes a re-apply replace the table instead of adding to it
+(`add` does nothing if the table exists, so the `delete` is safe on a first
+run), and `nft -f` applies it all as one transaction. Every rule has a
+`counter`, so `nft list table inet …` shows which rules matched when a sandbox
+can't reach something; see the
 [runbook](../operations/runbook.md#incident-playbooks).
 
-Full context: [IP-layer egress filtering](configuration.md#ip-layer-egress-filtering)
+See [IP-layer egress filtering](configuration.md#ip-layer-egress-filtering)
 for the config keys, and [the security model](../security/model.md#the-network-the-sandbox-sits-on)
-for what each layer does and does not bind.
+for what each layer does and doesn't enforce.
 
 ---
 
 ## Cleaning up after a killed control plane
 
-A hub that dies mid-run does not take its workloads with it. Containers, Pods
-and edge-device processes keep running, and since Task 20191 the next hub
-reattaches to the ones it can still identify and sweeps the rest — so these two
-commands are for the residue nothing is left to sweep: a host whose hub is not
-running, a runtime shared with one that never will be, and the half of the
-worktree cleanup that is too destructive to do unattended. See
-[the restart sweep](../architecture/executors.md#the-restart-sweep) for what the
-hub does on its own.
+When a hub dies during a run, its containers, Pods and edge-device processes
+keep running. The next hub reattaches to the ones it can still identify and
+removes the rest. These two commands clean up what is left: workloads on a
+host whose hub isn't running, or on a runtime shared with a hub that will never
+run again, and the part of the worktree cleanup that is too destructive to do
+unattended. See [the restart sweep](../architecture/executors.md#the-restart-sweep)
+for what the hub does by itself.
 
 ### `cloop executor reap <executor-id>`
 
-Remove sandbox containers or Pods this control plane created but no longer
-tracks. It takes exactly one executor ID and applies to `container` and
-`kubernetes` executors; anything else is refused by kind.
+Remove sandbox containers or Pods that this control plane created but no longer
+tracks. It takes exactly one executor ID and works on `container` and
+`kubernetes` executors; other kinds are refused.
 
-Both backends remove **terminated** workloads immediately, and **running** ones
-once they are older than that executor's
-[`orphan_grace_period_seconds`](configuration.md#container-sandbox) — ten minutes
-by default. The running case is the one that matters: an exited container holds a
-name and a writable layer, while a running orphan keeps burning a core, or a
-node's CPU and a ResourceQuota slot, with nobody reading its output.
+Both backends remove terminated workloads immediately, and running ones once
+they are older than that executor's
+[`orphan_grace_period_seconds`](configuration.md#container-sandbox) (ten minutes
+by default). Running orphans matter most: an exited container only holds a name
+and a writable layer, but a running orphan keeps using a CPU core, or a node's
+CPU and a ResourceQuota slot, with nobody reading its output.
 
-The grace period is what makes touching a running workload safe. A container or
-Pod that appeared moments ago may belong to a control plane that is starting
-right now, or to this one between dispatching a workload and recording its
-handle; anything older than the grace period has outlived both windows. A
-running container is additionally required to carry this executor's own labels,
-so two container executors sharing a host cannot reap each other's work.
+The grace period makes it safe to remove running workloads. A container or Pod
+that appeared moments ago may belong to a control plane that is starting up, or
+to this one in the gap between starting a workload and recording its handle.
+Anything older than the grace period is past both. A running container must
+also carry this executor's own labels, so two container executors sharing a
+host can't remove each other's work.
 
 ### `cloop worktree list` / `cloop worktree prune`
 
-Parallel task execution gives each task its own git worktree under
+When tasks run in parallel, each gets its own git worktree under
 `.cloop/worktrees/task-<id>`, on a branch named `cloop/task-<id>-<slug>`. Both
-are removed when the task finishes; a run killed in between leaks both. Both
-commands act on the current working directory's repository.
+are removed when the task finishes, but a run killed before then leaves both
+behind. Both commands work on the repository in the current directory.
 
 ```console
 $ cloop worktree list
@@ -2285,13 +2320,12 @@ TASK     BRANCH                                 DIR        GIT        AGE
 23       cloop/task-23-fix-parser               yes        no         26h0m0s
 ```
 
-`DIR` is whether the directory is on disk, `GIT` whether `git worktree list`
-still registers it. The two disagreeing is not an inconsistency to ignore, it is
-the leak: a directory with no registration is what a `git worktree prune` leaves
-behind, a registration with no directory is what an `rm -rf` leaves, and a sweep
-that consults only one source is blind to one of them. `list` also prints the
-`cloop/task-*` branches present in the repository, which is the population
-`prune` will not touch unless asked.
+`DIR` shows whether the directory is on disk, and `GIT` whether
+`git worktree list` still has it registered. If they disagree, that is a leak:
+a directory with no registration is what a `git worktree prune` leaves behind,
+and a registration with no directory is what an `rm -rf` leaves. Checking only
+one of them would miss the other kind. `list` also prints the `cloop/task-*`
+branches in the repository, which `prune` leaves alone unless you ask.
 
 `prune` removes the directories. Start with `--dry-run`.
 
@@ -2300,80 +2334,78 @@ that consults only one source is blind to one of them. `list` also prints the
 | `--dry-run` | `false` | Report the whole plan, including branches, without changing anything |
 | `--min-age` | `2h0m0s` | Only prune worktrees idle for at least this long; `0` disables the guard |
 | `--delete-branches` | `false` | Also delete `cloop/task-*` branches already merged into the base |
-| `--base` | the checked-out branch | Branch to test merged-ness against |
+| `--base` | the checked-out branch | Branch to check for merges against |
 
-**`--min-age` is the only flag here that can destroy work.** A live parallel
-run's worktrees are in that directory *right now*, and an agent that has been
-thinking for twenty minutes has written nothing in that time — mtime cannot tell
-"finished an hour ago" from "still running and quiet for an hour". Two hours is
-long enough to cover any plausible quiet period inside a running task; passing
-`--min-age 0` is how you say you have established that nothing is running, and
-git cannot restore what was never committed. A `git worktree lock` is honoured
-whatever the age, and a directory whose age cannot be read is kept.
+**`--min-age` is the only flag here that can destroy work.** The worktrees of a
+parallel run in progress are in that directory, and an agent that has been
+thinking for twenty minutes has written nothing in that time. The modification
+time can't
+tell "finished an hour ago" from "still running and quiet for an hour". Two
+hours covers any likely quiet period in a running task. Only pass
+`--min-age 0` once you are sure nothing is running: git can't restore work that
+was never committed. A `git worktree lock` is respected whatever the age, and a
+directory whose age can't be read is kept.
 
-**`--delete-branches` cannot delete unmerged work at any setting.** A branch is
-deleted only if its commits are already contained in `--base`, and the check is
-enforced twice — an explicit `git for-each-ref --merged` query, and then `git
+**`--delete-branches` can't delete unmerged work at any setting.** A branch is
+deleted only if its commits are already in `--base`, and this is checked twice:
+by an explicit `git for-each-ref --merged` query, and then by `git
 branch -d`, which refuses an unmerged branch on its own authority. `-D` is never
-used. Squash-merged branches are therefore kept and reported, because no ancestry
-test can see a squash: a stale ref costs a line of output, and being wrong the
-other way costs a task's only copy of its work.
+used. Squash-merged branches are therefore kept and reported, because no
+ancestry check can detect a squash merge.
 
-Every entry the sweep spares is reported with its reason, because the question
-after a prune is usually "why is this directory still full". A non-zero exit
-means some worktree could not be removed — a permission error, a busy mount —
-and names it; the others were still collected.
+Every entry the sweep keeps is reported with the reason. A non-zero exit means
+some worktree could not be removed (a permission error, a busy mount); the
+error names it, and the others were still removed.
 
 ---
 
 ## Device forwarders
 
-A device forwarder carries one on-prem USB device or network segment to the hub
-over an outbound tunnel; a binding gives it to one project's runs. See
-[the guide](../guides/device-forwarders.md) for the whole flow. Every command but
-the first acts on the control plane in the current directory.
+A device forwarder carries one on-premises USB device or network segment to the
+hub over an outbound tunnel, and a binding gives it to one project's runs. See
+[the guide](../guides/device-forwarders.md) for the whole flow. Every command
+except the first works on the control plane in the current directory.
 
 ### `cloop forward`
 
-Run the forwarder on the on-prem machine: `cloop forward --bundle <bundle>` the
-first time, plain `cloop forward` after (the credential is saved `0600` at
-`~/.cloop/forwarder.json`). `--usb vendor:product[:serial]` or `--interface
-<name>` names the device when no bundle does.
+Run the forwarder on the on-premises machine: `cloop forward --bundle <bundle>`
+the first time, and plain `cloop forward` after that (the credential is saved
+with mode `0600` at `~/.cloop/forwarder.json`). `--usb vendor:product[:serial]`
+or `--interface <name>` names the device when no bundle does.
 
 ### `cloop forward enroll` / `list` / `revoke <id>`
 
 `enroll --name N (--usb V:P[:S] | --interface I)` mints a single-use token and
-prints the `cloop forward --bundle …` command; `list` shows the forwarders;
-`revoke` revokes a token or a forwarder, its bindings with it, and tells the
-running hubs, which cut its live session and detach its device from every run.
+prints the `cloop forward --bundle …` command. `list` shows the forwarders.
+`revoke` revokes a token or a forwarder together with its bindings, and tells
+the running hubs, which end its live session and detach its device from every
+run.
 
 ### `cloop forward bind <forwarder-id>` / `bindings` / `unbind <binding-id>`
 
 `bind --project DIR [--virtual-executor ID] [--ttl 24h] [--target NAME
 --address CIDR --gateway IP --mtu N] [--note TEXT]` makes the forwarder's device
-available to the project's runs (only on that virtual executor, when given) for
-the TTL — at most 90 days. `bindings [--project DIR] [--all]` lists them;
-`unbind [--reason TEXT]` revokes one and tells the running hubs, which detach the
-device from a run holding it. Each is audited (`forwarder.bind`,
-`forwarder.unbind`).
+available to the project's runs (only on that virtual executor, if given) for
+the TTL, at most 90 days. `bindings [--project DIR] [--all]` lists the
+bindings. `unbind [--reason TEXT]` revokes one and tells the running hubs,
+which detach the device from any run holding it. Both are audited
+(`forwarder.bind`, `forwarder.unbind`).
 
 ## Executor internals
 
-Commands an executor runs on your behalf. They are documented because you will
-meet them in a container log or a failing init container, not because you are
-expected to type them.
+Commands that an executor runs for you. You don't normally type them, but you
+will see them in container logs and failing init containers.
 
 ### `cloop workspace provision`
 
-Materialise a git workspace into a directory, then exit. This is what an
-isolated executor runs *before* the harness starts: a Kubernetes init container
-named `workspace`, or any other place that has to hold the code before the
-workload does. The Kubernetes driver builds the argv, so the flags below are a
-wire format between the driver and this command rather than a UI.
+Check out a git workspace into a directory, then exit. An isolated executor
+runs this *before* the harness starts: in a Kubernetes init container named
+`workspace`, or anywhere else the code must be in place before the workload.
+The Kubernetes driver builds the arguments, so the flags below are an interface
+between the driver and this command, not one meant for people.
 
-> Unrelated to the other `cloop workspace` subcommands (`add`, `list`,
-> `switch`, …), which manage multiple cloop projects from one root. Same noun,
-> different feature.
+> This is unrelated to the other `cloop workspace` subcommands (`add`, `list`,
+> `switch`, …), which manage several cloop projects from one root directory.
 
 ```bash
 cloop workspace provision --dir /workspace/project --repo https://github.com/acme/app.git
@@ -2391,65 +2423,64 @@ cloop workspace provision --dir /workspace/project --repo https://github.com/acm
 | `--seed` | | Place the project state in this file into the checkout as `.cloop/state.json` once it is fetched |
 | `--seed-copy` | | Also leave the project state at this path, for `cloop workspace writeback --seed` (needs `--seed`) |
 
-**The project comes with the tree** (Task 20402). A clone of a source
-repository is not a cloop project, so for a seeded run the Kubernetes driver
-projects the hub's project state into this container — and this container only —
-and passes `--seed`. After the fetch the command writes it into the checkout,
-exactly as a remote agent does after its own, and keeps `.cloop/` out of the
-tree's commits (an `info/exclude` entry, and skip-worktree on anything the
-repository tracks under it), so neither the harness nor the push write-back can
-commit the hub's project into the repository. A `.cloop/` the repository commits
-is superseded: its database is removed from the working tree first, and the run
-sees the hub's project. `--seed-copy` leaves the bytes where the harness's
-wrapper reads the run's changes back against them. See
+**The project state comes with the tree.** A clone of a source repository is
+not a cloop project, so for a seeded run the Kubernetes driver puts the hub's
+project state into this container (and only this one) and passes `--seed`.
+After the fetch, the command writes it into the checkout, as a remote agent
+does after its own fetch. It keeps `.cloop/` out of the tree's commits (with an
+`info/exclude` entry, and skip-worktree on anything the repository tracks under
+it), so neither the harness nor the push write-back can commit the hub's
+project into the repository. If the repository commits its own `.cloop/`, the
+hub's project replaces it: its database is removed from the working tree first,
+and the run sees the hub's project. `--seed-copy` leaves a copy of the state
+where the harness's wrapper compares the run's changes against it. See
 [Kubernetes: the seed in a Secret, the outcome in the log](../architecture/executors.md#kubernetes-the-seed-in-a-secret-the-outcome-in-the-log-task-20402).
 
-`--dir` must be absolute: a relative path would resolve against whatever working
-directory the process happens to have, which inside a Pod is the image author's
-choice rather than the driver's. The repo URL must be `https://` and must not
-embed credentials — see [the workspace contract](../architecture/executors.md#workspace-provisioning)
-for why.
+`--dir` must be absolute, because a relative path would depend on the Pod's
+working directory, which the image author chooses, not the driver. The repo URL
+must be `https://` and must not contain credentials;
+[the workspace contract](../architecture/executors.md#workspace-provisioning)
+explains why.
 
-**Credentials come from the environment**, because that is the only channel a
-Pod has that is neither an argv (`/proc` publishes those to every process under
-the same uid) nor a file (which outlives the process that needed it):
+**Credentials come from the environment.** It is the only channel a Pod has
+that is neither the command line (`/proc` shows it to every process with the
+same uid) nor a file (which outlives the process that needed it):
 
 | Variable | Meaning |
 |----------|---------|
 | `CLOOP_WORKSPACE_TOKEN` | the bare token; absent or empty means an unauthenticated fetch, which works for a public repository |
 | `CLOOP_WORKSPACE_USER` | the basic-auth username; defaults to `x-access-token`, which is what GitHub expects alongside a PAT |
 
-Both are read and **removed from the process's environment before anything is
-spawned**, and no output of this command can contain either — every byte it
-writes and every error it returns is passed through the same redaction the
-provisioner applies.
+Both are read and removed from the process's environment before anything else
+is started, and no output of this command can contain either: everything it
+writes and every error it returns passes through the provisioner's redaction.
 
-The sequence is `git init`, `remote add origin`, `fetch`, then
-`checkout --detach FETCH_HEAD` — not `git clone`, because `clone` cannot name a
-bare commit SHA. A directory that already holds a checkout of the *same* remote
-is fetched into rather than re-cloned; one holding a *different* remote is a
-refusal naming both URLs, since re-cloning would discard whatever is there.
+The steps are `git init`, `remote add origin`, `fetch`, then
+`checkout --detach FETCH_HEAD`. It doesn't use `git clone`, because `clone`
+can't check out a bare commit SHA. If the directory already holds a checkout of
+the *same* remote, the command fetches into it. If it holds a *different*
+remote, the command refuses with an error naming both URLs, because cloning
+again would discard whatever is there.
 
-Running it by hand is the way to reproduce a workspace failure outside a
-cluster:
+To reproduce a workspace failure outside a cluster, run it by hand:
 
 ```bash
 CLOOP_WORKSPACE_TOKEN=ghp_… cloop workspace provision \
     --dir /tmp/repro --repo https://github.com/acme/app.git --ref main
 ```
 
-A non-zero exit means the tree is not there. The message names the machine, the
+A non-zero exit means the tree isn't there. The message names the machine, the
 repository and the directory, and is safe to paste into a bug report.
 
 ### `cloop workspace writeback`
 
-Run a harness, then return what it produced from a sandbox that will not
-outlive it: the files it changed, as a commit on a `cloop/` branch, and — for a
-seeded run — the project state it recorded. It is the harness container's
-command on Kubernetes and in a container executor's feature mode, with the
-harness's own argv after `--`; it forwards the harness's output and signals and
-exits with its status. Like `provision`, its flags are a wire format the driver
-renders.
+Run a harness, then return what it produced from a sandbox that is removed
+when the harness ends: the files it changed, as a commit on a `cloop/` branch,
+and, for a seeded run, the project state it recorded. It is the harness
+container's command on Kubernetes and in a container executor's feature mode,
+with the harness's own command line after `--`. It passes on the harness's
+output and signals, and exits with its status. As with `provision`, the driver
+builds its flags.
 
 ```bash
 cloop workspace writeback --dir /workspace --repo https://github.com/acme/app.git \
@@ -2473,11 +2504,11 @@ cloop workspace writeback --dir /workspace --seed /run/cloop/dispatch/seed.gz \
 | `--project-result-frame` | | Print it on stdout instead, as the last thing this command prints, as a framed and checksummed block tagged with this value (Kubernetes) |
 | `--place-seed` | `false` | Place `--seed` into `--dir` before the harness starts |
 
-A delivery (`--push` or `--bundle`) is required unless the command is returning
-only a seeded run's project state; then `--repo`, `--branch`, `--base`,
-`--message` and `--max-bundle-bytes` are refused rather than ignored. The
-write-back's report is one `##cloop-writeback-v1##` line on stdout, printed
-whatever happened. The project-result frame follows it — a Pod's log is its only
-way home — and the driver lifts it out of the log before the live log and the
-run's artifact see it, so it only shows in `kubectl logs`.
+A delivery (`--push` or `--bundle`) is required unless the command returns only
+a seeded run's project state. In that case `--repo`, `--branch`, `--base`,
+`--message` and `--max-bundle-bytes` are refused, not ignored. The write-back's
+report is one `##cloop-writeback-v1##` line on stdout, printed whatever
+happened. The project-result frame follows it, because a Pod's log is the only
+way to get it back to the hub. The driver removes the frame from the log before
+the live log and the run's artifact see it, so it only shows in `kubectl logs`.
 

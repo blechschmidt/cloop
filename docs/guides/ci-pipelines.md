@@ -1,8 +1,8 @@
 # Running an agent in CI without giving CI a key
 
-How a GitHub Actions job runs Claude Code against your cloop hub's Anthropic
-credential — without that credential ever reaching the runner, and without a
-long-lived secret in the repository.
+A GitHub Actions job can run Claude Code with your cloop hub's Anthropic
+credential. The credential never reaches the runner, and the repository needs
+no long-lived secret.
 
 - [The problem](#the-problem)
 - [How it works](#how-it-works)
@@ -20,21 +20,20 @@ long-lived secret in the repository.
 
 ## The problem
 
-The obvious way to run an agent harness in CI is an `ANTHROPIC_API_KEY`
-repository secret. It is also the wrong way, for four reasons that have nothing
-to do with each other:
+The usual way to run an agent harness in CI is an `ANTHROPIC_API_KEY`
+repository secret. That has four separate problems:
 
-- the key is **long-lived**, so a leak is permanent until someone notices;
-- it is **copied into every job** that can read the secret, including ones
-  added later by someone who did not think about it;
-- it **survives the job** that used it — a key exfiltrated from a runner works
-  from anywhere, forever;
-- nothing about a request made with it says **which pipeline** spent it, so
-  "why did our bill triple" has no answer.
+- The key is long-lived, so a leaked key works until someone notices.
+- Every job that can read the secret gets a copy, including jobs someone adds
+  later without thinking about it.
+- The key outlives the job that used it. A key taken from a runner works from
+  anywhere.
+- A request made with the key doesn't say which pipeline sent it, so if your
+  bill triples, you can't find out why.
 
-GitHub Actions can instead mint a short-lived, signed OIDC token that says what
-the job *is* — repository, ref, workflow, environment, actor, event — and hand
-it to a third party. cloop is the third party.
+Instead, GitHub Actions can mint a short-lived, signed OIDC token that
+describes the job (its repository, ref, workflow, environment, actor and
+event) and hand it to a third party: your cloop hub.
 
 ## How it works
 
@@ -59,21 +58,22 @@ GitHub Actions runner                         cloop hub                    Anthr
         │<────────────────────────────────────────│<───────────────────────────│
 ```
 
-The runner never holds the hub's Anthropic credential. It holds a session token
-that is worth only what its rule says — these models, this many requests, this
-long — and that the hub can revoke mid-job.
+The runner never holds the hub's Anthropic credential. It gets a session token
+that allows only what its rule allows (certain models, a number of requests,
+a lifetime), and the hub can revoke it in the middle of a job.
 
-Trust is established in **two independent halves**, and both are required:
+The hub accepts an OIDC token only if it passes two separate checks:
 
-1. **Verification** proves the forge signed this token and minted it for this
-   hub. On its own this proves nothing useful: every repository on GitHub can
-   obtain a correctly signed token naming itself.
-2. **Matching** proves you meant to trust the identity it describes. That is
-   the allowlist below.
+1. **Verification** checks that the forge signed the token and minted it for
+   this hub. That alone isn't enough, because any repository on GitHub can get
+   a correctly signed token naming itself.
+2. **Matching** checks that you chose to trust the identity in the token. That
+   is the allowlist below.
 
 ## Turning it on
 
-Settings → **CI/CD pipelines**, or in `.cloop/config.yaml`:
+Turn federation on under Settings → **CI/CD pipelines**, or in
+`.cloop/config.yaml`:
 
 ```yaml
 ui:
@@ -85,21 +85,23 @@ ui:
       - claude-haiku-*
 ```
 
-The hub relays with `anthropic.api_key` — the credential the rest of cloop
-already uses. Set `ui.ci.upstream_auth_token` instead if you relay with an
-OAuth bearer, or `ui.ci.upstream_base_url` if you front the API with a gateway.
+The hub relays requests with `anthropic.api_key`, the credential the rest of
+cloop already uses. To relay with an OAuth bearer token, set
+`ui.ci.upstream_auth_token` instead. If a gateway sits in front of the API,
+set `ui.ci.upstream_base_url`.
 
-With `enabled: false` both endpoints refuse whatever rules are stored. That is
-the switch to reach for when a pipeline is misbehaving and you want it stopped
-now rather than after you have finished reading the allowlist.
+With `enabled: false`, the token exchange and the relay both refuse every
+request, whatever rules are stored. Use it to stop a misbehaving pipeline at
+once, before you work out which rule to change.
 
-> **A hub with federation on and no Anthropic credential answers every exchange
-> with a 503.** The Settings panel says so before a pipeline finds out.
+> A hub with federation on but no Anthropic credential answers every exchange
+> with a 503. The Settings panel warns about this before a pipeline runs into
+> it.
 
 ## Allowlisting a pipeline
 
-A rule has two kinds of matcher and they compose with **AND**. The glob fields
-cover what nearly every deployment needs:
+A rule can match on glob fields and on a condition, and a pipeline must satisfy
+both. The glob fields cover what nearly every deployment needs:
 
 | Field | Matches | Example |
 | --- | --- | --- |
@@ -110,28 +112,27 @@ cover what nearly every deployment needs:
 | `actor` | who triggered the run | `dana` |
 | `event_name` | the triggering event | `push` |
 
-A trailing `/**` admits anything strictly below the prefix; a bare `*` does not
-cross a `/`, same as everywhere else in cloop.
+A trailing `/**` matches anything strictly below the prefix. A bare `*` doesn't
+match across a `/`, as everywhere else in cloop.
 
-**Every rule must identify the repository.** A rule built only from `ref` and
-`workflow` would admit any repository on GitHub whose workflow happened to be
-called `release`, and would look, to whoever wrote it, like a rule about their
-own repository. Rules like that are refused when you save them.
+**Every rule must identify the repository.** The hub refuses to save a rule
+built only from, say, `ref` and `workflow`, because it would admit any
+repository on GitHub with a workflow called `release`, although its author
+probably meant only their own.
 
-**The owner segment may not contain a wildcard.** `*/tool` reads like "the tool
-repository" and means "any account that creates a repository called tool" —
-which anyone can do, in seconds, for free.
+**The owner segment may not contain a wildcard.** `*/tool` looks like it means
+"the tool repository", but it matches a repository called tool in any account,
+and anyone can create one.
 
-`environment` deserves a note: a token only carries that claim when the job
-declares an environment, so a rule that sets it never admits a job that did
-not. That is the point — it makes GitHub's own environment protection rules
-(required reviewers, branch restrictions) the approval gate in front of your
-Anthropic spend.
+A token carries the `environment` claim only when the job declares an
+environment, so a rule that sets `environment` never admits a job that doesn't.
+That lets GitHub's environment protection rules (required reviewers, branch
+restrictions) decide which jobs can spend on your Anthropic account.
 
 ## Conditions
 
-For policies a glob cannot state, a rule may carry a CEL expression over the
-token's claims:
+For policies that globs can't express, a rule can carry a CEL expression over
+the token's claims:
 
 ```
 assertion.repository == "acme/tool" && assertion.ref.startsWith("refs/heads/release/")
@@ -139,19 +140,17 @@ assertion.repository in ["acme/tool", "acme/other"]
 assertion.repository == "acme/tool" && assertion.runner_environment == "github-hosted"
 ```
 
-This is the same shape as Google's workload identity federation
-`attribute_condition`, deliberately, because anyone federating GitHub Actions
-has probably read those docs.
+They follow the form of the `attribute_condition` in Google's workload
+identity federation, because anyone federating GitHub Actions has probably
+read those docs.
 
 ### Every GitHub claim is a string
 
-Before the grammar, the one fact that causes more broken rules than the rest of
-this section combined:
-
-**GitHub sends every one of its claims as a JSON string — `repository_id`,
-`actor_id`, `run_id`, `run_number`, `run_attempt` and `ref_protected`
-included.** Only the standard JWT time claims (`iat`, `exp`, `nbf`) are JSON
-numbers.
+GitHub sends every one of its claims as a JSON string, including
+`repository_id`, `actor_id`, `run_id`, `run_number`, `run_attempt` and
+`ref_protected`. Only the standard JWT time claims (`iat`, `exp`, `nbf`) are
+JSON numbers. Forgetting this breaks more rules than everything else in this
+section together.
 
 ```
 assertion.repository_id == "123456"    # correct
@@ -160,16 +159,14 @@ assertion.ref_protected == "false"     # correct — a stringified boolean
 assertion.ref_protected == false       # never matches
 ```
 
-The second and fourth lines are the natural thing to write and they cannot
-work. They are refused rather than silently evaluating false, so the rule
-editor's **Test** button tells you immediately — but no amount of re-reading
-the expression reveals the problem, because the expression is not what is
-wrong.
+The second and fourth lines look natural but can never match. The hub reports
+them as errors instead of evaluating them to false, so the rule editor's
+**Test** button shows the problem straight away. Re-reading the expression
+won't reveal it, because the expression itself looks right.
 
 ### The supported subset
 
-This is a **strict subset** of CEL, and what it leaves out is as important as
-what it keeps.
+Conditions use a strict subset of CEL. It supports the following:
 
 | Supported | Written as |
 | --- | --- |
@@ -183,91 +180,90 @@ what it keeps.
 | boolean connectives and grouping | `&&`, `\|\|`, `!`, `(` `)` |
 | four string methods | `startsWith`, `endsWith`, `contains`, `matches` |
 
-`&&` binds tighter than `||`, as in CEL. Comparisons do not chain: `a == b == c`
-is refused, because CEL reads it as `(a == b) == c` and nobody means that.
+`&&` binds tighter than `||`, as in CEL. Comparisons don't chain: `a == b == c`
+is refused, because CEL reads it as `(a == b) == c`, which is almost never what
+the author meant.
 
-`matches()` takes a **literal** regular expression — not a computed one — so a
-pattern that does not compile is caught when you save the rule rather than when
-a pipeline presents a token. It is RE2, unanchored (a search, not a full
-match), and supports inline flags like `(?i)`.
+`matches()` accepts only a literal regular expression, so a pattern that
+doesn't compile is caught when you save the rule, before any pipeline presents
+a token. Patterns use RE2 syntax, are unanchored (they search the claim and
+don't need to match all of it), and support inline flags such as `(?i)`.
 
 ### What is refused, and when
 
-Everything below is **refused when you save the rule**. That is the entire
-point: a construct this evaluator does not implement must never be a construct
-it *misreads*.
+The hub refuses to save a rule that uses anything below. Because these are
+caught at save time, the evaluator never misreads a construct it doesn't
+implement.
 
 | Refused | Write instead |
 | --- | --- |
-| `<` `>` `<=` `>=` | nothing — ordering has no use over identity claims |
+| `<` `>` `<=` `>=` | nothing: ordering is of no use for identity claims |
 | `+` `-` `*` `/` `%`, unary minus | nothing |
 | `? :` ternaries | `&&` / `\|\|` |
 | `has(assertion.x)` | pin the claim you want: `assertion.x == "…"` |
-| macros — `all`, `exists`, `exists_one`, `map`, `filter` | one narrow rule per case |
+| macros: `all`, `exists`, `exists_one`, `map`, `filter` | one narrow rule per case |
 | `size()`, `lowerAscii()`, and every function outside the four above | `matches("(?i)…")` for case folding |
-| indexing — `assertion.groups[0]` | `"eng" in assertion.groups` |
-| map literals and `in` over a map — `"k" in assertion.ctx` | `assertion.ctx.k == "…"` |
-| float and hex literals — `1.5`, `0x10` | decimal integers |
-| `null`, and `true`/`false`/`null` as field names | — |
-| mixed-type list literals — `["123456", 999]` | one type per list (see below) |
+| indexing, such as `assertion.groups[0]` | `"eng" in assertion.groups` |
+| map literals, and `in` over a map such as `"k" in assertion.ctx` | `assertion.ctx.k == "…"` |
+| float and hex literals, such as `1.5` and `0x10` | decimal integers |
+| `null`, and `true`/`false`/`null` as field names | nothing |
+| mixed-type list literals, such as `["123456", 999]` | one type per list (see below) |
 | `//` comments | the rule's **name** field |
-| durations, timestamps, optional chaining, type coercion | — |
+| durations, timestamps, optional chaining, type coercion | nothing |
 
-Several of these are legal CEL that this evaluator declines. `size()`,
-indexing, `has()`, macros and ternaries all *work* in real CEL; refusing them
-keeps the policy readable by eye, which is the property an audit reader needs.
-If you need one of them, you are describing a policy that should be several
-narrow rules.
+Some of these are valid CEL: `size()`, indexing, `has()`, macros and ternaries
+all work in real CEL. Leaving them out keeps every policy easy to read for
+whoever audits it. If you need one of them, write several narrow rules
+instead.
 
 ### Where this deliberately disagrees with CEL
 
-If you know CEL, these five are the surprises. Every one of them makes this
-evaluator **stricter** than CEL — it refuses where CEL would reach a verdict —
-and that direction is deliberate: a refusal costs you a clearer error message,
-whereas the opposite would admit a pipeline you did not intend.
+If you know CEL, these five differences may surprise you. In each one this
+evaluator is stricter than CEL: it returns an error where CEL would reach a
+verdict. That way a mistake in a rule costs you an error message, never a
+pipeline admitted by accident.
 
-- **A missing claim is an error, not `false`.** A rule reading
-  `assertion.environment` against a job that declared no environment does not
-  quietly fall through to its remaining conditions. It becomes undecidable, the
-  rule is skipped, and the reason is recorded.
+- **A missing claim is an error, not `false`.** If a rule reads
+  `assertion.environment` and the job declared no environment, the rule doesn't
+  fall through to its remaining conditions. It becomes undecidable: the hub
+  skips the rule and records why.
 - **Cross-type comparison is an error, including under `!=`.** In CEL,
-  `assertion.repository_id != 123456` is *true* for GitHub's string claim —
-  the types differ, so they are unequal. Here it is a refusal. A negated
-  condition over a mistyped claim is the one shape where CEL's answer is
-  "admit".
-- **No commutative absorption.** CEL lets `<error> || true` be `true` and
-  `<error> && false` be `false`, so that operand order does not matter. Here a
-  reached error propagates. `assertion.environment == "prod" || assertion.repository == "acme/tool"`
-  admits under CEL and is undecidable here when the token carries no
-  `environment`. Put the claim that is always present first, or split the rule.
-- **A claim that is present but `null` is an error**, not a value that compares
-  unequal to everything.
+  `assertion.repository_id != 123456` is true for GitHub's string claim,
+  because values of different types are unequal. Here it is an error. A negated
+  condition over a mistyped claim is the one case where CEL's answer would be
+  to admit the pipeline.
+- **No commutative absorption.** In CEL, `<error> || true` is `true` and
+  `<error> && false` is `false`, so that operand order doesn't matter. Here an
+  error propagates as soon as evaluation reaches it.
+  `assertion.environment == "prod" || assertion.repository == "acme/tool"`
+  admits under CEL but is undecidable here when the token has no `environment`
+  claim. Put the claim that is always present first, or split the rule.
+- **A claim that is present but `null` is an error**, rather than a value that
+  compares unequal to everything.
 - **A mixed-type list literal is refused when you save the rule.** CEL's own
   checker rejects `"123" in [123]`, but it accepts `assertion.x in [123, "123"]`
-  where the claim's type is not known statically. Here both are refused,
-  because a comparison across types cannot be decided and the alternative is
-  worse than a refusal: it would make the verdict depend on the order you typed
-  the entries in. `assertion.repository_id in ["123456", 999]` would admit —
-  the match is found before the `999` is reached — while
-  `assertion.repository_id in [999, "123456"]` would not. Same allowlist, same
-  intent, two different outcomes, and reordering a list silently changes who
-  gets in.
+  when the claim's type isn't known statically. Here both are refused. A
+  comparison across types can't be decided, and allowing it would make the
+  result depend on the order of the entries:
+  `assertion.repository_id in ["123456", 999]` would admit, because the match
+  is found before evaluation reaches `999`, while
+  `assertion.repository_id in [999, "123456"]` would not. Reordering the list
+  would change which pipelines get in.
 
-The subset's conformance against the reference CEL implementation is machine-
-checked: `pkg/celmatch/testdata/conformance.json` is a corpus of expressions
-and claim sets, `testdata/cel-verdicts.json` records what real `cel-go` does
-with each, and `testdata/conformance-table.txt` is the resulting side-by-side.
-Every row where the two disagree is the subset being stricter, and a test fails
+A test checks the subset against the reference CEL implementation.
+`pkg/celmatch/testdata/conformance.json` is a corpus of expressions and claim
+sets, `testdata/cel-verdicts.json` records what the real `cel-go` does with
+each, and `testdata/conformance-table.txt` shows the results side by side.
+Wherever the two disagree, the subset is the stricter one, and the test fails
 if that ever stops being true.
 
-Use **Test** in the rule editor. It answers both questions a rule's author has
-— does this compile, and would it admit the pipeline I am thinking of —
-without pushing a commit.
+Use **Test** in the rule editor to check, without pushing a commit, whether a
+rule compiles and whether it would admit the pipeline you have in mind.
 
 ## The workflow
 
-The Settings panel renders this with your hub's URL and audience filled in;
-copy it from there rather than from here.
+Copy this workflow from the Settings panel, which shows it with your hub's URL
+and audience filled in.
 
 ```yaml
 permissions:
@@ -298,44 +294,45 @@ steps:
     run: npx -y @anthropic-ai/claude-code --model sonnet -p "review the diff and fix any bug you find"
 ```
 
-`permissions: id-token: write` is the line people forget. Without it
-`$ACTIONS_ID_TOKEN_REQUEST_URL` is unset, and the step stops on its second line,
-before it reaches the hub, with a message that names the missing permission.
+`permissions: id-token: write` is the line people forget. Without it,
+`$ACTIONS_ID_TOKEN_REQUEST_URL` is unset, and the step stops at its second
+line, before it contacts the hub, with a message naming the missing
+permission.
 
-The step fails, rather than carrying on, whenever federation does. A `run:`
-step without a `shell:` runs under `bash -e`, which ignores a failed `curl` on
-the left of a pipe, and `jq -r` prints `null` for a field an error body does
-not have. Without `set -euo pipefail`, `curl -f` and `jq -e`, a refused
-exchange exports `ANTHROPIC_BASE_URL=null`, the step goes green, and the job
-fails one step later with Claude Code's `Invalid URL` — which names neither the
+If federation fails, the step fails too. A `run:` step without a `shell:` runs
+under `bash -e`, which ignores a failed `curl` on the left of a pipe, and
+`jq -r` prints `null` for a field that an error body lacks. Without
+`set -euo pipefail`, `curl -f` and `jq -e`, a refused exchange would export
+`ANTHROPIC_BASE_URL=null`, the step would pass, and the job would fail one
+step later with Claude Code's `Invalid URL` error, which mentions neither the
 allowlist nor the permission. With them, the job stops at the exchange and
 shows the hub's one-sentence reason.
 
-The `::add-mask::` matters: it stops the session token appearing in the job log
-if a later step echoes the environment.
+The `::add-mask::` line keeps the session token out of the job log if a later
+step prints the environment.
 
-`--model sonnet` matters too. Without it Claude Code picks its own default, and
-that changes between releases: 2.1.81 asks for `claude-sonnet-4-6`, while
-2.1.282 asks for `claude-opus-5-5`, which the hub's default allowlist (Sonnet
-and Haiku, see [Turning it on](#turning-it-on)) refuses on the agent's first
-call. `npx -y` runs whichever release is newest, so a job that relies on the
-default can break with nothing changed on either side. Name a model your rule
-admits — to let a pipeline use Opus, list it in the rule's `models`.
+Keep `--model sonnet` as well. Without it, Claude Code picks its own default
+model, which changes between releases: 2.1.81 asks for `claude-sonnet-4-6`,
+while 2.1.282 asks for `claude-opus-5-5`, which the hub's default allowlist
+(Sonnet and Haiku, see [Turning it on](#turning-it-on)) refuses on the agent's
+first call. `npx -y` runs the newest release, so a job that relies on the
+default can break with no change on your side or the hub's. Name a model your
+rule admits. To let a pipeline use Opus, add it to the rule's `models`.
 
-Nothing about the harness needs to know it is not talking to Anthropic. Claude
-Code reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`; the SDKs read
+The harness doesn't need to know that it is talking to the hub. Claude Code
+reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. The SDKs read
 `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`, and the relay accepts either
 credential header.
 
 **Tokens are single use.** A GitHub OIDC token stays valid for several minutes
-after the step that requested it, so one recovered from a debug log would
-otherwise be replayable for the rest of its life. Exchange it once; ask the
-forge for a fresh one if you need another.
+after the step that requested it, so otherwise anyone who found one in a debug
+log could replay it until it expired. Exchange each token once, and ask GitHub
+for a new one if you need another.
 
-This workflow is run end to end by `tests/ciworkflow`: a shell plays the
-GitHub runner and a stand-in plays GitHub's token service, while the hub and
-Claude Code are real. The test takes the snippet from the Settings panel and
-fails if this page publishes different text.
+`tests/ciworkflow` runs this workflow end to end against a real hub and real
+Claude Code, with a shell in place of the GitHub runner and a fake of GitHub's
+token service. The test takes the snippet from the Settings panel and fails if
+this page shows different text.
 
 ## What a session may do
 
@@ -347,68 +344,73 @@ fails if this page publishes different text.
 | lifetime | 60 min (max 6 h) | rule `ttl_seconds` |
 | API surface | `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET /v1/models/{id}` | fixed |
 
-A `max_tokens` over the cap is **clamped, not refused** — a stock SDK
-configuration must keep working behind a policy that sets one. A model outside
-the allowlist is refused, and the hub's credential is never attached to that
-request.
+A `max_tokens` above the cap is clamped to the cap instead of refused, so a
+stock SDK configuration keeps working under a policy that sets a cap. A request
+for a model outside the allowlist is refused, and the hub never attaches its
+credential to it.
 
-The API surface is fixed and narrow on purpose. Batches and files create state
-that outlives the job and is billed to your account; the organization endpoints
-are account administration. A pipeline lent the ability to ask a model a
-question has not been lent the ability to enumerate the workspace paying for it.
+The API surface is fixed and small. Batches and files create state that
+outlives the job and is billed to your account, and the organization endpoints
+administer the account. Permission to send prompts to a model doesn't let a
+pipeline list the workspace that pays for them.
 
 ## Watching and revoking
 
-**Live sessions** on the Settings panel shows every federated pipeline, what it
-has spent — requests, denials, input/output/cache tokens — and how much of its
-budget is left. Each row links to the Actions run that owns it.
+**Live sessions** on the Settings panel lists every federated pipeline with
+what it has spent (requests, denials, and input, output and cache tokens) and
+how much of its budget is left. Each row links to the Actions run it belongs
+to.
 
-Three things revoke a session immediately, mid-job:
+Three things revoke a session immediately, even in the middle of a job:
 
-- **Revoke** on the session row;
-- **editing or deleting its rule** — a session minted under the old text would
-  otherwise keep spending under a policy that no longer exists;
-- **turning federation off**. Each hub instance keeps to its own switch, which
+- **Revoke** on the session row.
+- **Editing or deleting its rule.** Otherwise a session minted under the old
+  rule would keep spending under a policy that no longer exists.
+- **Turning federation off.** Each hub instance follows its own switch, which
   its [instance overlay](../reference/configuration.md#two-dashboards-in-one-directory)
-  may set. Off through Settings, it ends that process's sessions at once, and
-  every member reading the same configuration ends its own within seconds.
-  Off by editing the file, a process notices within 15 seconds. To stop every
-  pipeline across a cluster whose members' overlays differ, disable or delete
-  the rules instead: that ends their sessions wherever they are served.
+  can set. Turning it off in Settings ends that process's sessions at once, and
+  every member that reads the same configuration ends its own within seconds.
+  If you turn it off by editing the file, a process notices within 15 seconds.
+  To stop every pipeline in a cluster whose members have different overlays,
+  disable or delete the rules instead. That ends their sessions on whichever
+  member serves them.
 
-Revocation stops the spend at once — every call after it is refused — but it
-does not end the job at once. A revoked or expired session is answered with a
-`401`, and Claude Code 2.1.282 retries that: eleven attempts over about three
-minutes, then it exits with `Not logged in · Please run /login`. So a revoked
-job holds its runner for those minutes and then fails with a message about
-logging in, not about the revocation.
+Revoking a session stops its spending at once, because every later call is
+refused, but the job keeps running for a while. The hub answers a revoked or
+expired session with a `401`, and Claude Code 2.1.282 retries: eleven attempts
+over about three minutes, after which it exits with
+`Not logged in · Please run /login`. So a revoked job holds its runner for
+those minutes and then fails with a message about logging in that doesn't
+mention the revocation.
 
-Every relay decision — allowed and denied, with the model and the token counts
-— lands in the hub's audit trail as `ci.relay.allowed` / `ci.relay.denied`,
-alongside `ci.exchange.accepted` / `ci.exchange.rejected` and the
-`ci.rule.*` changes an operator made.
+Every relay decision, allowed or denied, goes into the hub's audit trail as
+`ci.relay.allowed` or `ci.relay.denied`, with the model and the token counts.
+The trail also records `ci.exchange.accepted` and `ci.exchange.rejected`, and
+the `ci.rule.*` changes operators make.
 
 ## When the hub restarts
 
-A job outlives a restart of the hub it relays through — a nightly deploy, a
-rolling update of a [hub cluster](../architecture/hub-cluster.md). Its session
-is recorded when it is minted: the SHA-256 of its token, the rule and the
-verified claims of the OIDC token it was minted for, its policy and what it has
-spent. Never the token, and never the hub's Anthropic credential, which is the
-hub's configuration and not the session's.
+A job keeps working when the hub it relays through restarts, for example for a
+nightly deploy or a rolling update of a
+[hub cluster](../architecture/hub-cluster.md). When the hub mints a session,
+it records the SHA-256 of the session's token, the rule, the verified claims of
+the OIDC token it was minted for, its policy and what it has spent. It never
+records the token itself or the hub's Anthropic credential, which belongs to
+the hub's configuration.
 
-- A hub **stopped** gracefully suspends its sessions (`ci.session.suspended`)
-  instead of ending them, and writes what each had spent. One **killed**
-  outright leaves the same record, minus at most the last 15 seconds of its
-  spend: the counters are flushed every 15 seconds.
-- The job's next call reaches a hub process that has never heard of the
-  session, and that process restores it on the spot (`ci.session.restored`) —
-  no new token exchange, which the job could not make anyway: its OIDC token
-  has been spent, and the replay guard refuses it a second time. The call has
-  to present the session's token, which must hash to the record's; the record
-  moves to that process by a conditional write, so of two members receiving a
-  job's calls one restores the session and the other forwards to it.
-- The restored session is held to **its rule as the rule stands now**:
+- A hub that is stopped gracefully suspends its sessions
+  (`ci.session.suspended`) instead of ending them, and writes down what each
+  has spent. A hub that is killed leaves the same record, minus at most the
+  last 15 seconds of spending, because it flushes the counters every 15
+  seconds.
+- The job's next call reaches a hub process that doesn't know the session, and
+  that process restores it on the spot (`ci.session.restored`). There is no new
+  token exchange, and the job couldn't make one anyway: its OIDC token has
+  been used, and the replay guard refuses it a second time. The call must
+  present the session's token, whose hash must match the record. The record
+  moves to that process with a conditional write, so if two members receive a
+  job's calls, one restores the session and the other forwards to it.
+- The restored session must satisfy its rule as the rule stands now:
 
   | Since the session was minted… | Its next call |
   | --- | --- |
@@ -419,72 +421,75 @@ hub's configuration and not the session's.
 
   Its request budget is what it had left, not a fresh one.
 
-**Live sessions** lists a session no hub process serves right now as
+**Live sessions** shows a session that no hub process is serving right now as
 *suspended*. **Revoke** ends its record, so the job's next call is refused
-rather than restored. Editing or deleting its rule ends it too, and so does
-turning federation off on the instance that served it — through Settings or
-in the file, whether or not that instance is running: the hub ends such
-records within a minute, and refuses to restore one before then. A suspended
-session of an instance that keeps federation on is left alone.
+instead of restored. Editing or deleting its rule also ends it, and so does
+turning federation off on the instance that served it, through Settings or in
+the file, whether or not that instance is running. The hub ends such records
+within a minute and won't restore one in the meantime. A suspended session of
+an instance that keeps federation on is left alone.
 
 ## Debugging a refusal
 
-A refused pipeline gets one sentence and no detail. That is deliberate: the
-caller is unauthenticated by construction, so every word of explanation is a
-word an attacker enumerating your hub gets for free.
+A refused pipeline gets a one-sentence error and no detail. The caller hasn't
+authenticated, so any detail in the error would also help an attacker probing
+your hub.
 
-The detail is in **Recent exchanges** on the Settings panel, which records every
-attempt with the claims the token actually carried. The common causes:
+The details are in **Recent exchanges** on the Settings panel, which records
+every attempt with the claims its token carried. Common causes:
 
 | Symptom | Cause |
 | --- | --- |
 | `401`, "token was not accepted" | wrong `audience`, expired token, or the token was already exchanged |
-| `403`, "not on the allowlist" | no rule matched — compare the recorded claims against your rule |
+| `403`, "not on the allowlist" | no rule matched; compare the recorded claims with your rule |
 | `403` and the detail says *undecidable rules* | a rule reads a claim this token does not carry, usually `environment` |
 | `503` | federation is off, or the hub has no Anthropic credential |
-| relay `401`, "session token was not accepted" | the session expired or was revoked, or a restarted hub found its rule no longer admits it — Claude Code retries for minutes, then says `Not logged in` |
+| relay `401`, "session token was not accepted" | the session expired or was revoked, or a restarted hub found that its rule no longer admits it. Claude Code retries for minutes, then says `Not logged in` |
 | relay `403`, "model is not permitted" | the harness asked for a model outside the rule's allowlist |
 | relay `429` | the session's request budget is spent |
 
-The *undecidable rules* line is the one worth knowing about. From the
-pipeline's side it looks identical to "no rule matched", and an operator who
-cannot tell them apart will rewrite a rule that was nearly right.
+Look out for the *undecidable rules* case. From the pipeline's side it looks
+the same as "no rule matched", and an operator who can't tell the two apart
+may rewrite a rule that was nearly right.
 
-In the job log, an exchange refusal is the federation step's
-`cloop issued no session:` line, carrying the hub's one sentence. A relay refusal
-is whatever the harness makes of it, and Claude Code makes it misleading: it
-prints a relay `403` as `Failed to authenticate. API Error: 403 …`. Read
-past the prefix — `model "…" is not permitted for this pipeline` is the
-allowlist, not a bad credential.
+In the job log, a refused exchange appears as the federation step's
+`cloop issued no session:` line, followed by the hub's one sentence. How a
+refused relay call appears depends on the harness, and Claude Code's message
+is misleading: it prints a relay `403` as
+`Failed to authenticate. API Error: 403 …`. Read past the prefix.
+`model "…" is not permitted for this pipeline` means the rule's model
+allowlist refused the request, not that the credential is bad.
 
 ## Threat model
 
 **What an attacker who controls a runner gets.** A session token, until it
-expires or is revoked, bounded by its rule: those models, that many requests,
-that output size. They cannot reach the hub's dashboard, any project, any other
-secret, or any Anthropic endpoint outside the three listed above. They cannot
-raise their own limits — the policy lives in the hub, not in the token.
+expires or is revoked, limited by its rule: those models, that many requests,
+that output size. They can't reach the hub's dashboard, any project, any other
+secret, or any Anthropic endpoint other than the ones listed above. They can't
+raise their own limits, because the policy is kept in the hub, not in the
+token.
 
 **What an attacker who can open a pull request gets.** Nothing, unless a rule
-admits `pull_request` events from forks. GitHub does not issue an OIDC token to
-a fork PR workflow by default; if you widen that, widen it with a rule that
-names the environment and let GitHub's environment protection do the approving.
+admits `pull_request` events from forks. By default, GitHub doesn't issue an
+OIDC token to a workflow running for a pull request from a fork. If you allow
+that, do it with a rule that names an environment, and let GitHub's
+environment protection rules approve each run.
 
 **What an attacker who can merge to a matched branch gets.** Whatever the rule
-grants, because at that point they *are* the pipeline. This is the boundary the
-feature cannot move: pin `ref`, prefer `environment`, and keep budgets small.
+grants, because they now control the pipeline. Federation can't protect
+against this, so pin `ref`, prefer `environment`, and keep budgets small.
 
-**What a leaked session token gets.** The same as the runner, for the remainder
-of its TTL — which is why the TTL defaults to an hour and is capped at six, and
-why revocation is immediate rather than at expiry.
+**What a leaked session token gets.** The same as the runner, for the rest of
+its TTL. That is why the TTL defaults to an hour and is capped at six hours,
+and why revocation takes effect immediately instead of at expiry.
 
-**What the hub's operator can still see.** Which pipeline spent what. Prompts
-and completions are relayed, not inspected: the proxy moves bytes and decides
-whether it should. The only fields it reads are the model name and
-`max_tokens`, because those are the two that select and bound the spend.
+**What the hub's operator can still see.** Which pipeline spent what. The hub
+relays prompts and completions without inspecting them: the proxy forwards the
+bytes and decides whether to forward them. The only fields it reads are the
+model name and `max_tokens`, because those two choose and limit the spend.
 
 ---
 
-Related: [secrets and egress](secrets.md) for the same bargain applied to
+Related: [secrets and egress](secrets.md), which applies the same approach to
 GitHub tokens and kubeconfigs · [security model](../security/model.md) ·
 [HTTP API](../reference/http-api.md)

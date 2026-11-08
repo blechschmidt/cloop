@@ -1,43 +1,43 @@
 # Getting started
 
-Seven pages, in order. They assume nothing except a terminal and a provider you
-can reach — the last one, a hub someone else runs.
+Seven pages, best read in order. All you need is a terminal and access to a
+model provider, and for the last page, a hub that someone runs for your team.
 
-- **[Installation](installation.md)** — prerequisites, `go install`, building
-  from source, the container image, and shell completion. Ends with a working
-  binary.
-- **[Your first project](first-project.md)** — one walkthrough: set a goal,
-  read the plan cloop derives from it, run it, watch it, steer it, interrupt it.
-  Start here if you only read one page.
-- **[How cloop works](concepts.md)** — the loop itself. What a task is, how one
-  is picked and how its completion is detected, what happens when one fails,
-  and what auto-evolve does once the plan drains.
-- **[Choosing and configuring a provider](providers.md)** — the backends, what
-  each is good for, how provider and model are actually resolved, and the
-  environment variables that override them.
-- **[The web dashboard](web-ui.md)** — running `cloop ui`, what each screen
-  shows, and the authentication default you should know before binding it to
-  anything but localhost.
-- **[A walkthrough of the dashboard](walkthrough.md)** — the same ground as your
-  first project, done from a browser and in the order the screens come at you:
-  decide where work may run, create a project pinned there, then build and start
-  its plan. Screenshots throughout.
-- **[Working from a terminal](terminal.md)** — `cloop login` on a hub with
-  single sign-on: the code your terminal prints, approving it from the browser
-  you are signed in with, and the session that gives the terminal — then
+- **[Installation](installation.md)**: what you need, `go install`, building
+  from source, the container image and shell completion. At the end you have a
+  working `cloop` binary.
+- **[Your first project](first-project.md)**: a complete first run. You set a
+  goal, read the plan cloop makes from it, run it, watch it, change it and
+  stop it. If you only read one page, read this one.
+- **[How cloop works](concepts.md)**: what a task is, how cloop picks the next
+  one and knows when it is finished, what happens when a task fails, and what
+  auto-evolve does once the plan is done.
+- **[Choosing and configuring a provider](providers.md)**: the model backends
+  cloop can use, what each is good for, how cloop decides which provider and
+  model to use, and the environment variables that override that.
+- **[The web dashboard](web-ui.md)**: running `cloop ui`, what each screen
+  shows, and what to set up before you let anyone else reach it.
+- **[A walkthrough of the dashboard](walkthrough.md)**: a first project again,
+  this time in the browser, with screenshots. You choose where work may run,
+  create a project that runs there, add tasks and start it.
+- **[Working from a terminal](terminal.md)**: signing your terminal in to a hub
+  with `cloop login`. The terminal prints a code, you approve it in the browser
+  you are signed in with, and the terminal gets its own session. Then
   `cloop remote` for projects, tasks, runs and live logs, `cloop task attach`,
   and signing out.
 
 ## After that
 
-Nothing above assumes more than one machine or more than one person. The rest
-of the documentation is about relaxing those two assumptions:
+The pages above assume one machine and one person. The rest of the
+documentation covers what changes when there are more:
 
-- Running work somewhere other than the machine you typed on —
+- To run work on other machines, read the
   [executor architecture](../architecture/executors.md).
-- Letting other people in — [security model](../security/model.md), then the
+- To let other people use cloop, read the
+  [security model](../security/model.md), then the
   [operator runbook](../operations/runbook.md).
-- Giving a task a credential without giving it the credential's full power —
+- To give a task access to a repository, a cluster or the Internet without
+  handing over a full credential, read
   [secrets and egress](../guides/secrets.md).
 
 ---

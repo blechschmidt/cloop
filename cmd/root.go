@@ -26,15 +26,17 @@ var globalWorkspace string
 
 var rootCmd = &cobra.Command{
 	Use:   "cloop",
-	Short: "AI product manager and autonomous task pipeline",
-	Long: `cloop is a multi-provider AI product manager.
+	Short: "Build software from a goal, a task list or a specification with AI coding agents",
+	Long: `cloop builds software with AI coding agents.
 
-Define a project goal and cloop decomposes it into a visible task plan, then
-drives an AI provider through that plan autonomously. Supports Anthropic
-(Claude API), OpenAI, Ollama (local), and Claude Code.
+Give it a goal, a list of tasks or a specification. cloop splits the work into
+tasks and has a coding agent carry them out one by one in your repository:
+Claude Code by default, or the GitHub Copilot CLI, the Anthropic or OpenAI API,
+or a local Ollama model. It records every task's outcome, retries what fails,
+and keeps going until the plan is done.
 
-Commands are grouped below. Every group has more in it than the examples show —
-` + docsURL + ` is the full reference.`,
+Commands are grouped below, and each group has more commands than the examples
+show. The full reference is at ` + docsURL + `.`,
 	Example: `  cloop init "Build a REST API with user auth and CRUD endpoints"
   cloop run --auto-evolve   # keep discovering work after the plan drains
   cloop status              # where the plan stands

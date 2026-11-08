@@ -1,16 +1,17 @@
 # Multi-tenant soak
 
-`tests/soak` drives a hub under sustained concurrent load from several tenants
-at once and fails on the three things that only break there: cross-tenant
-bleed, leaked resources, and unbounded growth.
+`tests/soak` runs a hub under sustained, concurrent load from several tenants
+at once. It fails on three kinds of defect that only show up under that load:
+cross-tenant bleed (one tenant's output reaching another), leaked resources,
+and unbounded growth.
 
-It exists because the rest of the suite cannot see any of them. The
-[flagship circuit](../architecture/executors.md) proves one task completes one
-circuit; the security conformance suite machine-checks the guarantees against
-the source. Neither runs anything twice at the same moment — and every
-isolation defect this project has actually shipped was a concurrency defect.
-The cross-tenant live log leak fixed in Task 20189 came from the broadcast path
-walking every connected client, which is invisible with one client connected.
+The rest of the suite can't catch these. The
+[flagship circuit](../architecture/executors.md) runs one task through one
+circuit, and the security conformance suite checks the guarantees against the
+source. Neither runs two things at once, yet every isolation defect this
+project has shipped was a concurrency defect. One cross-tenant live log leak
+came from the broadcast path going through every connected client, which you
+can't see with only one client connected.
 
 ## Running it
 
@@ -18,133 +19,133 @@ walking every connected client, which is invisible with one client connected.
 CLOOP_SOAK=1 go test -race -timeout 30m ./tests/soak/
 ```
 
-It is opt-in: it drives the container runtime, writes to machine-global paths,
-and takes minutes. Without `CLOOP_SOAK` the soak skips, and only the detector
-tests below run.
+It is opt-in because it drives the container runtime, writes to
+machine-global paths and takes minutes. Without `CLOOP_SOAK` it is skipped, and
+only the detector tests below run.
 
-`-race` is not optional in spirit. A data race in the broadcast path is how a
-frame reaches the wrong room in the first place.
+Always run it with `-race`. A data race in the broadcast path is how a frame
+reaches the wrong room in the first place.
 
 ### Knobs
 
-Each is a flag with an environment-variable equivalent, so CI can set it
-without a shell-quoting argument.
+Each setting is a flag with an equivalent environment variable, so CI can set
+it without quoting shell arguments.
 
 | Flag | Env | Default | What it changes |
 | --- | --- | --- | --- |
 | `-soak.tasks` | `CLOOP_SOAK_TASKS` | 20 | Total container dispatches |
 | `-soak.tenants` | `CLOOP_SOAK_TENANTS` | 3 | Distinct identities competing |
 | `-soak.projects-per-tenant` | `CLOOP_SOAK_PROJECTS_PER_TENANT` | 2 | Projects each tenant owns |
-| — | `CLOOP_SOAK_IMAGE` | built | Use a prepared sandbox image instead of building one |
-| — | `CLOOP_SOAK_BASE_IMAGE` | `alpine:3.20` | Base the built image derives from |
-| — | `CLOOP_SOAK_RUNTIME` | auto | Pin `docker` or `podman` |
-| — | `CLOOP_SOAK_KEEP` | unset | Leave the soak root in place for post-mortem |
+| | `CLOOP_SOAK_IMAGE` | built | Use a prepared sandbox image instead of building one |
+| | `CLOOP_SOAK_BASE_IMAGE` | `alpine:3.20` | Base image for the built image |
+| | `CLOOP_SOAK_RUNTIME` | auto | Pin `docker` or `podman` |
+| | `CLOOP_SOAK_KEEP` | unset | Leave the soak root in place for a post-mortem |
 
-Tenants times projects is the concurrency ceiling, not `-soak.tasks`. The hub
-refuses a second simultaneous run on one project — by design, with a 409 — so
-the number of projects is the number of containers that can be in flight at
-once, and the tasks queue behind them.
+The concurrency limit is tenants times projects per tenant, not `-soak.tasks`.
+The hub refuses a second simultaneous run on the same project with a 409, so
+the number of projects is the number of containers that can run at once, and
+the remaining tasks queue behind them.
 
-Three tenants is the floor the suite enforces. With two, a broadcast bug and a
-routing bug look identical.
+The suite runs three tenants by default, because three is the smallest number
+that tells "A leaked to B" apart from "everyone sees everything": with two, a
+broadcast bug and a routing bug look the same. It refuses to run with fewer
+than two.
 
 ## What it actually runs
 
-A real hub, in-process, with `allow_host_process: false` — the posture an
-enterprise deployment runs in, where the web UI cannot spawn a harness on the
-host at all. Real project-scoped API tokens are the tenant boundary. Every task
-is a real container dispatched through `POST /api/run`, streamed back through
-the real broadcast path, and observed by real WebSocket subscribers: one per
-project plus one global-scope connection per tenant.
+A real hub runs in the test process with `allow_host_process: false`, as in
+an enterprise deployment, where the web UI can't start a harness on the host.
+Real project-scoped API tokens separate the tenants. Every task is a real
+container started through `POST /api/run`, and its output comes back through
+the real broadcast path to real WebSocket subscribers: one per project, plus
+one global-scope connection per tenant.
 
-The one stand-in is the workload. Instead of an agent harness, the sandbox runs
-a short script that reads a canary out of its own bind-mounted workspace and
-echoes it. That substitution is the point: the suite tests the hub's isolation
-of concurrent workloads, not an agent's behaviour, and an unpredictable
-workload would make bleed undetectable. Reading the canary from the workspace
-rather than the environment is also deliberate — it makes the value a function
-of the bind mount the executor set up, so a frame carrying tenant A's canary
-proves A's project directory was mounted into the container that produced it.
+Only the workload is a stand-in. Instead of an agent harness, the sandbox runs
+a short script that reads a canary from its bind-mounted workspace and prints
+it. The suite tests how the hub isolates concurrent workloads, not how an agent
+behaves, and unpredictable output would make bleed impossible to detect. The
+canary is read from the workspace, not the environment, so a frame carrying
+tenant A's canary proves that A's project directory was mounted into the
+container that produced it.
 
-Each project is also granted a real credential — a kubeconfig, because it is
-delivered as bytes on disk rather than as an environment variable, which is the
-path the wipe guarantee covers. The workload reports that the credential
-arrived and how large it was, and never its contents.
+Each project is also granted a real credential: a kubeconfig, because it is
+delivered as a file on disk, which is what the wipe guarantee covers. The
+workload reports that the credential arrived and its size, never its
+contents.
 
 ## The three assertions
 
 **Zero cross-tenant bleed.** Every frame delivered to a tenant's subscriber is
-scanned for every other tenant's canary and for every project's credential
-sentinel. A hit names the recipient, the owner, the task, the frame type and
-the payload — a soak that reports "mismatch" teaches nobody anything.
+searched for every other tenant's canary and for every project's credential
+sentinel. A match is reported with the recipient, the owner, the task, the
+frame type and the payload, so the failure says what leaked and where.
 
-The positive control is part of the assertion, not a diagnostic beside it: each
-project-scoped stream must have carried its *own* project's output. A hub that
-delivered nothing to anybody would have zero cross-tenant frames and would pass
-a leak-only check while being completely broken.
+The assertion also includes a positive control: each project-scoped stream must
+have carried its *own* project's output. Without it, a hub that delivered
+nothing to anybody would have zero cross-tenant frames and would pass.
 
-**Zero leaked resources.** After the load settles: no container from this run's
-executor survives, no credential staging directory created during the run
-remains, no byte of any granted credential is findable on disk, and the
-goroutine count has not risen above the post-warm-up baseline by more than a
-fixed slack. The slack is fixed rather than proportional to task count on
-purpose — a leak that scales with the load is the whole defect class, so a
-budget that also scaled would grow to accommodate it.
+**Zero leaked resources.** Once the load has settled, the soak checks that no
+container from this run's executor is left, no credential staging directory
+created during the run remains, no byte of any granted credential is on disk,
+and the goroutine count is at most a fixed slack above the baseline taken after
+warm-up. The slack doesn't grow with the number of tasks, because the leaks it
+looks for do, and an allowance that grew with them would hide them.
 
-**Bounded growth.** Control-plane and project database sizes (including the
-`-wal` sidecar, without which a commit is invisible to a `stat`), audit row
-count, and resident memory are sampled at quarter marks. The check compares the
-second half's per-task cost against the first half's rather than against an
-absolute ceiling, because that is what distinguishes the defects it stands in
-for: the audit amplification fixed in Task 20218 and the unbounded retention
-fixed in Task 20229 both look fine at small totals, and what gives them away is
-that each additional task costs more than the last.
+**Bounded growth.** The soak samples the control-plane and project database
+sizes (including the `-wal` file, without which a `stat` doesn't see a commit),
+the audit row count and resident memory at each quarter of the run. It compares
+the second half's cost per task with the first half's, not with an absolute
+ceiling, because defects such as audit amplification and unbounded retention
+(this project has had both) look fine at small totals. What gives them away is
+that each task costs more than the last.
 
 ## The detector tests
 
-`tests/soak` also contains `TestDetector_*`, which run on every `go test ./...`
-with no container runtime and no opt-in. They plant each defect — a
-cross-tenant frame, a leaked credential in a frame, credential bytes surviving
-on disk, a quadratic growth curve — and assert the corresponding detector
-reports it, with the right facts in the message.
+`tests/soak` also contains `TestDetector_*`. These run on every `go test ./...`
+and need no container runtime and no opt-in. Each one plants a defect (a
+cross-tenant frame, a leaked credential in a frame, credential bytes left on
+disk, a quadratic growth curve) and checks that the matching detector reports
+it, with the right details in the message.
 
-They exist because the soak's value is entirely in its ability to fail, and a
-detector that silently stopped working would otherwise be discovered only by a
-soak that quietly passed.
+The soak is only useful if it can fail. Without these tests, a detector that
+stopped working would only show up as a soak that kept passing.
 
 ## In CI
 
-The `concurrency-soak` job runs it on every push and pull request, under
-`-race`, gating rather than advisory.
+The `concurrency-soak` job runs the soak with `-race` on every push and pull
+request, and a failure fails the build.
 
-The job does not trust the exit code. The suite *skips* when `CLOOP_SOAK` is
-unset or no container runtime answers, and a skip exits 0 — so the job requires
-each of the three assertions to have passed by name, and requires the log to
-show that the configured number of tasks was actually driven. A green status
-with any of those missing is reported as an error.
+The job doesn't rely on the exit code, because the suite skips when
+`CLOOP_SOAK` is unset or no container runtime responds, and a skip exits 0. It
+also checks the log: each of the three assertions must have passed by name, and
+the configured number of tasks must have run. If either is missing, the job
+reports an error.
 
-Only the registry pull retries. The soak itself never does: re-running a failed
-isolation assertion is how a real regression gets re-run away.
+Only the image pull from the registry is retried. The soak itself is never
+retried, because retrying a failed isolation assertion until it passes would
+hide a real regression.
 
 ## Notes for operators
 
-**The per-IP WebSocket cap applies fleet-wide behind a proxy.** The hub bounds
-concurrent WebSocket connections per source address, defaulting to 8. The soak
-raises that bound for itself, because collapsing distinct tenants onto
-127.0.0.1 is an artefact of running the hub and its clients in one process.
+**The per-IP WebSocket cap applies fleet-wide behind a proxy.** The hub limits
+concurrent WebSocket connections per source address, to 8 by default. The soak
+raises the limit for itself: its tenants all connect from 127.0.0.1 only
+because the hub and its clients run in one process.
 
-The same collapse happens for real in a deployment that terminates TLS at a
-reverse proxy without setting `behind_proxy`: the hub then sees every client at
-the proxy's address, and eight connections — three browser tabs from two users
-— exhausts the cap for everyone. The symptom is a dial failing with 429 and a
-dashboard that silently falls back to SSE. See
+The same thing happens for real when a deployment terminates TLS at a reverse
+proxy without setting `behind_proxy`. The hub then sees every client at the
+proxy's address, and eight connections (three browser tabs from two users) use
+up the cap for everyone. You see a WebSocket dial fail with 429, and the
+dashboard falls back to SSE without any message. See
 [`hub bootstrap --behind-proxy`](runbook.md).
 
-**Audit appends are best-effort under concurrent load.** With several
-dispatches minting leases at once, SQLite can report `database is locked` on an
-audit insert; the hub logs one warning, suppresses the rest, and continues. The
-trail is a compliance record and the run is not blocked on it, which is the
-right trade for availability — but it means an audit row count taken under
-heavy concurrency is a lower bound, not an exact one. The soak's growth check
-is a ratio between two intervals and is unaffected; an operator reconciling
-counts should know it.
+**Audit appends are best-effort under concurrent load.** When several
+dispatches mint leases at once, SQLite can return `database is locked` for an
+audit insert. The hub reports the first failure at once, prints a summary of
+later ones once a minute, and carries on. The audit trail is a compliance
+record, but runs don't wait for it, so the hub stays available. Each loss is
+written into the chain afterwards as an `audit.gap` row that says how many
+events were lost, so under heavy concurrency the number of audit rows can be
+lower than the number of events, and the gap rows account for the difference.
+The soak's growth check compares two intervals and isn't affected, but keep
+this in mind if you reconcile audit counts.

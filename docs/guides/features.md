@@ -1,15 +1,16 @@
 # Developing features in parallel
 
-A cloop project has one task list and one set of run settings. That fits one
-line of work. It does not fit three: two features built in the same checkout
-edit the same files, their tasks interleave in one plan, and there is no way to
-say "keep evolving this one, but let that one finish and stop".
+A cloop project has one task list and one set of run settings. That works for
+one line of work, but not for three. Two features built in the same checkout
+edit the same files, their tasks get mixed up in one plan, and you can't say
+"keep evolving this one, but let that one finish and stop".
 
-A **feature** removes all three problems. It is a git worktree of the project's
-repository, on its own branch, with its own `.cloop/` directory — so it has its
-own task list, its own run, and its own auto-evolve and innovate settings — and
-any number of them run at the same time as the project and as each other. When
-one is done, it becomes a pull request into the branch it was cut from.
+A **feature** solves all three problems. It is a git worktree of the project's
+repository, on its own branch, with its own `.cloop/` directory. So it has its
+own task list, its own run, and its own auto-evolve and innovate settings, and
+any number of features can run at the same time as the project and each other.
+When a feature is done, it becomes a pull request into the branch it was cut
+from.
 
 ## What a feature is
 
@@ -21,47 +22,48 @@ one is done, it becomes a pull request into the branch it was cut from.
 ```
 
 - **A worktree, not a copy.** `git worktree add` shares the repository's
-  objects, so a feature costs a checkout of the tree and nothing more. Its
-  branch is `cloop/feature/<slug>`, cut from the base branch (the remote's
-  default branch unless you name another).
+  objects, so a feature costs only a checkout of the tree. Its branch is
+  `cloop/feature/<slug>`, cut from the base branch (the remote's default branch
+  unless you name another).
 - **A project in its own right.** The orchestrator runs in the feature's
-  directory like anywhere else: `cloop run`, `cloop task add` and every other
+  directory like anywhere else. `cloop run`, `cloop task add` and every other
   command work there unchanged, and the dashboard lists the feature as a project
-  of its own — nested under its parent.
+  of its own, nested under its parent.
 - **Independent settings.** A feature starts with the project's provider, model,
-  effort and instructions, and its *own* auto-evolve, innovate and parallel
-  settings. Toggle them on the feature's Overview without touching the project
-  or its other features.
-- **Told where it is.** A note is appended to the feature's instructions: which
-  branch it is on, that it must commit there and never push to or merge into the
-  base. The branch's upstream is set to `origin/cloop/feature/<slug>`, so a
-  harness that pushes out of habit publishes the feature and nothing else.
-- **Locked.** The worktree is `git worktree lock`ed, so neither cloop's
-  task-worktree cleanup nor `git gc` can collect it while it is briefly
+  effort and instructions, and has its *own* auto-evolve, innovate and parallel
+  settings. You can change them on the feature's Overview without affecting the
+  project or its other features.
+- **Told where it is.** cloop appends a note to the feature's instructions that
+  names its branch and tells the agent to commit there and never push to or
+  merge into the base. The branch's upstream is set to
+  `origin/cloop/feature/<slug>`, so a harness that pushes out of habit publishes
+  the feature and nothing else.
+- **Locked.** The worktree is locked with `git worktree lock`, so neither cloop's
+  task-worktree cleanup nor `git gc` can remove it while it is briefly
   unreachable. `cloop feature remove` unlocks it.
 
-cloop also makes sure every worktree's `.cloop/` is ignored by git — it adds
-`/.cloop/` to the repository's `info/exclude` if nothing already ignores it — so
+cloop also makes sure git ignores every worktree's `.cloop/`. If nothing already
+ignores it, cloop adds `/.cloop/` to the repository's `info/exclude`. That way
 neither the project nor a feature ever commits cloop's state, and the project
 never records a feature as an embedded repository.
 
 ## In the dashboard
 
 Open a project that is a git repository. Its Overview has a **Features**
-section: one row per feature with its branch, status, options, task progress and
-pull request, and **+ New feature**.
+section with one row per feature (branch, status, options, task progress and
+pull request) and a **+ New feature** button.
 
-The New feature dialog asks for a name and what the feature should achieve, and
-optionally initial tasks (one per line), a base branch, and the feature's
-settings: auto-evolve, innovate, parallel tasks, open the pull request when
-complete, and start now. Creating it opens the feature.
+The New feature dialog asks for a name and what the feature should achieve.
+Optionally you can add initial tasks (one per line), a base branch, and the
+feature's settings: auto-evolve, innovate, parallel tasks, open the pull request
+when complete, and start now. Creating the feature opens it.
 
-A feature's Overview begins with a banner naming its project and branch, with
+A feature's Overview starts with a banner naming its project and branch, with
 **Open pull request** (or **Update pull request** once one is open) and
-**Remove feature**. Everything below it — goal, options, tasks, run controls,
-event history — is the feature's own. On the Projects grid, features appear as
-chips inside their project's card; the header's project menu lists them indented
-under it.
+**Remove feature**. Everything below it (goal, options, tasks, run controls and
+event history) belongs to the feature. On the Projects grid, features appear as
+chips inside their project's card, and the header's project menu lists them
+indented under the project.
 
 ## From the command line
 
@@ -78,27 +80,29 @@ cloop feature remove dark-mode --delete-branch
 
 See the [command reference](../reference/commands.md#parallel-features) for every
 flag. A feature created from a terminal appears in the dashboard on its next
-refresh: features are discovered from `.cloop/features`, never registered.
+refresh, because features are discovered from `.cloop/features` and never
+registered.
 
 ## Pull requests
 
 **Open pull request** pushes the feature's branch to `origin` and opens a
 GitHub pull request from it into the feature's base branch. The title is the
-feature's name; the description is its goal, the tasks it completed, and those
-it did not — so a reviewer can tell a finished feature from one proposed early.
+feature's name. The description is its goal, the tasks it completed, and the
+tasks it did not, so a reviewer can tell a finished feature from one proposed
+early.
 
-Asked again while that pull request is open, it pushes whatever was committed
-since, which updates it. A feature created with **Open PR when complete**
-(`--auto-pr`) gets its pull request from the hub as soon as its plan completes;
-the feature's event history records either the pull request or why it could not
-be opened.
+If you click it again while that pull request is open, it pushes whatever was
+committed since, which updates the pull request. For a feature created with
+**Open PR when complete** (`--auto-pr`), the hub opens the pull request as soon
+as the feature's plan completes. The feature's event history records the pull
+request, or why it could not be opened.
 
 For a project the hub runs itself, the push uses whatever git credentials the
-feature's executor has — the host's SSH keys or credential store, the scoped
-credential helper a repository grant installs. Only if that push fails, and the
-remote is https, is it retried with the API token below, passed to git in its
-environment rather than on its command line. Opening the pull request needs a
-token with pull-request access, found in this order:
+feature's executor has: the host's SSH keys or credential store, or the scoped
+credential helper a repository grant installs. Only if that push fails and the
+remote is https does cloop retry it with the API token described below, passed
+to git in its environment and not on its command line. Opening the pull request
+needs a token with pull-request access. cloop looks for one in this order:
 
 1. `--token`;
 2. `GITHUB_TOKEN`, then `GH_TOKEN`;
@@ -106,35 +110,37 @@ token with pull-request access, found in this order:
    project's);
 4. git's credential helpers for the repository;
 5. `gh auth token`;
-6. `CLOOP_GITHUB_TOKEN` — the hub's own `github.token`, which it hands over
-   last, so that a project's credentials always come first, and only where it
-   widens nothing: on a hub without sign-in, for a project on an executor that
-   shares its host.
+6. `CLOOP_GITHUB_TOKEN`, the hub's own `github.token`. The hub offers it last,
+   so a project's own credentials always come first, and only where it gives
+   no extra access: on a hub without sign-in, for a project on an executor that
+   shares the hub's host.
 
 A token from the flag, the environment or a config file (1, 2, 3 and 6) is only
-sent to github.com, or to the host `--api-url` / `CLOOP_GITHUB_API_URL` names for
-GitHub Enterprise — never to whatever server a remote happens to point at, and an
-Enterprise token, whose `--api-url` is its server's, never to github.com.
-Only where the token came from is ever reported. A repository assigned to the
-project with **write** access (see [secrets and egress](secrets.md)) includes
-`pull_requests:write`.
+sent to github.com, or for GitHub Enterprise to the host that `--api-url` /
+`CLOOP_GITHUB_API_URL` names. It is never sent to whatever server a remote
+happens to point at, and an Enterprise token (whose `--api-url` is its
+server's) is never sent to github.com. Reports only ever say where the token
+came from. A repository assigned to the project with **write** access (see
+[secrets and egress](secrets.md)) includes `pull_requests:write`.
 
-For a project on an [isolating executor](#features-on-isolating-executors) the
+For a project on an [isolating executor](#features-on-isolating-executors), the
 hub publishes the feature itself, from the branch the runs' work was written
-back to: none of the sources above belong to the project there, so the token is
-the project's own GitHub grant for the repository — leased for the push and the
-API call and released straight after — or, on a hub without sign-in, the hub's
-`github.token`. The grant must be for the origin's host — `github.com`, or the
-GitHub Enterprise Server its secret names — and the pull request is opened at
-that grant's API (`api.github.com`, or the server's `/api/v3`), never at one
-derived from the origin; an origin on another host is refused, naming both. A grant restricted to certain branches must include the feature's
-(`cloop/*` does): no git proxy stands between the hub and the forge, so the hub
-applies the list itself and refuses to push anywhere else.
+back to. None of the token sources above belong to the project there, so the
+token is the project's own GitHub grant for the repository, leased for the push
+and the API call and released straight after. On a hub without sign-in it is
+the hub's `github.token`. The grant must be for the origin's host (`github.com`,
+or the GitHub Enterprise Server its secret names), and the pull request is
+opened at that grant's API (`api.github.com`, or the server's `/api/v3`), never
+at one derived from the origin. If the origin is on another host, cloop refuses
+with an error naming both hosts. A grant restricted to certain branches must
+include the feature's (`cloop/*` does). No git proxy sits between the hub and
+the forge, so the hub applies the branch list itself and refuses to push
+anywhere else.
 
 ## Where a feature may run, and what it inherits
 
-For everything that decides *what the project may do* rather than *what it is
-working on*, a feature is its project:
+For every setting that decides *what the project may do* (as opposed to *what
+it is working on*), a feature counts as its project:
 
 | | Taken from |
 |---|---|
@@ -143,66 +149,68 @@ working on*, a feature is its project:
 | Secret grants (repositories, keys, env) | the project's |
 | Who may see and operate it | the project's roles, owner and API-token scope |
 
-This is enforced by mapping the feature's path to its project's wherever such a
-decision is keyed by path, and the mapping is lexical — the parent is read from
-the path itself — so it fails closed: a feature whose record is damaged still
-runs in its project's sandbox with its project's grants, never on the hub's
-default executor with none. Binding a feature to another executor, or assigning
-it repositories of its own, is refused; change them on the project.
+Wherever such a decision is looked up by path, cloop maps the feature's path to
+its project's. The mapping reads the parent from the path itself, so it fails
+closed: a feature whose record is damaged still runs in its project's sandbox
+with its project's grants, and never on the hub's default executor with none.
+cloop refuses to bind a feature to another executor or to assign it
+repositories of its own. Change these on the project.
 
 The firewall rules a run gets, the [review gate](review-gate.md) and the
-[git proxy](../architecture/git-proxy.md) are the project's too, and apply to a
-feature's runs exactly as to the project's.
+[git proxy](../architecture/git-proxy.md) also come from the project, and apply
+to a feature's runs as they do to the project's.
 
 ## Features on isolating executors
 
 A feature is a *linked* worktree: its `.git` is a one-line pointer to the
 project's repository, by absolute path on the hub. On the hub that is all it
-needs. Anywhere else it is a directory git does not recognise — a container sees
-the feature at another path, a remote device does not see it at all — and
-handing the sandbox the project's `.git` as well, so the pointer resolves, is not
-something cloop will do: hooks and configuration written there would run on the
-hub the next time anything there ran git in the repository.
+needs. Anywhere else, git does not recognise the directory: a container sees
+the feature at another path, and a remote device does not see it at all. cloop
+won't also hand the sandbox the project's `.git` to make the pointer work,
+because hooks and configuration written there would run on the hub the next
+time anything there ran git in the repository.
 
-So on an executor that isolates from the hub — a [container executor](enterprise-hosts.md),
-a remote agent, a [virtual executor](virtual-executors.md) on one — a feature
-travels as its **branch**, and its work comes back the same way. This is what
-lets features run on a hub with `executors.allow_host_process: false`, where
-there is no other kind of executor.
+So on an executor that isolates from the hub (a
+[container executor](enterprise-hosts.md), a remote agent, or a
+[virtual executor](virtual-executors.md) on one), a feature travels as its
+**branch**, and its work comes back the same way. This is what lets features run
+on a hub with `executors.allow_host_process: false`, where there is no other
+kind of executor.
 
-**Out.** At each run the hub bundles the feature's branch (`git bundle`) and
-the executor builds a standalone checkout of it, on the branch itself, from the
-bundle:
+**Out.** At each run the hub bundles the feature's branch (`git bundle`), and
+the executor builds a standalone checkout of it from the bundle, on the branch
+itself:
 
 | The project's repository | What is shipped |
 |---|---|
-| Has an https upstream that already holds the feature's base, on an executor that can clone (a remote agent) | Only the feature's own commits. The executor clones the upstream at the feature's base, with the project's GitHub grant, exactly as it would clone the project, and applies the bundle on top. |
-| Exists only on the hub — or its base was never pushed, or the executor cannot clone (a container on the hub) | The whole branch. If that is over the size limit, its newest 50 commits, then its newest commit alone — a shallow checkout, with its boundary recorded. |
+| Has an https upstream that already holds the feature's base, on an executor that can clone (a remote agent) | Only the feature's own commits. The executor clones the upstream at the feature's base with the project's GitHub grant, as it would clone the project, and applies the bundle on top. |
+| Exists only on the hub, or its base was never pushed, or the executor cannot clone (a container on the hub) | The whole branch. If that is over the size limit, its newest 50 commits, and failing that its newest commit alone: a shallow checkout, with its boundary recorded. |
 
 Either way the bundle is capped at `executors.feature_bundle_mb` (default 32,
-at most 128); a branch too large even as one commit is refused with a message
-naming the setting. The feature's own `.cloop` state — goal, instructions,
-plan — travels beside it as for any project on an isolating executor, and the
-feature's `.cloop/` is excluded from the checkout's commits.
+at most 128). A branch that is too large even as one commit is refused with a
+message naming the setting. The feature's own `.cloop` state (goal,
+instructions, plan) travels beside it as for any project on an isolating
+executor, and the feature's `.cloop/` is excluded from the checkout's commits.
 
 **Back.** The harness commits on `cloop/feature/<slug>` in its checkout, as a
-feature's harness is told to. When the run ends, its commits — and anything it
-left uncommitted, committed on top — come back as a write-back bundle onto that
-branch, capped by the same setting, and the run's task outcomes come back with
-the project state. On the hub the bundle is fetched into quarantine and vetted
-before any branch moves: it must build on exactly the commit the run was sent,
+feature's harness is told to. When the run ends, its commits, plus anything it
+left uncommitted (committed on top), come back as a write-back bundle onto that
+branch, capped by the same setting. The run's task outcomes come back with the
+project state. On the hub the bundle is fetched into quarantine and checked
+before any branch moves. It must build on the exact commit the run was sent,
 and no path in it may reach into `.git`, escape the tree through a symlink, or
-be a submodule (see [Features: shipping a branch](../architecture/executors.md#features-shipping-a-branch-task-20367)
+be a submodule (see
+[Features: shipping a branch](../architecture/executors.md#features-shipping-a-branch-task-20367)
 and the [write-back checks](../security/model.md)).
 
-The hub then fast-forwards the feature's worktree onto the work — **only** when
-the worktree is clean, still on its branch, and the work builds on its HEAD. In
-every other case the work is kept, vetted, on a branch of its own,
-`cloop/returned/<slug>/<run>`, and the feature records a conflict: its row in
+The hub then fast-forwards the feature's worktree onto the work, but **only**
+when the worktree is clean, still on its branch, and the work builds on its
+HEAD. Otherwise the checked work is kept on a branch of its own,
+`cloop/returned/<slug>/<run>`, and the feature records a conflict. Its row in
 the parent's Features panel says "work kept on …", and its event history (and
-the parent's) says why — uncommitted changes in the worktree, a branch that
-moved while the run was out, or commits that touch `.cloop/`, which in the
-worktree is the hub's own copy of the feature's state. Nothing is ever forced.
+the parent's) gives the reason: uncommitted changes in the worktree, a branch
+that moved while the run was out, or commits that touch `.cloop/` (which in the
+worktree is the hub's own copy of the feature's state). Nothing is ever forced.
 Merge the kept branch when you are ready:
 
 ```bash
@@ -211,53 +219,53 @@ git merge cloop/returned/<slug>/<run>
 ```
 
 A run that fails or is stopped part-way still returns the commits its earlier
-tasks made — each was a deliberate checkpoint — but not what it left
-uncommitted, which may be a half-applied change.
+tasks made, since each one was a checkpoint the agent chose to commit. It does
+not return what the run left uncommitted, which may be a half-applied change.
 
 **Managing the feature.** For such a project the hub creates, removes and
-publishes features itself rather than sending `cloop feature …` to the
-executor, which cannot see the hub's worktrees. Every git command it runs for
-this — creating the worktree, bundling the branch, landing the work, pushing it
-for a pull request — runs with no system or global configuration and with the
+publishes features itself, because the executor cannot see the hub's worktrees
+and so cannot run `cloop feature …`. Every git command the hub runs for this
+(creating the worktree, bundling the branch, landing the work, pushing it for a
+pull request) runs without system or global configuration, with the
 repository's hooks, filters, fsmonitor and signing programs switched off, and
 never in a sandbox's copy of anything.
 
 **Which executors.** A container executor stages the checkout in a directory of
 its own (never the hub's worktree), mounts it as `/workspace`, and runs the
-write-back *inside* the container after the harness, so git is never run on the
-hub in a repository the sandbox could write; its sandbox image needs git and a
+write-back *inside* the container after the harness, so git never runs on the
+hub in a repository the sandbox could write. Its sandbox image needs git and a
 cloop of this release or later. A remote agent needs protocol v16 or later, and
-git on its device; the refusal for an older one says how to move it forward from
-this hub (see
+git on its device. For an older agent, the error says how to move it forward
+from this hub (see
 [Moving a device forward](../architecture/executors.md#moving-a-device-forward-which-remedy-works)).
-A Kubernetes executor cannot run
-features — the hub has no way to carry the branch into a Pod — and a feature
-bound to one, like one on an outdated agent, is refused at dispatch with a 409
-naming what is missing.
+A Kubernetes executor can't run features, because the hub has no way to carry
+the branch into a Pod. A feature bound to one, like a feature on an outdated
+agent, is refused at dispatch with a 409 that says what is missing.
 
-**Projects with no repository on the hub.** A project bound to a remote executor
-whose code is the repositories granted to it — cloned by the harness on the
-device, with nothing on the hub but `.cloop/` — has no branch for a feature to
-be. Creating a feature of it is refused with that reason. A per-feature device
-directory with a feature-branch convention in each granted repository was
-considered and not built: it would need a feature branch in every repository the
-project holds, a write-back and a pull request per repository, and a place for
-the feature's state that is neither a worktree nor the device's directory — a
-second feature model rather than this one carried further. Give the project a
-repository of its own on the hub to develop features of it.
+**Projects with no repository on the hub.** Some projects are bound to a remote
+executor and their code is the repositories granted to them, cloned by the
+harness on the device, with nothing on the hub but `.cloop/`. Such a project has
+no branch for a feature to live on, and creating a feature in it is refused
+with that reason. A design with a per-feature device directory and a feature
+branch in each granted repository was considered and not built. It would need a
+feature branch, a write-back and a pull request for every repository the
+project holds, plus a place for the feature's state that is neither a worktree
+nor the device's directory, which would amount to a second feature model. To
+develop features of such a project, give it a repository of its own on the hub.
 
 ## Removing a feature
 
-**Remove feature** deletes the worktree and with it the feature's task list and
+**Remove feature** deletes the worktree, and with it the feature's task list and
 history. It is refused while the feature runs and while the worktree has
 uncommitted changes (force discards them). The branch is kept unless you ask
-for it to go, and even then only if git considers it merged — a squash-merged
-pull request is not, so deleting that branch takes force.
+for it to be deleted, and even then only if git considers it merged. A
+squash-merged pull request doesn't count as merged, so deleting that branch
+needs force.
 
-Removing or unregistering the project itself is refused while any of its
-features runs. Snapshots (`cloop snapshot`) neither archive feature worktrees
-nor touch them on restore, and `cloop clean` refuses while features exist unless
-given `--force`.
+cloop refuses to remove or unregister the project itself while any of its
+features runs. Snapshots (`cloop snapshot`) don't archive feature worktrees and
+don't touch them on restore, and `cloop clean` refuses while features exist
+unless you pass `--force`.
 
 ## Limits
 

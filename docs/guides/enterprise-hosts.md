@@ -1,118 +1,121 @@
 # Critical hosts as cloop executors
 
-You have a few high-performance machines — a build box with 128 cores, a bench
-with instruments on serial lines, a node with GPUs — and you want cloop to run
+You have a few high-performance machines (a build box with 128 cores, a bench
+with instruments on serial lines, a node with GPUs), and you want cloop to run
 agent tasks on them without those tasks being able to reach the rest of your
-estate. This page is the configuration for that, end to end.
+network. This page describes the complete configuration for that.
 
-Four capabilities, four sections:
+The page has four sections, one per capability:
 
-1. [Per-project repository access](#1-per-project-repository-access) — give one
+1. [Per-project repository access](#1-per-project-repository-access): give one
    project one or more internal git repositories, and nothing else.
-2. [Per-project firewall rules](#2-per-project-firewall-rules) — let a project
-   out to the Internet while dropping every non-public address.
-3. [Per-project sandbox with gVisor](#3-per-project-sandbox-with-gvisor) — a
+2. [Per-project firewall rules](#2-per-project-firewall-rules): let a project
+   reach the Internet while dropping every non-public address.
+3. [Per-project sandbox with gVisor](#3-per-project-sandbox-with-gvisor): a
    confined environment whose syscalls never reach the host kernel, with a bind
    mount as its only view of the filesystem.
-4. [Hardware and network devices](#4-hardware-and-network-devices) — pass a
+4. [Hardware and network devices](#4-hardware-and-network-devices): pass a
    serial port, a GPU or a TUN device into that sandbox.
 
 ## The rule that shapes all four
 
-cloop splits every one of these between two files, and which file a setting
-lives in is not a matter of taste:
+cloop splits each of these between two files, and which file a setting goes in
+matters:
 
 | | who writes it | what it may do |
 |---|---|---|
 | **`.cloop/config.yaml`** on the hub | an operator, out of band | grant reach |
 | **`.cloop/sandbox.yaml`** in the repo | anyone who can open a pull request | give reach up |
 
-`.cloop/sandbox.yaml` is committed to the project's repository. On a hub the
-person who merges a pull request is not the person whose infrastructure runs it,
-so that file is treated as untrusted input: it can make a run **more** confined
-than your default and never less. There is no key in it that names an address
-range, a host path, or a device path.
+`.cloop/sandbox.yaml` is committed to the project's repository. On a hub, the
+person who merges a pull request is not the person whose infrastructure runs
+it, so that file is treated as untrusted input: it can make a run *more*
+confined than your default, never less. It has no key that names an address
+range, a host path or a device path.
 
-Everything that widens reach is a **grant** — issued by a human with the
+Everything that widens reach is a **grant**: issued by a person with the
 `secret.grant` permission, scoped to one project, with a TTL and an audit row.
-The repo may then *select* from what it holds.
+The repository can then *select* from what the project holds.
 
-If you remember one thing: **grants add, sandbox.yaml subtracts.**
+In short, grants add access, and `sandbox.yaml` can only take it away.
 
 ## Topology first
 
-Sections 3 and 4 need the container executor to be running **on the machine
-that has the hardware**, because a device path and a bind mount are statements
-about one machine's filesystem. That constrains your topology, and it is worth
-settling before you configure anything:
+Sections 3 and 4 need the container executor to run on the machine that has the
+hardware, because a device path and a bind mount refer to one machine's
+filesystem. That limits your topology, so settle it before you configure
+anything:
 
 | you want | run | gVisor? | devices? | local repos? |
 |---|---|---|---|---|
 | sandboxes on the hub's own host | `executors.container` | yes | yes | yes |
-| sandboxes on **another** host | a hub on that host | yes | yes | yes |
+| sandboxes on another host | a hub on that host | yes | yes | yes |
 | sandboxes across a cluster | `executors.kubernetes` | yes (RuntimeClass) | no | no |
 | sandboxes on a NAT'd edge device | `cloop executor agent` + [virtual executors](virtual-executors.md) | yes | yes | no |
 
-A host_device *grant* names a path with no machine attached to it, so the remote
-agent does not accept one: `/dev/ttyUSB0` on the hub says nothing about
-`/dev/ttyUSB0` in another building. Hardware on an edge device is given to a
-sandbox the other way round — by a [virtual executor](virtual-executors.md), a
-sub-executor of that device whose devices an admin chooses from the device's own
-USB inventory, alongside its own runtime and IP firewall. Projects are bound to
-executors explicitly, so a developer picks the machine and the containment by
-picking the executor.
+A host_device *grant* names a path without saying which machine it is on, so
+the remote agent does not accept one: `/dev/ttyUSB0` on the hub says nothing
+about `/dev/ttyUSB0` in another building. Hardware on an edge device reaches a
+sandbox the other way round, through a
+[virtual executor](virtual-executors.md): a sub-executor of that device whose
+devices an admin chooses from the device's own USB inventory, along with its
+own runtime and IP firewall. Projects are bound to executors explicitly, so a
+developer chooses the machine and the containment by choosing the executor.
 
-Devices and gVisor do not combine, on any driver. Measured on a gVisor host: a
-node passed with `--device` exists in the sandbox and every open of it fails with
-`ENXIO`, and `/sys/bus/usb` is absent. cloop refuses the pair at placement
-rather than start a hardware task that cannot touch its hardware; put hardware
-on an executor with the engine's default runtime, and untrusted work on a
-separate one with `runsc`.
+Devices and gVisor do not work together, on any driver. On a gVisor host, a
+node passed with `--device` exists in the sandbox but every attempt to open it
+fails with `ENXIO`, and `/sys/bus/usb` is absent. cloop refuses the combination
+at placement instead of starting a hardware task that cannot touch its
+hardware. Put hardware on an executor with the engine's default runtime, and
+untrusted work on a separate one with `runsc`.
 
-Every refusal below is a placement refusal that names the constraint. That is
-deliberate: a sandbox spec quietly ignored is worse than one rejected, because
-the task then runs in an environment nobody described.
+Every refusal below happens at placement, with an error naming the constraint.
+A sandbox spec that was ignored without an error would be worse than one that
+is rejected, because the task would then run in an environment nobody
+described.
 
 ## Before you start
 
-A hub on a critical host is a hub anyone who reaches it can drive unless it can
-tell people apart: without sign-in (`ui.oidc`, or `CLOOP_UI_TOKEN` from
-`hub.env`) it listens on `127.0.0.1` only and refuses an address beyond loopback.
-Give it sign-in before it listens on the network, or reach it through an SSH
-tunnel; pin it to `ui.listen: 127.0.0.1` behind a TLS proxy on the same host.
-`cloop hub doctor` reports where it actually listens (`ui.exposure`). See
+Without sign-in, anyone who can reach a hub can drive it. So a hub without
+sign-in (`ui.oidc`, or `CLOOP_UI_TOKEN` from `hub.env`) listens on `127.0.0.1`
+only and refuses an address beyond loopback. Give the hub sign-in before it
+listens on the network, or reach it through an SSH tunnel. Behind a TLS proxy on
+the same host, pin it to `ui.listen: 127.0.0.1`. `cloop hub doctor` reports
+where it actually listens (`ui.exposure`). See
 [the Web UI section of the configuration reference](../reference/configuration.md#web-ui-cloop-ui).
 
-Every `cloop secret` command on this page seals or opens a payload, so the shell
-needs the hub's master key, read the way the hub reads it — from its key file:
+Every `cloop secret` command on this page seals or opens a payload, so your
+shell needs the hub's master key, read the same way the hub reads it, from its
+key file:
 
 ```bash
 export CLOOP_SECRET_KEY_FILE=/srv/cloop/cloop-secret-key   # the file `cloop hub bootstrap` wrote
 ```
 
-Without it the first `mint` stops with `CLOOP_SECRET_KEY is not set`. It belongs
-in that file, beside `.cloop/` and never in it, at mode `0400` or `0600`, and never
-in a repository or an environment file — see [the root key](../operations/runbook.md#the-root-key),
-[installation](../getting-started/installation.md) for generating it and the
-[runbook](../operations/runbook.md) for backup and rotation. Losing it loses
-every stored secret, grants included — and, under `tls: auto` below, the hub's
-CA, which every sandbox trusts for the proxy's URL — unless it was escrowed
-(`cloop hub key escrow export`, see the
+Without it, the first `mint` stops with `CLOOP_SECRET_KEY is not set`. The key
+belongs in that file, beside `.cloop/` and never inside it, at mode `0400` or
+`0600`, and never in a repository or an environment file. See
+[the root key](../operations/runbook.md#the-root-key),
+[installation](../getting-started/installation.md) for generating it, and the
+[runbook](../operations/runbook.md) for backup and rotation. If you lose the
+key, you lose every stored secret, grants included, and under `tls: auto`
+(below) also the hub's CA, which every sandbox trusts for the proxy's URL,
+unless the key was escrowed (`cloop hub key escrow export`; see the
 [runbook](../operations/runbook.md#escrowing-the-sealing-key)).
 
 ### Keep forge and cluster credentials on the hub
 
-A GitHub token or a kubeconfig granted to a project is, by default, delivered
-into the sandbox: a `github_pat` as a token file a git credential helper
+By default, a GitHub token or a kubeconfig granted to a project is delivered
+into the sandbox: a `github_pat` as a token file that a git credential helper
 releases, a `github_app` grant as its installation token. A hostile workload
 then holds a credential it can use against GitHub's REST API, or to push
 wherever the token reaches. The [git interception proxy](../git-interception-proxy.md)
 and the [Kubernetes access monitor](../architecture/kubernetes-access.md) keep
-both on the hub: the sandbox gets a session token worth one grant's repositories
-and branches, or its verbs and namespaces, decided outside the sandbox on every
-push and every API request.
+both credentials on the hub. The sandbox gets a session token that is good for
+one grant's repositories and branches, or its verbs and namespaces, checked
+outside the sandbox on every push and every API request.
 
-`cloop hub bootstrap` turns both on (Task 20409):
+`cloop hub bootstrap` turns both on:
 
 ```bash
 cloop hub bootstrap --external-url https://hub.internal:8080
@@ -120,36 +123,37 @@ cloop hub bootstrap --external-url https://hub.internal:8080
 #   kube_guard: tls: auto, listen 0.0.0.0:8444, advertised https://hub.internal:8444
 ```
 
-`--git-proxy-port` and `--kube-guard-port` move the ports. `tls: auto` needs no
-certificate: the hub mints a CA the first time it starts, seals its key under
-`CLOOP_SECRET_KEY` in its own database, and serves each monitor a short-lived
-leaf for the advertised name, renewed before it expires. Every sandbox — a
-container on this host, a Pod, an edge device or a virtual executor on one — is
-told to trust that CA **for those two URLs only**, so no image needs it baked in
-and nothing else the sandbox talks to is affected. A device's agent must speak
-protocol v21 or later; an older one is refused the workloads that would talk to
-the proxy, with the upgrade named.
+`--git-proxy-port` and `--kube-guard-port` change the ports. `tls: auto` needs
+no certificate from you: the hub mints a CA the first time it starts, seals its
+key under `CLOOP_SECRET_KEY` in its own database, and serves each monitor a
+short-lived leaf certificate for the advertised name, renewed before it
+expires. Every sandbox (a container on this host, a Pod, an edge device or a
+virtual executor on one) is told to trust that CA for those two URLs only, so
+no image needs it built in and nothing else the sandbox talks to is affected. A
+device's agent must speak protocol v21 or later. An older agent is refused the
+workloads that would talk to the proxy, with an error naming the upgrade.
 
-What you have to provide is a route. Executors must reach TCP 8443 and 8444 on
-the hub at the advertised name, and both terminate their own TLS, so route them
-to the hub directly rather than through a TLS-terminating proxy. A container
-executor's `network: none` reaches nothing, and a firewall or egress filter
-needs the hub's address and both ports in its allow lists — see
+You need to provide a network route. Executors must reach TCP 8443 and 8444 on
+the hub at the advertised name. Both ports terminate their own TLS, so route
+them to the hub directly, not through a TLS-terminating proxy. A container
+executor with `network: none` reaches nothing, and a firewall or egress filter
+needs the hub's address and both ports in its allow lists; see
 [the network between sandbox and proxy](../architecture/git-proxy.md#the-network-between-sandbox-and-proxy).
-`cloop hub doctor` checks the certificates (`gitproxy.tls`, `kubeguard.tls`),
-dials both ports, and on a hub with `allow_host_process: false` and no proxy
-names every GitHub grant it delivers into sandboxes
+`cloop hub doctor` checks the certificates (`gitproxy.tls`, `kubeguard.tls`)
+and dials both ports. On a hub with `allow_host_process: false` and no proxy,
+it lists every GitHub grant the hub delivers into sandboxes
 (`gitproxy.forge_credentials`).
 
 ## 1. Per-project repository access
 
-Two kinds, depending on where the repositories live.
+There are two kinds, depending on where the repositories live.
 
 ### Repositories checked out on the host
 
-The hub host holds the trees; a project gets a bind mount of some of them.
+The hub host holds the checkouts, and a project gets a bind mount of some of
+them.
 
-Store the inventory once — the **root** directory that holds the checkouts:
+Store the inventory once. It is the **root** directory that holds the checkouts:
 
 ```bash
 cloop secret mint host-src --kind local_repo --value /srv/git
@@ -183,26 +187,26 @@ with `CLOOP_LOCAL_REPOS=api-service,shared-protos`,
 `CLOOP_LOCAL_REPO_ROOT=/repos`, and one `CLOOP_LOCAL_REPO_<NAME>` per
 repository.
 
-Read-only is the default and it is enforced by the bind mount, not by
-convention — a runaway harness cannot rewrite the history of a checkout that
-exists nowhere else. `--writable` is a decision someone makes.
+Read-only is the default, and the bind mount enforces it, so a runaway harness
+cannot rewrite the history of a checkout that exists nowhere else. Write access
+needs `--writable` on the grant.
 
-Two things worth knowing:
+Two more things to know:
 
 - **Symlinks cannot escape the root.** Every candidate path is resolved with
-  `EvalSymlinks` and re-checked against the resolved root, so a link planted
-  inside `/srv/git` by a dependency's postinstall script cannot redirect a bind
-  to `/`.
+  `EvalSymlinks` and checked again against the resolved root, so a link that a
+  dependency's postinstall script planted inside `/srv/git` cannot redirect a
+  bind to `/`.
 - **Only direct children are considered.** A root of `/srv/git` will not match
   `/srv/git/.cache/some-dep/vendor/x`.
 
 ### Repositories on an internal git server
 
-What cloop can authenticate depends on what the server is. **Only `github.com`
-and GitHub Enterprise Server hosts receive brokered credentials** (Task 20423):
-a GitHub credential is bound to the forge host its secret names, and is never
-presented to any other — however the other host's repository paths match the
-grant's allowlist.
+What cloop can authenticate to depends on the kind of server. Only `github.com`
+and GitHub Enterprise Server hosts receive brokered credentials. A GitHub
+credential is bound to the forge host its secret names, and is never presented
+to any other host, even if that host's repository paths match the grant's
+allowlist.
 
 **A GitHub Enterprise Server.** Mint the PAT for the server, so the host is
 sealed with the token, and constrain it to the repositories it may reach:
@@ -218,46 +222,48 @@ cloop secret grant gh-internal \
 ```
 
 A GitHub App installed on the server works the same way, with
-`"base_url": "https://git.acme.internal/api/v3"` in its payload; its tokens are
-bound to `git.acme.internal`. Either is presented to `git.acme.internal` only —
-never to `github.com`, even for a repository with the same `owner/name` — and a
-`github.com` grant is never presented to the server. A project whose origin is
-on another host is refused, naming both hosts, rather than fetched with the
-token.
+`"base_url": "https://git.acme.internal/api/v3"` in its payload, and its tokens
+are bound to `git.acme.internal`. Either credential is presented to
+`git.acme.internal` only, never to `github.com`, even for a repository with the
+same `owner/name`, and a `github.com` grant is never presented to the server. A
+project whose origin is on another host is refused with an error naming both
+hosts; it is not fetched with the token.
 
 With the [git proxy](#keep-forge-and-cluster-credentials-on-the-hub) on, the
-token stays on the hub: the sandbox's git rewrites `https://git.acme.internal/`
+token stays on the hub. The sandbox's git rewrites `https://git.acme.internal/`
 to the proxy's route for that host and presents a session token for
-`acme-internal/api-*`, and the proxy presents the PAT upstream — to
-`git.acme.internal` and nowhere else — only for those repositories and only for
+`acme-internal/api-*`. The proxy presents the PAT upstream, to
+`git.acme.internal` and nowhere else, only for those repositories and only for
 the pushes its policy allows. A lease that also holds a `github.com` grant gets
-a separate rewrite and route for it, so the two never meet. cloop's provisioning
+a separate rewrite and route for it, so the two never mix. cloop's provisioning
 fetch of a project's checkout goes to that checkout's own `https` origin,
-verified against the hub host's trust store — `SSL_CERT_FILE` or `SSL_CERT_DIR`
-for a private CA — and only when the origin is on the grant's host does it carry
-the credential. Without the proxy, the token is not exported as `GITHUB_TOKEN`
-(a tool reading it would send it to `github.com`; a wildcard grant exports it as
-`GH_ENTERPRISE_TOKEN` instead): cloop installs a git credential helper that
-releases it only for `git.acme.internal` and only for paths matching the
-allowlist, so a harness that tries to clone an unlisted repository gets an
-authentication failure rather than a checkout — but the token file itself is in
-the sandbox. See [the secrets guide](secrets.md#github-enterprise-server) for the
-full mechanism, and [the git interception proxy](../git-interception-proxy.md)
-for restricting which branches a sandbox may push to.
+verified against the hub host's trust store (`SSL_CERT_FILE` or `SSL_CERT_DIR`
+for a private CA), and carries the credential only when the origin is on the
+grant's host. Without the proxy, the token is not exported as `GITHUB_TOKEN`,
+because a tool reading it would send it to `github.com` (a wildcard grant
+exports it as `GH_ENTERPRISE_TOKEN` instead). cloop installs a git credential
+helper that releases the token only for `git.acme.internal` and only for paths
+matching the allowlist, so a harness that tries to clone an unlisted repository
+gets an authentication failure instead of a checkout. The token file itself is
+still in the sandbox, though. See
+[the secrets guide](secrets.md#github-enterprise-server) for the full
+mechanism, and [the git interception proxy](../git-interception-proxy.md) for
+restricting which branches a sandbox may push to.
 
-**Any other forge — GitLab, Gitea, Bitbucket, a plain `git-http-backend`.** No
+**Any other forge (GitLab, Gitea, Bitbucket, a plain `git-http-backend`).** No
 brokered credential is ever presented to it. Its repositories are fetched
-without one where no grant could apply — a path that is not `owner/name`, such
-as a GitLab subgroup, or a hub that does not run the secret broker — and are
-otherwise refused by name, with a refusal that says the host receives no
-brokered credential, rather than fetched with a GitHub token. To give a project
-such repositories, check them out on the host and grant them as [repositories
-checked out on the host](#repositories-checked-out-on-the-host) above.
+without a credential where no grant could apply (a path that is not
+`owner/name`, such as a GitLab subgroup, or a hub that does not run the secret
+broker). Otherwise they are refused by name, with an error saying that the host
+receives no brokered credential, and never fetched with a GitHub token. To give
+a project such repositories, check them out on the host and grant them as
+[repositories checked out on the host](#repositories-checked-out-on-the-host),
+described above.
 
 ## 2. Per-project firewall rules
 
-"Let the task reach the Internet, and nothing on our network." Two layers, and
-you want both.
+The goal: let the task reach the Internet, and nothing on your network. There
+are two layers, and you want both.
 
 ### The host-wide default
 
@@ -281,13 +287,13 @@ executors:
       resolvers: ["9.9.9.9:53"]
 ```
 
-`allow_public_internet: true` allows everything **outside** the hard-block set
-and drops everything inside it. The block set is not configurable, and it is the
-answer to "blacklist non-public IP addresses":
+`allow_public_internet: true` allows everything outside the fixed block set and
+drops everything inside it. The block set is not configurable, and it is what
+blocks every non-public IP address:
 
 | dropped | why |
 |---|---|
-| `169.254.169.254/32`, AWS's `fd00:ec2::254`, Alibaba's `100.100.100.200`, … | cloud metadata services (`pkg/cloudmeta`) — each hands out instance credentials, and is reached only by naming its own address, never by a range containing it |
+| `169.254.169.254/32`, AWS's `fd00:ec2::254`, Alibaba's `100.100.100.200`, … | cloud metadata services (`pkg/cloudmeta`). Each hands out instance credentials, and can be reached only by naming its own address, never through a range that contains it |
 | `10/8`, `172.16/12`, `192.168/16`, `fc00::/7` | RFC1918 / ULA private space |
 | `100.64/10` | carrier-grade NAT |
 | `169.254/16`, `fe80::/10` | link-local |
@@ -295,11 +301,11 @@ answer to "blacklist non-public IP addresses":
 | `224/4`, `ff00::/8` | multicast |
 | `64:ff9b::/96`, `2002::/16`, … | IPv6 transition prefixes a packet filter cannot unwrap |
 
-Rules are installed on the sandbox bridge **before** any container can join it,
-so there is no window in which a workload is up and unfiltered.
+Rules are installed on the sandbox bridge before any container can join it, so
+a workload is never up without its filter.
 
-Render what a configuration would install, without touching the host. The same
-compiler the driver uses, so this is the ruleset, not an approximation of it:
+You can render what a configuration would install without touching the host.
+This uses the same compiler as the driver, so the output is the actual ruleset:
 
 ```console
 $ cloop egress firewall --internet --ports 443 --resolver 9.9.9.9:53
@@ -326,8 +332,8 @@ loopback, link-local, CGNAT and metadata ranges are filtered
   drop   0.0.0.0/0                  any          default deny
 ```
 
-`--check` answers the question directly for one address, which is the form worth
-putting in a CI job:
+`--check` answers the question for one address, which makes it useful in a CI
+job:
 
 ```console
 $ cloop egress firewall --internet --ports 443 --resolver 9.9.9.9:53 --check 93.184.216.34:443
@@ -357,42 +363,42 @@ capabilities:
   egress: none        # no network interfaces at all
 ```
 
-`egress: public` works **even when the executor has no filter of its own** —
-that is the point of it. A project on a shared build host can renounce the
-intranet without the operator changing anything, and its neighbours are
-unaffected: each scope gets its own bridge and its own nftables table, so one
-project's confinement never becomes another's.
+`egress: public` works even when the executor has no filter of its own. A
+project on a shared build host can give up intranet access without the operator
+changing anything, and its neighbours are unaffected: each scope gets its own
+bridge and its own nftables table, so one project's confinement never applies
+to another.
 
 Two constraints to know about:
 
 - **`resolvers` is required** on the executor for `egress: public`. Dropping
-  private space drops whatever resolver the container runtime handed the
-  sandbox, and the symptom — every hostname failing to resolve — reads as "the
-  Internet is blocked" and is not fixed by anything in the allow list. cloop
-  refuses the run and names the config key rather than installing a policy with
-  no working DNS. The named resolver is waived as one address on port 53, not as
-  its subnet.
+  private address space also drops whatever resolver the container runtime gave
+  the sandbox. The symptom, every hostname failing to resolve, looks like "the
+  Internet is blocked", and nothing in the allow list fixes it. So cloop
+  refuses the run with an error naming the config key, instead of installing a
+  policy with no working DNS. The named resolver is allowed as one address on
+  port 53, not as its whole subnet.
 - **`egress: public` is refused on a broker-only executor.** If you configured
   `egress_filter.internal: true`, the sandbox's only route out is the egress
-  broker's hostname allowlist, so "the public Internet" is *more* reach than you
-  granted. That is a widening request and it is rejected, not downgraded.
+  broker's hostname allowlist, so "the public Internet" is *more* than you
+  granted. A request that widens access is rejected, not downgraded.
 
-`egress: none` needs no `nft`, no `CAP_NET_ADMIN` and no bridge — taking the
-interfaces away is not a filter. The strongest scope is available on the hosts
-least able to install a ruleset.
+`egress: none` needs no `nft`, no `CAP_NET_ADMIN` and no bridge, because
+removing the interfaces needs no filter. So the strongest scope is also
+available on the hosts least able to install a ruleset.
 
-A finer narrowing than the two scopes — "this project reaches our registry
-and GitHub, on 443, and nothing else" — is a rule set its maintainers save on
-the project's Overview page rather than in the repository, since a
-repository-committed file that could name addresses would put the network one
-pull request away. It may only narrow the executor's, and an admin can set a
-rule set on the executor itself that bounds every project on it. See
+For a finer narrowing than the two scopes ("this project reaches our registry
+and GitHub, on 443, and nothing else"), the project's maintainers save a rule
+set on the project's Overview page, not in the repository. A file in the
+repository that could name addresses would put the network one pull request
+away. The project's rule set can only narrow the executor's, and an admin can
+set a rule set on the executor itself that limits every project on it. See
 [firewall rules](firewall.md).
 
 ### Reaching a specific internal service
 
-A project that genuinely needs one internal endpoint does **not** get it from
-`sandbox.yaml`. Issue an egress grant, and name it from the repo:
+A project that needs one internal endpoint does not get it from `sandbox.yaml`.
+Issue an egress grant, and name it from the repository:
 
 ```bash
 cloop egress grant \
@@ -409,8 +415,8 @@ capabilities:
   network: <grant-id>
 ```
 
-The grant must already exist and be active; a spec naming one the project does
-not hold is refused. See [the secrets guide](secrets.md).
+The grant must already exist and be active. A spec naming a grant the project
+does not hold is refused. See [the secrets guide](secrets.md).
 
 ## 3. Per-project sandbox with gVisor
 
@@ -431,14 +437,14 @@ executors:
     pids_limit: 2048
 ```
 
-`oci_runtime` is a **registered runtime name**, never a path. docker resolves it
-against `/etc/docker/daemon.json` and podman against `containers.conf`, both
-root-owned files you already control — so the name is an indirection through a
-trusted table rather than a path to a binary the daemon would run as root.
+`oci_runtime` is a registered runtime name, never a path. docker looks it up in
+`/etc/docker/daemon.json` and podman in `containers.conf`, both root-owned files
+you already control. The name is therefore looked up in a trusted table, and
+cannot point at an arbitrary binary for the daemon to run as root.
 
-Confirm cloop recognises it. Preflight is phase one of `cloop executor test`,
-which then runs a real workload in the sandbox — the only thing that proves the
-runtime actually boots:
+Check that cloop recognises it. Preflight is the first phase of
+`cloop executor test`, which then runs a real workload in the sandbox. That is
+the only way to prove the runtime actually boots:
 
 ```bash
 cloop executor test <executor-id>
@@ -451,13 +457,13 @@ ok    gvisor       runsc is recognised as gVisor: workload syscalls are served b
                    satisfies capabilities.kernel_isolated
 ```
 
-That finding matters. A typo like `runcs` is a valid runtime name and would be
-silently treated as a plain container, so the check is that *cloop* agrees it is
-gVisor — not just that the runtime starts.
+The `gvisor` line is the one that matters. A typo like `runcs` is a valid
+runtime name and would be treated as a plain container without any warning, so
+the check is that *cloop* agrees the runtime is gVisor, not just that it starts.
 
-Use `--skip-preflight` to attempt the workload anyway when a finding is wrong
-about your host, and read the exit code: `2` means preflight found something
-fatal and the smoke test was not attempted.
+If a finding is wrong about your host, use `--skip-preflight` to run the
+workload anyway. Exit code `2` means preflight found something fatal and the
+smoke test was not attempted.
 
 ### Requiring it from a project
 
@@ -467,43 +473,43 @@ capabilities:
   kernel_isolated: true
 ```
 
-This asks that the workload's system calls are **not served by the executing
-machine's kernel**. Both gVisor and Kata satisfy it.
+This requires that the workload's system calls are not served by the executing
+machine's kernel. Both gVisor and Kata satisfy it.
 
 Use `kernel_isolated`, not `virtualized`, unless you specifically need a
 hypervisor:
 
 | key | satisfied by | ask |
 |---|---|---|
-| `kernel_isolated: true` | gVisor **and** Kata | "a kernel bug in my task must not be a kernel bug on the host" |
+| `kernel_isolated: true` | gVisor and Kata | "a kernel bug in my task must not be a kernel bug on the host" |
 | `virtualized: true` | Kata only | "there must be a hypervisor" |
 
-Demanding a VM when a userspace kernel would do refuses every gVisor executor in
-the fleet — the ones that met the requirement exactly. See
-[the Kata guide](kata.md) for the hypervisor path and its `/dev/kvm`
+Requiring a VM when a userspace kernel would do rules out every gVisor executor
+in the fleet, even though they meet the actual requirement. See
+[the Kata guide](kata.md) for the hypervisor option and its `/dev/kvm`
 prerequisite.
 
 Requiring more confinement needs no grant. The worst a repository can do with
-either key is refuse to run anywhere, and it refuses loudly.
+either key is make itself impossible to place, and that fails with an error.
 
 ### The workspace is a bind mount and nothing else
 
-The container executor's filesystem model is already what you asked for:
+The container executor's filesystem model already gives you this:
 
-- `/workspace` is a bind mount of the project directory — the same inodes,
-  mounted through. Nothing is copied and nothing else on the host is visible.
-- the image's root filesystem is mounted **read-only**;
-- `/tmp` is a `tmpfs` with `nosuid,nodev`, sized against the memory cap;
-- all capabilities are dropped (`--cap-drop=ALL`) with `no-new-privileges`;
-- the workload runs as the project directory's owner UID, never root;
+- `/workspace` is a bind mount of the project directory (the same inodes).
+  Nothing is copied, and nothing else on the host is visible.
+- The image's root filesystem is mounted read-only.
+- `/tmp` is a `tmpfs` with `nosuid,nodev`, sized against the memory cap.
+- All capabilities are dropped (`--cap-drop=ALL`), with `no-new-privileges`.
+- The workload runs as the project directory's owner UID, never root.
 - `--volume`, `--mount`, `--tmpfs`, `--privileged`, `--cap-add`,
-  `--security-opt`, `--pid`, `--ipc` and `--device` are all **rejected** in
-  `extra_args`, so operator config cannot dismantle the boundary the executor
+  `--security-opt`, `--pid`, `--ipc` and `--device` are all rejected in
+  `extra_args`, so operator config cannot undo the boundary the executor
   advertises.
 
-A project can rearrange what it was given — `mounts:` re-exposes sub-paths of
-the workspace elsewhere — but sources are workspace-relative with no `..`, so it
-can never reach past it.
+A project can rearrange what it was given (`mounts:` exposes sub-paths of the
+workspace at other locations), but sources are relative to the workspace and
+cannot contain `..`, so a project can never reach outside it.
 
 Per-project resources and toolchain:
 
@@ -525,46 +531,47 @@ mounts:
     target: /cache/target
 ```
 
-Numbers are clamped to the same bounds `pkg/config` enforces on your own
+Numbers are clamped to the same bounds that `pkg/config` enforces on your own
 executor config, so a repository cannot request 4096 cores. Clamps are reported
-as warnings, and the clamped value is what gets hashed and recorded — the
+as warnings, and the clamped value is what gets hashed and recorded, so the
 artifact never claims a limit the sandbox did not have.
 
-`disk: 20g` bounds the workspace — the bind-mounted project directory, its
-`.cloop/` counted by what the run adds to it — and the container executor holds
-it by measuring the tree: a
-workspace already over 20 GB is refused at the start with both sizes named, and
-a workload that grows past it is stopped and its run paused with reason
-`disk_limit` rather than retried. Free the space or raise the limit, then press
-Run. It is sampled — every 5 seconds to 2 minutes, at idle priority, and less
-often for a tree that is costly to walk — not a quota, so a burst can overshoot
-by what the workload writes between two samples: keep `orchestrator.min_free_disk_mb` on, because the free-space floor is
-what stops that burst from filling the host's volume. A disk ceiling you set on
-the executor (its **Limits** in the Executors panel, or
-`executors.limits.max_disk`) applies the same way, and also bounds every project
-that states no `disk:` at all. The executor's card shows `disk: enforced
+`disk: 20g` limits the workspace: the bind-mounted project directory, with its
+`.cloop/` counted by what the run adds to it. The container executor enforces
+the limit by measuring the tree. A workspace already over 20 GB is refused at
+the start, with both sizes in the error, and a workload that grows past the
+limit is stopped and its run paused with reason `disk_limit` instead of
+retried. Free the space or raise the limit, then press Run. The size is sampled
+(every 5 seconds to 2 minutes, at idle priority, and less often for a tree that
+is costly to walk), not enforced as a quota, so a burst can overshoot by
+whatever the workload writes between two samples. Keep
+`orchestrator.min_free_disk_mb` on, because the free-space floor is what stops
+such a burst from filling the host's volume. A disk ceiling you set on the
+executor (its **Limits** in the Executors panel, or
+`executors.limits.max_disk`) applies the same way, and also limits every
+project that sets no `disk:` at all. The executor's card shows `disk: enforced
 (sampled)`; see [`resources.disk` and the workspace](../reference/sandbox.md#resourcesdisk-and-the-workspace).
 
-Pin what may run with an image trust policy (`sandbox.image_policy`:
-`allowed_registries`, `require_digest`, signature verification) so a repo cannot
-name an arbitrary image. It sits at the top level rather than under an executor
-because it governs every image any project names, whichever driver runs it. On a
-critical host enrolled as a device that includes the host itself: its agent
-applies no policy of its own, so the hub checks a project's image before it
-dispatches, and under `require_signature` resolves a tag at its registry,
-verifies the digest with cosign *on the hub*, and sends the device that digest —
-so the hub needs `cosign`, and a route to the registries the policy names, even
-when no executor on it runs an image. The image you configure for the device's
-own sandbox is yours, and exempt. See
+Restrict what may run with an image trust policy (`sandbox.image_policy`:
+`allowed_registries`, `require_digest`, signature verification), so that a
+repository cannot name an arbitrary image. It sits at the top level, not under
+an executor, because it governs every image any project names, whichever driver
+runs it. On a critical host enrolled as a device, that includes the host
+itself. Its agent applies no policy of its own, so the hub checks a project's
+image before it dispatches. Under `require_signature` the hub resolves a tag at
+its registry, verifies the digest with cosign *on the hub*, and sends the device
+that digest. The hub therefore needs `cosign`, and a route to the registries the
+policy names, even when no executor on it runs an image. The image you
+configure for the device's own sandbox is yours, and is exempt. See
 [configuration](../reference/configuration.md) and
 [what is not mitigated](../security/model.md#what-is-not-mitigated).
 
 ## 4. Hardware and network devices
 
-A device node is the widest thing a sandbox request can ask for: `/dev/ttyUSB0`
-is a serial line into whatever is plugged in, `/dev/nvidia0` is a compute unit
-with its own memory, `/dev/net/tun` is an interface the sandbox can build its
-own path out of. So it is a grant, and `sandbox.yaml` can only select from it.
+A device node is the widest thing a sandbox can ask for: `/dev/ttyUSB0` is a
+serial line into whatever is plugged in, `/dev/nvidia0` is a compute unit with
+its own memory, and `/dev/net/tun` lets the sandbox build its own way out. So
+devices are granted, and `sandbox.yaml` can only select from a grant.
 
 ### Inventory the host's hardware
 
@@ -585,15 +592,15 @@ EOF
 ```
 
 The line format is `name=/dev/source[:/dev/target][:mode]`, where mode is `r`,
-`rw` (the default) or `rwm`. The name is the handle everything downstream refers
-to; remapping means a project told it has `accel` does not need to know that
-*this* node enumerates the card as `nvidia0`.
+`rw` (the default) or `rwm`. The name is the handle everything else refers to.
+With remapping, a project that is told it has `accel` does not need to know
+that *this* node enumerates the card as `nvidia0`.
 
-The inventory refuses paths whose exposure would waive the sandbox entirely —
-`/dev/mem`, `/dev/kmem`, `/dev/kcore`, `/dev/port`, `/dev/msr`, `/dev/cpu`, and
-whole host disks — and refuses anything outside `/dev`, because a regular file is
-a `local_repo` grant. Existence is *not* checked at mint time: the device may
-belong to an executor on another host, which is preflight's question.
+The inventory refuses paths that would make the sandbox pointless (`/dev/mem`,
+`/dev/kmem`, `/dev/kcore`, `/dev/port`, `/dev/msr`, `/dev/cpu`, and whole host
+disks), and refuses anything outside `/dev`, because a regular file is a
+`local_repo` grant. Whether the device exists is *not* checked at mint time,
+because it may belong to an executor on another host; preflight checks that.
 
 ### Grant a slice to a project
 
@@ -618,29 +625,28 @@ capabilities:
 ```
 
 Omitting `devices:` exposes everything the project was granted. Naming a device
-the project holds **no grant for is an error**, not a request — unlike `env:`,
-where an unheld name silently forwards nothing. A missing variable degrades a
-run; a missing device node makes a firmware build meaningless, so it is better
-to refuse than to start it with no serial port.
+the project has no grant for is an error. This differs from `env:`, where a
+name the project does not hold forwards nothing, without an error. A missing
+variable degrades a run, but a missing device node makes a firmware build
+meaningless, so it is better to refuse than to start it with no serial port.
 
 Inside the sandbox, `CLOOP_HOST_DEVICES=serial0` lists what arrived. Host paths
-are deliberately not in the environment — the machine's hardware layout is not
-something every process in the sandbox needs.
+are not in the environment, because not every process in the sandbox needs to
+know the machine's hardware layout.
 
 ### What the access mode does and does not enforce
 
-**Read the following before relying on a read-only device grant.**
+**Read this before relying on a read-only device grant.**
 
 The mode becomes the third field of the runtime's `--device src:dst:perms`,
 which programs the container's *device cgroup*. On cgroup v2 that is an eBPF
 program whose attachment depends on the kernel, the runtime build and cgroup
-delegation — none of which cloop can interrogate. **On many hosts it is not
-enforced at all**, and a device granted `r` is then writable, because the node
-inside the sandbox keeps its host file mode and `/dev/zero` is `0666` nearly
-everywhere.
+delegation, none of which cloop can query. On many hosts it is not enforced at
+all, and a device granted `r` is then writable, because the node inside the
+sandbox keeps its host file mode and `/dev/zero` is `0666` nearly everywhere.
 
-Preflight says so, unconditionally — a driver that said nothing about a boundary
-would read as a driver that provides it:
+Preflight always warns about this, because a driver that said nothing about a
+boundary would look like a driver that provides it:
 
 ```
 warn  devices   a host_device grant's access mode (r/rw/rwm) is programmed into the
@@ -651,8 +657,8 @@ warn  devices   a host_device grant's access mode (r/rw/rwm) is programmed into 
                 cannot open it for writing regardless of cgroups
 ```
 
-The control that holds on **every** host is the node's own ownership and mode.
-The sandbox runs as the project directory's owner UID, so:
+The control that works on every host is the node's own ownership and mode. The
+sandbox runs as the project directory's owner UID, so:
 
 ```bash
 # make the analyser unwritable by the sandbox UID, whatever the cgroup does
@@ -668,93 +674,91 @@ Use a udev rule to make that survive a reboot or a re-plug:
 SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", GROUP="cloop-ro", MODE="0640"
 ```
 
-cloop still emits the mode — on hosts where the cgroup rule *is* enforced it is
-enforced exactly, and withholding `mknod` by default costs nothing. It is
-defence in depth, not the boundary.
+cloop still passes the mode on: on hosts where the cgroup rule *is* enforced, it
+is enforced as written, and withholding `mknod` by default costs nothing. It is
+an extra layer of defence, not the boundary.
 
 ### GPUs on Kubernetes
 
-`executors.kubernetes` reports `SupportsDevices: false`, and that is honest
-rather than missing. Kubernetes does not take device paths: a device plugin owns
-the node and hands the container whichever unit it has free in response to an
-extended resource request. Mounting `/dev/nvidia0` as a hostPath from whatever
-node the scheduler picked would expose an unrelated piece of that node's
-hardware — worse than refusing.
+`executors.kubernetes` reports `SupportsDevices: false`, which reflects how
+Kubernetes works and is not a missing feature. Kubernetes does not take device
+paths: a device plugin owns the node and gives the container whichever unit it
+has free in response to an extended resource request. Mounting `/dev/nvidia0`
+as a hostPath on whatever node the scheduler picked would expose an unrelated
+piece of that node's hardware, which is worse than refusing.
 
-A project holding a `host_device` grant and bound to a Kubernetes executor is
-refused at placement, naming both facts. For GPU work on a cluster, bind the
-project to a container executor on the GPU host.
+A project that holds a `host_device` grant and is bound to a Kubernetes
+executor is refused at placement, with an error that names both. For GPU work
+on a cluster, bind the project to a container executor on the GPU host.
 
 ### Revocation, honestly
 
 A device already in a running sandbox's cgroup and mount namespace cannot be
-taken back from outside it — the same limitation bind mounts have, and for the
-same reason. Revoking a `host_device` grant takes it out of the run's lease at
-once and out of every later lease; the current workload keeps the device until
-it exits.
+taken back from outside it. Bind mounts have the same limitation, for the same
+reason. Revoking a `host_device` grant takes it out of the run's lease at once
+and out of every later lease, but the current workload keeps the device until it
+exits.
 
-`cloop secret revoke <grant-id>` withdraws the grant, and its help says so
-plainly: "What no revocation reaches is what is already inside a running
-sandbox: … a device or network interface passed through. … To stop the others
-now, revoke their lease with action=kill from the Secrets panel, or stop the
-run." Stop the run from the dashboard's Stop button, or by signalling the task —
-there is no `cloop stop`.
+`cloop secret revoke <grant-id>` withdraws the grant, and its help text says:
+"What no revocation reaches is what is already inside a running sandbox: … a
+device or network interface passed through. … To stop the others now, revoke
+their lease with action=kill from the Secrets panel, or stop the run." Stop the
+run with the dashboard's Stop button or by signalling the task. There is no
+`cloop stop`.
 
-Grant TTLs are the routine control, and they are the reason the above is usually
-academic. Eight hours for a bench session is better than a week, because the
-grant lapsing is what makes it a session rather than a standing entitlement.
+Grant TTLs are the routine control, and they are why this rarely matters in
+practice. Eight hours for a bench session is better than a week, because the
+grant lapsing is what makes it a session and not a standing entitlement.
 
 ### Network interfaces: L2 passthrough
 
 A device grant cannot carry a network interface. A netdev is not a node under
 `/dev`, so there is nothing to bind and no cgroup rule to write, and neither
-runtime has a flag for it — `/dev/net/tun` lets a sandbox *build* an interface,
-which is a different thing from being handed one.
+runtime has a flag for it. (`/dev/net/tun` lets a sandbox *build* an interface,
+which is not the same as being given one.)
 
-`host_interface` is that different thing. It **moves** an interface out of the
-executor's network namespace and into the sandbox's, which puts the workload on
-the segment the interface is attached to rather than behind a route through the
-host. That is what makes ARP, DHCP, PTP, raw Ethernet and every other
-link-layer protocol work — the ones a bring-up engineer actually needs, and the
-ones no egress rule can carry.
+`host_interface` gives the sandbox an interface. It moves an interface out of
+the executor's network namespace and into the sandbox's, which puts the
+workload on the segment the interface is attached to, instead of behind a route
+through the host. That is what makes ARP, DHCP, PTP, raw Ethernet and every
+other link-layer protocol work. A bring-up engineer needs these, and no egress
+rule can carry them.
 
-**Read this before granting one.** Two properties have no analogue anywhere else
-in cloop:
+**Read this before granting one.** Two properties have no equivalent anywhere
+else in cloop:
 
-- **The host gives the interface up.** A netdev lives in exactly one namespace.
-  For the life of the run the executor cannot use it at all. Naming the wrong
-  interface does not widen a boundary — it severs the machine, and on a remote
-  bench that means losing the machine. cloop refuses `lo`, the container
-  runtimes' own bridges (`docker0`, `podman0`, `cni-podman0`, `virbr0`, any
-  `br-*`) and, at attach time on the executor itself, whichever interface
-  carries that host's default route.
-- **Teardown is the kernel's decision.** When a network namespace is destroyed
-  the kernel returns *physical* devices to the initial namespace and **deletes**
-  virtual ones. A passed-through NIC comes home by itself; a passed-through
-  veth end is destroyed, taking its peer with it. cloop moves interfaces back
-  while the container is still up, so a graceful stop preserves a veth bench —
-  but a workload that is killed outright, or a host that loses power, leaves the
-  kernel's rules in force.
+- **The host gives the interface up.** A netdev lives in exactly one namespace,
+  so for the life of the run the executor cannot use it at all. Naming the wrong
+  interface cuts the machine off the network, and on a remote bench that means
+  losing access to the machine. cloop refuses `lo`, the container runtimes' own
+  bridges (`docker0`, `podman0`, `cni-podman0`, `virbr0`, any `br-*`) and, at
+  attach time on the executor itself, whichever interface carries that host's
+  default route.
+- **Teardown is the kernel's decision.** When a network namespace is destroyed,
+  the kernel returns *physical* devices to the initial namespace and *deletes*
+  virtual ones. A passed-through NIC comes back by itself, but a passed-through
+  veth end is destroyed, and its peer with it. cloop moves interfaces back while
+  the container is still up, so a graceful stop preserves a veth bench. A
+  workload that is killed outright, or a host that loses power, leaves it to the
+  kernel's rules.
 
 #### Which executors can honour it
 
-Only a **container** executor, running **as root**, on the machine the interface
-is attached to, with `ip(8)` and `nsenter(1)` installed, under **`runc` or
-`crun`**.
+Only a container executor running as root, on the machine the interface is
+attached to, with `ip(8)` and `nsenter(1)` installed, under `runc` or `crun`.
 
-The last condition is the one worth internalising. Kata and gVisor build their
-view of the network when the sandbox starts and never see a link that arrives
-afterwards — so the move succeeds, the host loses the interface, and
-`/proc/net/dev` inside the container still lists only `lo`. That is the worst
-possible outcome, so cloop reports the capability as false on those runtimes and
-refuses at placement instead of trying. A bench that needs both a wire and a
+The last condition matters most. Kata and gVisor build their view of the network
+when the sandbox starts and never see a link that arrives later. The move would
+succeed, the host would lose the interface, and `/proc/net/dev` inside the
+container would still list only `lo`. So cloop reports the capability as false
+on those runtimes and refuses at placement. A bench that needs both a wire and a
 guest kernel needs a different mechanism (SR-IOV VF assignment at VM creation),
 which cloop does not drive.
 
 #### Wire the bench
 
-The usual shape is a veth pair with one end on a bridge and the other granted to
-the sandbox. This is the exact bench cloop's own integration test builds:
+The usual setup is a veth pair with one end on a bridge and the other granted to
+the sandbox. cloop's own integration test builds this bench:
 
 ```bash
 # a segment with the device under test on it
@@ -768,9 +772,9 @@ ip link set bench-br up
 ip link set bench-sbx up
 ```
 
-For a *physical* bench port — a NIC wired to the board — skip the veth entirely
-and grant the interface itself. That is the case the kernel handles best: it
-comes back to the host on its own when the sandbox ends.
+For a *physical* bench port (a NIC wired to the board), skip the veth and grant
+the interface itself. The kernel handles this case best: the interface comes
+back to the host on its own when the sandbox ends.
 
 #### Inventory and grant
 
@@ -791,13 +795,13 @@ cloop secret grant bench-net \
 ```
 
 The line format is `name=ifname` followed by optional comma-separated
-attributes: `target=` (the name inside the sandbox), `address=` (a CIDR — an
-address with a prefix length), `gateway=` (needs `address=`; makes the sandbox's
-default route point at the bench) and `mtu=`. Comma-separated rather than
-colon-separated, because `fd00::10/64` is full of colons.
+attributes: `target=` (the name inside the sandbox), `address=` (a CIDR, that
+is, an address with a prefix length), `gateway=` (needs `address=`; points the
+sandbox's default route at the bench) and `mtu=`. The attributes are separated
+by commas, not colons, because `fd00::10/64` is full of colons.
 
 Omit `address=` for a segment with DHCP on it, or for a workload doing raw L2:
-the interface arrives up and unaddressed.
+the interface arrives up and without an address.
 
 #### Select from the grant
 
@@ -809,33 +813,33 @@ capabilities:
 ```
 
 Omitting `interfaces:` moves in everything the project was granted. Naming an
-interface the project holds **no grant for is an error**, for the same reason a
-missing device is: starting a bring-up task on a board it has no wire to is
-worse than refusing.
+interface the project has no grant for is an error, for the same reason as a
+missing device: starting a bring-up task on a board it has no wire to is worse
+than refusing.
 
-`interfaces:` together with `network: none` is refused rather than resolved.
-The two statements contradict each other, and honouring either silently would
-discard the other — the repo would have renounced the network and been given
-one, or the host would have handed over an interface the workload cannot see.
+`interfaces:` together with `network: none` is refused. The two settings
+contradict each other, and honouring either one without an error would discard
+the other: either the repository renounced the network and would be given one,
+or the host would hand over an interface the workload cannot see.
 
 Inside the sandbox, `CLOOP_HOST_INTERFACES=dut` lists the handles that arrived.
-Host interface names are deliberately not in the environment: the bench's wiring
-is not something every process in the sandbox needs.
+Host interface names are not in the environment, because not every process in
+the sandbox needs to know the bench's wiring.
 
 #### The start-up window
 
-The interface is moved in **after** the container starts, because the namespace
-it moves into does not exist until then. cloop does it before `Start` returns —
-so the task is never dispatched to a sandbox whose wire has not landed — but a
+The interface is moved in *after* the container starts, because the namespace it
+moves into does not exist until then. cloop does this before `Start` returns, so
+the task is never dispatched to a sandbox whose interface has not arrived. But a
 workload whose very first instruction probes for the link can still miss it by a
 few tens of milliseconds.
 
-The window is one-directional: it can only ever show a workload *less* than it
-was granted, never more. A workload that needs to synchronise waits for the link
-named by `$CLOOP_HOST_INTERFACES` to come **up** — not merely to exist. The
-kernel only renames a link while it is down, so the name appears first; the MTU
-and address follow, and bringing the link up is the last step (bar a granted
-gateway's default route, installed just after it):
+The window only ever shows a workload *less* than it was granted, never more. A
+workload that needs to synchronise should wait for the link named by
+`$CLOOP_HOST_INTERFACES` to come *up*, not just to exist. The kernel only
+renames a link while it is down, so the name appears first, then the MTU and
+address, and bringing the link up is the last step (apart from a granted
+gateway's default route, which is installed just after it):
 
 ```sh
 # IFF_UP is bit 0 of the link's flags
@@ -844,8 +848,8 @@ until [ $(( $(cat /sys/class/net/eth1/flags 2>/dev/null || echo 0) & 1 )) -eq 1 
 done
 ```
 
-A workload that exits before the move completes is a hard failure, not a silent
-one: the container is destroyed and the error says what to do about it.
+If a workload exits before the move completes, the start fails with an error:
+the container is destroyed, and the error says what to do.
 
 ## Putting it together
 
@@ -919,13 +923,13 @@ capabilities:
 No `kernel_isolated: true` here: it would place the project on a gVisor
 executor, where the serial line cannot be opened (see the topology section).
 
-What that produces: a container sandbox on the bench host, `/workspace` a bind
-mount of the project and nothing else on the filesystem visible, two checkouts
-read-only at `/repos`, one serial port at `/dev/ttyUSB0`, the public Internet
-reachable on 443 and every private address dropped — and a task that asks for
-anything else refused at placement with the constraint named.
+The result is a container sandbox on the bench host with `/workspace` as a bind
+mount of the project and nothing else on the filesystem visible, two read-only
+checkouts at `/repos`, one serial port at `/dev/ttyUSB0`, the public Internet
+reachable on port 443, and every private address dropped. A task that asks for
+anything else is refused at placement, with an error naming the constraint.
 
-Verify before you trust it:
+Check it before you rely on it:
 
 ```bash
 cloop executor test <id>          # preflight, then a real workload in the real sandbox
@@ -936,14 +940,14 @@ cloop egress firewall --internet --ports 443 --resolver 9.9.9.9:53 \
 
 ## Where the guarantees are written down
 
-- [Executor architecture](../architecture/executors.md) — drivers, capabilities,
-  placement, and which refusal comes from where
-- [Security model](../security/model.md) — the boundaries, stated as claims
-- [Threat model](../security/threat-model.md) — what each one is and is not
-  worth
-- [`tests/security/`](../../tests/security/) — the executable specification;
-  every guarantee on this page that can be machine-checked is checked there
-- [Sandbox spec reference](../reference/sandbox.md) — every
+- [Executor architecture](../architecture/executors.md): drivers, capabilities,
+  placement, and which component refuses what
+- [Security model](../security/model.md): the boundaries, stated as claims
+- [Threat model](../security/threat-model.md): what each boundary protects
+  against and what it does not
+- [`tests/security/`](../../tests/security/): the tests that check every
+  guarantee on this page that can be checked automatically
+- [Sandbox spec reference](../reference/sandbox.md): every
   `.cloop/sandbox.yaml` key
-- [Configuration reference](../reference/configuration.md) — every
+- [Configuration reference](../reference/configuration.md): every
   `.cloop/config.yaml` key

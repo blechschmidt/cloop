@@ -3,19 +3,19 @@
 Executor backends, sandbox settings, transport security and hardening keys for
 `.cloop/config.yaml`.
 
-Conceptual documentation lives elsewhere: [how executors work](../architecture/executors.md),
-[what each boundary authenticates with](../security/model.md), and
-[granting credentials](../guides/secrets.md). This file is the key-by-key
-reference those documents refer to.
+This page is the key-by-key reference. For the concepts, see
+[how executors work](../architecture/executors.md),
+[what each boundary authenticates with](../security/model.md) and
+[granting credentials](../guides/secrets.md).
 
 ---
 
 ## Per-user state: `CLOOP_HOME`
 
-Most configuration is per-project and lives in `.cloop/config.yaml` inside the
-working tree. A few things are per-*user* and deliberately outside it — the
-multi-project registry the dashboard lists, the global budget and cost ledger,
-named profiles, and cached provider credentials:
+Most configuration is per project and lives in `.cloop/config.yaml` in the
+working tree. A few things are per user and live outside it: the multi-project
+registry the dashboard lists, the global budget and cost ledger, named profiles,
+and cached provider credentials:
 
 | Path | Contents | Relocated by `CLOOP_HOME` |
 | --- | --- | --- |
@@ -27,63 +27,63 @@ named profiles, and cached provider credentials:
 | `~/.config/cloop/costs.jsonl` | Global cost ledger | no |
 | `~/.config/cloop/workspaces.json` | Registered workspaces | no |
 
-**`CLOOP_HOME`** overrides the directory that would otherwise be `~/.cloop`,
-following the `CARGO_HOME` convention: it names the directory itself, not a home
-that contains it. A relative value is resolved against the process working
-directory; an empty or whitespace-only value is treated as unset.
+**`CLOOP_HOME`** replaces `~/.cloop`. Like `CARGO_HOME`, it names the directory
+itself, not a home directory that contains it. A relative value is resolved
+against the process's working directory, and an empty or whitespace-only value
+counts as unset.
 
 ```bash
 CLOOP_HOME=/var/lib/cloop/alice cloop ui
 ```
 
-**It currently affects the registry only** — the right-hand column above is not
-decoration. Profiles, plugins and the agent credential still resolve from
-`$HOME` directly, so setting `CLOOP_HOME` alone does not give a second hub its
-own copy of those. To relocate everything, set `HOME`; `CLOOP_HOME` then
-narrows the registry further if you want it somewhere else again.
+It currently moves only the registry, as the right-hand column shows. Profiles,
+plugins and the agent credential still resolve from `$HOME`, so setting
+`CLOOP_HOME` alone doesn't give a second hub its own copy of them. To move
+everything, set `HOME`. You can then also set `CLOOP_HOME` to put the registry
+somewhere else again.
 
-Two reasons to set it:
+There are two reasons to set it:
 
-- **Running more than one hub under one Unix account.** Without it they share a
-  registry, so projects registered by one appear in the other. That sharing is
-  exactly what the members of one [hub cluster](../architecture/hub-cluster.md)
-  need, so do *not* give them different values.
-- **Testing.** The registry is process-global state at a fixed path outside the
-  working tree, which makes it easy for a test to write to the machine it runs
-  on and leave it there. That is not theoretical: a dashboard test accumulated
-  99 entries into a developer's real `projects.json`, one per run, until project
-  index 99 resolved to a deleted directory and three unrelated authorization
-  tests began failing — on that machine only, since CI always starts from an
-  empty `$HOME`. Go tests here isolate via `internal/hometest.Isolate` in
-  `TestMain`, which redirects `$HOME` and clears `CLOOP_HOME`; `tests/hermetic`
-  fails the build if a package that reads `$HOME` and has tests does not.
+- **Running more than one hub under one Unix account.** Without it the hubs
+  share a registry, so projects registered in one appear in the other. Members
+  of one [hub cluster](../architecture/hub-cluster.md) need that sharing, so
+  don't give them different values.
+- **Testing.** The registry is process-wide state at a fixed path outside the
+  working tree, so a test can leave entries in the real registry of the machine
+  it runs on. One dashboard test added an entry to a developer's `projects.json`
+  on every run until project index 99 pointed at a deleted directory, which broke
+  three unrelated tests on that machine only (CI always starts with an empty
+  `$HOME`). cloop's Go tests isolate themselves with `internal/hometest.Isolate`
+  in `TestMain`, which redirects `$HOME` and clears `CLOOP_HOME`.
+  `tests/hermetic` fails the build if a package that reads `$HOME` and has tests
+  doesn't do this.
 
 ---
 
 ## Background work left by an agent
 
-An agent can start a long job and exit before it finishes — `nohup python
-train.py &`, a background build, a test run it never waits on — and then print
-`TASK_DONE`. Its transcript is honest about what it *started* and silent about
-what it *finished*, so without help cloop marks the task complete and runs the
-next one against an artifact that is still being written. The incident this
-guards against had three consecutive tasks operating on a model the task before
-them was still training.
+An agent can start a long job (`nohup python train.py &`, a background build, a
+test run it never waits for), exit before the job finishes, and print
+`TASK_DONE`. The transcript shows what the agent started but not whether it
+finished, so without a check cloop would mark the task complete and run the next
+one against output that is still being written. In the case that led to this
+check, three tasks in a row worked on a model that the task before them was
+still training.
 
-cloop detects this. The `claude` CLI — and the `copilot` CLI, for the
-[copilot provider](../getting-started/providers.md#github-copilot) — runs in its
-own process group, so anything it forks is still identifiable after it exits. When the harness returns, cloop
-scans that group:
+cloop detects this. The `claude` CLI (and the `copilot` CLI, for the
+[copilot provider](../getting-started/providers.md#github-copilot)) runs in its
+own process group, so cloop can still find anything it started after it exits.
+When the harness returns, cloop scans that group:
 
-- **Nothing left running** — the common case. Costs one procfs scan, and the
+- **Nothing left running**: the common case. It costs one procfs scan, and the
   task proceeds normally.
-- **Something exits within the grace window** — ordinary teardown, ignored.
-- **Real background work** — cloop blocks until it finishes, then accepts the
-  task. The wait is visible in the UI and the event log while it happens.
-- **Work outlives the budget** — the task is *not* accepted as complete, whatever
-  its output claimed. It is marked failed with a diagnosis naming the surviving
-  processes, dependent tasks stay blocked, and the orphans are terminated so a
-  retry cannot race the leftovers.
+- **Something exits within the grace window**: ordinary teardown, ignored.
+- **Real background work**: cloop waits until it finishes, then accepts the
+  task. The UI and the event log show the wait while it happens.
+- **Work outlives the wait**: the task is not accepted as complete, whatever its
+  output says. It is marked failed with a diagnosis naming the surviving
+  processes, dependent tasks stay blocked, and the leftover processes are
+  terminated so a retry can't collide with them.
 
 Configure it under the provider:
 
@@ -97,28 +97,27 @@ claudecode:
 ```
 
 `copilot.background` takes the same four keys for the `copilot` provider.
-`grace_seconds` is capped at 120 and `wait_minutes` at 1440; a value beyond
-either is clamped with a warning rather than silently reinterpreted.
+`grace_seconds` is capped at 120 and `wait_minutes` at 1440. A larger value is
+clamped, with a warning.
 
-Raise `wait_minutes` if your tasks legitimately start long jobs — the cost of
-waiting too long is a slow task, while the cost of waiting too briefly is a task
-retried when it would have succeeded. Set `keep_orphans: true` only if something
-outside cloop is responsible for reaping those processes.
+Raise `wait_minutes` if your tasks are expected to start long jobs. Waiting too
+long costs a slow task; waiting too briefly costs a retry of a task that would
+have succeeded. Set `keep_orphans: true` only if something outside cloop cleans
+up those processes.
 
 **Limit:** a child that calls `setsid()` leaves the process group and is not
-detected. That is deliberate — `setsid` is the explicit "I intend to outlive my
-parent" gesture, and the case this exists to catch is the opposite one, where
-the work was meant to be waited for.
+detected. This is intended: calling `setsid` is how a process says it means to
+outlive its parent, and this check is for work that was meant to be waited for.
 
 ---
 
 ## Requirement-gated completion (`requirements`)
 
-A project can hold its tasks to their requirements: with the gate on, a task
-whose agent reports done is accepted only once its linked requirements — and in
-`linked+must` mode every approved must requirement that has tests — pass their
-tests on the project's executor (Task 20461). The setting is the project's and
-travels with it; `config.yaml` may declare it:
+A project can require its tasks to meet their requirements. With the gate on, a
+task the agent reports as done is accepted only once its linked requirements
+pass their tests on the project's executor. In `linked+must` mode, every
+approved must requirement that has tests has to pass too. The setting is stored
+with the project, and `config.yaml` can declare it:
 
 ```yaml
 requirements:
@@ -128,8 +127,8 @@ requirements:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `requirements.gate` | not declared | `cloop run` writes it into the project before it starts. Not declared, the project keeps whatever the dashboard's *Requirements* badge or `cloop requirements gate` set last. A mode the build does not know declares nothing — never `off` — and every load warns about it; `cloop config set` and `cloop config validate` refuse it. |
-| `requirements.assess` | not declared | With the gate on, ask the model about linked requirements without tests; one it finds unfulfilled blocks the task. Without it they are reported unverified and never block. |
+| `requirements.gate` | not declared | `cloop run` writes it into the project before it starts. If it isn't declared, the project keeps whatever the dashboard's *Requirements* badge or `cloop requirements gate` set last. A mode this build doesn't know declares nothing (it is not treated as `off`), and every load warns about it. `cloop config set` and `cloop config validate` refuse it. |
+| `requirements.assess` | not declared | With the gate on, asks the model about linked requirements that have no tests. One it finds unmet blocks the task. Without it, such requirements are reported as unverified and never block. |
 
 See [Requirement-gated completion](../guides/requirements.md#requirement-gated-completion)
 for what a check does, how a task is sent back, and how a regression is
@@ -138,57 +137,56 @@ reported.
 ## Following new builds
 
 A deploy replaces the cloop binary but not the runs started from it, and a run
-in auto-evolve does not end on its own — so without help it executes the build
-it started with indefinitely. Two settings let a run on this host move to a
-newly deployed build at a task boundary instead, keeping its process, its pid
-and the hub's live log (Task 20389). The runbook's *Long-lived runs after an
-upgrade* describes what happens and what each refusal means.
+in auto-evolve doesn't end on its own, so it would keep running its original
+build indefinitely. Two settings let a run on this host switch to a newly
+deployed build at a task boundary, keeping its process, its pid and the hub's
+live log. The runbook's *Long-lived runs after an upgrade* describes what
+happens and what each refusal means.
 
 | Setting | Where | Default | What it does |
 | --- | --- | --- | --- |
-| **Follow New Builds** | Per project: the Overview's Active Options badge, `cloop run --follow-builds` (`=false` to turn off), `POST /api/options/toggle` `{"flag":"follow_builds"}`. Stored in the project's `state.db` (metadata key `follow_builds`), not in `config.yaml` | off | At every task boundary the run checks the binary at the path it was started from; once that is a different file that has been in place for three minutes (a deploy that fails its health check is rolled back well within that), answers `version --json` with a higher `sequence` and a `schema` at least the database's, and accepts the run's command line, the run adopts it. A file it refused is not asked again until it changes; a probe that failed is tried three times. |
-| **Adopt at next task boundary** | One-shot, per run: the Overview button, or `POST /api/run/adopt-build` (`run.start`) | — | The same check and move, once, for the run that is running now — without the three-minute wait, but never to a build newer than the hub that asked. The request names that run's process and is cleared once the run has acted on it, or refused it. |
+| **Follow New Builds** | Per project: the Overview's Active Options badge, `cloop run --follow-builds` (`=false` to turn off), `POST /api/options/toggle` `{"flag":"follow_builds"}`. Stored in the project's `state.db` (metadata key `follow_builds`), not in `config.yaml` | off | At every task boundary the run checks the binary at the path it was started from. It switches to that binary once it is a different file that has been in place for three minutes (a deploy that fails its health check is rolled back well within that), answers `version --json` with a higher `sequence` and a `schema` at least the database's, and accepts the run's command line. A file it refused isn't checked again until it changes. A failed probe is tried three times. |
+| **Adopt at next task boundary** | One-shot, per run: the Overview button, or `POST /api/run/adopt-build` (`run.start`) | — | The same check and switch, once, for the current run, without the three-minute wait but never to a build newer than the hub that asked. The request names that run's process and is cleared once the run has acted on it or refused it. |
 
 Both apply only to host-process runs (the local executor) on Linux. A run in a
-container or on a remote device executes the binary its image or its agent
-provides and moves with them: rebuild the image, or upgrade the device from the
-Executors panel. The dashboard says so instead of offering the button.
+container or on a remote device uses the binary its image or agent provides,
+and changes when they do: rebuild the image, or upgrade the device from the
+Executors panel. For those runs the dashboard says so instead of offering the
+button.
 
-What the run keeps about itself, and where:
+What the run records about itself, and where:
 
 - The **run-owner record** (metadata key `run_owner`): pid, start time and boot
-  id, host, the path it was started from, executor kind, run id, and its build —
-  `version`, `commit`, `sequence`, `schema` — with `reexecs` and the `previous`
-  build once it has moved. Written only by the run; read by the dashboard
+  id, host, the path it was started from, executor kind, run id, and its build
+  (`version`, `commit`, `sequence`, `schema`), plus `reexecs` and the `previous`
+  build once it has switched. Only the run writes it. The dashboard
   (`run_build` in `/api/state`), `cloop status` and `cloop hub doctor`
-  (`runs.build_lag`).
+  (`runs.build_lag`) read it.
 - A pending request (metadata key `run_adopt_request`), written only by the hub.
-- `CLOOP_RUN_HANDOFF`, set by a run in its own environment as it re-executes
-  itself, names `.cloop/run-handoff-<pid>.json`. The new image reads it, removes
-  it and unsets the variable. Never set it yourself: an image started with it
-  skips everything a fresh run does at its start.
+- `CLOOP_RUN_HANDOFF` names `.cloop/run-handoff-<pid>.json`. A run sets it in its
+  own environment as it re-executes itself, and the new image reads the file,
+  removes it and unsets the variable. Never set it yourself: a process started
+  with it skips everything a fresh run does at startup.
 
-A candidate must report `schema` in `cloop version --json`; builds from before
-Task 20389 do not, and are refused.
+A candidate build must report `schema` in `cloop version --json`. Older builds
+don't, and are refused.
 
 ## Execution Backends (Executors)
 
-An **executor** decides *where* a cloop workload actually runs. By default it is
-a child process on the same host as cloop itself, with the same user, the same
-filesystem, and the same network. That is fine on a laptop. It is not fine for a
-hosted deployment where the agent executes model-authored code on someone else's
-behalf.
+An **executor** decides where a cloop workload runs. By default it is a child
+process on the same host as cloop, with the same user, filesystem and network.
+That is fine on a laptop, but not for a hosted deployment where the agent runs
+model-written code on someone else's behalf.
 
-Projects are pinned to an executor. A project bound to an executor that is not
-available **fails** rather than silently falling back to host execution — an
-isolation boundary you opted into is never downgraded because the backend
-happened to be unreachable.
+Each project is bound to an executor. If that executor isn't available, the
+project's runs fail. They never fall back to running on the host, so an
+isolation boundary you chose isn't lost because a backend was unreachable.
 
 | Kind | Isolation | Where it runs | Notes |
 |------|-----------|---------------|-------|
-| `localprocess` | none | this host | Default. Zero-config, no sandbox. |
-| `container` | container, or `vm` | this host | Docker/Podman sandbox. Opt-in via config. `vm` with a Kata [`oci_runtime`](#vm-isolated-sandboxes-kata-containers). |
-| `remote` | remote | an enrolled device | Edge box that dialled out to the control plane. |
+| `localprocess` | none | this host | Default. No configuration, no sandbox. |
+| `container` | container, or `vm` | this host | Docker/Podman sandbox, enabled in the config. `vm` with a Kata [`oci_runtime`](#vm-isolated-sandboxes-kata-containers). |
+| `remote` | remote | an enrolled device | An edge machine that connects out to the control plane. |
 | `kubernetes` | remote | an ephemeral Pod | One Pod per workload. Also VM-backed with a Kata [`runtime_class`](#vm-isolated-sandboxes-kata-containers). |
 
 ```bash
@@ -206,18 +204,18 @@ cloop executor revoke <id>       # kill a leaked token or a decommissioned devic
 
 ### The Executors panel
 
-The web dashboard has a global **Executors** tab: one card per backend with a
+The web dashboard has a global **Executors** tab with one card per backend: a
 live status dot, a kind badge (host / container / remote), capability chips,
-current load, and enroll/revoke actions. Status changes arrive over the same
-WebSocket the rest of the dashboard uses — nothing polls.
+current load, and enroll and revoke actions. Status changes arrive over the
+same WebSocket as the rest of the dashboard, without polling.
 
-Each project's execution target is a one-click setting: the **Executor** card on
-the project Overview page, next to the provider card. Changing it takes effect
-on the next run; work already in flight stays on the executor that started it.
+You choose a project's executor on the **Executor** card of its Overview page,
+next to the provider card. A change takes effect on the next run. Work already
+in progress stays on the executor that started it.
 
-The tab's banner always states the effective host-execution mode, so "can this
-server still fork a harness next to itself" is never something you have to infer
-from a config file.
+The tab's banner always shows the effective host-execution mode, so you can see
+whether this server may still run a harness on its own host without reading
+config files.
 
 ### Container sandbox
 
@@ -241,103 +239,106 @@ executors:
       region: eu
 ```
 
-`labels` are the executor's labels, which a [grant to a label
-selector](../guides/secrets.md#label-subjects) is matched against —
-`executors.kubernetes.labels` is the same for the Kubernetes executor. They are
-read from the configuration the hub starts with, like the rest of the section;
-after a restart that changes them, the leases the hub adopts are judged by the
-new labels and give back what those no longer match. A key with a space, `,` or
-`=`, or a value with `,`, is refused by `cloop config validate`, and dropped
-with a warning on load: no selector could name it.
-
-or with `cloop config set executors.container.<key> <value>`. The setter's key
-list covers `enabled`, `id`, `runtime`, `image`, `cpus`, `memory`, `pids_limit`,
-`network`, `allow_hosts`, `extra_args` and `selinux_label` — so `oci_runtime`,
+Or use `cloop config set executors.container.<key> <value>`. The setter accepts
+`enabled`, `id`, `runtime`, `oci_runtime`, `image`, `cpus`, `memory`,
+`pids_limit`, `network`, `allow_hosts`, `extra_args` and `selinux_label`.
 `orphan_grace_period_seconds`, `allow_root_user` and the whole `egress_filter`
-subtree have no setter key and are edited in the file directly.
+subtree have no setter key, so you edit them in the file.
 
-`orphan_grace_period_seconds` is how old a **running** container has to be before
-the startup sweep and `cloop executor reap` will kill it. Exited containers are
-collected immediately and ignore it entirely.
+`labels` are the executor's labels, which a [grant to a label
+selector](../guides/secrets.md#label-subjects) is matched against.
+`executors.kubernetes.labels` does the same for the Kubernetes executor. Like
+the rest of the section, they are read from the configuration the hub starts
+with. After a restart that changes them, the leases the hub adopts are checked
+against the new labels, and credentials the new labels no longer match are
+given back. A key containing a space, `,` or `=`, or a value containing `,`, is
+refused by `cloop config validate` and dropped with a warning on load, because
+no selector could name it.
 
-It is what makes reaping a running orphan safe rather than reckless. A container
-listed moments ago may belong to a control plane that is starting right now, or
-to this one in the microseconds between `run -d` returning and the handle being
-recorded, and neither is an orphan — but a container that has been running
-untracked for longer than this has a demonstrably absent owner. Zero means the
-600-second default, because treating an unset field as "reap on sight" would make
-the least-configured executor the most destructive one; the accepted range is
-0–604800 (7 days), and a value outside it is reported and reset to the default
-rather than silently clamped. `executors.kubernetes.orphan_grace_period_seconds`
-is the same key with the same default and the same meaning for Pods.
+`orphan_grace_period_seconds` is how old a running container must be before the
+startup sweep and `cloop executor reap` will kill it. Exited containers are
+removed immediately, whatever this says.
 
-Ten minutes is far wider than the millisecond-scale race it guards, and that is
-the correct direction to be wrong in: an orphan reaped ten minutes late costs
-CPU, an orphan reaped ten milliseconds early costs somebody's run. Lower it only
-on a host where nothing else shares the runtime. See
+The grace period is what makes it safe to remove running orphans. A container
+listed a moment ago may belong to a control plane that is starting right now,
+or to this one in the instant between `run -d` returning and the handle being
+recorded, and neither is an orphan. A container that has run untracked for
+longer than the grace period has no owner. Zero means the 600-second default,
+so an unset field never means "remove on sight". The accepted range is
+0–604800 (7 days). A value outside it is reported and reset to the default, not
+clamped. `executors.kubernetes.orphan_grace_period_seconds` is the same key,
+with the same default and meaning, for Pods.
+
+Ten minutes is far longer than the millisecond race it guards against, which
+errs on the safe side: removing an orphan late costs some CPU, but removing one
+early kills someone's run. Lower it only on a host where nothing else shares the
+container runtime. See
 [orphan grace periods](../architecture/executors.md#orphan-grace-periods) for
-what else has to be true before a running container is touched, and
+the other conditions before a running container is touched, and
 [after a control-plane restart](../operations/runbook.md#after-a-control-plane-restart)
 for the log line that reports one.
 
 Every container is started with:
 
 - **only the project directory** bind-mounted, at the fixed path `/workspace`.
-  Nothing else of the host is visible.
-- a **non-root UID** taken from the project directory's owner, so files the
-  workload creates are owned correctly on the host and an escape lands on an
-  unprivileged user. Under rootless podman the same is achieved with
-  `--userns=keep-id`.
-- **`--network=none`** by default. Egress is opt-in, per executor.
+  Nothing else on the host is visible.
+- a **non-root UID**, taken from the owner of the project directory, so files
+  the workload creates have the right owner on the host and an escape lands on
+  an unprivileged user. Under rootless podman, `--userns=keep-id` does the same.
+- **`--network=none`** by default. Egress is enabled per executor.
 - **all Linux capabilities dropped** and `no-new-privileges` set, so a setuid
-  binary in the image cannot undo the UID choice.
-- **`--cpus` / `--memory` / `--pids-limit`**, with swap pinned to the memory
-  ceiling so paging cannot evade it.
-- a deterministic name, `cloop-<project>-<runID>`, so orphans stay reapable.
+  binary in the image can't change the UID.
+- **`--cpus` / `--memory` / `--pids-limit`**, with swap set to the memory limit
+  so swapping can't get around it.
+- a predictable name, `cloop-<project>-<runID>`, so orphans can be found and
+  removed.
 
-**Secrets** (provider API keys, brokered credentials) are injected as
-environment at start using the bare `--env NAME` form: the runtime reads each
-value from its own environment, so no secret ever appears in the host's process
-table. Nothing is baked into an image and nothing is written to the mounted
-workdir.
+**Secrets** (provider API keys, brokered credentials) are passed as environment
+variables at start, using the bare `--env NAME` form. The runtime reads each
+value from its own environment, so no secret appears in the host's process
+table. Nothing is baked into an image or written to the mounted working
+directory.
 
-Unlike host execution, a container workload does **not** inherit the control
-plane's environment. Forwarding it would hand the sandbox every credential the
-server holds, so variables are passed explicitly or not at all.
+Unlike a host process, a container workload doesn't inherit the control plane's
+environment, which would hand the sandbox every credential the server holds.
+Variables are passed explicitly or not at all.
 
 ### What the container sandbox does not do
 
-- **It does not filter egress unless you configure it to.** Anything other than
-  `network: none` grants unrestricted outbound access unless the named network
-  carries its own policy, and `cloop executor test` warns rather than implying a
-  guarantee. Two supported ways to give a sandbox *scoped* network access:
-  leave it on `network: none` and grant egress through the broker
+- **It doesn't filter egress unless you configure it to.** Any `network` other
+  than `none` gives unrestricted outbound access unless the named network has
+  its own policy, and `cloop executor test` warns about this. There are two
+  supported ways to give a sandbox limited network access: keep
+  `network: none` and grant egress through the broker
   ([Scoped network egress](#scoped-network-egress)), or turn on
   [`egress_filter`](#ip-layer-egress-filtering), which enforces the same
-  allowlist at the IP layer. They compose, and the second is what binds a
-  workload that ignores the first.
-- **It does not pull images.** Runs use `--pull=never` so a cold image cache
-  fails immediately with an actionable error instead of turning a UI click into
-  a multi-minute hang. Preflight tells you what to pull.
-- **It does not enforce disk quotas.** A `DiskMB` request is refused rather
-  than accepted and ignored, because writable-layer quotas only work on a
-  minority of storage-driver configurations.
+  allowlist at the IP layer. You can use both, and the filter is what stops a
+  workload that ignores the broker.
+- **It doesn't pull images.** Runs use `--pull=never`, so a missing image fails
+  at once with an error that says what to do, instead of a click in the UI
+  hanging for minutes. Preflight tells you what to pull.
+- **It doesn't set disk quotas.** Writable-layer quotas work on only a few
+  storage-driver configurations, so a `DiskMB` limit (`resources.disk`, or the
+  operator's disk ceiling) is enforced by measurement instead. The image's root
+  filesystem is read-only and `/tmp` is a capped tmpfs, so the work lands in
+  the mounted workspace. The driver measures that tree before the run starts
+  and at intervals while it runs, and stops the workload once it is over the
+  limit. A burst of writes can overshoot the limit until the next measurement.
 
-`extra_args` is validated: flags that would dismantle the sandbox
-(`--privileged`, `--cap-add`, `--volume`, `--network`, `--user`, `--entrypoint`,
-`--env`, …) are rejected, and every entry must start with `-` so a bare value
-cannot be consumed as the image reference. Prefer `--flag=value`: only the part
-before the `=` is matched against the denylist.
+`extra_args` is validated. Flags that would undo the sandbox (`--privileged`,
+`--cap-add`, `--volume`, `--network`, `--user`, `--entrypoint`, `--env`, …) are
+rejected, and every entry must start with `-`, so a bare value can't be taken as
+the image reference. Prefer `--flag=value`: only the part before the `=` is
+checked against the denylist.
 
 ### IP-layer egress filtering
 
-[Scoped network egress](#scoped-network-egress) below is an HTTP proxy: it
-enforces hosts, methods and quotas, and it only ever sees traffic the workload
-chose to send it. A harness that opens a raw socket, or runs
-`curl --noproxy '*'`, or speaks anything that is not HTTP, walks past all of it.
-`egress_filter` is what binds that harness — a packet filter compiled from the
-same allowlist, enforced by the kernel rather than by the workload's
-cooperation.
+[Scoped network egress](#scoped-network-egress), below, is an HTTP proxy. It
+enforces hosts, methods and quotas, but it only sees traffic the workload
+chooses to send through it. A harness that opens a raw socket, runs
+`curl --noproxy '*'`, or uses a protocol other than HTTP bypasses it.
+`egress_filter` covers that case: a packet filter compiled from the same
+allowlist and enforced by the kernel, whether or not the workload cooperates.
 
 The recommended configuration is two lines:
 
@@ -351,16 +352,15 @@ executors:
       internal: true
 ```
 
-`internal: true` puts sandboxes on a runtime network the runtime installs no
-route off. Nothing on it reaches the Internet at all, so put the egress broker
-on the host and it becomes the only way out — which is what makes the broker's
-*host* allowlist meaningful rather than advisory. It needs no `nft`, no
-`CAP_NET_ADMIN` and no host privileges of any kind.
+`internal: true` puts sandboxes on a container network with no route off the
+host. Nothing on it can reach the Internet, so with the egress broker on the
+host, the broker is the only way out, and its host allowlist is actually
+enforced. This needs no `nft`, no `CAP_NET_ADMIN` and no other host privileges.
 
-Everything else in the section describes **direct** egress, for destinations a
-sandbox must dial itself — a Kubernetes API server, an internal registry. That
-form installs an nftables ruleset on the sandbox bridge from the host side, so
-it needs `nft(8)` on the host and `CAP_NET_ADMIN` in the control plane.
+The rest of the section describes **direct** egress, for destinations a sandbox
+must connect to itself, such as a Kubernetes API server or an internal registry.
+Direct egress installs an nftables ruleset on the sandbox bridge from the host
+side, so it needs `nft(8)` on the host and `CAP_NET_ADMIN` in the control plane.
 
 ```yaml
 executors:
@@ -380,64 +380,62 @@ executors:
 
 | Key | Meaning |
 | --- | --- |
-| `enabled` | Turns the filter on. With it off the configured `network` is used as-is and the remaining keys are inert |
+| `enabled` | Turns the filter on. When it is off, the configured `network` is used as it is and the other keys have no effect |
 | `internal` | Sandboxes join a network with no route off the host. Needs no privileges |
-| `allow_cidrs` | Address ranges a sandbox may dial directly (`10.8.0.0/24`). The **only** setting that opens private space, and it opens exactly what it names |
-| `allow_ports` | Destination ports every allow above is bounded by. **Required** whenever `allow_cidrs` or `allow_public_internet` is set |
-| `allow_public_internet` | Every address outside the block set, on `allow_ports`. This is what a hostname allowlist becomes at layer 3 |
-| `resolvers` | DNS servers the sandbox may query directly, as address literals (`10.7.0.10`, or with a port). Opened on UDP *and* TCP |
-| `broker` | The egress proxy endpoint, as an `address:port` literal. Only needed alongside direct egress — on an internal network the broker shares the bridge |
-| `host_patterns` | Records the L7 allowlist this filter cannot enforce, so the rendered ruleset and the preflight report can name what was widened |
-| `drop_denied` | Discards a denied packet silently instead of refusing it. Left off, a blocked connection is answered with a TCP reset or an ICMP "administratively prohibited", so the workload fails at once rather than after its own timeout, and the refusal is logged and shown on the run ([diagnosing a blocked connection](../guides/firewall.md#diagnosing-a-blocked-connection)) |
+| `allow_cidrs` | Address ranges a sandbox may connect to directly (`10.8.0.0/24`). The only setting that opens private address space, and it opens only what it names |
+| `allow_ports` | Destination ports that limit every allow rule above. Required whenever `allow_cidrs` or `allow_public_internet` is set |
+| `allow_public_internet` | Every address outside the blocked ranges, on `allow_ports`. This is what a hostname allowlist turns into at layer 3 |
+| `resolvers` | DNS servers the sandbox may query directly, as address literals (`10.7.0.10`, or with a port). Opened on both UDP and TCP |
+| `broker` | The egress proxy endpoint, as an `address:port` literal. Only needed with direct egress; on an internal network the broker shares the bridge |
+| `host_patterns` | Records the L7 allowlist this filter can't enforce, so the rendered ruleset and the preflight report can show what was widened |
+| `drop_denied` | Drops a denied packet without a reply instead of refusing it. When off, a blocked connection gets a TCP reset or an ICMP "administratively prohibited", so the workload fails at once instead of after its own timeout, and the refusal is logged and shown on the run ([diagnosing a blocked connection](../guides/firewall.md#diagnosing-a-blocked-connection)) |
 
-**Off by default, and the default is load-bearing.** Silently firewalling an
-existing deployment on upgrade would break it in a way that looks like a network
-outage, and a security control that arrives switched on without being asked for
-is one operators learn to switch off. Enabling it is a decision, made once, in a
-file. Preflight reports the unconfigured case as a *warning* rather than staying
-silent, because a driver that says nothing about egress reads as one that
-constrains it.
+**Off by default.** Turning a firewall on during an upgrade could break an
+existing deployment in a way that looks like a network outage, so you turn it on
+yourself, once, in the file. Until then, preflight reports a warning, because
+saying nothing would suggest that egress is restricted.
 
-Four rules the section is validated against, all of them refusals rather than
-guesses:
+The section is validated against four rules. Each one refuses the configuration
+instead of guessing:
 
-- **`allow_cidrs` opens exactly what it names.** Listing `10.8.0.0/24` does not
-  lift the block on the rest of `10.0.0.0/8`. A `/0` is refused outright — it is
-  not an allowlist entry, it is the removal of the block set — and so is any
-  prefix that covers a cloud metadata service without naming the address
-  exactly. The services are one table (`pkg/cloudmeta`): `169.254.169.254`,
-  AWS's IPv6 `fd00:ec2::254` inside `fc00::/7`, Alibaba Cloud's
-  `100.100.100.200` inside `100.64.0.0/10`, and the others each cloud publishes.
-  `cloop ui` refuses to start while an `allow_cidrs`/`cidrs` entry contains one
-  unnamed, naming the service and the explicit alternative (add its `/32` to the
-  allowlist, or allow a range that leaves it out); `cloop hub doctor` fails the
-  same (`firewall.metadata`). A filter compiled from a stored rule keeps the
-  service closed regardless — it is dropped ahead of the allow.
+- **`allow_cidrs` opens only what it names.** Listing `10.8.0.0/24` doesn't lift
+  the block on the rest of `10.0.0.0/8`. A `/0` is refused, because it would
+  remove the blocked ranges altogether, and so is any prefix that covers a cloud
+  metadata service without naming its address exactly. The services are listed
+  in one table (`pkg/cloudmeta`): `169.254.169.254`, AWS's IPv6 `fd00:ec2::254`
+  inside `fc00::/7`, Alibaba Cloud's `100.100.100.200` inside `100.64.0.0/10`,
+  and the others each cloud publishes. `cloop ui` refuses to start while an
+  `allow_cidrs`/`cidrs` entry contains one without naming it. The error names
+  the service and the alternatives: add its `/32` to the allowlist, or allow a
+  range that leaves it out. `cloop hub doctor` fails the same check
+  (`firewall.metadata`). A filter compiled from a stored rule keeps the service
+  closed in any case, because it is dropped before the allow rule.
 - **Destinations without ports are an error.** An allow rule with no port
-  restriction is a hole, and "they probably meant 80 and 443" is not a decision
-  a firewall compiler makes on an operator's behalf.
+  restriction is a hole, and the compiler won't guess ports such as 80 and 443
+  for you.
 - **`broker` and `resolvers` take address literals, never names.** A packet
-  filter matches addresses, so a name here would be resolved once at
-  configuration time and pinned silently — the DNS rebinding hazard the broker's
-  own resolve-once discipline exists to prevent.
+  filter matches addresses, so a name would be resolved once when the
+  configuration is loaded and then fixed without notice. That is the DNS
+  rebinding risk the broker's own resolve-once rule prevents.
 - **`enabled: true` with `network: none` is refused**, because a workload with
-  no interfaces has nothing to filter, and the refusal says which of the two to
+  no network interface has nothing to filter. The error says which of the two to
   change.
 
-**`host_patterns` cannot be enforced and says so.** `*.github.com` is a name;
-names do not exist at layer 3. Direct egress compiled from a host allowlist is
-"every public address on `allow_ports`" and nothing narrower is possible. Listing
-the patterns here does not enforce them — it makes the compiled policy carry a
-warning naming them and what they became, which lands in the nft ruleset as a
-comment and in `cloop executor test` as an `egress-scope` finding. If the host
-allowlist is the control you are relying on, use `internal: true`.
+**`host_patterns` can't be enforced, and the output says so.** `*.github.com` is
+a name, and names don't exist at layer 3. Direct egress compiled from a host
+allowlist is "every public address on `allow_ports`"; nothing narrower is
+possible. Listing the patterns here doesn't enforce them. It adds a warning to
+the compiled policy that names them and what they became, which appears in the
+nft ruleset as a comment and in `cloop executor test` as an `egress-scope`
+finding. If you rely on the host allowlist, use `internal: true`.
 
 #### On Kubernetes: a NetworkPolicy per Pod
 
 `executors.kubernetes.egress_filter` compiles the same allowlist into a
-`NetworkPolicy` created alongside each Pod and selecting that Pod alone. The
-keys differ slightly from the container section — there is no `internal` and no
-`broker`, because a Pod's network is the cluster's — and one is new:
+`NetworkPolicy` that is created with each Pod and selects only that Pod. The
+keys differ slightly from the container section. There is no `internal` and no
+`broker`, because a Pod's network belongs to the cluster, and there is one new
+key:
 
 ```yaml
 executors:
@@ -452,56 +450,57 @@ executors:
       allow_cluster_dns: true      # UDP and TCP 53 to kube-system; unset means true
 ```
 
-`allow_cluster_dns` is on unless you set it to `false`, and should stay on: a
-default-deny egress policy without it breaks name resolution, and that failure
-reads to everyone involved as "the network is broken" rather than "DNS is
-denied". It is expressed as a `namespaceSelector` on `kube-system` rather than
-an address, because cluster DNS lives on a Service ClusterIP in private space
-and which side of the policy the CNI applies its DNAT on varies by CNI.
+`allow_cluster_dns` is on unless you set it to `false`, and should stay on. A
+default-deny egress policy without it breaks name resolution, which looks like
+a broken network instead of blocked DNS. It is written as a `namespaceSelector`
+on `kube-system` instead of an address, because cluster DNS runs on a Service
+ClusterIP in private address space, and CNIs differ in which side of the policy
+they apply DNAT on.
 
-Off by default for the same reason as the container section, plus one more: an
-empty allowlist denies everything, including whatever your harness clones from.
-Turning it on wants `cidrs`/`ports` or `allow_public_internet` set alongside it.
+The Kubernetes filter is off by default for the same reason as the container
+filter, and also because an empty allowlist denies everything, including
+wherever your harness clones from. When you turn it on, also set
+`cidrs`/`ports` or `allow_public_internet`.
 
-Two things it needs from the cluster, neither of which cloop can supply:
+The filter needs two things from the cluster that cloop can't provide:
 
 - **RBAC.** The executor's identity needs
   `networkpolicies: [create delete list]` in the workload namespace. Preflight
-  lists them to prove the leased identity actually has it; a `403` is a `fail`,
-  because every `Start` will then refuse rather than run a Pod with unfiltered
-  egress. The Helm chart's `executor.kubernetes.rbac.create` grants them.
-- **A CNI that implements NetworkPolicy.** flannel does not; Calico, Cilium,
+  lists NetworkPolicies to confirm the leased identity has these permissions. A
+  `403` is a `fail`, because every `Start` would then refuse to run instead of
+  starting a Pod with unfiltered egress. The Helm chart's
+  `executor.kubernetes.rbac.create` grants them.
+- **A CNI that implements NetworkPolicy.** flannel doesn't; Calico, Cilium,
   Antrea and most managed CNIs do. The API server stores the object either way,
-  so a cluster with the wrong CNI looks identical to a working one from the
-  hub's side. `cloop executor test kubernetes` carries this as a standing
+  so from the hub's side a cluster with the wrong CNI looks the same as a
+  working one. `cloop executor test kubernetes` always shows this as an
   `egress-enforcement` warning.
 
-A malformed `egress_filter` **disables the Kubernetes executor** rather than
-being cleared to a default, with a message naming what would not compile. The
-container section is validated the same way but through its driver options, so
-a bad value there is a refusal to build the executor rather than a silent
-fallback. In the chart, the same settings are
+A malformed `egress_filter` disables the Kubernetes executor, with a message
+naming what wouldn't compile. It is never reset to a default. The container
+section is validated the same way, through its driver options, so a bad value
+there stops the executor from being built. In the chart, the same settings are
 `executor.kubernetes.egressFilter.{enabled,cidrs,ports,allowPublicInternet,resolvers,allowClusterDNS}`.
 
-Preview any of this before writing it, without touching the host:
+You can preview any of this before writing it, without changing the host:
 
 ```bash
 cloop egress firewall --cidrs 10.8.0.0/24 --ports 6443 --format rules
 cloop egress firewall --internet --ports 443 --check 169.254.169.254:80
 ```
 
-See [`cloop egress firewall`](commands.md#cloop-egress-firewall) for the full
+See [`cloop egress firewall`](commands.md#cloop-egress-firewall) for the
 command, and [the executor architecture](../architecture/executors.md#sandbox-network-isolation)
-for how the two mechanisms are chosen and why the ruleset is installed on the
+for how the two mechanisms are chosen and why the ruleset is installed from the
 host side.
 
 #### On Kubernetes: the git proxy's CA, for its URL only
 
-A Pod's git verifies the [git interception proxy](#git-interception-proxy)'s
-certificate, and a proxy served under an in-cluster Service name has one no
-public CA issued. On a device the operator fixes that in the image or with
-`GIT_SSL_CAINFO`; a Pod's spec is the driver's, so the driver does it
-(Task 20385):
+Git in a Pod verifies the certificate of the
+[git interception proxy](#git-interception-proxy), and a proxy served under an
+in-cluster Service name has a certificate that no public CA issued. On a device
+the operator handles this in the image or with `GIT_SSL_CAINFO`. A Pod's spec is
+written by the driver, so the driver handles it:
 
 ```yaml
 executors:
@@ -512,43 +511,42 @@ executors:
       urls: ["https://cloop-hub.cloop.svc:8443"] # executors.git_proxy.advertise_url
 ```
 
-Every Pod mounts the entry read-only at `/etc/cloop/git-ca/ca.crt`, in the
-harness and in the workspace provisioner, and git trusts it for the listed URLs
-**only** — `http.<url>.sslCAInfo`, set through the `GIT_CONFIG_COUNT` protocol
-and joining any block the workload's environment already numbers. Not
-`GIT_SSL_CAINFO`, which replaces git's whole trust store: a bundle holding only
-the proxy's CA would break every forge the workload reaches directly. cloop's
-own provisioning and write-back git, which run with a closed environment,
-import exactly these keys (`http.<https-url>.sslCAInfo` and `.sslCAPath`) and
-nothing else from it.
+Every Pod mounts the entry read-only at `/etc/cloop/git-ca/ca.crt`, in both the
+harness and the workspace provisioner, and git trusts it for the listed URLs
+only. This uses `http.<url>.sslCAInfo`, set through the `GIT_CONFIG_COUNT`
+protocol and appended to any entries the workload's environment already
+numbers. It doesn't use `GIT_SSL_CAINFO`, which replaces git's whole trust
+store: a bundle holding only the proxy's CA would break every forge the workload
+reaches directly. cloop's own provisioning and write-back git commands run with
+a closed environment and import only these keys from it
+(`http.<https-url>.sslCAInfo` and `.sslCAPath`).
 
-A hub whose git proxy runs under `tls: auto` needs none of this: each Pod gets
+A hub whose git proxy runs under `tls: auto` needs none of this. Each Pod gets
 the hub's own CA from its run's lease Secret, mounted read-only at
 `/etc/cloop/hub-ca/ca.crt` in both containers and trusted the same way, for the
-proxy's URL only (Task 20409). A `git_ca_bundle` that already names the proxy's
-URL keeps it — two `sslCAInfo` values for one URL would leave git with whichever
-came last — and the hub's CA is delivered for the URLs the bundle leaves.
+proxy's URL only. If a `git_ca_bundle` already names the proxy's URL, the bundle
+keeps it (with two `sslCAInfo` values for one URL, git would use whichever came
+last), and the hub's CA is delivered for the remaining URLs.
 
-The kubelet fetches the ConfigMap on the Pod's behalf, so the executor's Role
-needs no rule for it; a missing one holds the Pod at `ContainerCreating` with an
-event naming it. `config_map` without `urls` is refused, as are URLs that are not
-bare `https://` bases, and an unusable section disables the executor with the
-reason — the same treatment as a malformed `egress_filter`. The Helm chart
-renders this section, and the ConfigMap, from `executor.monitorTLS`; see
+The kubelet fetches the ConfigMap for the Pod, so the executor's Role needs no
+rule for it. If the ConfigMap is missing, the Pod stays in `ContainerCreating`
+with an event naming it. `config_map` without `urls` is refused, as are URLs
+that aren't bare `https://` bases, and an unusable section disables the executor
+with the reason, as a malformed `egress_filter` does. The Helm chart renders
+this section, and the ConfigMap, from `executor.monitorTLS`; see
 [deploy/README.md](../../deploy/README.md#the-git-proxy-and-the-kubernetes-access-monitor).
 
 ### VM-isolated sandboxes: Kata Containers
 
-Everything above confines a workload with namespaces, cgroups and seccomp, on
-the **host's kernel**. A kernel bug is therefore a host bug. Two keys move the
-boundary up a level by running each workload inside a lightweight VM with a
-kernel of its own — [Kata Containers](https://katacontainers.io) — so an escape
-reaches the guest kernel and the host's sits behind a hypervisor. Neither key is
-set by default, and an empty value is exactly the behaviour every deployment had
-before they existed.
+Everything above confines a workload with namespaces, cgroups and seccomp on the
+host's kernel, so a kernel bug affects the host. Two keys instead run each
+workload in a lightweight VM with its own kernel, using
+[Kata Containers](https://katacontainers.io). An escape then reaches the guest
+kernel, and the host's kernel is behind a hypervisor. Neither key is set by
+default, and an empty value keeps the behaviour from before the keys existed.
 
-**Locally — `executors.container.oci_runtime`.** `runtime:` above picks the CLI;
-this picks what that CLI hands each container to, passed through as
+**Locally: `executors.container.oci_runtime`.** `runtime:` above picks the CLI.
+This key picks the low-level runtime the CLI hands each container to, passed as
 `--runtime <name>`:
 
 ```yaml
@@ -563,28 +561,28 @@ executors:
     network: none
 ```
 
-It must be a **registered runtime name, never a path**. docker resolves it
-against `/etc/docker/daemon.json` and podman against `containers.conf`, both
-root-owned files you already control, so the name is a lookup in a trusted table
-rather than a binary the daemon is told to execute as root. Names are validated
-for shape only — letters, digits, `.`, `_`, `-`, no path separator, no leading
-dash — because operators legitimately register Kata under many names and a fixed
-allow-list would reject working hosts.
+It must be a registered runtime name, never a path. docker resolves it from
+`/etc/docker/daemon.json` and podman from `containers.conf`, both root-owned
+files you already control, so the name refers to an entry in a trusted table
+and the daemon is never told to run an arbitrary binary as root. Names are checked for
+form only (letters, digits, `.`, `_`, `-`, no path separator, no leading dash),
+because Kata is registered under many different names and a fixed allowlist
+would reject working hosts.
 
-A value that fails that check **disables the container executor**. It is the one
-key here that is not clamped back to its default, because for this field the
-default is *weaker*: falling back to runc would turn the VM sandbox you asked
-for into a container one while the executor kept running and reporting success.
-A hub that starts with one fewer executor is a failure you can see.
+A value that fails that check disables the container executor. Unlike the other
+keys here, it isn't reset to its default, because the default is weaker:
+falling back to runc would turn the VM sandbox you asked for into a plain
+container while the executor kept reporting success. A missing executor is a
+failure you can see.
 
-Kata needs `/dev/kvm`, and needs it openable by the user cloop runs as.
-`cloop executor test <id>` checks both, plus that the CLI actually knows the
-name — see [the Kata guide](../guides/kata.md) for installation, the
+Kata needs `/dev/kvm`, and the user cloop runs as must be able to open it.
+`cloop executor test <id>` checks both, and that the CLI knows the runtime name.
+See [the Kata guide](../guides/kata.md) for installation, the
 nested-virtualization prerequisite, and what the checks print.
 
-**On Kubernetes — `executors.kubernetes.runtime_class`.** This sets
+**On Kubernetes: `executors.kubernetes.runtime_class`.** This sets
 `runtimeClassName` on every workload Pod, so kube-scheduler places it on a node
-advertising that handler:
+that offers that handler:
 
 ```yaml
 executors:
@@ -601,33 +599,32 @@ executors:
         effect: NoSchedule
 ```
 
-The three keys travel together in practice. A RuntimeClass names a handler; it
-does not by itself keep ordinary workloads off the Kata pool, so those nodes are
-conventionally **tainted** — which means Pods need a matching `toleration` to
-land there at all, and a `node_selector` to be steered there rather than merely
-permitted. Set only `runtime_class` on a tainted pool and Pods stay unscheduled.
+In practice you set all three keys together. A RuntimeClass names a handler,
+but it doesn't keep ordinary workloads off the Kata nodes, so those nodes are
+usually **tainted**. Pods then need a matching `toleration` to run there at
+all, and a `node_selector` to be sent there. If you set only `runtime_class` on
+a tainted pool, Pods are never scheduled.
 
-cloop does not create the RuntimeClass. It is a cluster-scoped object installed
-with the Kata node pool, and the hub deliberately holds no cluster-scoped
-authority — so it also cannot preflight it. The name is checked as an RFC 1123
-subdomain at startup, which catches a typo against the config line rather than at
-someone's first run; a *valid* name for a class that does not exist surfaces at
-dispatch, as a Pod that never runs.
+cloop doesn't create the RuntimeClass. It is a cluster-scoped object installed
+with the Kata node pool, and the hub has no cluster-scoped permissions, so it
+can't check it in preflight either. The name is checked as an RFC 1123
+subdomain at startup, which catches typos before the first run. A valid name
+for a class that doesn't exist shows up at dispatch, as a Pod that never runs.
 
-The Helm chart's ConfigMap does not render `runtime_class`, `node_selector` or
-`tolerations` yet, so a chart-based install sets them in the hub's
+The Helm chart's ConfigMap doesn't render `runtime_class`, `node_selector` or
+`tolerations` yet, so with a chart-based install you set them in the hub's
 `config.yaml` directly.
 
-Only the keys above change; credentials, resources and deadlines are whatever the
-executor already had.
+Only these keys change. Credentials, resources and deadlines stay as the
+executor already had them.
 
-In both cases the executor reports the change rather than leaving you to infer
-it: `cloop executor list` appends `hypervisor-backed` (and, for the container
-driver, names the pair as `docker via kata-qemu`), the Executors tab grows a
-**kata / VM** chip, and `cloop hub doctor` reports `virtualized` per executor.
-Placement can also *require* it: a workload that does is refused a candidate
-sharing the executing machine's kernel, under the constraint `virtualization`,
-rather than run on a weaker sandbox than it asked for — see
+In both cases the executor reports the change: `cloop executor list` appends
+`hypervisor-backed` (and, for the container driver, shows the pair as
+`docker via kata-qemu`), the Executors tab shows a **kata / VM** chip, and
+`cloop hub doctor` reports `virtualized` per executor. A workload can also
+require it. Placement then refuses any executor that shares the host machine's
+kernel, under the constraint `virtualization`, instead of running the workload
+in a weaker sandbox than it asked for. See
 [Placement](../architecture/executors.md#placement).
 
 ### Sandbox image contract
@@ -635,24 +632,25 @@ rather than run on a weaker sandbox than it asked for — see
 `executors.container.image` must provide:
 
 - the cloop binary at `/usr/local/bin/cloop`;
-- the agent harness the project's provider needs (for the default `claudecode`
-  provider, the `claude` CLI on `PATH`; for `copilot`, the `copilot` CLI —
-  which the default `cloop-harness` image does not carry, so a `copilot`
-  project runs in its published variant, `ghcr.io/blechschmidt/cloop-harness-copilot`,
-  or an image of its own; see [the published
+- the agent harness the project's provider needs: the `claude` CLI on `PATH`
+  for the default `claudecode` provider, or the `copilot` CLI for `copilot`.
+  The default `cloop-harness` image doesn't include `copilot`, so a `copilot`
+  project uses the published variant, `ghcr.io/blechschmidt/cloop-harness-copilot`,
+  or its own image (see [the published
   images](sandbox.md#the-published-images-and-what-an-image-carries));
 - `git` and a CA bundle;
-- a non-root user, since the workload runs as the project directory's owner UID.
+- a non-root user, since the workload runs as the UID that owns the project
+  directory.
 
-`cloop executor test` bind-mounts the control plane's *own* binary read-only at
-`/usr/local/bin/cloop`, so the smoke test is meaningful even against an image
-that does not yet ship cloop.
+`cloop executor test` bind-mounts the control plane's own binary read-only at
+`/usr/local/bin/cloop`, so the smoke test works even with an image that doesn't
+contain cloop yet.
 
 ### Per-project images: `.cloop/sandbox.yaml`
 
 `executors.container.image` is one image for every project on the hub. A project
-needing a different toolchain overrides it from its own repository, without an
-operator editing this file:
+that needs a different toolchain can override it from its own repository,
+without an operator editing this file:
 
 ```yaml
 # <project>/.cloop/sandbox.yaml
@@ -662,21 +660,21 @@ resources:
   memory: 8g
 ```
 
-The spec is repo-committed and therefore untrusted: it is schema-validated,
-every number is clamped to the same bounds as the keys above, and it can only
-make a run *more* confined than this file allows — omitting
-`capabilities.network` takes the network away, and there is no field that adds
-it. A spec asking for something the bound executor cannot do is refused before
-the run, with the constraint named.
+The spec is committed to the repository, so it is untrusted. It is validated
+against a schema, every number is clamped to the same bounds as the keys above,
+and it can only make a run more restricted than this file allows: leaving out
+`capabilities.network` removes the network, and no field adds it. A spec asking
+for something the bound executor can't do is refused before the run, with the
+constraint named.
 
-Full schema, the narrowing rules, per-executor support, and the digest pinning
-that keeps a run reproducible: **[Per-project sandbox](sandbox.md)**.
+For the full schema, the restriction rules, per-executor support, and the
+digest pinning that keeps a run reproducible, see
+**[Per-project sandbox](sandbox.md)**.
 
 ### Image trust: `sandbox.image_policy`
 
-`image:` above is the one field the narrowing rules do not cover, because it is
-not a knob on the sandbox — it *is* the sandbox. Constrain which images a
-project may name:
+The restriction rules don't cover `image:` above, because the image is the
+sandbox's whole environment. To restrict which images a project may name:
 
 ```yaml
 sandbox:
@@ -688,45 +686,46 @@ sandbox:
     govern_operator_images: false     # also check the operator's own images
 ```
 
-Matching is on the **parsed** reference, so `ghcr.io` here admits neither
+Matching uses the parsed reference, so `ghcr.io` here admits neither
 `evil.example/ghcr.io/x` nor `ghcr.io.evil.example/x`, and a Unicode lookalike
-of it is refused as malformed. An accepted tag is resolved to a digest and the
-digest is what runs. An absent section constrains nothing, which keeps existing
-single-machine installs working across an upgrade.
+of it is refused as malformed. An accepted tag is resolved to a digest, and the
+digest is what runs. Without the section nothing is restricted, so existing
+single-machine installs keep working after an upgrade.
 
-On Kubernetes the tag is resolved at the registry the kubelet pulls from, by
-the hub, before the Pod is built, and the Pod carries the digest (Task 20457) —
-see [`registry_secret`](#resolving-image-tags-for-kubernetes-pods) for the login
-it asks a private registry with. There `require_digest` and `require_signature`
-also refuse a tag the hub *cannot* resolve, the executor's own image included,
-where other policies run it as a tag with a warning. The
-[Helm chart](../../deploy/helm/cloop-hub) leaves `require_digest` off since the
-hub pins tags itself, and defaults `allowed_registries` to the registry the
-hub's own image comes from.
+On Kubernetes, the hub resolves the tag at the registry the kubelet pulls from
+before it builds the Pod, and the Pod carries the digest. See
+[`registry_secret`](#resolving-image-tags-for-kubernetes-pods) for the login it
+uses with a private registry. There, `require_digest` and `require_signature`
+also refuse a tag the hub can't resolve, including the executor's own image;
+under other policies such a tag runs as a tag, with a warning. The
+[Helm chart](../../deploy/helm/cloop-hub) leaves `require_digest` off, since the
+hub pins tags itself, and sets `allowed_registries` by default to the registry
+the hub's own image comes from.
 
-The policy governs the images a *project* names. An operator's own image —
-`executors.container.image`, `executors.kubernetes.image`, a device's or a
-virtual executor's sandbox image — is chosen beside it and runs as configured,
-unless `govern_operator_images: true` holds it to the same registries, digest
-and signature rules (Task 20453). cloop's own images are the exception both
-ways: whoever chose them, they are checked against the workflow that publishes
-them instead — see [Image provenance](#image-provenance).
+The policy applies to the images a project names. The operator's own images
+(`executors.container.image`, `executors.kubernetes.image`, a device's or
+virtual executor's sandbox image) run as configured, unless
+`govern_operator_images: true` holds them to the same registry, digest and
+signature rules. cloop's own images are handled separately: whoever chose them,
+they are checked against the workflow that publishes them. See
+[Image provenance](#image-provenance).
 
-Rules, denial codes, the cosign contract and the audit record:
+For the rules, denial codes, the cosign requirements and the audit record, see
 **[Image trust policy](sandbox.md#image-trust-policy)**.
 
 #### Resolving image tags for Kubernetes Pods
 
-A Pod spec is acted on later, by a kubelet, on whatever node the Pod lands on —
-and a tag in it would be resolved then, by that node. So before it builds a Pod
-the hub resolves every tag the Pod would carry — the image a project names,
-`executors.kubernetes.image`, one of cloop's own — to the digest the registry
-serves for it now, verifies that digest's signature when the policy asks, and
-writes `repo@sha256:…` into the spec (Task 20457). The run's log starts with what
-was resolved to what; the handle, its persisted row and the task's
-`task.dispatch` audit row name the digest (`pinned_image`, `image_digest`).
+A kubelet acts on a Pod spec later, on whichever node the Pod lands on, and
+would resolve a tag in it then. So before building a Pod, the hub resolves every
+tag the Pod would carry (the image a project names, `executors.kubernetes.image`,
+or one of cloop's own) to the digest the registry serves at that moment. It
+verifies that digest's signature when the policy requires it, and writes
+`repo@sha256:…` into the spec. The run's log starts with each tag and the digest
+it resolved to, and the handle, its stored row and the task's `task.dispatch`
+audit row name the digest (`pinned_image`, `image_digest`).
 
-A private registry needs a login, and it is the hub's, not the workload's:
+A private registry needs a login. The login belongs to the hub, not the
+workload:
 
 ```yaml
 executors:
@@ -738,142 +737,141 @@ executors:
 cloop secret mint ghcr-robot --kind registry --file config.json
 ```
 
-The secret is the `config.json` `docker login` writes — the Docker
-configuration whose `"auths"` name the registry each login is for. Each login is
-presented to its own registry and to no other; a project naming an image
-somewhere else gets an anonymous request there. The hub opens the secret as a
-credential it presents as itself, at every dispatch, so a rotation takes effect
-on the next Pod. It is **not** granted to the executor: a grant to
-`executor:<id>` is leased to every run on it, and would put the login in every
-Pod. Only the shared Docker-configuration form is accepted — a personal secret is
-its owner's to spend, and a bare `user:password` names no registry the hub could
-bound it to — and a secret that cannot be read fails resolution, naming it,
-rather than letting the hub try anonymously. The same login is handed to cosign
-when it fetches the signature from that registry: in a `DOCKER_CONFIG`
-directory private to the hub (0700), holding that one login, removed when the
-verification ends.
+The secret is the `config.json` that `docker login` writes: a Docker
+configuration whose `"auths"` say which registry each login is for. Each login
+is sent only to its own registry. For an image on another registry, the hub asks
+anonymously. The hub opens the secret as its own credential at every dispatch,
+so a rotated secret takes effect on the next Pod. It is not granted to the
+executor, because a grant to `executor:<id>` is leased to every run on it and
+would put the login in every Pod. Only the shared Docker-configuration form is
+accepted: a personal secret is for its owner to use, and a bare `user:password`
+names no registry the hub could limit it to. If the secret can't be read,
+resolution fails with an error naming it; the hub doesn't fall back to an
+anonymous request. The same login is given to cosign when it fetches the
+signature from that registry, in a `DOCKER_CONFIG` directory private to the hub
+(0700) that holds only that login and is removed when the verification ends.
 
-It is never the namespace's `image_pull_secrets`. Those are the kubelet's, for
-pulling, and the executor's Role grants nothing on Secrets.
+It is never the namespace's `image_pull_secrets`. Those belong to the kubelet,
+for pulling, and the executor's Role grants no access to Secrets.
 
-| The hub could not resolve a tag — its registry unreachable from the hub, refusing, or not knowing the tag | |
+| The hub couldn't resolve a tag (its registry is unreachable from the hub, refuses, or doesn't know the tag) | |
 | --- | --- |
-| `require_digest` or `require_signature` | refused, naming the registry and the remedy: pin it by digest, or let the hub reach the registry — with a login in `registry_secret` if it is private |
-| any other policy | the tag goes into the Pod as written, with a warning on the run's log and the hub's; the kubelet resolves it when it pulls |
+| `require_digest` or `require_signature` | refused, naming the registry and the fix: pin the image by digest, or let the hub reach the registry (with a login in `registry_secret` if it is private) |
+| any other policy | the tag goes into the Pod as written, with a warning in the run's log and the hub's; the kubelet resolves it when it pulls |
 
 `cloop executor test kubernetes` and `cloop hub doctor` report `registry-login`
-— which registries the secret covers, or why it cannot be read — and
-`image-resolution`: what `executors.kubernetes.image` resolves to now.
+(which registries the secret covers, or why it can't be read) and
+`image-resolution` (what `executors.kubernetes.image` resolves to now).
 
-With `image_pull_policy: Never` a node must hold the image *by the digest* the
-tag resolved to — pulled from the registry, not loaded from a tarball, which
-records none — whenever the hub could resolve the tag.
+With `image_pull_policy: Never`, whenever the hub could resolve the tag, a node
+must hold the image under the digest the tag resolved to. That means pulled from
+the registry, not loaded from a tarball, which records no digest.
 
 ### Remote executors (edge devices)
 
-A remote executor runs work on a machine the control plane **cannot dial** —
-an edge device behind NAT, a build box on an office network, a laptop on hotel
-wifi. The connection is inverted: the device dials out and holds one multiplexed
-WebSocket open, so there is no inbound port to forward, no VPN, and no firewall
-rule.
+A remote executor runs work on a machine the control plane can't connect to: an
+edge device behind NAT, a build machine on an office network, a laptop on hotel
+Wi-Fi. The device connects out instead and keeps one multiplexed WebSocket
+open, so you need no inbound port forwarding, VPN or firewall rule.
 
-Enrollment is therefore a two-step, out-of-band flow. On the control plane
-(or in the Executors tab, **+ Enroll device**):
+Enrollment takes two steps, out of band. On the control plane (or in the
+Executors tab, **+ Enroll device**):
 
 ```bash
 cloop executor enroll --name edge-1 --ttl 15m
 ```
 
-It prints a single-use, expiring token and the exact command to paste on the
-device — including the control plane's certificate pin, derived automatically
-from `ui.tls.cert_file`:
+This prints a single-use, expiring token and the command to paste on the
+device, including the control plane's certificate pin, which is derived from
+`ui.tls.cert_file`:
 
 ```bash
 cloop executor agent --server wss://cloop.example.com/api/executors/connect \
   --token <token> --pin sha256:<base64>
 ```
 
-The token is **shown once** — only its hash is stored, so it cannot be
-recovered. On first connect the device redeems it for a long-lived credential,
-persists that 0600 at `~/.cloop/agent.json`, and reconnects with it from then
-on. If a token leaks, `cloop executor revoke <id>` (or **Revoke** on the card)
-kills it; if it was already redeemed, that revokes the resulting credential too,
-drops the device's session, and unbinds every project that pointed at it.
+The token is shown once. Only its hash is stored, so it can't be recovered. On
+first connect the device exchanges it for a long-lived credential, saves that
+with mode 0600 at `~/.cloop/agent.json`, and reconnects with it from then on.
+If a token leaks, `cloop executor revoke <id>` (or **Revoke** on the card)
+invalidates it. If it was already redeemed, this also revokes the resulting
+credential, drops the device's session, and unbinds every project that used the
+device.
 
 `--label region=eu` (repeatable), or the Labels field of the Enroll dialog,
-gives the device labels: what a [grant to a label
-selector](../guides/secrets.md#label-subjects) is matched against. They live on
-the device's credential, on the hub, and an admin changes them later with
-**Labels** on the device's card (`PUT /api/executors/{id}/labels`, audited as
-`executor.labels`); a running task holding a credential from a label grant the
-new labels no longer match gives it back when they are saved. Labels the device
-itself reports — `cloop executor agent --label` — are not its labels and match
-no grant.
+gives the device labels, which a [grant to a label
+selector](../guides/secrets.md#label-subjects) is matched against. They are
+stored with the device's credential on the hub. An admin can change them later
+with **Labels** on the device's card (`PUT /api/executors/{id}/labels`, audited
+as `executor.labels`). When they are saved, a running task holding a credential
+from a label grant that the new labels no longer match gives it back. Labels the
+device reports itself (`cloop executor agent --label`) don't count, and match no
+grant.
 
-That command runs the agent in the *foreground* and installs nothing. For a
-device you intend to keep, install it as a supervised service instead:
+That command runs the agent in the foreground and installs nothing. For a device
+you want to keep, install the agent as a supervised service:
 
 ```bash
 CLOOP_ENROLL_BUNDLE='cloopenroll1.…' sudo -E cloop executor agent install
 ```
 
 This writes a hardened systemd unit with `Restart=always` and the certificate
-pin baked in, creates a dedicated non-login system user, and stores the token in
-a `0600` file that the unit references by path — never on the command line,
-where `systemctl show` and `ps` would print it. `--output docker` and
-`--output shell` cover devices without systemd, `--dry-run` shows the unit
-without writing it, and `--uninstall` reverses it idempotently. See
+pin built in, creates a dedicated system user that can't log in, and stores the
+token in a `0600` file that the unit refers to by path. The token is never on
+the command line, where `systemctl show` and `ps` would show it.
+`--output docker` and `--output shell` cover devices without systemd,
+`--dry-run` shows the unit without writing it, and `--uninstall` removes it (and
+is safe to run more than once). See
 [Installing the agent as a service](../architecture/executors.md#installing-the-agent-as-a-service).
 
-The Executors panel shows a one-command form of the same thing, backed by
-`GET /install.sh` on the hub. That route is gated on `executor.manage` and
-refuses to answer over plaintext HTTP: its body is piped into a root shell on a
-device that does not yet know which control plane to trust.
+The Executors panel shows a one-line version of the same thing, served by
+`GET /install.sh` on the hub. That route requires `executor.manage` and refuses
+to answer over plain HTTP, because its output is piped into a root shell on a
+device that doesn't yet know which control plane to trust.
 
 #### Transport security
 
-A token proves the *device* is authorised. It says nothing about whether the
-server that answered is the control plane — so the agent verifies that
-independently, before it sends anything:
+A token proves the device is authorised. It doesn't prove that the server that
+answered is the control plane, so the agent checks that separately before it
+sends anything:
 
-- **Plaintext is refused.** `ws://` to a non-loopback host fails at startup,
-  because the enrollment token and the long-lived credential would both travel
-  in the clear and an agent retries forever, making one interception permanent.
-  `--insecure-transport` overrides it for links already protected some other
-  way, and logs a warning on every connection attempt while it is on.
-- **`--pin sha256:<base64>`** requires the server's public key to be exactly the
-  expected one, *in addition to* normal certificate-chain verification — never
-  instead of it. cloop sets `InsecureSkipVerify` on no outbound dial, and
-  `tests/security/transport_test.go` machine-checks that across the agent's
-  whole import closure.
-- The pin is over the **SPKI** (public key), not the certificate, so a routine
-  renewal that reuses the key does not break the fleet. Rotating onto a new key
-  does, deliberately — stage it by passing both pins comma-separated until every
-  device has crossed over.
+- **Plaintext is refused.** `ws://` to a non-loopback host fails at startup.
+  Both the enrollment token and the long-lived credential would travel
+  unencrypted, and since an agent retries forever, one interception would give
+  lasting access. `--insecure-transport` overrides this for links protected in
+  some other way, and logs a warning on every connection attempt while it is on.
+- **`--pin sha256:<base64>`** requires the server's public key to match the
+  expected one, in addition to normal certificate-chain verification. cloop sets
+  `InsecureSkipVerify` on no outbound connection, and
+  `tests/security/transport_test.go` checks this across all the code the agent
+  imports.
+- The pin covers the **SPKI** (the public key), not the certificate, so a
+  routine renewal that keeps the key doesn't break the fleet. Moving to a new
+  key does. To stage that, pass both pins, comma-separated, until every device
+  has switched over.
 - The pin is stored in `~/.cloop/agent.json`, so every reconnect for the life of
-  the device is pinned, not just the first one.
-- **`--ca-file`** adds a PEM bundle to the trusted roots — the supported way to
-  reach a private CA or a `cloop hub tls-init` certificate. There is
-  deliberately no flag that disables verification instead.
+  the device is pinned, not only the first.
+- **`--ca-file`** adds a PEM bundle to the trusted roots. This is how you reach a
+  server with a private CA or a `cloop hub tls-init` certificate. No flag turns
+  verification off.
 
 Read the current pin at any time with `cloop hub pin`.
 
-The agent endpoint deliberately sits outside the dashboard's token/OIDC auth.
-Agents are not users: they carry their own scoped, individually revocable
-credential rather than one that would grant full UI access. It stays behind the
-rate limiter, which is what absorbs an unauthenticated flood of connect
-attempts.
+The agent endpoint isn't behind the dashboard's token or OIDC authentication.
+Agents aren't users: each has its own scoped credential that can be revoked
+individually, instead of one that would grant full UI access. The endpoint is
+still behind the rate limiter, which absorbs floods of unauthenticated
+connection attempts.
 
 ### Scoped network egress
 
-A sandbox with `network: none` is safe and, on its own, not very useful: it
-cannot fetch a dependency, clone a repo, or call an API. The usual escape is to
-give it a real network and hope. `cloop egress` is the alternative — the
-control plane lends its own connection, one destination at a time.
+A sandbox with `network: none` is safe but can't fetch a dependency, clone a
+repository or call an API. Instead of giving it a full network, `cloop egress`
+lets it use the control plane's connection, one destination at a time.
 
-The sandbox keeps no route of its own. It reaches the outside world only
-through an authenticated forward proxy hosted by the control plane, which
-decides per connection:
+The sandbox has no route of its own. It reaches the outside world only through
+an authenticated forward proxy hosted by the control plane, which decides on
+each connection:
 
 ```bash
 cloop egress grant --to project:/srv/app \
@@ -901,165 +899,172 @@ executors:
 | Key | Meaning |
 | --- | --- |
 | `enabled` | `cloop ui` binds `listen_addr` at startup and hosts the proxy. Off by default |
-| `listen_addr` | Bind address. Empty binds an ephemeral loopback port, which only host-process runs can reach. Container sandboxes need `0.0.0.0:<port>` (or the bridge's own address) — the per-session credential is what protects the proxy, on every interface |
-| `advertise_addr` | The address a **Pod** or an **edge device** dials. A bare host takes the bound port. Not used for the hub's own containers, which are pointed at their bridge's gateway |
-| `max_session_minutes` | One session period, 15 by default, at most 240. A session is renewed while its run lives and never past its grant |
-| `dial_timeout_seconds` | Bounds the proxy's connection to an authorised origin |
-| `default_max_bytes_up` / `default_max_bytes_down` | The per-session quota for a grant that names none. A grant's own quota wins |
+| `listen_addr` | Bind address. Empty binds an ephemeral loopback port, which only host-process runs can reach. Container sandboxes need `0.0.0.0:<port>` (or the bridge's own address). On every interface, the per-session credential is what protects the proxy |
+| `advertise_addr` | The address a **Pod** or an **edge device** connects to. A bare host gets the bound port. Not used for the hub's own containers, which connect to their bridge's gateway |
+| `max_session_minutes` | One session period, 15 by default, at most 240. A session is renewed while its run lives, but never past its grant's expiry |
+| `dial_timeout_seconds` | Time limit for the proxy's connection to an authorised origin |
+| `default_max_bytes_up` / `default_max_bytes_down` | The per-session quota for a grant that names none. A grant's own quota takes precedence |
 
 **What the hub does with it.** `cloop ui` binds the proxy when it starts, before
-anything can dispatch, and logs `egress proxy listening on X, advertised as Y`;
-`cloop hub doctor` reports the same line for every running hub, or the reason one
-could not bind (`egress.hosted`). A proxy that will not bind does not stop the
-hub. Every member of a [hub cluster](../architecture/hub-cluster.md) binds its own
-— a session lives in the memory of the member that issued it, and the member that
-dispatches a run is the one that issues its session — so in a cluster
+anything can be dispatched, and logs `egress proxy listening on X, advertised as Y`.
+`cloop hub doctor` reports the same line for every running hub, or why its proxy
+couldn't bind (`egress.hosted`). A proxy that fails to bind doesn't stop the hub.
+Every member of a [hub cluster](../architecture/hub-cluster.md) binds its own
+proxy, because a session lives in the memory of the member that issued it, and
+the member that dispatches a run issues its session. So in a cluster,
 `listen_addr` usually comes from each member's
-[per-instance overlay](#two-dashboards-in-one-directory) or uses port 0. `cloop serve`
-hosts no proxy (it dispatches nothing to a sandbox), and neither does a
-`cloop run` on a laptop or an executor agent on a device: a device's sandboxes
-use the proxy of the hub that dispatched to them. `cloop egress test` runs its
-own, for the length of one test. A session is never shared between processes,
-and its token is never written down; since Task 20383 its *record* is — the
-token's SHA-256, the grant snapshot, the deadline and the byte counters, in
-`proxy_sessions`, checkpointed every minute — so a run that outlives the process
-that issued its session (the hub restarted, or another cluster member adopted
-the run after the one that dispatched it died) gets it back: the process that
-adopts the run re-reads the grant and restores the session under the same
-credential, counting on from the checkpointed totals against the same quota —
-never a wider one: a quota the grant leaves to the defaults above is the tighter
-of the one it was redeemed with and today's, and its deadline is held to the
-session ceiling from now. A hub stopped gracefully checkpoints and suspends each
-run's session rather than closing it; a SIGKILL can lose at most a minute of
-traffic from the count. A session whose grant was revoked or expired meanwhile is
-not restored, and its proxy requests are refused (`407`) from then on; one that
-could not be restored for a reason that may pass — the grant store unreadable —
-is tried again two seconds later, then with the wait doubling to a minute, and
-by its next request, until it is restored or its recorded expiry passes (Task
-20451; the run's history and `cloop hub doctor` say so meanwhile). A request made before
-the run is adopted waits up to 60 seconds for the restore. The restored session
-is served by the adopting process's proxy, at the address the run was given, so
-`advertise_addr` must reach that process: on a single hub it is the address the
-restarted process binds again. Nothing forwards egress between cluster members,
-so a session is restored only from a member that is gone. When a run moves
-between two live members, the old one keeps serving its egress session until
-the run ends, which it learns from the run's owner row, and then ends it; the
-run's owner row keeps naming the session meanwhile, and the member owning the
-run takes it over if the old one stops first (Task 20451).
+[per-instance overlay](#two-dashboards-in-one-directory) or uses port 0.
+`cloop serve` hosts no proxy (it dispatches nothing to a sandbox), and neither
+does `cloop run` on a laptop or an executor agent on a device; a device's
+sandboxes use the proxy of the hub that dispatched to them. `cloop egress test`
+runs its own proxy for the length of one test.
 
-**One session per run.** When a run is dispatched — a task run, a helper
-subcommand such as `cloop suggest`, a `cloop task reproduce` — and its project
-holds an active grant aimed at it (`project:`, `executor:`, or `any`; a feature
-uses its parent project's grants, never its own path's), the hub redeems one
-session for it. The session is issued to the run's user and run id, which every
-audit row it produces carries; its quotas are the grant's (or the defaults
-above); it lasts one session period and is **renewed while the run lives**,
-never past the grant's expiry; and it is **closed** when the run ends, when it is
-stopped, and when the hub shuts down. Revoking the grant — in the dashboard, with
-`cloop egress revoke`, or on another hub member — closes the session within a
-minute at most (at once through the dashboard of the hub holding it) and cuts its
-open tunnels. The project's event journal records each of these as an `egress`
-row, and records why a project that holds a grant got no session: the hub has no
-proxy, the grant is spent, the run has no network, or the executor has no route
-to it. That row is never silence and never a credential.
+A session is never shared between processes, and its token is never stored,
+but a record of the session is: the token's SHA-256, the grant snapshot, the
+deadline and the byte counters, saved in `proxy_sessions` every minute. So a
+run that outlives the
+process that issued its session (the hub restarted, or another cluster member
+took over the run after the dispatching member died) gets its session back. The
+process that adopts the run re-reads the grant and restores the session under
+the same credential, continuing from the saved totals against the same quota,
+never a larger one. If the grant leaves the quota to the defaults above, the
+restored quota is the smaller of the one the session was redeemed with and the
+current one, and the deadline is capped at the session ceiling, counted from
+the restore.
+A hub that is stopped cleanly saves and suspends each run's session instead of
+closing it; after a SIGKILL, at most a minute of traffic can be missing from the
+count. A session whose grant was revoked or expired in the meantime isn't
+restored, and its proxy requests are refused (`407`) from then on. If a session
+couldn't be restored for a reason that may pass, such as an unreadable grant
+store, the restore is tried again after two seconds, then with the wait doubling
+up to a minute, and on its next request, until it succeeds or its recorded
+expiry passes. Meanwhile the run's history and `cloop hub doctor` report it. A
+request made before the run is adopted waits up to 60 seconds for the restore.
+
+The adopting process's proxy serves the restored session at the address the run
+was given, so `advertise_addr` must reach that process. On a single hub, that is
+the address the restarted process binds again. Egress isn't forwarded between
+cluster members, so a session is restored only from a member that is gone. When
+a run moves between two live members, the old member keeps serving its egress
+session until the run ends (it learns this from the run's owner row) and then
+ends the session. Meanwhile the run's owner row keeps naming the session, and
+the member that owns the run takes it over if the old member stops first.
+
+**One session per run.** When a run is dispatched (a task run, a helper
+subcommand such as `cloop suggest`, or `cloop task reproduce`) and its project
+holds an active grant aimed at it (`project:`, `executor:` or `any`; a feature
+uses its parent project's grants, never grants for its own path), the hub
+redeems one session for it. The session is issued to the run's user and run id,
+which every audit row it produces carries. Its quotas are the grant's, or the
+defaults above. It lasts one session period and is renewed while the run lives,
+never past the grant's expiry. It is closed when the run ends, when the run is
+stopped, and when the hub shuts down. Revoking the grant (in the dashboard, with
+`cloop egress revoke`, or on another hub member) closes the session within a
+minute (at once through the dashboard of the hub holding it) and cuts its open
+tunnels. The project's event journal records each of these as an `egress` row.
+It also records why a project that holds a grant got no session: the hub has no
+proxy, the grant is used up, the run has no network, or the executor has no
+route to the proxy. The journal always gives the reason, and never contains a
+credential.
 
 **What the workload receives.** `HTTPS_PROXY`, `HTTP_PROXY`, their lowercase
-forms and `NO_PROXY` (loopback plus the hub's own git proxy and Kubernetes
+forms, and `NO_PROXY` (loopback plus the hub's own git proxy and Kubernetes
 monitor, which git and kubectl would otherwise send through the egress proxy),
-with `CLOOP_EGRESS_SESSION`, `CLOOP_EGRESS_ALLOW`, `CLOOP_EGRESS_GRANT_ID` and
-`CLOOP_EGRESS_EXPIRES` (the deadline at issue; renewal moves the real one). The
-proxy variables carry the session's credential, so they are declared sensitive:
-scrubbed from the run's live log, its artifacts, its transcript and the provider
-call log, left out of the dispatch record the hub stores, and absent from every
-journal and audit row. A harness that honours `HTTPS_PROXY` — Claude Code does,
-as do git, curl and Go's and Node's HTTP clients — sends *all* of its HTTP through
-the proxy, its own model API calls included, so a grant for a sandbox with no
-other way out must name the model API's host (`api.anthropic.com`).
+along with `CLOOP_EGRESS_SESSION`, `CLOOP_EGRESS_ALLOW`,
+`CLOOP_EGRESS_GRANT_ID` and `CLOOP_EGRESS_EXPIRES` (the deadline when the
+session was issued; renewals move the real deadline). The proxy variables
+contain the session's credential, so they are marked sensitive: they are
+scrubbed from the run's live log, artifacts, transcript and provider call log,
+left out of the dispatch record the hub stores, and never appear in a journal or
+audit row. A harness that honours `HTTPS_PROXY` (Claude Code does, as do git,
+curl, and Go's and Node's HTTP clients) sends all of its HTTP through the proxy,
+including its own model API calls. So a grant for a sandbox with no other way
+out must include the model API's host (`api.anthropic.com`).
 
 **How each executor reaches it.**
 
 | Executor | Address in `HTTPS_PROXY` | Needs |
 | --- | --- | --- |
 | host process | the bound address (`127.0.0.1` for a wildcard bind) | — |
-| container (the hub's engine) | `host.containers.internal`, pinned in the sandbox to the gateway of the bridge it joins — an `--internal` bridge's included | `listen_addr` on every interface, or on that bridge's address. A loopback bind is refused, naming the fix |
-| Kubernetes | `advertise_addr` (a Service) | the Pod's `NetworkPolicy` must already allow it when `egress_filter` or stored rules apply; the hub proves it does before issuing the session |
-| remote agent, virtual executor | `advertise_addr` | an address the device can reach — loopback, link-local, `host.docker.internal`/`host.containers.internal` and cluster-internal names are refused, with a journal row. Behind a device firewall it must be an IP address and the agent must speak protocol v18 |
+| container (the hub's engine) | `host.containers.internal`, pinned in the sandbox to the gateway of the bridge it joins, including an `--internal` bridge | `listen_addr` on every interface, or on that bridge's address. A loopback bind is refused, with an error naming the fix |
+| Kubernetes | `advertise_addr` (a Service) | the Pod's `NetworkPolicy` must already allow it when `egress_filter` or stored rules apply; the hub checks this before issuing the session |
+| remote agent, virtual executor | `advertise_addr` | an address the device can reach. Loopback, link-local, `host.docker.internal`/`host.containers.internal` and cluster-internal names are refused, with a journal row. Behind a device firewall it must be an IP address, and the agent must speak protocol v18 |
 
-**Firewalls open the proxy, and nothing beside it.** When the container
-executor installs an nftables ruleset for a sandbox — its own `egress_filter`, a
-[device or project firewall](../guides/firewall.md) — the driver adds the proxy's
-address and port (the bridge gateway, TCP, that port only) to the compiled allow
-set and proves with the policy's own `Evaluate` that the sandbox can reach it
-before it installs anything. An operator deny list that covers it still wins, and
-the run is refused rather than started holding a session it cannot use. An
-`--internal` bridge with no ruleset needs no opening: its gateway is on-link. A v18
-agent does the same on a device.
+**Firewalls open the proxy and nothing else.** When the container executor
+installs an nftables ruleset for a sandbox (its own `egress_filter`, or a
+[device or project firewall](../guides/firewall.md)), the driver adds the
+proxy's address and port (the bridge gateway, TCP, that port only) to the
+compiled allow set. Before installing anything, it checks with the policy's own
+`Evaluate` that the sandbox can reach the proxy. An operator deny list that
+covers the proxy still takes precedence, and then the run is refused instead of
+starting with a session it can't use. An `--internal` bridge with no ruleset
+needs no opening, because its gateway is on-link. A v18 agent does the same on a
+device.
 
 **`.cloop/sandbox.yaml`.** A spec that names a grant in `capabilities.network`
-asks for that grant's session. If the hub cannot serve it — no proxy, a proxy
-that failed to bind, or no route from the bound executor — the run is refused
-with a `409` (`sandbox_egress_unavailable`) and the remedy, rather than started
-without the egress its author asked for. A spec that names no grant takes the
-network away, so its runs get no session.
+asks for that grant's session. If the hub can't provide it (no proxy, a proxy
+that failed to bind, or no route from the bound executor), the run is refused
+with a `409` (`sandbox_egress_unavailable`) and the fix, instead of starting
+without the egress its author asked for. A spec that names no grant removes the
+network, so its runs get no session.
 
-A grant carries hosts, CIDRs, ports, methods, byte quotas, and a TTL, targeted
-with the same `--to` syntax as `cloop secret grant`. Redeeming one mints a
-**single-use, per-session credential** — 256 random bits, compared in constant
-time, stored only as a SHA-256 — which the workload receives as
-`HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`. It never sees the grant itself.
+A grant has hosts, CIDRs, ports, methods, byte quotas and a TTL, and is targeted
+with the same `--to` syntax as `cloop secret grant`. Redeeming it creates a
+**single-use, per-session credential** (256 random bits, compared in constant
+time, stored only as a SHA-256), which the workload receives in
+`HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`. The workload never sees the grant
+itself.
 
 What the proxy enforces:
 
-- **Host, port, and method** are checked before a byte leaves. Methods gate
-  plain HTTP only; a CONNECT tunnel's method lives inside TLS and is not
-  observable (see below).
-- **Resolve-once pinning.** The destination name is resolved exactly once,
-  *every* returned address must pass policy, and the dial goes to the resolved
-  literal. There is no second lookup for a hostile DNS server to answer
-  differently, so rebinding has nowhere to put the second answer.
-- **SSRF hard-block.** Loopback, RFC1918, CGNAT, link-local — which is where
-  the cloud metadata service at `169.254.169.254` lives — multicast, and
-  unspecified addresses are refused *even under `--hosts '*'`*. Reaching one
-  requires naming its range in `--cidrs`, so an internal destination is always
-  a sentence somebody wrote on purpose. The v4-in-v6 encodings
-  (`::ffff:127.0.0.1`, NAT64, `::127.0.0.1`) are unwrapped before the check.
-- **Quotas, mid-stream.** An over-budget transfer is cut while it is in
-  flight, not flagged after it finishes.
-- **TTL, mid-tunnel.** An open tunnel does not outlive its session, including
-  when idle.
+- **Host, port and method** are checked before any data is sent. Methods apply
+  to plain HTTP only, because a CONNECT tunnel's method is inside TLS and can't
+  be seen (see below).
+- **Resolve-once pinning.** The destination name is resolved once, every
+  returned address must pass the policy, and the connection goes to the
+  resolved address. There is no second lookup that a hostile DNS server could
+  answer differently, so DNS rebinding doesn't work.
+- **SSRF hard-block.** Loopback, RFC1918, CGNAT, link-local (where the cloud
+  metadata service at `169.254.169.254` lives), multicast and unspecified
+  addresses are refused, even under `--hosts '*'`. To reach one, you must name
+  its range in `--cidrs`, so an internal destination is always allowed
+  explicitly. IPv4-in-IPv6 encodings (`::ffff:127.0.0.1`, NAT64, `::127.0.0.1`)
+  are unwrapped before the check.
+- **Quotas, mid-stream.** A transfer that goes over quota is cut off while in
+  progress.
+- **TTL, mid-tunnel.** An open tunnel, even an idle one, ends when its session
+  does.
 
-Every decision — allow and deny — lands in the same hash-chained audit log as
-the credential broker, with the identity, task, host, port, byte counts, and
+Every decision, allow or deny, is written to the same hash-chained audit log as
+the credential broker's, with the identity, task, host, port, byte counts and
 verdict, and no credential material.
 
-**The tunnel is CA-free.** cloop does not terminate, inspect, or re-sign TLS,
-and installs no certificate in the sandbox: the workload validates the origin's
-certificate itself, exactly as it would without a proxy. That costs visibility
-into tunnelled requests, deliberately — a proxy that could read every sandbox's
-traffic would be a far more valuable thing to compromise than the credentials
-it protects.
+**The tunnel needs no CA.** cloop doesn't terminate, inspect or re-sign TLS, and
+installs no certificate in the sandbox. The workload validates the origin's
+certificate itself, as it would without a proxy. The cost is that cloop can't
+see inside tunnelled requests, but a proxy that could read every sandbox's
+traffic would be a much more valuable target than the credentials it protects.
 
-Revocation is immediate rather than TTL-bounded, which is the payoff for
-brokering a *capability* instead of handing over a token: a leaked PAT cannot
-be recalled from a running container, but a proxy session is torn down at the
-proxy, mid-tunnel, by the control plane that holds it.
+Revocation takes effect immediately, not at the TTL. That is the advantage of
+brokering access instead of handing over a token: a leaked PAT can't be taken
+back from a running container, but the control plane can end a proxy session at
+the proxy, even mid-tunnel.
 
-**What the proxy cannot do is bind a workload that does not use it.** Every
-check above applies to traffic the harness chose to send through `$HTTP_PROXY`.
-Pair it with [`egress_filter`](#ip-layer-egress-filtering) — ideally
-`internal: true`, where the proxy is the only address the sandbox can reach at
-all — so that the allowlist above is enforced on everything rather than on the
-cooperative case.
+**The proxy can't restrict a workload that doesn't use it.** Every check above
+applies only to traffic the harness sends through `$HTTP_PROXY`. Combine it with
+[`egress_filter`](#ip-layer-egress-filtering), ideally with `internal: true`,
+where the proxy is the only address the sandbox can reach, so the allowlist
+applies to all traffic.
 
 ### Git interception proxy
 
 A sandbox that clones the project and pushes its work back needs a forge
-credential, and the branch rule that keeps it inside `cloop/` runs in code the
-sandbox itself executes — which makes it a convention rather than a boundary.
-`executors.git_proxy` inverts that: the hub keeps the PAT, runs a git smart-HTTP
-proxy, and hands the sandbox a session token good for one repository under one
-policy. The proxy parses each push's ref-update list and refuses anything outside
-the allowlist before presenting the credential upstream.
+credential, and the rule that keeps its pushes inside `cloop/` branches runs in
+code the sandbox itself executes, so the sandbox could ignore it. With
+`executors.git_proxy`, the hub keeps the PAT, runs a git smart-HTTP proxy, and
+gives the sandbox a session token that works for one repository under one
+policy. The proxy parses each push's list of ref updates and refuses anything
+outside the allowlist before it presents the credential upstream.
 
 ```yaml
 executors:
@@ -1078,103 +1083,109 @@ executors:
     push_scan_seconds: 300                         # 0 means 300; ceiling 3600
 ```
 
-`cloop hub bootstrap` writes the first eight, with `advertise_url` derived from
-`--external-url` (Task 20409); the push scan's are the defaults.
+`cloop hub bootstrap` writes the first eight keys, deriving `advertise_url` from
+`--external-url`. The push scan keys keep their defaults.
 
-- **Off by default.** Interposing a proxy changes the URL sandboxes push to, so
-  it is an operator's decision rather than something a config file acquires on
-  upgrade. With it off, workspaces are provisioned exactly as before — and a
-  GitHub grant delivers the forge credential itself into the sandbox, which
-  `cloop hub doctor` names as `gitproxy.forge_credentials` on a hub with
-  `allow_host_process: false`.
-- **TLS is required**, because the session token rides every request, and the
-  certificate is validated by *the sandbox's* git, not by the hub. There are two
-  ways to supply it:
-  - **`tls: auto`** has the hub issue it. A CA is minted the first time any hub
-    process serving this control plane starts a monitor under `tls: auto`; its
-    private key is sealed under the KEK registry in the control-plane database
-    (never a loose file), so every [hub-cluster](../architecture/hub-cluster.md)
-    member serves the same identity, a database backup carries it, and `cloop
-    hub key rotate` rewraps it. The proxy serves a leaf from that CA naming the
+- **Off by default.** The proxy changes the URL sandboxes push to, so the
+  operator turns it on; an upgrade doesn't. With it off, workspaces are
+  provisioned as before, and a GitHub grant delivers the forge credential itself
+  into the sandbox. On a hub with `allow_host_process: false`, `cloop hub doctor`
+  reports this as `gitproxy.forge_credentials`.
+- **TLS is required**, because the session token is sent with every request,
+  and the certificate is validated by the sandbox's git, not by the hub. There
+  are two ways to provide it:
+  - **`tls: auto`** has the hub issue the certificate. A CA is created the first
+    time any hub process serving this control plane starts a monitor under
+    `tls: auto`. Its private key is sealed under the KEK registry in the
+    control-plane database (never stored as a separate file), so every
+    [hub-cluster](../architecture/hub-cluster.md) member serves the same
+    identity, a database backup includes it, and `cloop hub key rotate`
+    re-wraps it. The proxy serves a leaf certificate from that CA naming the
     host of `advertise_url` and of `listen_addr` (when it names one), valid for
-    72 hours; the cluster leader replaces it with 48 hours left, and every
+    72 hours. The cluster leader replaces it when 48 hours are left, and every
     member serves the new one within a minute, per handshake, so a push in
-    flight is not interrupted. Every sandbox the hub dispatches is told to trust
-    the CA **for `advertise_url` only** — `http.<advertise_url>.sslCAInfo`
-    through the `GIT_CONFIG_COUNT` block, never `GIT_SSL_CAINFO`, which would
-    replace the image's trust store and trust every host the CA signed. No
-    image needs the CA baked in: a host process and a container get a read-only
-    file, a Pod gets it from its run's lease Secret, and an edge device gets it
-    in the start frame (agents speaking protocol v21 or later; an older agent
-    is refused a workload that would talk to the proxy, with the upgrade named,
-    rather than handed the forge credential). Needs `CLOOP_SECRET_KEY`;
-    excludes `cert_file` and `key_file`.
-  - **`cert_file` and `key_file`**, an operator's pair. A self-signed one needs
-    its CA in the sandbox image, or on Kubernetes in
+    progress isn't interrupted. Every sandbox the hub dispatches is told to
+    trust the CA for `advertise_url` only, through
+    `http.<advertise_url>.sslCAInfo` in the `GIT_CONFIG_COUNT` block. It never
+    uses `GIT_SSL_CAINFO`, which would replace the image's trust store and trust
+    every host the CA signed. No image needs the CA built in: a host process and
+    a container get a read-only file, a Pod gets it from its run's lease Secret,
+    and an edge device gets it in the start frame (agents speaking protocol v21
+    or later). An older agent is refused any workload that would talk to the
+    proxy, with an error naming the upgrade, instead of being given the forge
+    credential. Needs `CLOOP_SECRET_KEY`; can't be combined with `cert_file`
+    and `key_file`.
+  - **`cert_file` and `key_file`**, a certificate and key the operator
+    provides. A self-signed certificate needs its CA in the sandbox image, or on
+    Kubernetes in
     [`executors.kubernetes.git_ca_bundle`](#on-kubernetes-the-git-proxys-ca-for-its-url-only).
 
-  `tls: auto` is an explicit choice, never inferred: an enabled section with
-  neither is switched off at load, as it always was, rather than starting to
-  interpose a proxy on the upgrade that introduced `tls: auto`. `tls: auto`
-  beside `cert_file`/`key_file` is refused by `cloop config validate` and, at
-  load, dropped in favour of the files.
-- **`advertise_url` must be reachable from where git runs** — a Kubernetes
-  Service for the Pod backend, the hub's address on the link for an edge device,
-  or `host.docker.internal` / `host.containers.internal` for a containerised
-  agent. Empty falls back to the bound address, which is right only when that
-  process shares the hub's network namespace.
-- **A workspace session lasts as long as its run.** It is minted for
-  `session_minutes`, renewed by as much while the run lives, and closed once the
-  run is done with it (Task 20422), so a run longer than `session_minutes` still
-  pushes its work back. A session a GitHub lease mints for the workload's own
-  git lasts at most `session_minutes` from dispatch.
-- **`allowed_refs` is the ceiling for every grant.** A GitHub grant can narrow
-  it to particular branches (`--branches`, or **Push to branches** in the
-  dashboard) but never widen it, so a hub that wants projects to push to
-  branches of their own choosing sets it wider — `["refs/heads/**"]` — and lets
-  each grant say which. It is also the only thing that can enforce a grant's
-  branch list: with no proxy, such a grant is delivered read-only (`github_app`)
-  or not at all (`github_pat`). See
+  `tls: auto` must be set explicitly; it is never assumed. An enabled section
+  with neither `tls: auto` nor certificate files is switched off at load, as in
+  older versions, so an upgrade never starts a proxy by itself. `tls: auto`
+  together with `cert_file`/`key_file` is refused by `cloop config validate`,
+  and at load the files are used and `tls: auto` is dropped.
+- **`advertise_url` must be reachable from where git runs**: a Kubernetes
+  Service for the Pod backend, the hub's address on the local network for an
+  edge device, or `host.docker.internal` / `host.containers.internal` for a
+  containerised agent. If it is empty, the bound address is used, which works
+  only when that process shares the hub's network namespace.
+- **A workspace session lasts as long as its run.** It is created for
+  `session_minutes`, renewed by the same amount while the run lives, and closed
+  once the run is done with it, so a run longer than `session_minutes` can still
+  push its work back. A session that a GitHub lease creates for the workload's
+  own git lasts at most `session_minutes` from dispatch.
+- **`allowed_refs` is the upper limit for every grant.** A GitHub grant can
+  narrow it to particular branches (`--branches`, or **Push to branches** in the
+  dashboard) but never widen it. A hub that wants projects to push to branches
+  of their own choosing sets it wider, to `["refs/heads/**"]`, and lets each
+  grant say which. The proxy is also the only thing that can enforce a grant's
+  branch list: without it, such a grant is delivered read-only (`github_app`) or
+  not at all (`github_pat`). See
   [limiting pushes to particular branches](../guides/secrets.md#limiting-pushes-to-particular-branches).
-- **Every push is scanned for the credentials its run was given** (Task 20436)
-  before the forge may accept it: `push_scan: values` matches the exact values
-  the run's lease and spec delivered — env values, kubeconfig tokens and client
-  keys, registry auth, egress and model relay credentials, GitHub tokens — as
-  delivered, base64- and percent-encoded; `shapes` adds pkg/redact's credential
-  formats; `off` forwards packs unread. A push carrying one is refused with no
-  ref moved, naming the objects and the grant and secret, never the value. A
-  project's own `.cloop/config.yaml` may set a stricter `push_scan`, never a
-  weaker one. A push past `push_scan_max_object_mb` or `push_scan_max_push_mb`
-  inflated, or `push_scan_seconds` of scanning (waiting on the network does not
-  count), is refused naming the setting: a scan that gave up is not one that
-  found nothing. An unreadable `push_scan` loads as `values`, never as `off`.
-  See [the push scan](../architecture/git-proxy.md#the-push-scan).
-- Every decision lands in the hash-chained audit log as
+- **Every push is scanned for the credentials its run was given** before the
+  forge can accept it. `push_scan: values` looks for the exact values the run's
+  lease and spec delivered (env values, kubeconfig tokens and client keys,
+  registry auth, egress and model relay credentials, GitHub tokens), as
+  delivered and base64- and percent-encoded. `shapes` also looks for
+  pkg/redact's credential formats. `off` forwards packs without reading them. A
+  push that contains a credential is refused with no ref moved, and the error
+  names the objects, the grant and the secret, never the value. A project's own
+  `.cloop/config.yaml` can set a stricter `push_scan`, never a weaker one. A
+  push that inflates past `push_scan_max_object_mb` or `push_scan_max_push_mb`,
+  or needs more than `push_scan_seconds` of scanning (time spent waiting on the
+  network doesn't count), is refused with an error naming the setting, because a
+  scan that gave up hasn't shown the push is clean. An unreadable `push_scan`
+  loads as `values`, never as `off`. See
+  [the push scan](../architecture/git-proxy.md#the-push-scan).
+- Every decision is written to the hash-chained audit log as
   `gitproxy.push_denied`, `gitproxy.push_secret_refused`,
   `gitproxy.push_allowed`, `gitproxy.session_minted`,
-  `gitproxy.session_renewed`, `gitproxy.session_closed`, `gitproxy.fetch` and
-  `gitproxy.rejected`. Alert on the first two. Under `tls: auto`, `hub_ca.minted` and `hub_ca.leaf_issued` record
-  the CA and every certificate issued from it.
+  `gitproxy.session_renewed`, `gitproxy.session_closed`, `gitproxy.fetch` or
+  `gitproxy.rejected`. Alert on the first two. Under `tls: auto`,
+  `hub_ca.minted` and `hub_ca.leaf_issued` record the CA and every certificate
+  issued from it.
 
-The proxy runs inside the hub process — sessions are in memory, so the process
-that mints them must be the one that serves them — and there is deliberately no
-standalone command. Full design and operations:
+The proxy runs inside the hub process, because sessions are held in memory and
+the process that creates them must also serve them. There is no standalone
+command. For the full design and operations, see
 [git interception proxy](../git-interception-proxy.md).
 
 ### Kubernetes access monitor
 
-A kubeconfig grant is delivered by rewriting the document: contexts outside
-`--contexts` are dropped, and the clusters and users nothing references go with
-them. That answers "which clusters" and nothing else. The namespace written into
-a delivered context is a **client-side default** — `kubectl -n kube-system get
-secrets` ignores it — and read-only has no representation in a kubeconfig at all,
-because the document carries a credential whose authority is the cluster's RBAC,
-frequently cluster-admin on a kubeconfig a developer uploaded.
+A kubeconfig grant is delivered by rewriting the kubeconfig: contexts outside
+`--contexts` are dropped, along with the clusters and users nothing references
+any more. That controls which clusters the sandbox can reach, and nothing else.
+The namespace in a delivered context is only a client-side default
+(`kubectl -n kube-system get secrets` ignores it), and a kubeconfig has no way
+to express read-only access. Its credential has whatever permissions the
+cluster's RBAC gives it, which for a kubeconfig a developer uploaded is often
+cluster-admin.
 
-`executors.kube_guard` inverts that: the hub keeps the cluster credential, runs
-an API interception proxy, and hands the sandbox a kubeconfig pointing at the
-monitor with a short-lived bearer token. Every request is parsed into (verb,
-group, resource, subresource, namespace, name) and matched against the grant
+With `executors.kube_guard`, the hub keeps the cluster credential, runs an API
+interception proxy, and gives the sandbox a kubeconfig that points at the
+monitor, with a short-lived bearer token. Every request is parsed into verb,
+group, resource, subresource, namespace and name, and checked against the grant
 before the credential is attached.
 
 ```yaml
@@ -1196,61 +1207,60 @@ executors:
     audit_allowed: false                         # true: a row per forwarded request too
 ```
 
-- **Off by default.** Interposing a monitor changes the server a sandbox's
-  `kubectl` talks to, so it is an operator's decision rather than something a
-  config file acquires on upgrade. With it off, kubeconfigs are minimised and
-  delivered exactly as before.
-- **TLS is required.** The session token rides an `Authorization` header on every
-  request. `tls: auto` has the hub issue the certificate from the same CA as the
-  [git proxy's](#git-interception-proxy), for the host of `advertise_url` and of
-  `listen_addr`, and embed the CA in every kubeconfig the monitor issues; it
-  needs `CLOOP_SECRET_KEY` and excludes `cert_file`, `key_file` and `ca_file`.
-  Otherwise an enabled section without both `cert_file` and `key_file` is
-  switched off at load rather than publishing tokens in cleartext. Either way the
-  trust anchor needs no change to the sandbox image: the hub's CA, or `ca_file`
-  (else `cert_file`), is embedded into the delivered kubeconfig as
-  `certificate-authority-data` — trusted by that kubeconfig's `kubectl`, for that
-  server, and by nothing else in the sandbox.
+- **Off by default.** The monitor changes the server a sandbox's `kubectl` talks
+  to, so the operator turns it on; an upgrade doesn't. With it off, kubeconfigs
+  are minimised and delivered as before.
+- **TLS is required.** The session token is sent in an `Authorization` header on
+  every request. `tls: auto` has the hub issue the certificate from the same CA
+  as the [git proxy's](#git-interception-proxy), for the host of `advertise_url`
+  and of `listen_addr`, and embed the CA in every kubeconfig the monitor issues.
+  It needs `CLOOP_SECRET_KEY` and can't be combined with `cert_file`, `key_file`
+  and `ca_file`. Without `tls: auto`, an enabled section that lacks `cert_file`
+  or `key_file` is switched off at load instead of sending tokens unencrypted.
+  Either way the sandbox image needs no change: the hub's CA, or `ca_file` (else
+  `cert_file`), is embedded in the delivered kubeconfig as
+  `certificate-authority-data`. Only that kubeconfig's `kubectl` trusts it, for
+  that server; nothing else in the sandbox does.
 - **`advertise_url` must be reachable from where `kubectl` runs**, and must be a
-  bare `https://` base with no path — it becomes the kubeconfig's `server:`.
-  Empty falls back to the bound address, which is right only when the sandbox
-  shares the hub's network namespace.
-- **`verbs` is a hub-wide *ceiling*, not a grant**, intersected with each grant's
-  own. Empty means no ceiling — each grant decides, and a grant that names no
-  verbs of its own is read-only. Setting it to `[get, list, watch]` is how an
-  operator says "no project on this hub may ever write to a cluster", regardless
-  of what any grant asks for. `namespaces` and `resources` intersect the same
-  way. An empty intersection on **any** of the three refuses the lease rather
-  than producing a session: an empty namespace list would otherwise read as "no
-  confinement", which would make the narrowing widen. Write these as a literal
+  bare `https://` base with no path, because it becomes the kubeconfig's
+  `server:`. If it is empty, the bound address is used, which works only when
+  the sandbox shares the hub's network namespace.
+- **`verbs` is a hub-wide upper limit, not a grant**, and is intersected with
+  each grant's own verbs. Empty means no limit: each grant decides, and a grant
+  that names no verbs is read-only. Setting it to `[get, list, watch]` means no
+  project on this hub can write to a cluster, whatever a grant asks for.
+  `namespaces` and `resources` are intersected the same way. If the
+  intersection for any of the three is empty, the lease is refused and no
+  session is created, because an empty namespace list would otherwise mean "no
+  restriction", and narrowing would widen access. Write these as a literal
   superset of every grant, or leave them empty. See
   [the floor](../architecture/kubernetes-access.md#the-deployment-floor-and-the-grant-intersect).
-- **`exec`, `attach`, `portforward` and `proxy` are refused for every verb** and
-  cannot be re-enabled by any policy: `GET .../pods/x/exec` is a shell, not a
-  read. Protocol upgrades are refused; ordinary watches still work.
-- **A hub that cannot start the monitor refuses kubeconfig leases** rather than
+- **`exec`, `attach`, `portforward` and `proxy` are refused for every verb**, and
+  no policy can re-enable them: `GET .../pods/x/exec` opens a shell, which is
+  not a read. Protocol upgrades are refused; ordinary watches still work.
+- **A hub that can't start the monitor refuses kubeconfig leases** instead of
   falling back to delivering the cluster credential. Everything else keeps
   working.
-- Every decision lands in the hash-chained audit log as
+- Every decision is written to the hash-chained audit log as
   `kubeguard.request_denied`, `kubeguard.session_minted`,
-  `kubeguard.session_closed` and `kubeguard.rejected`, and is counted by
+  `kubeguard.session_closed` or `kubeguard.rejected`, and counted by
   `cloop_kubeguard_requests_total` and `cloop_kubeguard_denials_total`. Alert on
   the first.
 - **`audit_allowed` adds a `kubeguard.request_allowed` row for every forwarded
-  request** (Task 20385). Off by default: one `kubectl get pods` is a burst of
-  discovery requests and a watch never ends, so those rows bury the denials.
-  Turn it on where "what did this sandbox read from the cluster" has to be
-  answerable from the trail.
+  request.** It is off by default, because one `kubectl get pods` sends a burst
+  of discovery requests and a watch never ends, so those rows would bury the
+  denials. Turn it on if the audit trail must show what a sandbox read from the
+  cluster.
 
-Like the git proxy, it runs inside the hub process and has no standalone command.
-Full design and operations:
+Like the git proxy, it runs inside the hub process and has no standalone
+command. For the full design and operations, see
 [Kubernetes access monitor](../architecture/kubernetes-access.md).
 
 ### Hardened (enterprise) configuration
 
 By default cloop may run workloads as child processes of the control plane. To
-guarantee that the web UI **never** spawns a harness on the host, turn host
-execution off:
+make sure the web UI never starts a harness on the host, turn host execution
+off:
 
 ```yaml
 executors:
@@ -1264,79 +1274,76 @@ sandbox:
     require_digest: true
 ```
 
-or `cloop config set executors.allow_host_process false`.
+or run `cloop config set executors.allow_host_process false`.
 
-The image policy belongs in the same breath as the executor. Moving execution
-off the host and then letting a repo-committed file choose the image puts the
-untrusted code back on the trusted side of the boundary — the container is not
-the host, but its contents were still chosen by a pull request.
+Set the image policy at the same time. If execution moves off the host but a
+committed file can still choose the image, a pull request still decides what
+runs inside the container.
 
-This is the one setting a hosted deployment must flip. Absent means `true`, so
-existing single-machine installs keep working across an upgrade.
+A hosted deployment must change this setting. If it is absent, it counts as
+`true`, so existing single-machine installs keep working after an upgrade.
 
 With it `false`:
 
 - the `localprocess` driver refuses to start anything;
-- `executor.Resolve` refuses to hand that driver out, so background paths are
-  covered too, not just the ones with an explicit check;
-- every Web UI path that would have dispatched work returns **HTTP 409** with a
+- `executor.Resolve` refuses to return that driver, so background code paths
+  are covered too, not only those with an explicit check;
+- every web UI path that would have dispatched work returns HTTP 409 with a
   machine-readable `code: host_execution_denied` and a `remediation` string
-  naming the executors that *are* available; and
-- the Executors tab shows the mode as a banner.
+  naming the executors that are available; and
+- the Executors tab shows the mode in a banner.
 
-Hardening before any device has enrolled is a supported intermediate state —
-remote executors arrive at runtime, not through this file — so the config still
-loads and warns rather than refusing to boot.
+You can harden a hub before any device has enrolled. Remote executors are added
+at runtime, not through this file, so the config still loads, with a warning,
+instead of stopping the hub from starting.
 
-The other half of hardening is who can reach the hub at all. A hub without
-sign-in listens on `127.0.0.1` only, and refuses an address beyond loopback
-unless `ui.allow_unauthenticated_network` says otherwise — which a hosted
-deployment should never set. Configure `ui.oidc` before the hub listens on a
-network; behind a TLS proxy on the same host, set `ui.listen: 127.0.0.1` so the
-plaintext port is reachable through the proxy alone. `cloop hub doctor`
-checks both (`ui.exposure`); see [Web UI](#web-ui-cloop-ui).
+Hardening also means controlling who can reach the hub. A hub without sign-in
+listens on `127.0.0.1` only, and refuses an address beyond loopback unless
+`ui.allow_unauthenticated_network` is set, which a hosted deployment should
+never do. Configure `ui.oidc` before the hub listens on a network. Behind a TLS
+proxy on the same host, set `ui.listen: 127.0.0.1` so the plaintext port can be
+reached only through the proxy. `cloop hub doctor` checks both (`ui.exposure`);
+see [Web UI](#web-ui-cloop-ui).
 
 ### Minimum agent build
 
-A fleet-wide floor on the cloop build a remote executor agent may be running and
-still receive work:
+The oldest cloop build a remote executor agent can run and still receive work,
+for the whole fleet:
 
 ```yaml
 executors:
   min_agent_build: v0.1.0
 ```
 
-Absent — the default — means no floor, so an existing deployment places exactly
-as it did before.
+By default it is absent, which means there is no minimum, so existing
+deployments place work as before.
 
-It exists because the negotiated protocol version cannot express most of what
-changes between builds. The protocol number moves only when a *frame* moves, so
-two devices can both speak the current protocol and differ by a year of fixes to
-things the wire never sees. Without a floor, an operator who has deployed such a
-fix has no way to stop scheduling onto the devices that predate it, and finds out
-which ones those were from the failures.
+The negotiated protocol version doesn't capture most changes between builds. It
+changes only when a message frame changes, so two devices can speak the current
+protocol and still differ by a year of fixes to things that never cross the
+wire. With a minimum, you can stop scheduling onto devices that lack a fix you
+have deployed, instead of finding out which ones they are from failures.
 
-A device below the floor is refused at placement with the `agent_build`
-constraint and a message naming both versions and the upgrade command, rather
-than being selected and failing at run time. A device that cannot *prove* it
-meets the floor — reporting no build, the legacy `1` placeholder, or an
-unreleased `dev+g…` build — is refused too, with a message saying which of those
-it was. Container, Kubernetes and local-process executors are never subject to
-it: they run the hub's own binary and have no separate build to compare.
+A device below the minimum is refused at placement, under the `agent_build`
+constraint, with a message naming both versions and the upgrade command, instead
+of being selected and then failing at run time. A device that can't show it meets
+the minimum (it reports no build, the legacy `1` placeholder, or an unreleased
+`dev+g…` build) is refused too, with a message saying which. Container,
+Kubernetes and local-process executors are never checked: they run the hub's
+own binary and have no separate build to compare.
 
-The value must be a comparable `vMAJOR.MINOR.PATCH` release. `cloop config set`
-refuses anything else outright; a hand-edited `config.yaml` is not refused — that
-would turn a typo into a hub that will not boot — but it raises a banner on the
-Executors tab saying **no floor is being enforced**. A floor the scheduler cannot
-parse is a rule that silently does nothing while the operator believes their
-fleet is gated, and that is the one outcome this setting must never have quietly.
+The value must be a `vMAJOR.MINOR.PATCH` release that can be compared.
+`cloop config set` refuses anything else. A bad value in a hand-edited
+`config.yaml` doesn't stop the hub from starting, but the Executors tab then
+shows a banner saying **no floor is being enforced**, so you know the minimum
+isn't in effect.
 
 Like `allow_host_process`, it is applied as a **ratchet**: a hub reads many
-tenants' `config.yaml`, and a tenant-controlled file must not be able to lower a
-fleet-wide floor. Lowering it means restarting with the looser config.
+tenants' `config.yaml` files, and a file a tenant controls must not be able to
+lower a fleet-wide minimum. To lower it, restart with the looser config.
 
-See [Placement](../architecture/executors.md#placement) for how the constraint is
-ranked and enforced on both the scheduling and the project-binding paths.
+See [Placement](../architecture/executors.md#placement) for how the constraint
+is ranked and enforced when scheduling and when binding projects.
 
 ### Isolation evidence
 
@@ -1349,105 +1356,107 @@ executors:
 ```
 
 An executor's `Virtualized` and `KernelIsolated` capabilities come from its
-runtime's name — `kata` claims a VM, `runsc` a userspace kernel — and since Task
-20439 the hub checks the name: it runs `cloop isolation-probe` under the runtime
-when configured executors are reconciled, at each device's hello, after a runtime
-change, daily and on the card's **Re-probe**, and records what the kernel serving
-the sandbox said about itself against the host's own kernel.
+runtime's name: `kata` claims a VM, `runsc` a userspace kernel. The hub checks
+the claim by running `cloop isolation-probe` under the runtime when configured
+executors are reconciled, at each device's hello, after a runtime change, daily,
+and when you press **Re-probe** on the card. It records what the kernel serving
+the sandbox reported about itself, compared with the host's own kernel.
 
 | Evidence | A project requiring kernel isolation or virtualization |
 | --- | --- |
 | verifies the claim | is placed |
-| contradicts it — a `kata` that is runc or gVisor, a `runsc` that is runc | is **refused** under the `isolation_evidence` constraint, naming the evidence, whatever this key says |
-| none yet, or the probe could not run or was inconclusive | `warn`: placed, with a warning on the run's journal; `required`: refused |
+| contradicts it (a `kata` that is runc or gVisor, a `runsc` that is runc) | is **refused** under the `isolation_evidence` constraint, naming the evidence, whatever this key says |
+| none yet, or the probe couldn't run or was inconclusive | `warn`: placed, with a warning in the run's journal; `required`: refused |
 
-`warn` and `required` are the only values: `cloop config set` refuses anything
-else, and a hand-edited unknown value raises a banner on the Executors tab saying
-unverified executors are being admitted. Like `min_agent_build` it is a
-**ratchet**: once a hub requires evidence, a tenant's `config.yaml` saying `warn`
-does not relax it. It is a hub-scope key, so the per-instance overlay
-`config.ui-<port>.yaml` may set it for one hub alone.
+`warn` and `required` are the only values. `cloop config set` refuses anything
+else, and an unknown value in a hand-edited file shows a banner on the
+Executors tab saying unverified executors are being admitted. Like
+`min_agent_build`, it is a **ratchet**: once a hub requires evidence, a tenant's
+`config.yaml` saying `warn` doesn't relax it. It is a hub-scope key, so the
+per-instance overlay `config.ui-<port>.yaml` can set it for one hub only.
 
 Before turning on `required`, check the Executors panel or `cloop hub doctor`
-(`executors.isolation`): a device whose agent predates protocol v26 cannot be
-probed, so every project requiring isolation on it would be refused until it is
-upgraded. See [The name is checked](../architecture/executors.md#the-name-is-checked-isolation-evidence).
+(`executors.isolation`). A device whose agent predates protocol v26 can't be
+probed, so every project requiring isolation on it would be refused until the
+agent is upgraded. See [The name is checked](../architecture/executors.md#the-name-is-checked-isolation-evidence).
 
 ### Image provenance
 
-What a dispatch does with one of cloop's own images whose signature it could
-not verify:
+What a dispatch does with one of cloop's own images whose signature it couldn't
+verify:
 
 ```yaml
 executors:
   image_provenance: required   # or warn, the default
 ```
 
-cloop's published images — `ghcr.io/blechschmidt/cloop`, `cloop-harness` and
-`cloop-harness-copilot` — are signed by `.github/workflows/publish-images.yml`,
-keyless, every digest it pushes. Since Task 20453 the hub checks one of them
-before a sandbox runs it, however it was chosen: the default image, an executor
-configured with it, a device's or a virtual executor's sandbox image, a project
-naming it. The tag is resolved to a digest — from the local image store after
-the pull on the container executor, at the registry for a device and, since
-Task 20457, for a Kubernetes Pod — cosign verifies the digest against that
+cloop's published images (`ghcr.io/blechschmidt/cloop`, `cloop-harness` and
+`cloop-harness-copilot`) are signed keyless by
+`.github/workflows/publish-images.yml`, for every digest it pushes. The hub
+checks one of them before a sandbox runs it, however it was chosen: as the
+default image, configured for an executor, as a device's or virtual executor's
+sandbox image, or named by a project. The tag is resolved to a digest (from the
+local image store after the pull on the container executor, and at the registry
+for a device or a Kubernetes Pod). cosign verifies the digest against that
 workflow's identity on `main` or a release tag, and the dispatch names the
 digest.
 
 | cosign finds | `warn` (default) | `required` |
 | --- | --- | --- |
 | the workflow's signature | runs the verified digest | runs the verified digest |
-| a signature from anyone else, or bytes that do not match | **refused** | **refused** |
-| no signature — an image published before signing began, or pushed unsigned | runs, with a warning on the run and in `cloop hub doctor` | refused |
-| nothing could check: no cosign on the hub, the registry or Sigstore out of reach, an image built locally | runs, with the warning | refused |
+| a signature from anyone else, or bytes that don't match | **refused** | **refused** |
+| no signature (an image published before signing began, or pushed unsigned) | runs, with a warning on the run and in `cloop hub doctor` | refused |
+| no check possible: no cosign on the hub, the registry or Sigstore unreachable, or an image built locally | runs, with the warning | refused |
 
-On Kubernetes the Pod carries the digest that was checked, verified or not — a
-kubelet pulling later pulls those bytes. A tag the hub could not resolve there
-runs as the tag, with the warning, unless `required` refuses it — or
-`require_digest` or `require_signature`, which send no tag to a Pod. On a
-device the verified digest is what the start frame names, and the device's
-engine never pulls: a device holding an older copy of the tag refuses the start
-naming `docker pull <digest>`. An image that could not be verified is left to the
-device's own copy of the tag, with the warning.
+On Kubernetes the Pod carries the digest that was checked, whether or not it
+verified, so a kubelet pulling later gets that same image. A tag the hub
+couldn't resolve runs as the tag, with the warning, unless `required` refuses
+it, or `require_digest` or `require_signature` is set (both send no tag to a
+Pod). On a device, the start frame names the verified digest, and the device's
+engine never pulls: a device with an older copy of the tag refuses to start,
+naming `docker pull <digest>`. For an image that couldn't be verified, the
+device uses its own copy of the tag, with the warning.
 
-The published hub image bundles cosign (v3.1.4, pinned by checksum); elsewhere
-install it on the hub's `PATH`. `cloop hub verify-image <image>` makes the check
-by hand, and `cloop hub doctor` reports it as `images.provenance`: whether cosign
-is present and its version, the setting, and what each image in use resolved to.
-Before turning on `required`, check that the images in use are signed — every
-image published before Task 20453 is not: pull `:edge`, or a release after
-v0.0.7. An enterprise that rebuilds the images and signs them itself repoints the
-pin with `CLOOP_PROVENANCE_IMAGES_ISSUER` and `CLOOP_PROVENANCE_IMAGES_IDENTITY`,
-which move neither the release nor the edge pin.
+The published hub image includes cosign (v3.1.4, pinned by checksum); elsewhere,
+install it on the hub's `PATH`. `cloop hub verify-image <image>` runs the check
+by hand, and `cloop hub doctor` reports it as `images.provenance`: whether
+cosign is installed and its version, the setting, and what each image in use
+resolved to. Before turning on `required`, check that the images in use are
+signed. Images published before signing began are not: pull `:edge`, or a
+release after v0.0.7. An organisation that rebuilds and signs the images itself
+can point the check at its own signer with `CLOOP_PROVENANCE_IMAGES_ISSUER` and
+`CLOOP_PROVENANCE_IMAGES_IDENTITY`. These are separate from the release and edge
+pins, which they don't change.
 
-Like `isolation_evidence` it is a **ratchet**: once a hub requires verified
-images, a tenant's `config.yaml` saying `warn` does not relax it, and `cloop
-config set` refuses any other value. It is a hub-scope key, so the per-instance
-overlay `config.ui-<port>.yaml` may set it for one hub alone.
+Like `isolation_evidence`, it is a **ratchet**: once a hub requires verified
+images, a tenant's `config.yaml` saying `warn` doesn't relax it.
+`cloop config set` refuses any value other than `warn` and `required`. It is a
+hub-scope key, so the
+per-instance overlay `config.ui-<port>.yaml` can set it for one hub only.
 
 ### Feature bundles
 
-A [feature](../guides/features.md) that runs on an executor isolating from the
-hub — a container, a remote device, a virtual executor — travels there as a git
-bundle of its branch, and its run's commits come back as another. This caps
-both:
+A [feature](../guides/features.md) that runs on an executor isolated from the
+hub (a container, a remote device, a virtual executor) is sent there as a git
+bundle of its branch, and its run's commits come back as another bundle. This
+setting caps the size of both:
 
 ```yaml
 executors:
   feature_bundle_mb: 32   # the default; at most 128
 ```
 
-The hub applies it when it bundles the branch (falling back to the newest 50
-commits, then the newest one, before refusing), the sandbox applies it when it
-bundles its own work, and the hub applies it again when that work arrives. A
-refusal says which bundle was too large and names this setting. Values outside
+The hub applies the cap when it bundles the branch (falling back to the newest
+50 commits, then the newest one, before refusing), the sandbox applies it when
+it bundles its own work, and the hub applies it again when that work arrives.
+The error says which bundle was too large and names this setting. Values outside
 `0..128` are refused when the configuration is loaded; `0` means the default.
 
 ### Failover
 
-When an executor stops answering while it holds a run, the hub's supervisor
-starts the run again on another executor. This bounds how many times one
-dispatch may be started again elsewhere:
+When an executor stops responding while it holds a run, the hub's supervisor
+restarts the run on another executor. This setting limits how many times one
+dispatch can be restarted elsewhere:
 
 ```yaml
 executors:
@@ -1455,33 +1464,34 @@ executors:
     max_attempts: 2   # the default; 0 = never re-dispatch; at most 10
 ```
 
-Past the cap nothing re-dispatches the run: its session closes as
-`failover_exhausted`, and the tasks it was running fail, naming every node the
-run was lost on and when it went unreachable. Independently of the cap, a task
-that two or more distinct executors went down under is quarantined as a
-suspected node killer, its run is not re-dispatched, and the task runs again
-only after an explicit reset — `cloop task reset <id>`, or a reset to pending
-from the dashboard. `cloop executor list --inventory` lists the quarantined
-tasks.
+Past the cap, the run isn't dispatched again: its session closes as
+`failover_exhausted`, and the tasks it was running fail, with a message naming
+every node the run was lost on and when each became unreachable. Separately
+from the cap, a task that two or more different executors went down under is
+quarantined as a suspected node killer. Its run isn't dispatched again, and the
+task runs again only after an explicit reset (`cloop task reset <id>`, or a
+reset to pending from the dashboard). `cloop executor list --inventory` lists
+the quarantined tasks.
 
-A replacement is dispatched like any run, and followed as the project's run
-(Task 20396). It never lands on an executor restricted to an access list. When
-nothing replaces a run, the project is paused with reason `executor_lost`,
-naming the executor.
+A replacement is dispatched like any run and tracked as the project's run. It
+never goes to an executor restricted to an access list. When no replacement is
+possible, the project is paused with reason `executor_lost`, naming the
+executor.
 
-A hub-scope key, read at every failover, so a per-instance overlay may set it
-for one hub alone and a change applies without a restart. `cloop config set`
-refuses a value outside `0..10`; one written into the file by hand is reset to
-the default when the configuration is loaded, with a warning — never to "no
-cap". See [the failover cap](../architecture/executors.md#the-failover-cap-and-the-node-killer-quarantine-task-20391).
+This is a hub-scope key, read at every failover, so a per-instance overlay can
+set it for one hub only, and a change applies without a restart.
+`cloop config set` refuses a value outside `0..10`. Such a value written into
+the file by hand is reset to the default when the configuration is loaded, with
+a warning; it never means "no cap". See
+[the failover cap](../architecture/executors.md#the-failover-cap-and-the-node-killer-quarantine-task-20391).
 
 ### Returned work held in memory
 
 A remote executor sends a run's work back as a write-back bundle, streamed in
-chunks, and a seeded run's project state as one document; the hub holds both in
-memory until it collects them. Each is capped per run — a bundle at the cap its
-dispatch asked for, a document at 640 KiB — and these two cap what all of it
-may add up to (Task 20399):
+chunks, and a seeded run's project state as one document. The hub holds both in
+memory until it collects them. Each is capped per run (a bundle at the cap its
+dispatch asked for, a document at 640 KiB), and these two settings cap the
+total:
 
 ```yaml
 executors:
@@ -1490,38 +1500,38 @@ executors:
     max_pinned_writeback_total_bytes: 1073741824   # every executor together; the default, 1 GiB
 ```
 
-Both are **byte counts**, not megabytes: values outside 1 MiB to 64 GiB are
-refused by `cloop config set` and `cloop config validate`, and one written into
+Both are byte counts, not megabytes. Values outside 1 MiB to 64 GiB are refused
+by `cloop config set` and `cloop config validate`, and such a value written into
 the file by hand is reset to its default when the configuration is loaded, with
-a warning — never to "unbounded". A per-executor budget above the ceiling is
-refused too, and lowered to it at load.
+a warning; it never means "unbounded". A per-executor budget above the ceiling
+is refused too, and lowered to the ceiling at load.
 
-The first is what one device may make the hub hold, across every run it is
-returning work for; the second is what the whole fleet may, and is the one that
-keeps the hub serving everybody else when several devices misbehave at once. A
-frame that would cross either fails that run's write-back: nothing of it is
-kept, the run's journal names the limit and how much was already held, and what
-is held for other runs is untouched. Work is let go of as soon as it is
-collected, when its run ends without the result that would make it collectable,
-when the device is revoked or removed, and fifteen minutes after its run ended
-if nothing has collected it. `cloop_writeback_pinned_bytes` and
-`cloop_writeback_pinned_bytes_max` report the level; see
+The first is how much one device can make the hub hold, across all the runs it
+is returning work for. The second is how much the whole fleet can, and keeps
+the hub serving everyone else when several devices misbehave at once. A frame
+that would exceed either fails that run's write-back: none of it is kept, the
+run's journal names the limit and how much was already held, and work held for
+other runs isn't affected. Held work is released as soon as it is collected,
+when its run ends without a result that would make it collectable, when the
+device is revoked or removed, and fifteen minutes after its run ended if
+nothing has collected it. `cloop_writeback_pinned_bytes` and
+`cloop_writeback_pinned_bytes_max` report the current level; see
 [the metrics](../operations/metrics.md#returned-work-held-in-memory).
 
-`executors.remote.max_pinned_writeback_bytes` should stay at least
+Keep `executors.remote.max_pinned_writeback_bytes` at least as large as
 `executors.feature_bundle_mb`, or a feature run's work is refused when it
-arrives; the Executors panel warns when it is not. A hub-scope key, read when
-the hub starts its agent endpoint, so a per-instance overlay may set it for one
-hub alone and a change takes effect at the next restart. In a hub cluster each
-member applies it to the memory it holds itself. See
+arrives; the Executors panel warns when it isn't. These are hub-scope keys,
+read when the hub starts its agent endpoint, so a per-instance overlay can set
+them for one hub only, and a change takes effect at the next restart. In a hub
+cluster, each member applies them to the memory it holds itself. See
 [what a device's returned work may hold](../architecture/executors.md#what-a-devices-returned-work-may-hold-on-the-hub-task-20399).
 
 ### Pushing a run's work back
 
-A run on an executor that does not share the hub's filesystem — a remote
-device, a Pod — works in a clone of the project's repository there. By default
-what it changes stays there, unless the run's own git pushes it. This makes the
-executor push it back:
+A run on an executor that doesn't share the hub's filesystem (a remote device, a
+Pod) works in a clone of the project's repository there. By default its changes
+stay there, unless the run's own git pushes them. This setting makes the
+executor push them back:
 
 ```yaml
 executors:
@@ -1529,69 +1539,69 @@ executors:
 ```
 
 Once a run's workload exits successfully, the executor commits everything the
-run changed in the checkout — as git sees it, so `.gitignore` applies — to a
-fresh branch `cloop/run-<UTC time>-<random>` and pushes it to the project's
-`origin` with the workspace's credential: through the
-[git proxy](../git-interception-proxy.md)'s pinned session for the workspace
-when the proxy runs, so its ref policy decides the push, and a write-back after
-a hub restart is served by the [restored session](../architecture/git-proxy.md#a-hub-restarted-mid-run)
-(Task 20390). The project's journal records the branch and commit, or why the
-push failed, as a `write_back` row.
+run changed in the checkout (as git sees it, so `.gitignore` applies) to a new
+branch `cloop/run-<UTC time>-<random>`, and pushes it to the project's `origin`
+with the workspace's credential. When the
+[git proxy](../git-interception-proxy.md) runs, the push goes through the
+proxy's pinned session for the workspace, so the proxy's ref policy decides it,
+and a write-back after a hub restart is served by the
+[restored session](../architecture/git-proxy.md#a-hub-restarted-mid-run). The
+project's journal records the branch and commit, or why the push failed, as a
+`write_back` row.
 
 It applies to a project whose checkout on the hub has an https `origin` and a
-GitHub grant admitting it, on an executor that can return work (a device whose
-agent has git). The workspace is fetched at the commit the hub's checkout
-records for `origin/<branch>` — the base the push is measured from — so fetch
-the origin on the hub before a run; a project with no such ref, or no branch
-checked out, is dispatched as before, without a write-back, and its journal says
-why. The push presents the workspace's git proxy session, which is renewed
-while the run lives and closed once its write-back has run (Task 20422), so a
-run longer than `executors.git_proxy.session_minutes` still pushes its work
-back. A value other than `push` is refused by `cloop config validate` and
-`cloop config set`; one written into the file by hand is treated as unset and
-shown as a warning on the Executors tab. Read from the hub's own configuration,
-its instance overlay included, on every dispatch.
+GitHub grant that covers it, on an executor that can return work (a device
+whose agent has git). The workspace is fetched at the commit the hub's checkout
+records for `origin/<branch>`, which is the base the push is measured from, so
+fetch the origin on the hub before a run. A project with no such ref, or no
+branch checked out, is dispatched as before, without a write-back, and its
+journal says why. The push uses the workspace's git proxy session, which is
+renewed while the run lives and closed once its write-back has run, so a run
+longer than `executors.git_proxy.session_minutes` can still push its work back.
+A value other than `push` is refused by `cloop config validate` and
+`cloop config set`. Such a value written into the file by hand is treated as
+unset and shown as a warning on the Executors tab. The setting is read from the
+hub's own configuration, including its instance overlay, on every dispatch.
 
 It is a hub-scope key: read once at startup, from `config.yaml` with the hub's
 overlay merged in.
 
 ### Executors that bring their own Claude credential
 
-A `claudecode`, `anthropic` or `copilot` run on an executor that isolates from
-the hub gets its harness credential — a Claude one, or for `copilot` a Copilot
-one — only through a secret grant, and the hub refuses to dispatch one whose
+A `claudecode`, `anthropic` or `copilot` run on an executor isolated from the
+hub gets its harness credential (a Claude credential, or a Copilot one for
+`copilot`) only through a secret grant. The hub refuses to dispatch a run whose
 lease would carry none (`harness_credential_missing`; see [the Claude
 credential of a sandboxed run](../guides/secrets.md#the-claude-credential-of-a-sandboxed-run)).
-An executor that supplies the credential itself — a device whose agent user is
+If an executor supplies the credential itself (a device whose agent user is
 signed in to `claude`, an image with a key in its environment, a cloud role
-behind Bedrock or Vertex — is listed here, and the check is waived for it:
+behind Bedrock or Vertex), list it here to skip the check for it:
 
 ```yaml
 executors:
   harness_credential_exempt: [sgx, build-box-2]   # executor IDs
 ```
 
-It waives nothing on the hub's own host: a `copilot` project there on a hub with
-single sign-on needs a credential that counts for the person each run acts for,
-since the only credential the host could bring is the hub's own ([per-person
+It skips nothing on the hub's own host. There, a `copilot` project on a hub with
+single sign-on needs a credential for the person each run acts for, because the
+only credential the host could supply is the hub's own ([per-person
 Copilot credentials](../security/copilot-identity.md)).
 
-The waiver is the check and nothing else: the grants such a run holds are
-delivered exactly as before, and another user's personal Claude credential is
-still withheld from it. Only the hub's own configuration can grant it — a
-project's `config.yaml` is written by whoever can push to the project — and an
-entry that is empty or contains whitespace is refused when the configuration is
-loaded.
+Only the check is skipped. The grants such a run holds are delivered as before,
+and another user's personal Claude credential is still withheld from it. Only
+the hub's own configuration can set this list, because a project's
+`config.yaml` is written by whoever can push to the project. An entry that is
+empty or contains whitespace is refused when the configuration is loaded.
 
 ### The model relay for sandboxed runs
 
-A `claudecode` or `anthropic` run on an executor that isolates from the hub — a
-container, a Pod, an enrolled device, a virtual executor — is handed its Claude
+A `claudecode` or `anthropic` run on an executor isolated from the hub (a
+container, a Pod, an enrolled device, a virtual executor) gets its Claude
 credential as a leased environment variable. The workload then holds the
-plaintext for the whole run: it can print it, commit it or send it anywhere, a
-revocation cannot take it out of a running device task, and what the hub
-charges the run's budgets is whatever the run reports it spent.
-`executors.model_relay` keeps the credential on the hub instead (Task 20435):
+plaintext credential for the whole run: it can print it, commit it or send it
+anywhere, revoking it doesn't remove it from a running device task, and the hub
+charges the run's budgets whatever the run reports it spent.
+`executors.model_relay` keeps the credential on the hub instead:
 
 ```yaml
 executors:
@@ -1607,80 +1617,83 @@ executors:
     # hub_credential: ["project:/srv/app", "executor:build-box"]
 ```
 
-With it on, each such dispatch mints a relay session bound to the run's secret
-lease. The sandbox gets `ANTHROPIC_BASE_URL` pointing at the relay and a
+With it on, each such dispatch creates a relay session bound to the run's
+secret lease. The sandbox gets `ANTHROPIC_BASE_URL` pointing at the relay and a
 `cloop_relay_…` session token in `ANTHROPIC_AUTH_TOKEN` (`ANTHROPIC_API_KEY`,
-with the URL ending `/v1`, for the `anthropic` provider); every Claude
-credential the lease delivered is taken out of its environment, and the hub
-spends it upstream. The session lives exactly as long as the lease: recorded
+with the URL ending in `/v1`, for the `anthropic` provider). Every Claude
+credential the lease delivered is removed from the sandbox's environment, and
+the hub uses it upstream. The session lasts as long as the lease. It is recorded
 for the hub process that adopts the run after a restart, renewed by the lease's
 keepalive, and ended at once when the lease is released or revoked or its grant
-is taken back — the run's next model call is refused with the reason. Any hub
-member serves it. Each response's usage is read from the API's own counts as it
-streams past and charged to the identity that started the run, in the same
-`daily_token_budget` and `daily_cost_usd` counters [quotas](../security/model.md#quotas-how-much-not-whether)
-enforce, and a call that would pass one is refused before it reaches the API.
-See [the Claude credential of a sandboxed
+is withdrawn; the run's next model call is then refused with the reason. Any hub
+member can serve it. The usage in each response is read from the API's own
+counts as it streams through, and charged to the identity that started the run,
+in the same `daily_token_budget` and `daily_cost_usd` counters that
+[quotas](../security/model.md#quotas-how-much-not-whether) enforce. A call that
+would exceed one of them is refused before it reaches the API. See [the Claude
+credential of a sandboxed
 run](../guides/secrets.md#with-the-model-relay-on-the-claude-credential-stays-on-the-hub)
 for what a run and its card show.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `false` | Route the model calls of every `claudecode` and `anthropic` run on an isolating executor through the relay. Off by default: it changes the endpoint every sandboxed harness talks to, and whether a hub turns it on is its operator's decision. |
-| `listener` | `git_proxy` | Where sandboxes reach it. `git_proxy` serves it on the git interception proxy's listener at `<advertise_url>/_anthropic`, so it needs `executors.git_proxy` on; under `tls: auto` the harness is handed the hub's CA in a file of its own through `NODE_EXTRA_CA_CERTS`. `dashboard` serves it on the hub's own listener at `<ui.external_url>/_anthropic`, which must be `https` with a certificate the sandbox already trusts; nothing is added to its trust. |
-| `models` | every Claude model (`claude-*`) | The hub's model allowlist for relayed runs, as globs. A project's maintainers may narrow it for their project from its Claude credential card (`PUT /api/projects/{idx}/model-relay`), never widen it; a call for any other model is refused before the API. |
-| `max_output_tokens` | `32000` | Clamps `max_tokens` on every relayed call, as the CI relay does — and with it an extended-thinking budget it would leave at or above `max_tokens`, which the API refuses. |
-| `upstream_base_url` | `https://api.anthropic.com` | A gateway of your own in front of the API: an `https` origin, or loopback, with no path. |
-| `hub_credential` | none | Where the hub's own `anthropic.api_key` may be spent for a run that has no Claude credential granted: `project:<path>` (a feature through its parent) or `executor:<id>`. Never a fallback: unlisted, the hub's key is spent nowhere. Inert until API keys are relayed (below). |
+| `enabled` | `false` | Sends the model calls of every `claudecode` and `anthropic` run on an isolating executor through the relay. Off by default, because it changes the endpoint every sandboxed harness talks to; the operator decides whether to turn it on. |
+| `listener` | `git_proxy` | Where sandboxes reach it. `git_proxy` serves it on the git interception proxy's listener at `<advertise_url>/_anthropic`, so `executors.git_proxy` must be on; under `tls: auto` the harness gets the hub's CA in a separate file through `NODE_EXTRA_CA_CERTS`. `dashboard` serves it on the hub's own listener at `<ui.external_url>/_anthropic`, which must be `https` with a certificate the sandbox already trusts; nothing is added to the sandbox's trust store. |
+| `models` | every Claude model (`claude-*`) | The hub's model allowlist for relayed runs, as globs. A project's maintainers can narrow it for their project from its Claude credential card (`PUT /api/projects/{idx}/model-relay`), but never widen it. A call for any other model is refused before it reaches the API. |
+| `max_output_tokens` | `32000` | Clamps `max_tokens` on every relayed call, as the CI relay does. It also lowers an extended-thinking budget that would otherwise end up at or above `max_tokens`, which the API refuses. |
+| `upstream_base_url` | `https://api.anthropic.com` | Your own gateway in front of the API: an `https` origin, or loopback, with no path. |
+| `hub_credential` | none | Where the hub's own `anthropic.api_key` may be used for a run that has no Claude credential granted: `project:<path>` (a feature through its parent) or `executor:<id>`. It is never a fallback: if nothing is listed, the hub's key is used nowhere. Has no effect until API keys are relayed (see below). |
 
-**Only proven credential kinds are relayed.** A Claude OAuth token (`claude
-setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`) is relayed: proven on 2026-10-16 with
-real Claude Code through a hub and an enrolled device, and by
-`TestLiveModelRelay`, which relays real calls with a credential of a given
-kind. An API key is not relayed yet. A run whose credential is one keeps
-today's delivery, its journal and the `model_relay.not_relayed` audit row say
-so, and the project's Claude credential card says *not relayed* and why. So
-does a run on a device whose agent predates protocol v23, when the relay needs
-the harness's Node to trust the hub's CA (the `git_proxy` listener under `tls:
-auto`): that agent cannot hand it over, so the hub journals it and delivers as
-before. While the hub's CA is being [rotated](../operations/runbook.md#rotating-the-hub-ca),
-an agent before protocol v25 is handed the active CA alone for Node — it cannot
-take two — so its relayed run trusts only that one and holds an activation back
-like a run dispatched before the stage.
+**Only tested credential kinds are relayed.** A Claude OAuth token (`claude
+setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`) is relayed. This was tested on
+2026-10-16 with real Claude Code through a hub and an enrolled device, and is
+covered by `TestLiveModelRelay`, which relays real calls with a credential of a
+given kind. API keys aren't relayed yet. A run with an API key gets its
+credential delivered as before; its journal and the `model_relay.not_relayed`
+audit row say so, and the project's Claude credential card shows *not relayed*
+and why. The same applies to a run on a device whose agent predates protocol
+v23, when the relay needs the harness's Node to trust the hub's CA (the
+`git_proxy` listener under `tls: auto`): that agent can't pass the CA on, so the
+hub records this in the journal and delivers the credential as before. While the
+hub's CA is being [rotated](../operations/runbook.md#rotating-the-hub-ca), an
+agent older than protocol v25 gets only the active CA for Node, because it can't
+take two. Its relayed run therefore trusts only that CA, and holds back an
+activation like a run dispatched before the new CA was staged.
 
-**It fails closed.** A relay that should serve a run and cannot — not running,
-its listener absent, its session not minted — refuses the dispatch, naming the
-reason, rather than hand the run its credential. So does a section that does not
-load: a `listener`, `models` or `upstream_base_url` it cannot run with is kept
-as written and marked, not reset to a default that would be wider; the hub
-starts no relay, `cloop hub doctor` fails `config.repaired`, and every run it
-would relay is refused until the section loads. The same holds for a section
-edited into one that does not load while the hub runs.
+**It fails closed.** If the relay should serve a run but can't (it isn't
+running, its listener is missing, or its session wasn't created), the dispatch
+is refused with the reason, instead of handing the run its credential. The same
+happens when the section doesn't load. A `listener`, `models` or
+`upstream_base_url` the relay can't use is kept as written and marked, not reset
+to a default that would allow more. The hub starts no relay, `cloop hub doctor`
+fails `config.repaired`, and every run it would relay is refused until the
+section loads. This also applies if the section is edited into a state that
+doesn't load while the hub runs.
 
-**Reachability.** On the `git_proxy` listener the relay is the same host and
-port as the git proxy, so a firewall — a device's, a virtual executor's or a
-project's egress rules — that lets a sandbox reach the git proxy lets it reach
-the relay, and nothing else needs allowing. On `dashboard` the sandbox needs the
-dashboard's address allowed instead.
+**Reachability.** On the `git_proxy` listener, the relay uses the same host and
+port as the git proxy, so a firewall (a device's, a virtual executor's or a
+project's egress rules) that lets a sandbox reach the git proxy also lets it
+reach the relay, and nothing else needs allowing. With `dashboard`, the sandbox
+must be allowed to reach the dashboard's address instead.
 
-**What Node trusts.** `NODE_EXTRA_CA_CERTS` is process-wide: Node adds the hub's
-CA to its trust for every TLS connection the harness makes, not for the relay's
-URL alone, as git's per-URL setting is scoped. The file holds the hub's CA and
-nothing else, and its key never leaves the hub; `listener: dashboard` with a
-publicly trusted certificate adds nothing at all.
+**What Node trusts.** `NODE_EXTRA_CA_CERTS` applies to the whole process: Node
+trusts the hub's CA for every TLS connection the harness makes, not only for
+the relay's URL, unlike git's per-URL setting. The file holds only the hub's CA,
+and the CA's key never leaves the hub. `listener: dashboard` with a publicly
+trusted certificate adds nothing at all.
 
-`enabled`, `listener` and `upstream_base_url` are read at startup.
-`models`, `max_output_tokens` and `hub_credential` are read on each dispatch
-while the hub's configuration keeps the relay on; switched off in the file, a
+`enabled`, `listener` and `upstream_base_url` are read at startup. `models`,
+`max_output_tokens` and `hub_credential` are read on each dispatch while the
+hub's configuration keeps the relay on. If you switch it off in the file, a
 running relay keeps the section it started with until the restart that stops
-it. A project's own `config.yaml` cannot set any of them.
+it. A project's own `config.yaml` can't set any of these keys.
 
 ### Automatic harness installation
 
-A project driven by the `claudecode` provider needs the `claude` CLI on whatever
-runs it, and a `copilot` project the `copilot` CLI. A freshly enrolled edge
+A project that uses the `claudecode` provider needs the `claude` CLI wherever it
+runs, and a `copilot` project needs the `copilot` CLI. A newly enrolled edge
 device has neither, so by default the hub asks the device to install the one a
-dispatch needs from **its vendor's official installer** the first time it is
+dispatch needs, using the vendor's official installer, the first time it is
 needed:
 
 ```yaml
@@ -1688,83 +1701,82 @@ executors:
   auto_install_harness: true    # the default; absent means true
 ```
 
-The device reports what it did, and the same dispatch carries on. Turn it off to
-get the older behaviour — the dispatch is refused with a message naming the
-manual remedies:
+The device reports what it did, and the dispatch continues. Turn it off to get
+the older behaviour, where the dispatch is refused with a message explaining how
+to install the CLI by hand:
 
 ```yaml
 executors:
   auto_install_harness: false
 ```
 
-Set it `false` where "the control plane may fetch and run a vendor shell script
-here" is a decision you want to keep for yourself — a critical host, an
-air-gapped site, or anywhere a change of installed software has to go through
-review. What it does **not** control is *what* can be installed; see below.
+Set it to `false` where you don't want the control plane to download and run a
+vendor's shell script: a critical host, an air-gapped site, or anywhere changes
+to installed software must be reviewed. It doesn't control what can be
+installed; see below.
 
-**What the hub may ask for.** The install frame names a *harness*, never a URL,
-a script, an argv or an interpreter. The device holds the table mapping a name
-to an installer, compiled into the agent binary, and its entries are:
+**What the hub can ask for.** The install frame names a harness, never a URL, a
+script, an argv or an interpreter. The table that maps a name to an installer is
+compiled into the agent binary on the device. Its entries are:
 
 | Harness   | Installer                                                       |
 | --------- | --------------------------------------------------------------- |
 | `claude`  | `https://claude.ai/install.sh` (Anthropic's documented install), then `https://downloads.claude.ai/claude-code-releases/bootstrap.sh` |
 | `copilot` | `https://gh.io/copilot-install` (GitHub's documented install), accepted only from `raw.githubusercontent.com/github/copilot-cli/` |
 
-The second URL is where the first redirects to, fetched directly. It is tried
-only when the documented one does not serve the script: the claude.ai website
-answers many datacenter networks with a Cloudflare bot challenge (HTTP 403),
-while the download host — which the script fetches the binary from anyway —
-does not. A cloud VM enrolled as an executor is exactly such a machine. A
-source refused on a safety rule (a redirect off `claude.ai`, a downgrade to
-plaintext, an oversized body) is not retried elsewhere; the install stops and
-says why.
+The second URL is where the first one redirects to, fetched directly. It is
+tried only when the documented URL doesn't serve the script: the claude.ai
+website answers many datacenter networks with a Cloudflare bot challenge (HTTP
+403), but the download host, which the script downloads the binary from anyway,
+doesn't. A cloud VM enrolled as an executor is typically such a machine. A
+source refused by a safety rule (a redirect away from `claude.ai`, a downgrade
+to plaintext, an oversized response) isn't retried elsewhere; the install stops
+and says why.
 
-GitHub's URL is a redirector too: `gh.io` answers 301 with the script in
-GitHub's own `github/copilot-cli` repository on `raw.githubusercontent.com`.
-That host serves every repository on GitHub, so a domain alone would admit any
-user's script there; the entry pins the repository's path as well, and a
-redirect anywhere else on the host is refused as a safety rule. It has no
-mirror: the cloud VM the claude mirror exists for reaches `gh.io`, the script
-and the release download it fetches. The script installs into `~/.local/bin`
-from the CLI's release on github.com, checking the release's checksums, and
-needs `bash`, `curl` or `wget`, `tar` and `gzip`; the CLI unpacks a runtime of
-about 250 MB under `~/.cache/copilot` the first time it starts.
+GitHub's URL also redirects: `gh.io` answers 301 with the script in GitHub's own
+`github/copilot-cli` repository on `raw.githubusercontent.com`. That host serves
+every repository on GitHub, so allowing the domain alone would admit any user's
+script. The entry therefore also pins the repository's path, and a redirect
+anywhere else on the host is refused by a safety rule. There is no fallback URL
+for it: the cloud VMs that the claude fallback exists for can reach `gh.io`, the
+script and the release download it fetches. The script installs into
+`~/.local/bin` from the CLI's release on github.com, checking the release's
+checksums, and needs `bash`, `curl` or `wget`, `tar` and `gzip`. The CLI unpacks
+a runtime of about 250 MB under `~/.cache/copilot` the first time it starts.
 
-So a hub that has been taken over can ask a device to install Claude Code from
-Anthropic, and can ask for nothing else — there is nothing else to ask for. The
-agent fetches the script itself rather than piping `curl` into a shell, which
-lets it reject a redirect that leaves the vendor's domain, bound the response,
-and capture the script's output so a failure is reported to the hub instead of
-scrolling past on a machine nobody is logged into. `cloop` itself is deliberately
-absent from the table: it already has
-[remote upgrade](../architecture/executors.md#upgrading-a-device), which verifies
-Sigstore provenance against a pinned identity, and a shell script would be a
-downgrade.
+So a compromised hub can ask a device to install Claude Code from Anthropic,
+and nothing else. The agent downloads the script itself instead of piping
+`curl` into a shell. That lets it reject a redirect that leaves the vendor's
+domain, limit the response size, and capture the script's output, so a failure
+is reported to the hub instead of scrolling past on a machine nobody is logged
+in to. `cloop` itself isn't in the table: it already has
+[remote upgrade](../architecture/executors.md#upgrading-a-device), which
+verifies Sigstore provenance against a pinned identity, and a shell script would
+be less secure.
 
-**Where it lands.** The official installers need no root and write no system
-path — the binary goes to `~/.local/bin/claude` or `~/.local/bin/copilot`. That directory is not on a
-systemd unit's `PATH`, so the agent adds it to its own environment and to any
-payload environment that carries an explicit `PATH`. An operator debugging this
-can read the resolved path back from the Fleet panel; a device that installed
-the harness but still cannot resolve it says so rather than reporting success.
+**Where it is installed.** The official installers need no root and write to no
+system path: the binary goes to `~/.local/bin/claude` or `~/.local/bin/copilot`.
+That directory isn't on a systemd unit's `PATH`, so the agent adds it to its own
+environment and to any payload environment that sets an explicit `PATH`. When
+debugging, you can read the resolved path in the Fleet panel. A device that
+installed the harness but still can't find it reports that instead of success.
 
 **When it is skipped.** In container sandbox mode nothing is installed on the
-device's host — the harness comes out of the image, which is the configuration
-that *fixes* a device without one. An agent older than protocol v12 does not
-know the frame, and gets the plain refusal rather than a complaint about its
-version. An agent built before its table had `copilot` answers that it has no
-installer for it, and the refusal carries that answer: upgrade the agent, or
-install the CLI on the device by hand.
+device's host. The harness comes from the image, which is also how to fix a
+device that lacks one. An agent older than protocol v12 doesn't know the install
+frame, and gets the plain refusal instead of an error about its version. An
+agent built before its table had `copilot` answers that it has no installer for
+it, and the refusal includes that answer: upgrade the agent, or install the CLI
+on the device by hand.
 
-The policy is a **ratchet**: it can only tighten at runtime. A control plane
-manages many projects, each with its own `config.yaml`, and applying them
-symmetrically would let a tenant re-enable host execution by editing a file they
-control. Loosening requires a restart with a permissive config.
+The setting is a **ratchet**: at runtime it can only be tightened. A control
+plane manages many projects, each with its own `config.yaml`, and if any of them
+could loosen it, a tenant could re-enable host execution by editing a file they
+control. To loosen it, restart with a permissive config.
 
 ### Resource ceilings
 
-A ceiling on what any single workload may be given, whichever executor runs it:
+An upper limit on what any single workload can get, whichever executor runs it:
 
 ```yaml
 executors:
@@ -1775,68 +1787,68 @@ executors:
     max_pids: 2048    # processes/threads
 ```
 
-Every field is optional; an absent one leaves that resource uncapped, so adding
-the section to an existing deployment changes nothing until you name a key.
+Every field is optional. A missing field leaves that resource uncapped, so
+adding the section to an existing deployment changes nothing until you set a
+key.
 
-**This is the only resource setting in the file that is a bound rather than a
-default.** `executors.container.memory` and the Kubernetes requests/limits say
+This is the only resource setting in the file that is a limit and not a
+default. `executors.container.memory` and the Kubernetes requests and limits say
 what a workload gets when it asks for nothing, and a project's
-[`.cloop/sandbox.yaml`](sandbox.md) *overrides* them — correct for a default, and
-useless as a policy, because that file is committed to the repository and
-authored by whoever can push to it. Under the override rule alone a project could
-name `memory: 900g` and get it, bounded only by a built-in 1 TiB constant sized
-to catch typos rather than tenants.
+[`.cloop/sandbox.yaml`](sandbox.md) overrides them. That is right for a default
+but no use as a policy, because the file is committed to the repository by
+whoever can push to it. With overrides alone, a project could ask for
+`memory: 900g` and get it, limited only by a built-in 1 TiB constant meant to
+catch typos.
 
-A ceiling also bounds a request that was never made. In a spec, an absent
-`resources.memory` means *no limit* — not "the default" — so a cap that only
-lowered stated numbers would be defeated by deleting a line, which is also the
-state of every project that has never heard of sandbox specs.
+A ceiling also applies when nothing was requested. In a spec, a missing
+`resources.memory` means no limit, not "the default", so a cap that only
+lowered stated numbers could be avoided by deleting a line. That is also the
+state of every project that has no sandbox spec.
 
-That case is closed by the executor rather than by the spec, and the order
-matters: the driver first resolves the request against its own configured
-default (`executors.container.memory` and friends), and *then* applies the
-ceiling to whatever came out. So a project that asks for nothing on a hub with
-`container.memory: 4g` under an 8 GB ceiling still gets 4 GB — a ceiling only
-ever lowers. It fills in a limit only where nothing else set one, which is the
-genuinely unbounded case a fleet cap exists for.
+The executor handles that case, in this order: the driver first resolves the
+request against its own configured default (`executors.container.memory` and
+similar keys), and then applies the ceiling to the result. So a project that
+asks for nothing on a hub with `container.memory: 4g` and an 8 GB ceiling still
+gets 4 GB, because a ceiling only ever lowers a limit. The ceiling sets a limit
+itself only where nothing else did.
 
-Like `min_agent_build` it is applied as a **ratchet**, and for a sharper reason:
-a hub reads many tenants' `config.yaml`, and combining them symmetrically would
-let one tenant raise a cap that applies to everyone else in the process.
-Loosening means restarting with the looser config.
+Like `min_agent_build`, it is applied as a **ratchet**: a hub reads many
+tenants' `config.yaml` files, and otherwise one tenant could raise a cap that
+applies to everyone else in the process. To loosen it, restart with the looser
+config.
 
-A malformed section is not refused at boot — that would turn a typo into an
-outage — but it installs *nothing*, and raises a banner saying no ceiling is
-being enforced. `cloop config set` refuses one outright.
+A malformed section doesn't stop the hub from starting, but it sets no ceilings
+at all, and a banner says that no ceiling is being enforced. `cloop config set`
+refuses a malformed value.
 
-**Disk** (`max_disk`, and the Disk field of an executor's Limits) bounds the
-workspace — the tree the workload works in, its `.cloop/` counted by what the
-run adds to it — and is applied
-like memory: a larger `resources.disk` is lowered to it and a project that
-states none is given it (Task 20405). A Kubernetes executor holds it by
-eviction; a container executor, on the hub or on a device whose agent speaks
-protocol v20 or later, by measuring the workspace while the workload runs and
-stopping it once it is over, which pauses the run with reason `disk_limit`. That
-is enforcement by sampling, not a quota: a burst can overshoot by the write rate
-times the sampling interval, which is why the
-[free-space floor](#free-space-floor) still matters. Where nothing holds a disk
-ceiling — the host-process driver, a device running payloads on its host, an
-agent older than v20 — every dispatch says so on the project's journal, and the
+**Disk** (`max_disk`, and the Disk field of an executor's Limits) limits the
+workspace: the tree the workload works in, counting what the run adds to its
+`.cloop/`. It is applied like memory: a larger `resources.disk` is lowered to
+it, and a project that sets none gets it. A Kubernetes executor enforces it by
+eviction. A container executor, on the hub or on a device whose agent speaks
+protocol v20 or later, measures the workspace while the workload runs and stops
+the workload once it is over, which pauses the run with reason `disk_limit`.
+This is enforcement by sampling, not a quota: a burst can overshoot by the write
+rate times the sampling interval, which is why the
+[free-space floor](#free-space-floor) still matters. Where nothing can enforce a
+disk ceiling (the host-process driver, a device running payloads on its host, an
+agent older than v20), every dispatch says so in the project's journal, and the
 executor card shows `disk: not supported`. See
 [`resources.disk` and the workspace](sandbox.md#resourcesdisk-and-the-workspace).
 
-**Upgrading takes these ceilings from inert to enforced.** A `max_disk`, or a
-Disk set in an executor's Limits, recorded no limit on a container executor
-before Task 20405; from it, runs there are refused over it and stopped past it.
-And a remote device running payloads in a container now receives its own
-ceiling — CPU, memory and processes as well as disk — filled into the spec for
-a project that asked for nothing, where before only the project's stated
-requests were bounded there. Check the ceilings you have set before upgrading.
+**Upgrading from an older build turns these ceilings on.** On a container
+executor, older builds recorded no limit for a `max_disk`, or for a Disk value
+in an executor's Limits. Current builds refuse runs there that are over it and
+stop runs that go past it. A remote device running payloads in a container now
+also gets its ceilings (CPU, memory and processes as well as disk) written into
+the spec for a project that asked for nothing, where older builds limited only
+the project's stated requests. Check the ceilings you have set before
+upgrading.
 
 ### Per-project resource ceilings
 
-The fleet ceiling holds everything below one number. To hold a single project
-lower — a noisy neighbour, an untrusted tenant — set a ceiling on it directly:
+The fleet ceiling applies one limit to everything. To hold a single project
+lower (a noisy neighbour, an untrusted tenant), set a ceiling on it directly:
 
 ```console
 $ cloop hub limits set /srv/projects/noisy --memory 2g --reason "OOMing the box"
@@ -1844,21 +1856,20 @@ $ cloop hub limits list
 $ cloop hub limits clear /srv/projects/noisy --reason "moved to its own node"
 ```
 
-These live in the hub's control-plane database rather than in any file the
-project can reach, which is the point: a project states what it *needs* in its
-own repository, and the operator states what it may *have* somewhere the project
-cannot edit.
+These are stored in the hub's control-plane database, not in any file the
+project can reach. A project states what it needs in its own repository, and the
+operator states what it may have somewhere the project can't edit.
 
-The two ceilings compose by getting tighter, resource by resource, and neither
-can be raised by the project. A per-project ceiling above the fleet's is stored
-as written and simply does not bind — it is a second bound, never a waiver.
+The two ceilings combine resource by resource, and the lower one applies. The
+project can't raise either. A per-project ceiling above the fleet's is stored as
+written but has no effect: it is a second limit, never an exemption.
 
-Ceilings are read on every dispatch, so an edit applies to the next task to
-start: no hub restart, and `cloop hub limits` does not refuse while a hub is
-running. When one lowers a workload, the reduction is recorded on the project's
-own event log naming the resource, both numbers and which ceiling bound it —
-otherwise a sandbox that quietly received 2 GB instead of 8 is indistinguishable
-from a slow machine, and nothing in the repository would explain it.
+Ceilings are read on every dispatch, so a change applies to the next task that
+starts, without a hub restart, and `cloop hub limits` works while a hub is
+running. When a ceiling lowers a workload's limits, the project's event log
+records the resource, both numbers and which ceiling applied. Otherwise a
+sandbox that got 2 GB instead of 8 would look like a slow machine, with nothing
+in the repository to explain it.
 
 ---
 
@@ -1867,8 +1878,8 @@ from a slow machine, and nothing in the repository would explain it.
 
 ### What data leaves the machine
 
-When you run cloop in any AI-powered mode (PM, suggest, explain, etc.) cloop sends
-**only the following** to your configured AI provider:
+When you run cloop in any mode that uses a model (PM, suggest, explain and so
+on), it sends only the following to your configured provider:
 
 | Data sent | When |
 |-----------|------|
@@ -1877,17 +1888,17 @@ When you run cloop in any AI-powered mode (PM, suggest, explain, etc.) cloop sen
 | **Codebase snippets** injected by `--inject-context` or `cloop context` | When context injection is enabled |
 | Git log / diff excerpts | Commands that require them (pr, commit-msg, trace, …) |
 
-**No API keys, passwords, or environment variables** are ever included in prompts.
-**No telemetry** is sent to Anthropic or any third party by cloop itself.
+API keys, passwords and environment variables are never included in prompts.
+cloop itself sends no telemetry to Anthropic or any third party.
 
 A hub with [semantic knowledge search](#semantic-knowledge-search-knowledgeembeddings)
-turned on also sends the text of its knowledge chunks, and every knowledge search
-query, to the embedding endpoint `knowledge.embeddings` names. It is off unless an
-administrator turns it on.
+turned on also sends the text of its knowledge chunks, and every knowledge
+search query, to the embedding endpoint that `knowledge.embeddings` names. It
+is off unless an administrator turns it on.
 
-The hub does collect a browser diagnostic trail, but it never leaves the
-deployment: it is written by your own front ends to your own hub, stored in
-your own database, and scrubbed of credentials on the way in. See
+The hub can collect a diagnostic trail from browsers, but it never leaves the
+deployment: your own front ends send it to your own hub, it is stored in your
+own database, and credentials are scrubbed on the way in. See
 [front-end telemetry](../operations/telemetry.md), including how to turn it
 off.
 
@@ -1895,50 +1906,50 @@ off.
 
 | Location | What is stored |
 |----------|----------------|
-| `.cloop/config.yaml` | API keys (optional — env vars are preferred) |
+| `.cloop/config.yaml` | API keys (optional; environment variables are preferred) |
 | Environment variables | Recommended: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN` |
-| `.cloop/state.db` | Goal, task list, step outputs — **no API keys** |
+| `.cloop/state.db` | Goal, task list, step outputs; no API keys |
 
 **Config file permissions:** cloop writes `.cloop/config.yaml` with mode `0600`
-(owner read/write only). On load, cloop warns if the file has world- or
-group-readable permissions so you can run `chmod 600 .cloop/config.yaml`.
+(owner read/write only). On load, it warns if the file is readable by the group
+or by others, so you can run `chmod 600 .cloop/config.yaml`.
 
-**Encrypted secrets** (`cloop secret`) are stored in `.cloop/secrets.enc` using
-AES-256-GCM and never written to any AI prompt.
+**Encrypted secrets** (`cloop secret`) are stored in `.cloop/secrets.enc` with
+AES-256-GCM and never included in a prompt.
 
 ### The root key: `CLOOP_SECRET_KEY`
 
 Every sealed credential, session refresh token and hub CA key, every audit
 checkpoint seal and backup sidecar seal, the key escrow and `.cloop/secrets.enc`
-derive from one root secret. The hub and every command read it through one
-resolver, from the first of these that is set — and refuse to run when two of
-them hold different keys:
+are derived from one root secret. The hub and every command read it through one
+resolver, from the first of these that is set, and refuse to run if two of them
+hold different keys:
 
 | Setting | Holds |
 | --- | --- |
-| `CLOOP_SECRET_KEY_FILE` | absolute path to a file holding the key: a regular file the hub's user owns, mode `0400` or `0600`, outside every `.cloop/` directory (one trailing newline is ignored). A Kubernetes Secret volume — owned by root, mode `0440`, readable through the Pod's `fsGroup` — is accepted too, and so is a file owned by root that an ACL lets the hub's user, and nobody else, read: how systemd 255 and later hand a unit with `User=` its credentials |
-| `$CREDENTIALS_DIRECTORY/cloop-secret-key` | the systemd credential: `LoadCredential=cloop-secret-key:<file>`, or `LoadCredentialEncrypted=` with a file `systemd-creds encrypt` sealed — to the host's credential secret and, where there is one, its TPM |
-| `CLOOP_SECRET_KEY` | the key itself, in the environment — the last resort: readable in `/proc/<pid>/environ` and inherited by children |
-| `CLOOP_SECRET_KEY_PREVIOUS_FILE`, `cloop-secret-key-previous`, `CLOOP_SECRET_KEY_PREVIOUS` | the key a [change of root](../operations/runbook.md#changing-cloop_secret_key-itself) is replacing, read the same way: it opens what it sealed and mints nothing. Refused without a current key, or when it is the current key |
+| `CLOOP_SECRET_KEY_FILE` | absolute path to a file holding the key: a regular file owned by the hub's user, mode `0400` or `0600`, outside every `.cloop/` directory (one trailing newline is ignored). A Kubernetes Secret volume (owned by root, mode `0440`, readable through the Pod's `fsGroup`) is accepted too, and so is a file owned by root that an ACL lets only the hub's user read, which is how systemd 255 and later pass credentials to a unit with `User=` |
+| `$CREDENTIALS_DIRECTORY/cloop-secret-key` | the systemd credential: `LoadCredential=cloop-secret-key:<file>`, or `LoadCredentialEncrypted=` with a file sealed by `systemd-creds encrypt` to the host's credential secret and, where there is one, its TPM |
+| `CLOOP_SECRET_KEY` | the key itself, in the environment. Use this only as a last resort: it is readable in `/proc/<pid>/environ` and inherited by child processes |
+| `CLOOP_SECRET_KEY_PREVIOUS_FILE`, `cloop-secret-key-previous`, `CLOOP_SECRET_KEY_PREVIOUS` | the key that a [change of root](../operations/runbook.md#changing-cloop_secret_key-itself) is replacing, read the same way. It opens what it sealed and creates nothing new. Refused without a current key, or when it is the current key |
 
-`cloop hub bootstrap` writes the key to `cloop-secret-key` beside `.cloop/`
-(`--key-file`), encrypted with `systemd-creds` when the host can
-(`--systemd-creds auto|always|never`). A serving hub resolves once at startup,
-prints the source and the key's fingerprint, and advertises the fingerprint to
-its cluster peers; a changed file takes effect at a restart. It refuses to start
-when a live sealing key derives from neither configured root. See
-[the root key](../operations/runbook.md#the-root-key) in the runbook. With
-[`secrets.kms`](#sealing-keys-in-a-kms-secrets) the secret store's keys come from
-a KMS instead, and the root key seals the rest.
+`cloop hub bootstrap` writes the key to `cloop-secret-key` next to `.cloop/`
+(`--key-file`), encrypted with `systemd-creds` when the host supports it
+(`--systemd-creds auto|always|never`). A running hub resolves the key once at
+startup, prints the source and the key's fingerprint, and advertises the
+fingerprint to its cluster peers. A changed file takes effect at the next
+restart. The hub refuses to start if a live sealing key is derived from neither
+configured root. See [the root key](../operations/runbook.md#the-root-key) in
+the runbook. With [`secrets.kms`](#sealing-keys-in-a-kms-secrets), the secret
+store's keys come from a KMS instead, and the root key seals everything else.
 
 ### Sealing keys in a KMS: `secrets`
 
-By default every key-encryption key (KEK) is derived from `CLOOP_SECRET_KEY` and
-a salt stored beside it, so the database and the key file together open every
-sealed credential — offline, for as long as anybody keeps the copy. With
-`secrets.kms` a KEK is random instead, and the database keeps only the
-ciphertext an external key-management service made of it: opening the store is
-a call to the KMS, which logs it and whose owner can refuse it (Task 20433).
+By default, every key-encryption key (KEK) is derived from `CLOOP_SECRET_KEY`
+and a salt stored with it, so the database and the key file together open every
+sealed credential, offline, for as long as anyone keeps a copy. With
+`secrets.kms`, each KEK is random, and the database keeps only the ciphertext an
+external key-management service (KMS) produced from it. Opening the store
+requires a call to the KMS, which logs it and whose owner can refuse it.
 
 ```yaml
 secrets:
@@ -1955,53 +1966,54 @@ secrets:
 
 | Key | Meaning |
 | --- | --- |
-| `kms.provider` | `kmsv2` — a [Kubernetes KMS v2](https://kubernetes.io/docs/tasks/administer-cluster/kms-provider/) plugin over a unix socket: Azure Key Vault, AWS KMS, Google Cloud KMS and Vault through the plugins their vendors publish for the API server. `transit` — HashiCorp Vault or OpenBao Transit over HTTPS |
-| `kms.name` | what the key registry records as each key's root and what a hub cluster member advertises. Defaults to `kmsv2:<socket path>` or `transit:<host>/<mount>/<key>`; set it when the endpoint may move |
-| `kms.kmsv2.endpoint` | the plugin's socket: `unix:///abs/path` or `/abs/path`. Nothing else — a KMS reached over a network would put the keys it unwraps on that network. A socket in a directory every user shares (`/tmp`, `/dev/shm`) is refused: whoever bound it first would be sent every key the hub wraps |
+| `kms.provider` | `kmsv2`: a [Kubernetes KMS v2](https://kubernetes.io/docs/tasks/administer-cluster/kms-provider/) plugin over a unix socket, which covers Azure Key Vault, AWS KMS, Google Cloud KMS and Vault through the plugins their vendors publish for the API server. `transit`: HashiCorp Vault or OpenBao Transit over HTTPS |
+| `kms.name` | what the key registry records as each key's root, and what a hub cluster member advertises. Defaults to `kmsv2:<socket path>` or `transit:<host>/<mount>/<key>`; set it if the endpoint may change |
+| `kms.kmsv2.endpoint` | the plugin's socket: `unix:///abs/path` or `/abs/path`, nothing else, because a KMS reached over a network would send the keys it unwraps across that network. A socket in a directory all users share (`/tmp`, `/dev/shm`) is refused, because whoever bound it first would receive every key the hub wraps |
 | `kms.transit.address` | `https://vault.example.com:8200`; plain `http` only to a loopback host. A redirect to another server is not followed |
 | `kms.transit.mount`, `key`, `namespace` | the Transit mount (`transit`), key name, and Vault Enterprise / OpenBao namespace |
 | `kms.transit.token_file` | a Vault token, re-read on every call (a Vault Agent sink renews it in place); a file other users can write is refused |
 | `kms.transit.kubernetes.role`, `mount`, `token_file` | Vault's Kubernetes auth method instead: logs in as `role` with the service account token at `token_file` (default the Pod's), and again when the lease runs out |
 | `kms.transit.ca_file` | a PEM bundle trusted beside the system roots |
-| `previous_root` | `passphrase` while moving from `CLOOP_SECRET_KEY` onto `secrets.kms`: the passphrase still opens the keys it derives, and mints nothing |
+| `previous_root` | `passphrase` while moving from `CLOOP_SECRET_KEY` onto `secrets.kms`: the passphrase still opens the keys it derives, and creates nothing new |
 | `kms_previous` | a second KMS block: the KMS a change of root is moving off. Its `name` must differ from `kms.name` |
 
 The keyring holds a current root and, during a change of root, a previous one:
 
 | Configured | Current root | Previous root |
 | --- | --- | --- |
-| nothing | `CLOOP_SECRET_KEY` | — |
+| nothing | `CLOOP_SECRET_KEY` | none |
 | `CLOOP_SECRET_KEY_PREVIOUS` | `CLOOP_SECRET_KEY` | `CLOOP_SECRET_KEY_PREVIOUS` |
-| `secrets.kms` | the KMS | — |
+| `secrets.kms` | the KMS | none |
 | `secrets.kms`, `previous_root: passphrase` | the KMS | `CLOOP_SECRET_KEY` |
 | `secrets.kms_previous` | `CLOOP_SECRET_KEY` | the KMS |
 | `secrets.kms`, `secrets.kms_previous` | the new KMS | the old one |
 
-At most one previous root: two are refused, and so is
-`CLOOP_SECRET_KEY_PREVIOUS` beside a KMS root. `cloop hub key rotate
---retire-previous` finishes every one of these changes — see
+There is at most one previous root: two are refused, and so is
+`CLOOP_SECRET_KEY_PREVIOUS` together with a KMS root.
+`cloop hub key rotate --retire-previous` completes any of these changes; see
 [keys in a KMS](../operations/runbook.md#keys-in-a-kms).
 
-Hub-scope: `cloop ui` reads it with its per-instance overlay merged, the `cloop
-hub key` commands and `cloop db restore` with the overlay of the hub their
-`--port` names. Every member of a hub cluster opens one store, so `config.yaml`
-is the usual place for it. **Nothing falls back.** `cloop ui` refuses to start
-on a section it does not accept, and — after waiting `startup_timeout` — on a
-KMS it cannot reach; a key no configured root opens refuses the start as it
-always has. `CLOOP_SECRET_KEY` is not needed for the store with a KMS current,
-but still seals the audit checkpoints, backup sidecars and the escrow.
+This section is hub-scope. The `cloop
+hub key` commands and `cloop db restore` read it with the overlay of the hub
+their `--port` names, and `cloop ui` reads it with its per-instance overlay
+merged in. Every member of a hub cluster opens the same store, so
+`config.yaml` is the usual place for it. Nothing falls back. `cloop ui` refuses
+to start with a section it doesn't accept, and, after waiting
+`startup_timeout`, with a KMS it can't reach. A key that no configured root
+opens still stops the hub from starting. With a KMS as the current root, the
+store doesn't need `CLOOP_SECRET_KEY`, but the key still seals the audit
+checkpoints, backup sidecars and the escrow.
 
 ### State file integrity (optional HMAC)
 
-Set the `CLOOP_STATE_HMAC_KEY` environment variable to enable HMAC-SHA256
-signing of exported state. The `pkg/security` package provides `Sign()` /
-`Verify()` utilities; tooling that exports or imports state can use these to
-detect tampering.
+Set the `CLOOP_STATE_HMAC_KEY` environment variable to sign exported state with
+HMAC-SHA256. The `pkg/security` package provides `Sign()` / `Verify()`, which
+tools that export or import state can use to detect tampering.
 
 ### Non-interactive access: API tokens
 
-CI jobs, deploy scripts, and edge devices cannot hold a browser session. Give
-them a **scoped API token** (`cloop_pat_…`):
+CI jobs, deploy scripts and edge devices can't hold a browser session. Give them
+a **scoped API token** (`cloop_pat_…`):
 
 ```bash
 # Read-only, one project, expires in 30 days
@@ -2013,12 +2025,12 @@ cloop hub token revoke <id>       # effective on the next request
 cloop hub token approve <id>      # a token minted while no role policy was in force
 ```
 
-Or use the **Tokens** section of the Secrets panel, or `POST /api/tokens`.
-Either way the value is printed **exactly once** — cloop stores a salted hash,
-so a lost token is re-minted, never recovered.
+You can also use the **Tokens** section of the Secrets panel, or
+`POST /api/tokens`. Either way, the value is shown once. cloop stores only a
+salted hash, so a lost token can't be recovered; you create a new one instead.
 
-A token is not an authorization bypass. It carries roles, and every RBAC check
-applies to it exactly as it does to a signed-in user:
+A token doesn't bypass authorization. It carries roles, and every RBAC check
+applies to it as it does to a signed-in user:
 
 | Field | Meaning |
 | --- | --- |
@@ -2026,28 +2038,29 @@ applies to it exactly as it does to a signed-in user:
 | `--project` | restrict to these projects (repeatable). Out-of-scope projects are reported as nonexistent, not forbidden. |
 | `--expires-in` | `90d`, `12h`, an RFC3339 timestamp, or `0` for no expiry. |
 
-Use it as `Authorization: Bearer cloop_pat_…` (or `?token=…` for EventSource).
-Minting requires the `token.admin` permission, which only `admin` holds; the
-API additionally refuses to issue a token stronger or wider than its creator.
-Creation, revocation, and every failed authentication are recorded in the audit
-trail (`cloop events`).
+Send it as `Authorization: Bearer cloop_pat_…` (or `?token=…` for
+EventSource). Creating a token requires the `token.admin` permission, which only
+`admin` holds, and the API also refuses to issue a token with more authority or
+a wider scope than its creator. Creation, revocation and every failed
+authentication are recorded in the audit trail (`cloop events`).
 
-With single sign-on and no role policy every signed-in identity holds every
-role, so a token minted from the dashboard then is only as trustworthy as
-whoever was signed in. The hub records what governed each mint, and once a role
-policy is in force it refuses a token minted with none — or before the hub
-recorded how — until an administrator approves it: **Approve** in the tokens
-section (the approver must hold every role it carries) or `cloop hub token
-approve <id>`. Such a token is listed `suspended`; a token acting for an owner,
-like a glasses link, never is. The enforce question in Settings names every
-token it will suspend, and `cloop hub doctor` fails `api_tokens.unapproved`
-while one remains.
+With single sign-on and no role policy, every signed-in identity holds every
+role, so a token created from the dashboard in that state is only as
+trustworthy as whoever was signed in. The hub records which policy applied when
+each token was created. Once a role policy is in force, it refuses a token
+created without one (or before the hub recorded this) until an administrator
+approves it, with **Approve** in the tokens section (the approver must hold
+every role the token carries) or `cloop hub token
+approve <id>`. Such a token is listed `suspended`. A token that acts for an
+owner, such as a glasses link, never is. The enforce prompt in Settings lists
+every token it will suspend, and `cloop hub doctor` fails
+`api_tokens.unapproved` while any remain.
 
 ### Audit-trail retention
 
-The hash-chained audit trail only grows. `audit:` bounds it — and is **off by
-default**, because deleting from a compliance record on a schedule nobody chose
-is worse than the disk it saves.
+The hash-chained audit trail only grows. `audit:` limits it. It is off by
+default, because deleting from a compliance record on a schedule nobody chose is
+worse than the disk space it saves.
 
 ```yaml
 audit:
@@ -2058,19 +2071,19 @@ audit:
 
 | Key | Default | Range | What it does |
 | --- | --- | --- | --- |
-| `retention_days` | `0` (disabled) | `1`–`3650` | How long rows stay in the database. Older ones are **archived, then removed** — never deleted outright. Out-of-range values fall back to `0`, not to some default window. |
-| `export_dir` | `.cloop/audit-archive` | — | Where sealed prefixes are written. Put it on storage the hub does not otherwise own: the archive's value is that it can be compared against a database an attacker may have edited. |
-| `prune_on_maintain` | `false` | — | Lets `cloop db maintain` apply the window before it VACUUMs, so the freed pages actually come back. Otherwise only `cloop hub audit prune` applies it. |
+| `retention_days` | `0` (disabled) | `1`–`3650` | How long rows stay in the database. Older rows are archived, then removed, never deleted outright. Out-of-range values fall back to `0`, not to a default window. |
+| `export_dir` | `.cloop/audit-archive` | — | Where sealed prefixes are written. Put it on storage the hub doesn't otherwise control, so the archive can be compared with a database an attacker may have edited. |
+| `prune_on_maintain` | `false` | — | Lets `cloop db maintain` apply the window before it runs VACUUM, so the freed pages are returned to the filesystem. Otherwise only `cloop hub audit prune` applies it. |
 
 The procedure, what an anchor is, and why a pruned chain still verifies are in
 [the runbook](../operations/runbook.md#retention-keeping-the-trail-bounded).
 
 ### Audit head checkpoints
 
-A hash chain shows editing anywhere and deletion anywhere but at the newest
-end: delete the newest rows and the survivors still verify. `audit.checkpoints`
-is where the hub writes down how long each chain was, somewhere the database
-cannot reach (Task 20404). It is **on by default**, to stderr.
+A hash chain reveals edits anywhere, and deletions anywhere except at the newest
+end: if the newest rows are deleted, the rest still verify. With
+`audit.checkpoints`, the hub records how long each chain was, somewhere the
+database can't reach. It is on by default, writing to stderr.
 
 ```yaml
 audit:
@@ -2082,29 +2095,29 @@ audit:
 
 | Key | Default | Range | What it does |
 | --- | --- | --- | --- |
-| `interval` | `5m` | `1m`–`24h` | How often the cluster leader writes one record per chain — the control plane's every time, a project's when its head has moved (and daily regardless). Windows are numbered from the clock and claimed in a marker the control plane holds, so a leader change never writes a window twice, and a window whose writer died between claiming and writing it is written by the next leader — late, if the window has ended by then — rather than skipped. A value that does not parse, or lies outside the range, runs at the default. |
-| `file` | — | absolute path | Appended to and fsynced, one JSON record per line, mode 0600. Must lie outside every `.cloop/` directory, symlinks resolved, and its directory must exist — cloop does not create it, so a missing directory fails loudly. An unmounted mount point is still an existing, empty directory, so put the file in a subdirectory that exists only on the mounted volume (`/mnt/audit/cloop/`, not `/mnt/audit/`), or the records land on the root disk beneath it. A path that breaks the rule is dropped at load with a warning; `cloop config set` and `cloop config validate` refuse it. Put it on storage the database does not share. |
-| `stderr` | `true` | — | Prints each record as one JSON line on the hub's stderr, for a container platform's log pipeline to ship off the box. With `false` and no `file`, no checkpoints are written and `cloop hub doctor` warns. |
+| `interval` | `5m` | `1m`–`24h` | How often the cluster leader writes one record per chain: the control plane's every time, and a project's when its head has moved (and at least daily). Windows are numbered by the clock and claimed in a marker the control plane holds, so a leader change never writes a window twice. If a leader dies between claiming a window and writing it, the next leader writes it (late, if the window has ended by then) instead of skipping it. A value that doesn't parse, or is outside the range, runs at the default. |
+| `file` | — | absolute path | Appended to and fsynced, one JSON record per line, mode 0600. Must be outside every `.cloop/` directory, after resolving symlinks, and its directory must exist: cloop doesn't create it, so a missing directory causes an error. An unmounted mount point is still an existing, empty directory, so put the file in a subdirectory that exists only on the mounted volume (`/mnt/audit/cloop/`, not `/mnt/audit/`), or the records end up on the root disk underneath. A path that breaks these rules is dropped at load with a warning; `cloop config set` and `cloop config validate` refuse it. Put it on storage the database doesn't share. |
+| `stderr` | `true` | — | Prints each record as one JSON line on the hub's stderr, for a container platform's log pipeline to send off the machine. With `false` and no `file`, no checkpoints are written and `cloop hub doctor` warns. |
 
 Each record holds the chain (`control-plane` or `project`), the database path,
 the newest row's id and hash, the row count, the newest prune anchor and whether
-the hub verified that anchor's archive (it reads each new anchor's archive once),
-the time and the hub member that wrote it, and is sealed with HMAC-SHA256 under a key
-derived from `CLOOP_SECRET_KEY` with a label of its own, stamped with the key's
-fingerprint. Without `CLOOP_SECRET_KEY` the records are unsigned. A leading hub
-also writes every chain at clean shutdown. Check the chains against the records
-with `cloop hub audit verify --checkpoints <file>` — the
+the hub verified that anchor's archive (it reads each new anchor's archive
+once), the time, and the hub member that wrote it. It is sealed with HMAC-SHA256
+under a key derived from `CLOOP_SECRET_KEY` with its own label, and stamped with
+the key's fingerprint. Without `CLOOP_SECRET_KEY` the records are unsigned. The
+leading hub also writes every chain at a clean shutdown. Check the chains
+against the records with `cloop hub audit verify --checkpoints <file>`; the
 [runbook](../operations/runbook.md#checkpoints-catching-a-shortened-trail) lists
-what it can find. Like the rest of `audit`, the section is read from the hub's
-effective configuration, overlay included, at every window.
+what it can detect. Like the rest of `audit`, the section is read from the hub's
+effective configuration, including its overlay, at every window.
 
 ### Audit forwarding (`audit.forward`)
 
-Checkpoints pin how long each chain is; `audit.forward` ships what the rows say
-off the hub as they are written (Task 20426). The cluster leader tails every
-chain — the control plane's and each registered project's — and sends each row
-to every sink, advancing a cursor per sink and chain in the control plane only
-once the sink acknowledges. **Off unless sinks are listed.**
+Checkpoints record how long each chain is. `audit.forward` sends the rows
+themselves off the hub as they are written. The cluster leader follows every
+chain (the control plane's and each registered project's) and sends each row to
+every sink. It advances a cursor per sink and chain in the control plane only
+after the sink acknowledges. It is off unless sinks are listed.
 
 ```yaml
 audit:
@@ -2139,18 +2152,18 @@ Every sink:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `name` | required | Lower-case letters, digits, `-`, `_`, at most 32. Keys the sink's cursors, its metric label and its rows in the audit trail; renaming a sink starts it again from `start`. |
+| `name` | required | Lower-case letters, digits, `-`, `_`, at most 32. Identifies the sink's cursors, its metric label and its rows in the audit trail; renaming a sink restarts it from `start`. |
 | `type` | required | `syslog`, `https` or `file`. |
-| `format` | `json` | `json` — the `cloop audit-log export --format jsonl` record with `source`, `dir` and `hub` — or `cef`, the export's CEF line. An `https` sink sends `json`. |
+| `format` | `json` | `json` (the `cloop audit-log export --format jsonl` record, with `source`, `dir` and `hub`) or `cef` (the export's CEF line). An `https` sink sends `json`. |
 | `batch_size` | `500` | Rows read, sent and acknowledged as one, `1`–`5000`. |
 | `timeout` | `30s` | How long one send may take, `1s`–`10m`. |
-| `start` | `oldest` | Where the sink begins on a chain it has never sent: every row still in the database, or `latest` — the chain's head when the forwarder first meets it. |
+| `start` | `oldest` | Where the sink starts on a chain it has never sent: every row still in the database, or `latest`, the chain's head when the forwarder first sees it. |
 | `ca_file` | — | A PEM bundle added to the system roots for this sink. |
 | `client_cert`, `client_key_secret` | — | Mutual TLS: the certificate file, and the secret holding its private key. Both or neither. |
 | `server_name` | from the address | The name the receiver's certificate is checked against. |
-| `allow_plaintext_loopback` | `false` | Acknowledges a plaintext sink (`transport: tcp`, an `http://` URL) to a **loopback** address. Plaintext to any other address is refused whatever this says. |
+| `allow_plaintext_loopback` | `false` | Acknowledges a plaintext sink (`transport: tcp`, an `http://` URL) to a loopback address. Plaintext to any other address is refused whatever this says. |
 
-`syslog` — RFC 5424 messages in RFC 5425 octet-counted framing:
+`syslog` sinks send RFC 5424 messages in RFC 5425 octet-counted framing:
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -2161,10 +2174,10 @@ Every sink:
 | `max_message_bytes` | `8192` | `2048`–`1048576`. A row larger than this is sent with its payload left out, and the record says so. |
 
 A syslog batch counts as acknowledged once the receiver's TCP stack has
-acknowledged every byte on a connection it has not closed — the protocol has no
-acknowledgement of its own.
+acknowledged every byte on a connection it hasn't closed, because the protocol
+has no acknowledgement of its own.
 
-`https` — one POST per batch:
+`https` sinks send one POST per batch:
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -2178,37 +2191,38 @@ acknowledgement of its own.
 A batch is acknowledged by a 2xx (and, for HEC, `code` 0). A redirect is a
 failed send, never followed, and no proxy from the environment is used.
 
-`file` — appended to and fsynced after each batch, mode 0600:
+`file` sinks append to the file and fsync it after each batch, mode 0600:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `path` | required | An absolute path outside every `.cloop/` directory, symlinks resolved. Its directory must exist — the sink never creates it — so put the file in a subdirectory that only exists on the mounted volume: an unmounted mount point is an existing, empty directory. |
+| `path` | required | An absolute path outside every `.cloop/` directory, after resolving symlinks. Its directory must exist (the sink never creates it), so put the file in a subdirectory that exists only on the mounted volume: an unmounted mount point is an existing, empty directory. |
 
-Secrets are named, never written here: a shared `env` secret in the hub's
-secret store (`cloop secret mint <name> --kind env --file …`), as `name`, or
-`name#KEY` for one key of a secret holding several. A sink that fails
-validation — plaintext off the host, a file inside `.cloop/`, credentials in a
-URL, a missing field — is dropped at load and recorded as switched off;
+Secrets are referenced by name, never written here: a shared `env` secret in the
+hub's secret store (`cloop secret mint <name> --kind env --file …`), as `name`,
+or `name#KEY` for one key of a secret holding several. A sink that fails
+validation (plaintext off the host, a file inside `.cloop/`, credentials in a
+URL, a missing field) is dropped at load and recorded as switched off;
 `cloop hub doctor` fails it, and `cloop config set` and `cloop config validate`
-refuse it. Every member of a hub cluster must run the same section — only the
-leader forwards, under its own configuration — so keep it in `config.yaml`, or
-the same overlay on every member. Changes are recorded as
+refuse it. Every member of a hub cluster must run the same section, because only
+the leader forwards, using its own configuration. Keep it in `config.yaml`, or
+in the same overlay on every member. Changes are recorded as
 `audit.forward.configured` rows. The hub reads a sink's secrets when it starts
-the sink, after a failed send, and at least hourly. The procedure, delivery semantics and SIEM
-examples are in [the runbook](../operations/runbook.md#forwarding-the-trail-off-the-box).
+the sink, after a failed send, and at least hourly. The procedure, delivery
+semantics and SIEM examples are in
+[the runbook](../operations/runbook.md#forwarding-the-trail-off-the-box).
 
 ### Approval notifications (`notifications`)
 
-Two decisions wait on somebody who may make them: a self-service grant request,
-which needs a holder of `secret.grant` (and an administrator for one aimed at
-every project or executor), and an API token a role policy suspends until an
-administrator approves it. The dashboard's header counts what waits on whoever
-is signed in, and its inbox lists it — see
+Two kinds of decision wait for someone allowed to make them: a self-service
+grant request, which needs a holder of `secret.grant` (and an administrator for
+a request aimed at every project or executor), and an API token that a role
+policy suspends until an administrator approves it. The dashboard's header
+counts what is waiting for whoever is signed in, and its inbox lists it; see
 [the secrets guide](../guides/secrets.md#approvals-the-inbox-and-notifications).
-`notifications:` takes the same news to where approvers already are (Task
-20427). The cluster leader posts once per cluster: when a request is filed,
-12 hours before it lapses, when it is approved, denied, withdrawn or lapses,
-and when a token starts waiting. **Off unless webhooks are listed.**
+`notifications:` sends the same news to where approvers already are. The
+cluster leader posts once per cluster: when a request is filed, 12 hours before
+it lapses, when it is approved, denied, withdrawn or lapses, and when a token
+starts waiting. It is off unless webhooks are listed.
 
 ```yaml
 notifications:
@@ -2237,57 +2251,57 @@ Every webhook:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `name` | required | Lower-case letters, digits, `-`, `_`, at most 32. Keys the webhook's delivery cursor and its metric label; a webhook added under a new name hears what happens from then on, not the backlog. |
-| `type` | required | `slack` (an incoming webhook), `teams` (a Microsoft Teams Workflows trigger — "Post to a channel when a webhook request is received" — sent an Adaptive Card), `discord` (one embed, every mention switched off), or `json` (one object: `event`, `title`, `link`, `at`, and `request` or `token`). |
-| `url`, `url_env` | one of them | The webhook's address, `https://` only — it is the credential for its channel, so it never crosses the network in the clear, loopback included. `url` keeps it in this file (the Settings panel writes it there and no API returns it); `url_env` names an environment variable of the hub process holding it, `CLOOP_NOTIFY_` followed by upper-case letters, digits or `_` — the form for a file kept in version control (a Kubernetes Secret mapped into the environment, a systemd `EnvironmentFile`). It is read at every send, on whichever member leads, so set it on every member. Not the hub's secret store: a maintainer may delete and re-mint a shared secret, and the URL decides who hears about every request. |
-| `events` | every event but `requirement.regression` | Any of `request.filed`, `request.reminder`, `request.approved`, `request.denied`, `request.withdrawn`, `request.lapsed`, `token.waiting`, and `requirement.regression` — a requirement that passed at its previous check and fails a later one, most often the [requirements gate](../guides/requirements.md#regressions)'s check of a task. That one is opt-in: it is sent only to a webhook whose `events` name it, so a channel set up for approvals is not told about a project's tests unless it asks. |
+| `name` | required | Lower-case letters, digits, `-`, `_`, at most 32. Identifies the webhook's delivery cursor and its metric label. A webhook added under a new name gets events from then on, not the backlog. |
+| `type` | required | `slack` (an incoming webhook), `teams` (a Microsoft Teams Workflows trigger, "Post to a channel when a webhook request is received", sent an Adaptive Card), `discord` (one embed, with all mentions switched off), or `json` (one object: `event`, `title`, `link`, `at`, and `request` or `token`). |
+| `url`, `url_env` | one of them | The webhook's address, `https://` only. The URL is the credential for its channel, so it never crosses the network unencrypted, not even over loopback. `url` keeps it in this file (the Settings panel writes it there, and no API returns it). `url_env` names an environment variable of the hub process that holds it: `CLOOP_NOTIFY_` followed by upper-case letters, digits or `_`. Use that form for a file kept in version control (with a Kubernetes Secret mapped into the environment, or a systemd `EnvironmentFile`). It is read at every send, on whichever member leads, so set it on every member. It isn't kept in the hub's secret store, because a maintainer can delete and re-create a shared secret, and the URL decides who hears about every request. |
+| `events` | every event but `requirement.regression` | Any of `request.filed`, `request.reminder`, `request.approved`, `request.denied`, `request.withdrawn`, `request.lapsed`, `token.waiting`, and `requirement.regression`: a requirement that passed its previous check and fails a later one, most often in the [requirements gate](../guides/requirements.md#regressions)'s check of a task. `requirement.regression` is opt-in: it is sent only to a webhook whose `events` name it, so a channel set up for approvals doesn't hear about a project's tests unless it asks. |
 | `allow_addresses` | — | IP addresses or CIDR prefixes a receiver on a loopback, private, link-local or carrier-grade-NAT address may be reached at. A prefix of every address, a cloud metadata service, or a prefix containing one is refused. |
 | `ca_file` | — | A PEM bundle added to the system roots for this webhook. |
 | `timeout` | `10s` | How long one POST may take, `1s`–`1m`. |
 
-The sender checks the address it actually connects to, after DNS — so a public
-name resolving to a private address, or rebinding to one, is refused at the
-connect — and refuses a cloud metadata service whatever `allow_addresses` says.
-It follows no redirect (a 3xx is a failed send), uses no proxy from the
-environment, sends at most 32 KiB and reads at most 8 KiB of the answer. A
-message carries identities, the credential's name and kind, the subject, the
-deadline and the link — never credential material, never the requester's
-justification or an approver's note — and every string in it passes through the
-[credential-pattern scrubber](credential-patterns.md) first.
+The sender checks the address it actually connects to, after DNS resolution, so
+a public name that resolves or rebinds to a private address is refused at
+connection time. It refuses a cloud metadata service whatever
+`allow_addresses` says. It follows no redirects (a 3xx is a failed send), uses
+no proxy from the environment, sends at most 32 KiB and reads at most 8 KiB of
+the response. A message contains identities, the credential's name and kind, the
+subject, the deadline and the link. It never contains credential material, the
+requester's justification or an approver's note, and every string in it goes
+through the [credential-pattern scrubber](credential-patterns.md) first.
 
-A receiver that fails is retried with a growing backoff (30 seconds, doubling,
-at most 30 minutes); a notice is dropped after 8 failed sends, on a refusal that
-retrying cannot change (a 4xx other than 408, 425 and 429, a redirect, a refused
-address), or once it is a day old. A filing or a reminder for a request decided
-before it could go out is not sent. Deliveries are counted in
+A failed delivery is retried with increasing backoff (30 seconds, doubling, at
+most 30 minutes). A notice is dropped after 8 failed sends, on a refusal that
+retrying can't change (a 4xx other than 408, 425 and 429, a redirect, a refused
+address), or once it is a day old. A filing or reminder for a request that was
+decided before it could be sent isn't sent. Deliveries are counted in
 [`cloop_approval_notifications_total`](../operations/metrics.md#approval-notifications).
 
 A webhook that fails validation is dropped at load and recorded as switched off;
 `cloop hub doctor` reports it, and `cloop config set` and `cloop config validate`
-refuse it. Settings → Notifications edits the section (administrators only),
-writing it into the hub's overlay once it has one, and sends a test message to a
-configured webhook; each change is an
+refuse it. **Settings → Notifications** edits the section (administrators only),
+writing it into the hub's overlay once the hub has one, and can send a test
+message to a configured webhook. Each change is a
 [`notifications.config.updated`](audit-events.md#notifications) row. A webhook
-removed there forgets its place at once, so adding it back starts from what
-happens next; one dropped from a file is forgotten a day later. Only the leader
-sends, under its own configuration, so a cluster's members should run the same
-section: a webhook only some members configure is sent to while one of them
-leads. Decisions are picked up from the time the leader last scanned, less two
-minutes, so members' clocks must agree to within that — run NTP. Delivery is at
-least once: for the moment two members both believe they lead, a notice can be
-posted twice.
+removed there loses its place at once, so adding it back starts from new
+events. One removed from a file is forgotten a day later. Only the leader sends,
+using its own configuration, so a cluster's members should run the same
+section: a webhook that only some members configure is sent to only while one of
+them leads. Decisions are picked up from the time the leader last scanned, minus
+two minutes, so members' clocks must agree to within that; run NTP. Delivery is
+at least once: while two members both believe they lead, a notice can be posted
+twice.
 
 ### Semantic knowledge search (`knowledge.embeddings`)
 
-The knowledge index ranks a project's chunks by their words: SQLite's full-text
-index and BM25, on the hub and nowhere else. `knowledge.embeddings` adds ranking
-by meaning (Task 20471). Each chunk gets a vector from an embedding endpoint
-during its source's sync, and a search compares the query's vector with the
-vectors of the project's bound sources and fuses that ranking with the
-words'. **Off unless enabled**, and it should be turned on deliberately: on, the
-hub sends **the text of every chunk of every synced source, and every search
-query, to the endpoint**. `cloop hub doctor` and Settings → Hub health always
-show a `knowledge.embeddings` finding naming it.
+The knowledge index ranks a project's chunks by their words, using SQLite's
+full-text index and BM25, on the hub only. `knowledge.embeddings` adds ranking
+by meaning. Each chunk gets a vector from an embedding endpoint when its source
+syncs, and a search compares the query's vector with the vectors from the
+project's bound sources and combines that ranking with the word ranking. It is
+off unless enabled. When it is on, the hub sends the text of every chunk of
+every synced source, and every search query, to the endpoint, so turn it on only
+if that is acceptable. `cloop hub doctor` and **Settings → Hub health** always
+show a `knowledge.embeddings` finding naming the endpoint.
 
 ```yaml
 knowledge:
@@ -2309,9 +2323,9 @@ The same `provider: openai` reaches the other OpenAI-compatible endpoints:
 | Ollama | `http://localhost:11434/v1` | No `secret_ref`. `model: nomic-embed-text`, `dimensions: 768`. |
 | vLLM | `http://<host>:8000/v1` | `secret_ref` when the server runs with `--api-key`. |
 
-`provider: voyage` speaks Voyage AI's API (`endpoint` defaults to
-`https://api.voyageai.com/v1`), telling it whether it embeds documents or a
-query.
+`provider: voyage` uses Voyage AI's API (`endpoint` defaults to
+`https://api.voyageai.com/v1`) and tells it whether it is embedding documents or
+a query.
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -2327,64 +2341,65 @@ query.
 | `timeout` | `30s` | How long one request may take, `1s`–`5m`. A search waits at most 5 seconds for its query's vector, whatever this says. |
 | `max_candidates` | `50000` | How many vectors one search compares its query with, 1,000–1,000,000. A project whose sources hold more is searched by meaning over that many and by words over all of them; `cloop_knowledge_search_vectors_capped_total` counts the searches it cut. |
 
-The comparison is a brute-force scan of every current vector of the project's
-bound sources, read from the hub's database, so its cost grows with the
-project's knowledge: on a 4-core host, comparing 50,000 vectors of 768
-dimensions takes about half a second, and the words' ranking of the same 50,000
-chunks about 20 ms (`go test ./pkg/knowledge -run '^$' -bench Search50k`).
-Lower `max_candidates` to bound it; `cloop_knowledge_search_vector_scan_seconds`
-shows what it costs.
+The comparison is a brute-force scan of every current vector from the project's
+bound sources, read from the hub's database, so its cost grows with the amount
+of knowledge. On a 4-core host, comparing 50,000 vectors of 768 dimensions takes
+about half a second, and ranking the same 50,000 chunks by words about 20 ms
+(`go test ./pkg/knowledge -run '^$' -bench Search50k`). Lower `max_candidates`
+to limit it; `cloop_knowledge_search_vector_scan_seconds` shows the cost.
 
-No key in the file: an `api_key` field, or an endpoint whose query carries a
-parameter that reads as a credential, switches the section off at load, as does
-an endpoint, model or dimensions missing. `cloop hub doctor` reports the
-switch-off as a failure, and `cloop config validate` refuses it. The client
-follows no redirect, uses the proxy the hub's environment names (`HTTPS_PROXY`,
-never for loopback), and reads an answer only up to what the vectors asked for
-could take.
+Keys never go in the file. An `api_key` field, or an endpoint whose query string
+has a parameter that looks like a credential, switches the section off at load,
+as does a missing endpoint, model or dimensions. `cloop hub doctor` reports this
+as a failure, and `cloop config validate` refuses it. The client follows no
+redirects, uses the proxy named in the hub's environment (`HTTPS_PROXY`, never
+for loopback), and reads a response only up to the size the requested vectors
+could need.
 
-**What a sync does.** After its listing, each sync embeds, in batches, the
-chunks of its source that have no current vector: new chunks, chunks of a
-document that changed, and every chunk when embeddings are first turned on or
-the model, provider or dimensions change. A model change makes every source due
-at once, so the backfill starts within a minute. A chunk whose document
-changed but whose own text did not keeps its vector without a request. A pass
-stops after 10 minutes; a source with more waiting is synced again within a
-minute. Vectors live in the hub's database, one per chunk and model, as float32
-values; they go with their chunk, and the cluster leader purges other models'
-vectors hourly. Turning embeddings off keeps the vectors for when they are
-turned back on.
+**What a sync does.** After listing its source, each sync embeds, in batches,
+the chunks that have no current vector: new chunks, chunks of a document that
+changed, and every chunk when embeddings are first turned on or the model,
+provider or dimensions change. A model change makes every source due at once,
+so the backfill starts within a minute. A chunk whose document changed but whose
+own text didn't keeps its vector without a request. A pass stops after 10
+minutes, and a source with more chunks waiting is synced again within a minute.
+Vectors are stored in the hub's database, one per chunk and model, as float32
+values. They are deleted with their chunk, and the cluster leader purges other
+models' vectors hourly. Turning embeddings off keeps the vectors for when they
+are turned back on.
 
-**What a search does.** The query's vector is asked for while the words are
-ranked. Then every current vector of the project's bound sources is compared
-with it, through the same bindings and narrowing (spaces, query matches) as the
-full-text search, never another project's. The two rankings are fused by
+**What a search does.** The query's vector is requested while the words are
+ranked. Then every current vector from the project's bound sources is compared
+with it, through the same bindings and filters (spaces, query matches) as the
+full-text search, never another project's. The two rankings are combined by
 reciprocal rank (`1/(60+rank)` from each), and each hit says whether it was
-found by words, meaning or both (`found_by`). The search answers `retrieval`:
-`mode` `hybrid`, the model and how many vectors it compared.
+found by words, meaning or both (`found_by`). The search response includes
+`retrieval`: `mode` `hybrid`, the model and how many vectors it compared.
 
-**When the endpoint fails.** Neither a sync nor a search fails because of the
+**When the endpoint fails.** Neither syncs nor searches fail because of the
 endpoint. A sync whose endpoint is down, refuses the key, or returns vectors of
 the wrong length ends `ok` with a `warning` in its status, and the chunks wait
-for the next sync. A search ranks by words, `mode` `lexical` with a `warning`
-saying why, and for 30 seconds after a failure does not ask the endpoint at all.
-The doctor's `knowledge.embeddings.sync` finding lists the sources whose last
-sync could not embed. See [the metrics](../operations/metrics.md#knowledge-search-and-embeddings).
+for the next sync. A search falls back to ranking by words (`mode` `lexical`,
+with a `warning` saying why), and for 30 seconds after a failure doesn't
+contact the endpoint at all. The doctor's `knowledge.embeddings.sync` finding
+lists the sources whose last sync couldn't embed. See
+[the metrics](../operations/metrics.md#knowledge-search-and-embeddings).
 
-In a hub cluster the leader's section decides what syncs embed, and each
-member's what its own searches compare, so every member should run the same
-section: a member configured with another model finds no vectors of it and
-ranks by words.
+In a hub cluster, the leader's section decides what syncs embed, and each
+member's section decides what its own searches compare, so every member should
+run the same section. A member configured with a different model finds no
+vectors for it and ranks by words.
 
 ### Disk retention
 
-`retention:` governs the janitor the hub runs on a timer to keep `.cloop`
-bounded. Unlike `audit:` above, it is **on by default** — what it reclaims is
+`retention:` controls the janitor the hub runs on a timer to keep `.cloop` from
+growing without limit. Unlike `audit:` above, it is on by default: it reclaims
 derived data and dead database pages, not a compliance record, and a hub that
-fills its disk is an outage.
+fills its disk stops working.
 
-Every key's zero value means "use the default", not "off", so a config file
-that predates this section gets the working policy. Turning it off is explicit.
+A zero value for any key means "use the default", not "off", so a config file
+written before this section existed gets the default policy. You turn it off
+explicitly.
 
 ```yaml
 retention:
@@ -2402,33 +2417,33 @@ retention:
 | --- | --- | --- | --- |
 | `enabled` | `true` | — | Runs a pass every `interval_hours`. Set `false` and nothing reclaims `.cloop` automatically, including the row limits below. |
 | `interval_hours` | `24` | `1`–`336` | How often a pass runs. The stamp at `.cloop/retention-last-run` makes the cadence survive a restart. |
-| `keep_snapshots` | `50` | `1`–`10000` | How many plan snapshots survive. Enforced **at write time** inside `SaveSnapshot` as well as by the pass, so a busy project cannot outrun the interval. |
+| `keep_snapshots` | `50` | `1`–`10000` | How many plan snapshots are kept. Enforced at write time inside `SaveSnapshot` as well as by the pass, so a busy project can't get ahead of the interval. |
 | `vacuum_free_ratio` | `0.30` | `≥ 0.01` | Free-page fraction at which `state.db` is rewritten. `1` or more never vacuums. A ratio, not a size: 2 GB of freelist is urgent in a 2.3 GB file and unremarkable in a 200 GB one. |
-| `vacuum_min_free_mb` | `64` | `1`–`1048576` | Absolute floor beneath the ratio, so a small database is not rewritten daily to reclaim a few hundred kilobytes. |
-| `vacuum_max_inline_mb` | `1024` | `1`–`1048576` | The most **live** data the hub will rewrite *without being stopped*. The control-plane database holds the hub's own lease, so a VACUUM that outlasts the lease TTL starves its heartbeat and the hub stands down believing another instance took over. Past this the janitor declines and points at `cloop hub retention --apply`, which has no heartbeat to lose. Measured against live data, not file size — a 2.3 GB file holding 300 MB is a fast rewrite. |
-| `archive_max_mb` | `0` (disabled) | `1`–`1048576` | Caps `.cloop/audit-archive`; oldest seals go first. Off by default — a seal is the **only** remaining copy of the rows it holds. |
+| `vacuum_min_free_mb` | `64` | `1`–`1048576` | An absolute minimum below the ratio, so a small database isn't rewritten daily to reclaim a few hundred kilobytes. |
+| `vacuum_max_inline_mb` | `1024` | `1`–`1048576` | The most live data the hub will rewrite while it is running. The control-plane database holds the hub's own lease, so a VACUUM that takes longer than the lease TTL blocks the lease heartbeat, and the hub stands down, assuming another instance took over. Above this size the janitor skips the VACUUM and points to `cloop hub retention --apply`, which has no heartbeat to lose. Measured against live data, not file size: a 2.3 GB file holding 300 MB is quick to rewrite. |
+| `archive_max_mb` | `0` (disabled) | `1`–`1048576` | Caps `.cloop/audit-archive`; the oldest seals are deleted first. Off by default, because a seal is the only remaining copy of the rows it holds. |
 | `archive_max_age_days` | `0` (disabled) | `1`–`3650` | Deletes seals older than this. Off by default, for the same reason. |
 
-Two safety properties are not configurable. The newest audit seal is never
-deleted, so a cap smaller than a single seal cannot empty the directory; and a
-VACUUM is refused unless another hub does not hold the control-plane lease and
-the filesystem has room for the rebuild — SQLite needs free space *before* it
-returns any, which makes a nearly-full disk the worst moment to try.
+Two safety rules can't be configured. The newest audit seal is never deleted,
+so a cap smaller than one seal can't empty the directory. And a VACUUM is
+refused while another hub holds the control-plane lease, or when the filesystem
+lacks room for the rebuild: SQLite needs free space before it returns any, so a
+nearly full disk is the worst time to try.
 
-Every pass also removes the task verdicts the orchestrator writes beside each
+Every pass also removes the task verdicts the orchestrator writes next to each
 live artifact (`.cloop/artifacts/<id>_verdict.json`, read by stale-task
-recovery) once they are a week old and their task is no longer in progress. One
-whose task is still in progress is never removed: that is the one a recovery
-needs. `cloop compact` removes them on the same terms, after
-`--keep-artifacts-days` (an hour at the least).
+recovery) once they are a week old and their task is no longer in progress. A
+verdict whose task is still in progress is never removed, because recovery needs
+it. `cloop compact` removes them on the same terms, after
+`--keep-artifacts-days` (at least an hour).
 
 #### Row tables
 
-The keys above bound files and dead pages. These bound the tables that gain a
-row per unit of work, which until recently nothing reclaimed at all — measured
-on this project's own control plane, `provider_calls` held **47.5 MB in 265
-rows**, 14% of every live byte in the database, because each row stores the full
-prompt and response of one provider call.
+The keys above limit files and dead pages. These limit the tables that gain a
+row per unit of work. Without limits these tables keep growing: on cloop's own
+control plane, `provider_calls` once held 47.5 MB in 265 rows, 14% of the live
+data in the database, because each row stores the full prompt and response of
+one provider call.
 
 ```yaml
 retention:
@@ -2443,48 +2458,44 @@ retention:
 
 | Key | Default | Range | What it does |
 | --- | --- | --- | --- |
-| `provider_call_body_age_days` | `30` | `1`–`3650`, or `-1` | Clears the stored prompt, system prompt and response of older calls, **keeping the row**. The inspector's list and every cost report read only the metadata — timestamp, model, tokens, latency — which costs ~200 bytes; the bodies are the other 99%. A stripped call is marked as such, so the panel says "dropped by retention" rather than showing an empty prompt, and Replay asks for a new prompt instead of re-running an empty one. |
-| `provider_call_max_rows` | `10000` | `100`–`100000000`, or `-1` | Row ceiling for `provider_calls`; newest survive. |
-| `step_max_rows` | `20000` | `100`–`100000000`, or `-1` | Row ceiling for `steps`. Also a bound on a run's resident memory, since `state.Load` reads every step. Skipped while a run is executing — a live run rewrites its own step history from memory, so rows deleted underneath it come straight back. |
-| `event_max_rows` | `20000` | `100`–`100000000`, or `-1` | Row ceiling for the unified event journal. |
-| `cost_max_rows` | `50000` | `100`–`100000000`, or `-1` | Row ceiling for the cost ledger. Deliberately the loosest — a cost row is tiny, `cloop cost report` aggregates over the whole table, and the ledger is mirrored to `.cloop/costs.jsonl`. It exists so the table is bounded, not so it is pruned. |
-| `telemetry_max_age_days` | `30` | `1`–`3650`, or `-1` | Ages out browser telemetry. There is no row key because the write path already caps that table: a public ingest endpoint must not be able to fill a disk between two passes. |
-| `knowledge_deleted_days` | `30` | `1`–`3650`, or `-1` | Purges the tombstone a knowledge document leaves when its source deletes it. What the document said — its chunks, full-text entries and matches — leaves the index at once; the tombstone keeps only its id and external id, so a citation made before still resolves to "deleted" and a document that comes back keeps its id. Every pass also purges the documents and chunks of a deleted knowledge source, whatever this says: a source's deletion removes them itself, and only one cut short leaves any. |
+| `provider_call_body_age_days` | `30` | `1`–`3650`, or `-1` | Clears the stored prompt, system prompt and response of older calls, but keeps the row. The inspector's list and every cost report read only the metadata (timestamp, model, tokens, latency), which takes about 200 bytes; the bodies are the other 99%. A cleared call is marked as such, so the panel says "dropped by retention" instead of showing an empty prompt, and Replay asks for a new prompt instead of re-running an empty one. |
+| `provider_call_max_rows` | `10000` | `100`–`100000000`, or `-1` | Maximum rows in `provider_calls`; the newest are kept. |
+| `step_max_rows` | `20000` | `100`–`100000000`, or `-1` | Maximum rows in `steps`. This also limits a run's memory use, since `state.Load` reads every step. Skipped while a run is executing, because a live run rewrites its step history from memory, so rows deleted under it would come straight back. |
+| `event_max_rows` | `20000` | `100`–`100000000`, or `-1` | Maximum rows in the unified event journal. |
+| `cost_max_rows` | `50000` | `100`–`100000000`, or `-1` | Maximum rows in the cost ledger. The highest of these limits, because a cost row is tiny, `cloop cost report` aggregates over the whole table, and the ledger is mirrored to `.cloop/costs.jsonl`. It is there to keep the table bounded, not to prune it regularly. |
+| `telemetry_max_age_days` | `30` | `1`–`3650`, or `-1` | Deletes browser telemetry older than this. There is no row key, because the write path already caps that table: a public ingest endpoint must not be able to fill a disk between two passes. |
+| `knowledge_deleted_days` | `30` | `1`–`3650`, or `-1` | Purges the tombstone a knowledge document leaves when its source deletes it. The document's content (its chunks, full-text entries and matches) leaves the index at once. The tombstone keeps only its id and external id, so an earlier citation still resolves to "deleted" and a document that comes back keeps its id. Every pass also purges the documents and chunks of a deleted knowledge source, whatever this says: deleting a source removes them itself, and only an interrupted deletion leaves any behind. |
 
-`-1` keeps a table in full while leaving the rest of the policy in force — the
-opt-out these need and the archive keys do not, because these default to on. A
-value outside the range falls back to the **default**, not to "off": clamping a
-typo to "keep everything" would silently restore the growth this policy exists
-to stop.
+`-1` keeps a table in full while the rest of the policy stays in force. These
+keys need that opt-out because they are on by default; the archive keys don't.
+A value outside the range falls back to the default, not to "off", so a typo
+can't turn this policy off without anyone noticing.
 
-Row pruning and the VACUUM report separate numbers, and the distinction is real.
-Deleting a row frees a page *inside* `state.db`; only a VACUUM hands pages back
-to the filesystem. The row steps therefore run first in a pass, so the same pass
-can reclaim what they released.
+Row pruning and VACUUM report separate numbers. Deleting a row frees a page
+inside `state.db`; only a VACUUM returns pages to the filesystem. So the row
+steps run first in a pass, and the same pass can then reclaim what they freed.
 
 Every pass ends by truncating the database's write-ahead log, `state.db-wal`,
-which all of the steps above wrote through and which SQLite never shrinks on its
-own. That step needs no key: it runs whenever the pass does, beside a live run
-or other hub processes too, because its checkpoint waits at most a quarter of a
-second for another connection and reports "busy" rather than hold writers up.
-The hub's leader also truncates its own database's log within a minute of
-finding it over 64 MiB. See
+which all of the steps above wrote through and which SQLite never shrinks by
+itself. This step has no key. It runs whenever the pass does, even alongside a
+live run or other hub processes, because its checkpoint waits at most a quarter
+of a second for another connection and reports "busy" instead of holding up
+writers. The hub's leader also truncates its own database's log within a minute
+of finding it over 64 MiB. See
 [The write-ahead log](../operations/runbook.md#the-write-ahead-log).
 
 Preview or force a pass with `cloop hub retention` (a dry run unless you pass
-`--apply`). `cloop doctor` and `cloop hub doctor` both report the per-directory
-breakdown and the reclaimable-page estimate; `cloop hub doctor` additionally
-reports per-table row counts and names any table the active policy leaves
-unbounded.
+`--apply`). `cloop doctor` and `cloop hub doctor` both report usage per
+directory and an estimate of reclaimable pages. `cloop hub doctor` also reports
+row counts per table and names any table the active policy leaves unbounded.
 
 ### Free-space floor
 
-`orchestrator.min_free_disk_mb` is how much free space a run wants before it
-starts work (Task 20381). A full disk used to announce itself as a failed write,
-and the write that fails first is often the one recording a task's outcome: the
-run stopped with `state_not_persisted`, sometimes with the verdict sidecar lost
-in the same moment, and stale-task recovery then fell back to the agent's own
-`TASK_DONE`.
+`orchestrator.min_free_disk_mb` is how much free space a run needs before it
+starts work. Without it, a full disk shows up as a failed write, and the first
+write to fail is often the one recording a task's outcome. The run then stops
+with `state_not_persisted`, sometimes losing the verdict sidecar at the same
+time, and stale-task recovery falls back to the agent's own `TASK_DONE`.
 
 ```yaml
 orchestrator:
@@ -2493,84 +2504,85 @@ orchestrator:
 
 | Key | Default | Range | What it does |
 | --- | --- | --- | --- |
-| `orchestrator.min_free_disk_mb` | `1024` | `0`, or `64`–`1048576` | Before every task attempt and every evolve round, the run measures the volume holding the project's `.cloop` and the working tree's volume (one, unless `.cloop` is a symlink onto another disk). Below the floor nothing starts: the run pauses with reason `disk_low` and checks again every minute, carrying on by itself once every volume is back above the floor plus a tenth. `0` turns the check off. |
+| `orchestrator.min_free_disk_mb` | `1024` | `0`, or `64`–`1048576` | Before every task attempt and every evolve round, the run measures the volume holding the project's `.cloop` and the working tree's volume (the same volume, unless `.cloop` is a symlink to another disk). Below the floor nothing starts: the run pauses with reason `disk_low`, checks again every minute, and continues by itself once every volume is back above the floor plus a tenth. `0` turns the check off. |
 
 What a `disk_low` pause looks like:
 
-- **The run stays up.** Unlike every other pause, the process waits; Stop ends
-  it. The dashboard shows *Paused: volume / has 812.3 MB free, below the
-  1.00 GB floor* with a Stop button, and the event history has a
+- **The run stays up.** Unlike every other pause, the process keeps running and
+  waits; **Stop** ends it. The dashboard shows *Paused: volume / has 812.3 MB
+  free, below the 1.00 GB floor* with a Stop button. The event history has a
   `session_paused` row naming the volume, the free space, the floor and what
   was about to start, then a `session_started` row ("Run resumed: disk space
-  recovered") when it carries on. In parallel mode the round in flight
-  finishes and records its outcomes; no new task starts.
-- **A reserve stands behind it.** Each project keeps `.cloop/reserve`, 16 MiB
-  of preallocated blocks, created whenever the check passes. If a task's
-  verdict or outcome write still fails for want of space — its own build
-  filled the disk between the check and the write — the run deletes the
-  reserve and writes again, then pauses `disk_low` before starting anything
-  else. Only if that retry fails too does it stop with `state_not_persisted`.
-  Snapshots, `cloop compact`, the janitor and the disk-usage reports all leave
-  the reserve out.
+  recovered") when it continues. In parallel mode, the round in progress
+  finishes and records its outcomes, but no new task starts.
+- **A reserve backs it up.** Each project keeps `.cloop/reserve`, 16 MiB of
+  preallocated blocks, created whenever the check passes. If writing a task's
+  verdict or outcome still fails for lack of space (because its own build filled
+  the disk between the check and the write), the run deletes the reserve and
+  writes again, then pauses with `disk_low` before starting anything else. It
+  stops with `state_not_persisted` only if that retry fails too. Snapshots,
+  `cloop compact`, the janitor and the disk-usage reports all leave the reserve
+  out.
 - **A run on another machine measures its own disk.** A container or device
-  run applies the project's own setting against the volume it writes to.
-- **A disk limit does not replace it.** A container executor holds a
-  workload's `resources.disk` or disk ceiling by sampling its workspace (Task
-  20405), and a burst can overshoot by the write rate times the sampling
-  interval before the next sample stops it. The floor is what keeps that burst
-  from filling the volume everything else writes to.
+  run applies the project's own setting to the volume it writes to.
+- **A disk limit doesn't replace it.** A container executor enforces a
+  workload's `resources.disk` or disk ceiling by sampling its workspace, and a
+  burst can overshoot by the write rate times the sampling interval before the
+  next sample stops it. The floor stops that burst from filling the volume
+  everything else writes to.
 
-The hub holds its own state volume to the same number: `cloop hub doctor`
-reports `storage.free_space` (a warning below twice the floor, a failure
-below it), admins see a banner across the dashboard while it is below, and
-every hub process exports `cloop_hub_disk_free_bytes{volume}`. The floor is
-editable in **Settings → Disk & Retention** (admins), which writes it where the
-hub reads it — its per-instance overlay when it has one, `config.yaml`
-otherwise. A run reads its project's `config.yaml`, so for runs of the hub's own
-directory the hub passes the Settings value down as `CLOOP_MIN_FREE_DISK_MB`.
-`cloop config set orchestrator.min_free_disk_mb <MB>` and `cloop config
-validate` apply the same bounds. A value outside the range in a file falls back
-to the default, not to "off".
+The hub applies the same floor to its own state volume. `cloop hub doctor`
+reports `storage.free_space` (a warning below twice the floor, a failure below
+it), admins see a banner across the dashboard while free space is below the
+floor, and every hub process exports `cloop_hub_disk_free_bytes{volume}`.
+Admins can edit the floor in **Settings → Disk & Retention**, which writes it
+where the hub reads it: its per-instance overlay if it has one, otherwise
+`config.yaml`. A run reads its project's `config.yaml`, so for runs in the hub's
+own directory the hub passes the Settings value down as
+`CLOOP_MIN_FREE_DISK_MB`. `cloop config set orchestrator.min_free_disk_mb <MB>`
+and `cloop config validate` apply the same bounds. A value outside the range in
+a file falls back to the default, not to "off".
 
 ### Interactive access: single sign-on and sessions
 
 `ui.oidc.*` configures OpenID Connect for the dashboard. The full setup is in
-[the security model](../security/model.md#configuring-oidc-single-sign-on);
-these are the keys that govern how long a session lives and how quickly it can
-be taken away.
+[the security model](../security/model.md#configuring-oidc-single-sign-on).
+This section covers the keys that control how long a session lasts and how
+quickly it can be revoked.
 
-All of `ui.oidc` is editable three ways: this file, `cloop config set
-ui.oidc.<key> <value>`, and **Settings → Single sign-on** in the dashboard. The
-panel is gated on `user.manage` rather than `config.write`, refuses a block that
-would stop the hub starting, and does not take effect until the hub restarts —
-see [editing it from the dashboard](../security/model.md#editing-it-from-the-dashboard).
-`role_mappings` is the one key `cloop config set` cannot reach, being a list of
-records; use the file or the panel's table.
+You can edit all of `ui.oidc` in three ways: in this file, with
+`cloop config set ui.oidc.<key> <value>`, and in **Settings → Single sign-on**
+in the dashboard. The panel requires `user.manage` (not `config.write`),
+refuses a block that would stop the hub from starting, and its changes take
+effect when the hub restarts; see
+[editing it from the dashboard](../security/model.md#editing-it-from-the-dashboard).
+`role_mappings` is a list of records, so `cloop config set` can't edit it; use
+the file or the panel's table.
 
 `default_role` and `role_mappings` together decide whether a role policy is in
-force. With neither set, single sign-on runs with **RBAC off**: every identity
-the issuer authenticates holds every permission except executor administration
-(`admin_emails`). The hub keeps that for deployments that enabled SSO before
-RBAC existed, and says so — a warning on stderr at every start, a failing
-`rbac.enforced` in `cloop hub doctor`, and a notice in Settings with an
-**Enforce deny-by-default** button. `require_rbac: true` turns the state into a
-refusal to start; see
+force. With neither set, single sign-on runs with RBAC off: every identity the
+issuer authenticates holds every permission except executor administration
+(`admin_emails`). The hub keeps this behaviour for deployments that enabled SSO
+before RBAC existed, and warns about it: a warning on stderr at every start, a
+failing `rbac.enforced` in `cloop hub doctor`, and a notice in Settings with an
+**Enforce deny-by-default** button. With `require_rbac: true`, the hub refuses
+to start in this state; see
 [when RBAC is in force](../security/model.md#when-rbac-is-in-force).
 
-If two hubs share a working directory, `ui.oidc` belongs in that hub's
-[`.cloop/config.ui-<port>.yaml`](#two-dashboards-in-one-directory)
-instead — `redirect_url` names one origin, and the hub it does not name cannot
-serve the callback.
+If two hubs share a working directory, put `ui.oidc` in that hub's
+[`.cloop/config.ui-<port>.yaml`](#two-dashboards-in-one-directory) instead:
+`redirect_url` names one origin, and the other hub can't serve the callback.
 
-For Microsoft Entra ID there is a worked Terraform module at
+For Microsoft Entra ID there is a complete Terraform module at
 [`deploy/terraform/azure-entra-id/`](../../deploy/terraform/azure-entra-id/README.md).
 It creates the application registration, declares cloop's four roles as Entra
-app roles, and prints the `ui.oidc` block to paste in here — including the
-provider-specific details that are invisible until a sign-in fails: the issuer
-must carry a `/v2.0` suffix and name one tenant, the hub's bare origin has to
-be a registered redirect URI or sign-out dead-ends, and `offline_access` must
-be in `scopes` or Entra issues no refresh token and both of the revocation
-knobs below quietly stop working.
+app roles, and prints the `ui.oidc` block to paste in here. The block gets
+right the provider-specific details you otherwise discover only when a sign-in
+fails: the
+issuer must end in `/v2.0` and name one tenant, the hub's bare origin must be a
+registered redirect URI or sign-out leads nowhere, and `offline_access` must be
+in `scopes`, or Entra issues no refresh token and both revocation settings below
+stop working without an error.
 
 ```yaml
 ui:
@@ -2587,157 +2599,152 @@ ui:
 
 | Key | Default | Range | What it bounds |
 | --- | --- | --- | --- |
-| `session_ttl_hours` | `24` | `1`–`720` | The hard ceiling. No amount of activity extends it; when it lapses the user signs in again. |
-| `idle_timeout_hours` | `8` | `1`–`720`, and never above `session_ttl_hours` | How long a session may go unused. This is the clock that bounds an unattended browser, and usually the one to tighten first — shortening it costs a re-login after a long meeting, while shortening the ceiling interrupts people mid-task. |
-| `refresh_interval_minutes` | `15` | `1`–`1440`, or `-1` to disable | Worst-case lag between the identity provider disabling a user and their cloop session ending. Requires `CLOOP_SECRET_KEY`. |
-| `max_claim_age_minutes` | `5` | `1`–`60`, or `-1` to disable | How stale a session's group and role claims may be when it performs an action **above operator**. Past it the provider is re-asked synchronously and the action is refused if it cannot answer. With `CLOOP_SECRET_KEY` the hub re-asks with the session's refresh token; without one the dashboard re-asserts the claims from the user's browser instead (see below). |
-| `sudo_max_age_minutes` | `120` | `1`–`1440`, or `-1` to turn off | **Sudo mode** (Task 20448): how recently the person behind a session must have signed in interactively for a privileged action — creating or deleting a secret or a grant, minting or approving an API token, minting an enrollment token, editing this block, retiring the static token, rotating the hub CA, upgrading or deregistering an executor, attaching to a sandbox, granting membership at maintainer, ending someone else's session, offboarding, minting a SCIM credential or a glasses link, setting a provider's API key or base URL, the dictation key or the CI relay's settings. Measured from the `id_token`'s `auth_time`, or — where the provider reports none, as Entra ID does unless that optional claim is configured — from a sign-in the hub itself started with `prompt=login`; silent renewal never counts. Older, the action is refused with `401 REAUTH_REQUIRED` and the dashboard asks the person to confirm it's them at the provider (`prompt=login&max_age=0`). A terminal session counts from the sign-in behind its `cloop login` approval — the approval itself when it asked you to sign in, which it does whenever the approving browser's sign-in is not recent — and is told to run `cloop login` again. **API tokens and the static token are not sessions and are never asked.** `-1` turns it off, and `cloop hub doctor` and Hub health warn (`oidc.sudo`). Editable in Settings → Single sign-on, honoured in a per-hub overlay like the rest of this block. See [Recent sign-in for privileged actions](../security/model.md#recent-sign-in-for-privileged-actions). |
+| `session_ttl_hours` | `24` | `1`–`720` | The absolute limit. Activity never extends it; when it runs out, the user signs in again. |
+| `idle_timeout_hours` | `8` | `1`–`720`, and never above `session_ttl_hours` | How long a session can go unused. This limits an unattended browser, and is usually the one to shorten first: a shorter idle timeout means signing in again after a long meeting, while a shorter absolute limit interrupts people in the middle of their work. |
+| `refresh_interval_minutes` | `15` | `1`–`1440`, or `-1` to disable | The longest delay between the identity provider disabling a user and their cloop session ending. Requires `CLOOP_SECRET_KEY`. |
+| `max_claim_age_minutes` | `5` | `1`–`60`, or `-1` to disable | How old a session's group and role claims can be when it performs an action above operator. Past this age, the provider is asked again before the action, and the action is refused if the provider can't answer. With `CLOOP_SECRET_KEY` the hub asks using the session's refresh token; without it, the dashboard renews the claims from the user's browser instead (see below). |
+| `sudo_max_age_minutes` | `120` | `1`–`1440`, or `-1` to turn off | **Sudo mode**: how recently the person behind a session must have signed in interactively to perform a privileged action. The privileged actions are: creating or deleting a secret or a grant, creating or approving an API token, creating an enrollment token, editing this block, retiring the static token, rotating the hub CA, upgrading or deregistering an executor, attaching to a sandbox, granting maintainer membership, ending someone else's session, offboarding, creating a SCIM credential or a glasses link, and setting a provider's API key or base URL, the dictation key or the CI relay's settings. Measured from the `id_token`'s `auth_time` or, where the provider doesn't report it (Entra ID doesn't, unless that optional claim is configured), from a sign-in the hub itself started with `prompt=login`. Silent renewal never counts. If the sign-in is older, the action is refused with `401 REAUTH_REQUIRED`, and the dashboard asks the person to confirm their identity at the provider (`prompt=login&max_age=0`). A terminal session counts from the sign-in behind its `cloop login` approval (the approval itself, if it asked you to sign in, which it does whenever the approving browser's sign-in isn't recent), and is told to run `cloop login` again. API tokens and the static token aren't sessions and are never asked. `-1` turns it off, and `cloop hub doctor` and Hub health then warn (`oidc.sudo`). Editable in **Settings → Single sign-on**, and honoured in a per-hub overlay like the rest of this block. See [Recent sign-in for privileged actions](../security/model.md#recent-sign-in-for-privileged-actions). |
 | `clock_skew_seconds` | `300` | `0`–`600`, or `-1` for none | Leeway applied to an ID token's `exp` and `iat`, for hosts whose clocks disagree with the provider's. |
 | `require_idp` | `false` | — | Makes an unresolvable issuer fatal at startup instead of a warning. Also available as `cloop ui --require-idp`. |
-| `require_rbac` | `false` | — | Makes single sign-on without a role policy — no `role_mappings` and no `default_role` — fatal at startup instead of a warning. The Settings panel refuses to save a block it would refuse, and `cloop hub doctor` says the start will fail. |
+| `require_rbac` | `false` | — | Makes single sign-on without a role policy (no `role_mappings` and no `default_role`) fatal at startup instead of a warning. The Settings panel refuses to save a block that would fail this check, and `cloop hub doctor` says the start will fail. |
 
-Out-of-range values are clamped rather than rejected, and an
-`idle_timeout_hours` larger than `session_ttl_hours` is held down to it — an
-idle clock that can never fire would silently remove the protection you
-believe is on.
+Out-of-range values are clamped, not rejected, and an `idle_timeout_hours`
+larger than `session_ttl_hours` is lowered to it, because an idle timeout that
+can never fire would remove the protection without any sign.
 
-`clock_skew_seconds` is the exception: above the bound it is **rejected**, not
-clamped. It exists for deployments that cannot fix the underlying problem — an
-on-premise provider on a host whose NTP is blocked by the same firewall that
-makes it on-premise — and raising it means accepting tokens that expired that
-long ago, so raise it only as far as the drift you have measured. Quietly
-giving an operator who wrote an hour ten minutes instead would leave them
-debugging the wrong thing.
+`clock_skew_seconds` is the exception: above the limit it is rejected, not
+clamped. It exists for deployments that can't fix the underlying problem, such
+as an on-premises provider on a host whose NTP is blocked by the same firewall
+that keeps the provider on-premises. Raising it means accepting tokens that
+expired that long ago, so raise it only as far as the drift you have measured.
+If a value of an hour were clamped to ten minutes without a warning, the
+operator would end up debugging the wrong problem.
 
 #### Failing fast on a misconfigured provider
 
-The hub resolves its issuer at startup rather than at the first sign-in:
-discovery and the JWKS fetch, with a ten-second budget for both.
+The hub resolves its issuer at startup instead of at the first sign-in: it runs
+discovery and fetches the JWKS, with ten seconds for both.
 
-- It **logs** the issuer URL, the HTTP status and a one-line fix when that
-  fails, instead of the failure surfacing hours later as an error page written
-  by the provider, in the provider's words, about a value the provider was
-  never shown.
-- It **degrades `/readyz`** — `503` with `"check": "identity"` — for as long as
-  the issuer has *never* resolved. Once it has resolved once the gate stays
-  open: existing sessions keep authenticating through a later provider outage,
-  and dropping the hub from its Service over one would turn a login outage into
-  a total one.
-- With `require_idp` (or `--require-idp`) it **refuses to start**, so a
-  Kubernetes rollout fails and rolls back rather than replacing a working hub
+- **It logs** the issuer URL, the HTTP status and a one-line fix if that fails.
+  Otherwise the failure would show up hours later as an error page from the
+  provider, in the provider's terms, about a value the provider never saw.
+- **It reports `/readyz` as unready** (`503` with `"check": "identity"`) for as
+  long as the issuer has never resolved. Once it has resolved, the check keeps
+  passing: existing sessions keep working through a later provider outage, and
+  removing the hub from its Service during one would turn a sign-in outage into
+  a complete outage.
+- **With `require_idp`** (or `--require-idp`) it refuses to start, so a
+  Kubernetes rollout fails and rolls back instead of replacing a working hub
   with one nobody can sign in to.
 
-A failed preflight never disables the normal path, so a provider that is down
-for a minute recovers on its own at the next sign-in with no restart.
-`cloop hub doctor` runs the same two round trips and prints the resolved
-authorization, token and JWKS endpoints — which is usually the fastest way to
-settle "is it talking to the realm I think it is?", since a wrong realm looks
-identical in the config file and obvious in its authorization endpoint.
+A failed startup check never disables normal sign-in, so if a provider is down
+for a minute, the next sign-in works again without a restart. `cloop hub doctor`
+makes the same two requests and prints the resolved authorization, token and
+JWKS endpoints. That is usually the quickest way to check the hub is using the
+realm you expect: a wrong realm looks fine in the config file but is obvious in
+its authorization endpoint.
 
-A role mapping the provider cannot satisfy gets its own signal. `ui.oidc`
-validates role names and claim kinds at startup, but it cannot see whether the
-provider actually *releases* the claim a binding reads — so a `group` binding
-on a deployment whose `groups` scope was never granted is inert, and every user
-silently falls back to `default_role`. After the first identity the hub
-authenticates, it logs one warning per such binding, naming the claims that
+A role mapping the provider can't satisfy gets its own warning. `ui.oidc`
+validates role names and claim kinds at startup, but it can't see whether the
+provider actually sends the claim a binding reads. So on a deployment whose
+`groups` scope was never granted, a `group` binding has no effect, and every
+user falls back to `default_role` without an error. After the first identity the
+hub authenticates, it logs one warning per such binding, naming the claims that
 were present. See
 [Configuring role mappings](../security/model.md#configuring-role-mappings).
 
 Sessions are stored in the hub's own `state.db` and survive a restart or a
-rolling upgrade. The refresh token used for revalidation is sealed with
-AES-256-GCM under **`CLOOP_SECRET_KEY`** — the same variable
-[`cloop secret`](../guides/secrets.md) uses. Without it cloop does not retain
-refresh tokens at all (rather than storing a live credential in plaintext), so
-`refresh_interval_minutes` has no effect and IdP-side revocation is
-unavailable. `cloop ui` says so at startup and the **Active sessions** panel
+rolling upgrade. The refresh token used to revalidate a session is sealed with
+AES-256-GCM under `CLOOP_SECRET_KEY`, the same variable
+[`cloop secret`](../guides/secrets.md) uses. Without that key, cloop keeps no
+refresh tokens at all (instead of storing a live credential in plaintext), so
+`refresh_interval_minutes` has no effect and revocation at the IdP doesn't
+reach cloop. `cloop ui` says so at startup, and the **Active sessions** panel
 shows a banner.
 
-`max_claim_age_minutes` has a second way to re-assert claims, so it keeps
-working without a key. With no refresh token the hub cannot ask the provider
-itself, and refuses actions above operator once the bound lapses — but the
-dashboard then asks from the user's browser: a hidden frame makes a
-`prompt=none` round trip through `GET /auth/renew` shortly before the claims go
-stale, and again, followed by one retry, if a call is refused for their age.
-When it works nothing on screen moves. When the provider needs to see the user —
-they are signed out there, or their browser keeps the provider's cookies out of
-frames, as Safari and Firefox do — a banner offers a sign-in that comes back to
-the same tab and view. See
+`max_claim_age_minutes` has a second way to renew claims, so it keeps working
+without a key. With no refresh token, the hub can't ask the provider itself and
+refuses actions above operator once the claims are too old. The dashboard then
+asks from the user's browser: a hidden frame makes a `prompt=none` round trip
+through `GET /auth/renew` shortly before the claims expire, and again, followed
+by one retry, if a call is refused because of their age. When this works,
+nothing changes on screen. When the provider needs to see the user (they are
+signed out there, or their browser blocks the provider's cookies in frames, as
+Safari and Firefox do), a banner offers a sign-in that returns to the same tab
+and view. See
 [Silent renewal from the browser](../security/model.md#silent-renewal-from-the-browser).
 
-On a fleet whose browsers cannot complete the silent round trip, every
-privileged action costs a visible sign-in once per bound. The durable fix is
-`CLOOP_SECRET_KEY` with `offline_access` in `scopes`; the alternative is
-`max_claim_age_minutes: -1`, which records the choice to act on sign-in-time
-claims explicitly.
+Where browsers can't complete the silent round trip, privileged actions need a
+visible sign-in once per `max_claim_age_minutes` period. The lasting fix is
+`CLOOP_SECRET_KEY` with `offline_access` in `scopes`. The alternative is
+`max_claim_age_minutes: -1`, which explicitly accepts acting on the claims from
+sign-in time.
 
-A session that has *ended* — its idle or absolute clock ran out, or it was
-revoked — no longer meets the access-token prompt either. Every `401` an SSO hub
+A session that has ended (its idle or absolute timeout ran out, or it was
+revoked) no longer shows the access-token prompt either. Every `401` an SSO hub
 sends says where to sign in again, and the dashboard goes there through the
-provider and returns to the same view; with the user still signed in at the
-provider that is two redirects and no prompt.
+provider and returns to the same view. If the user is still signed in at the
+provider, that takes two redirects and no prompt.
 
 ### Claim freshness for privileged actions
 
-`refresh_interval_minutes` is a *background cadence*: it bounds how long a
-disabled account keeps a working session. It does not bound how stale the
-**claims inside a live session** are, and on most providers those are two very
-different numbers. RFC 6749 does not require an `id_token` on a refresh, and
-Okta, Auth0 and Keycloak all omit one under common configurations — so the
-grant is renewed every interval while the groups and roles stay exactly as they
-were at sign-in. cloop asks the `userinfo` endpoint in that case, but a
-deployment with neither leaves a session carrying sign-in-time authority for
-its whole life.
+`refresh_interval_minutes` is a background interval: it limits how long a
+disabled account keeps a working session. It doesn't limit how old the claims
+inside a live session are, and on most providers those are very different
+numbers. RFC 6749 doesn't require an `id_token` on a refresh, and Okta, Auth0
+and Keycloak all leave it out in common configurations, so the grant is renewed
+every interval while the groups and roles stay as they were at sign-in. cloop
+asks the `userinfo` endpoint in that case, but on a deployment with neither, a
+session keeps its sign-in-time permissions for its whole life.
 
-`max_claim_age_minutes` bounds the second number, and only where it matters.
-Before a permission **above the operator tier** — `secret.grant`,
+`max_claim_age_minutes` limits the age of the claims, and only where it
+matters. Before using a permission above the operator tier (`secret.grant`,
 `secret.revoke`, `user.manage`, `token.admin`, `session.admin`,
 `executor.manage`, `config.write`, `project.write`, `project.share`,
-`audit.read`, `sandbox.attach`, `knowledge.admin` — cloop checks when the
-provider last asserted
-that session's claims. If it is longer ago than this bound, the provider is
-asked *synchronously*, the decision is made against whatever it now says, and
-the action is refused if it cannot be reached.
+`audit.read`, `sandbox.attach`, `knowledge.admin`), cloop checks when the
+provider last confirmed that session's claims. If that was longer ago than this
+limit, cloop asks the provider before acting, decides based on its current
+answer, and refuses the action if the provider can't be reached.
 
-Three things keep that affordable:
+Three things keep this cheap:
 
-- **Reads never take the path.** Everything a viewer or operator may do —
-  including running and stopping plans — stays on the background cadence, so an
-  IdP outage makes the hub slow to revoke, never slow to serve.
-- **Concurrent checks share one round trip.** A dashboard panel that fires six
-  admin requests at once costs one call to the provider, and all six see the
-  same answer. A demotion cannot be outrun by sending more requests.
+- **Reads never wait for it.** Everything a viewer or operator can do, including
+  running and stopping plans, stays on the background interval, so an IdP
+  outage makes the hub slow to revoke access, never slow to respond.
+- **Concurrent checks share one request.** A dashboard panel that sends six
+  admin requests at once causes one call to the provider, and all six get the
+  same answer. Sending more requests can't get ahead of a demotion.
 - **Fresh claims cost nothing.** Only the first privileged call in each window
-  contacts the provider; the rest are a single indexed read.
+  contacts the provider; the rest need one indexed read.
 
-The provider's own `expires_in` tightens the bound but never loosens it: an IdP
-issuing five-minute access tokens is stating how long it stands behind the
-authorization that produced those claims, and cloop honours whichever deadline
-falls first.
+The provider's own `expires_in` can shorten the limit but never lengthen it. An
+IdP that issues five-minute access tokens is saying how long it vouches for the
+claims, and cloop uses whichever deadline comes first.
 
-Claim age is visible per session in the **Active sessions** panel and in
-`cloop hub session list`, next to the grant check so the gap between them is
-readable at a glance. A session whose claims the provider has actively refused
-to confirm — a `401` or `invalid_token` from `userinfo` — keeps working for
-reads and is refused for everything above operator until a later check
-succeeds; both outcomes are written to the audit trail as
-`session.claims_rejected` and `session.claims_stale`.
+The **Active sessions** panel and `cloop hub session list` show each session's
+claim age next to its last grant check, so you can see the gap between them. A
+session whose claims the provider has refused to confirm (a `401` or
+`invalid_token` from `userinfo`) keeps working for reads and is refused for
+everything above operator until a later check succeeds. Both outcomes are
+written to the audit trail, as `session.claims_rejected` and
+`session.claims_stale`.
 
-Operators with the `session.admin` permission get an Active sessions table in
-the Secrets tab — subject, IP, device, sign-in time, idle time, and a
-Terminate button — backed by `GET /api/sessions` and
-`DELETE /api/sessions/{id}`. Any signed-in user can end their other sessions
-from the header (`POST /api/session/logout-all`). Signing out also redirects to
-the provider's `end_session_endpoint` when it advertises one, so the browser's
-session at the IdP ends too. Revocation semantics, including what happens when
-the IdP is unreachable, are in
+Users with the `session.admin` permission get an Active sessions table in the
+Secrets tab (subject, IP, device, sign-in time, idle time and a **Terminate**
+button), backed by `GET /api/sessions` and `DELETE /api/sessions/{id}`. Any
+signed-in user can end their other sessions from the header
+(`POST /api/session/logout-all`). Signing out also redirects to the provider's
+`end_session_endpoint` when it has one, so the browser's session at the IdP
+ends too. How revocation works, including when the IdP is unreachable, is
+described in
 [Session lifecycle and revocation](../security/model.md#session-lifecycle-and-revocation).
 
 ### Terminal sign-in (`cloop login`)
 
-A hub with single sign-on also signs terminals in: `cloop login <hub>` prints a
-code, a signed-in browser approves it at `/device`, and the terminal gets a CLI
-session — a row in the same session store, of kind `cli`, authenticated as
-`Authorization: Bearer cloop_cli_…`. The walkthrough is
+A hub with single sign-on can also sign in terminals. `cloop login <hub>` prints
+a code, a signed-in browser approves it at `/device`, and the terminal gets a
+CLI session: a row of kind `cli` in the same session store, authenticated with
+`Authorization: Bearer cloop_cli_…`. For a walkthrough, see
 [Working from a terminal](../getting-started/terminal.md).
 
 ```yaml
@@ -2751,97 +2758,98 @@ ui:
 
 | Key | Default | Range | What it bounds |
 | --- | --- | --- | --- |
-| `device_login` | `true` | — | Whether `POST /api/device/code` and `/api/device/token` answer, and `/device` is served. Off, `cloop login` is told terminal sign-in is turned off. |
-| `cli_session_ttl_hours` | `session_ttl_hours` | `1`–`session_ttl_hours` | A terminal session's absolute lifetime, from its approval. Never longer than a browser session's: the credential that sits in a file is the one that should go stale first. |
-| `cli_idle_timeout_hours` | `idle_timeout_hours` | `1`–`idle_timeout_hours`, and never above `cli_session_ttl_hours` | How long a terminal session may go unused. The janitor sweeps each kind of session on its own idle clock. |
-| `device_approval_max_age_minutes` | `120` | `1`–`1440`, or `-1` never to ask | How long ago the person approving may have signed in. The approval's round trip asks the provider for `max_age` of this; a browser session older than it is sent with `prompt=login&max_age=0` instead. Where the `id_token` carries `auth_time` the hub holds it to that — a sign-in older than this behind a fresh dashboard session (a silent re-login) goes round again with `prompt=login`, and one that ignored the prompt is refused — so a provider that ignored either is caught rather than believed. A provider that reports no `auth_time` (Entra ID unless that optional claim is configured) is trusted to have honoured them. |
+| `device_login` | `true` | — | Whether `POST /api/device/code` and `/api/device/token` answer, and `/device` is served. When off, `cloop login` reports that terminal sign-in is turned off. |
+| `cli_session_ttl_hours` | `session_ttl_hours` | `1`–`session_ttl_hours` | A terminal session's absolute lifetime, from its approval. Never longer than a browser session's, because a credential stored in a file should expire first. |
+| `cli_idle_timeout_hours` | `idle_timeout_hours` | `1`–`idle_timeout_hours`, and never above `cli_session_ttl_hours` | How long a terminal session can go unused. The janitor applies each kind of session's own idle timeout. |
+| `device_approval_max_age_minutes` | `120` | `1`–`1440`, or `-1` never to ask | How long ago the approving person may have signed in. The approval's round trip asks the provider for this `max_age`; a browser session older than this is sent with `prompt=login&max_age=0` instead. Where the `id_token` includes `auth_time`, the hub checks it: a sign-in older than this behind a fresh dashboard session (a silent re-login) goes round again with `prompt=login`, and one that ignored the prompt is refused, so a provider that ignored either parameter is caught. A provider that reports no `auth_time` (Entra ID, unless that optional claim is configured) is trusted to have honoured them. |
 
-Everything else is the browser session's: `refresh_interval_minutes`,
+Everything else works as for browser sessions: `refresh_interval_minutes`,
 `max_claim_age_minutes` and `sudo_max_age_minutes` apply unchanged, because the
-approval is itself an authorization-code sign-in whose `id_token` and refresh grant become the CLI
-session's own — never a copy of the browser's. Without `CLOOP_SECRET_KEY` no
-refresh grant is kept, so a terminal session's claims stay as of its approval
-and actions above operator need a fresh `cloop login` once they are older than
-`max_claim_age_minutes`; the terminal is told so when it signs in. Sudo mode
-counts a terminal session from the sign-in behind its approval: approving from
-a browser whose own sign-in is older than `sudo_max_age_minutes` makes the
-approval a `prompt=login` sign-in, which the terminal then counts from, and a
-silent approval leaves the terminal no fresher than the browser. A privileged
-action — minting a token, approving a request, opening a sandbox terminal — from
-a terminal past the window is refused, and the terminal names `cloop login` as
-the way back.
+approval is itself an authorization-code sign-in whose `id_token` and refresh
+grant become the CLI session's own (never a copy of the browser's). Without
+`CLOOP_SECRET_KEY` no refresh grant is kept, so a terminal session's claims stay
+as they were at approval, and actions above operator need a new `cloop login`
+once the claims are older than `max_claim_age_minutes`. The terminal is told
+this when it signs in. Sudo mode counts a terminal session from the sign-in
+behind its approval. Approving from a browser whose own sign-in is older than
+`sudo_max_age_minutes` makes the approval a `prompt=login` sign-in, which the
+terminal then counts from; a silent approval leaves the terminal no more recent
+than the browser. A privileged action (creating a token, approving a request,
+opening a sandbox terminal) from a terminal outside the window is refused, and
+the terminal says to run `cloop login`.
 
-Two endpoints answer before authentication — a terminal asking for a code holds
-no credential yet. They take JSON only, like every state-changing request, and
-are bounded instead of gated: twelve codes per client address per ten minutes,
-two thousand in flight hub-wide, a code dead after ten minutes and worthless
-until a signed-in person approves it, polling held to the interval by
-`slow_down`. The browser's three routes — `/api/device/lookup`, `approve`,
-`deny` — take a browser session cookie and nothing else: not a terminal's
-session, not an API token, not the static token. See the
-[HTTP API](http-api.md) for each.
+Two endpoints answer before authentication, because a terminal asking for a code
+has no credential yet. They accept JSON only, like every state-changing request,
+and are rate-limited instead of authenticated: twelve codes per client address
+per ten minutes, two thousand pending across the hub, each code expiring after
+ten minutes and useless until a signed-in person approves it, and polling held
+to the interval by `slow_down`. The browser's three routes
+(`/api/device/lookup`, `approve`, `deny`) accept a browser session cookie and
+nothing else: not a terminal's session, an API token or the static token. See
+the [HTTP API](http-api.md) for each.
 
 ### Projects created by name (`ui.projects_root`)
 
 `cloop remote init` creates a hub project from a checkout on a developer's
-machine, which cannot know where this hub keeps projects. It asks for one by
-name, and the hub places it under its projects root (Task 20417):
+machine, which can't know where the hub keeps projects. It asks for a project
+by name, and the hub creates it under its projects root:
 
 ```yaml
 ui:
   projects_root: /srv/cloop/projects   # absolute; default: projects/ in the hub's home
 ```
 
-Unset, it is `projects/` in the home directory of the user the hub runs as —
-`/var/lib/cloop/projects` in the packaged image, whose `HOME` is its state volume.
-The Helm chart mounts its state volume's `projects/` there, since everything
-else in its container is read-only and a project may not live inside the state
-directory itself.
+If unset, it is `projects/` in the home directory of the user the hub runs as:
+`/var/lib/cloop/projects` in the packaged image, whose `HOME` is its state
+volume. The Helm chart mounts its state volume's `projects/` there, because
+everything else in its container is read-only and a project can't be inside the
+state directory itself.
 A name is one path segment of letters, digits, dots, hyphens and underscores,
-starting with a letter or digit. A relative `projects_root` is refused at use,
-naming the setting.
+starting with a letter or digit. A relative `projects_root` is refused when it
+is used, with an error naming the setting.
 
-The root is also where projects are confined (Task 20418). A project's directory
-is what every sandbox it runs in is bound to, read-write, so:
+Projects are also confined to the root. Every sandbox a project runs in gets the
+project's directory mounted read-write, so:
 
-- **Anyone without `executor.manage`** — maintainers creating in the dashboard's
-  New Project dialog, `cloop remote init --dir` — may create a project only
-  strictly inside the root, in no hidden directory. Outside it the answer is
-  `403 FORBIDDEN` naming `executor.manage` and the root; by name the question
-  never arises.
-- **Nobody** may create a project at the root itself or at a directory that
-  contains it; at, inside or above the hub's own directory or another hub's
-  (one holding `.cloop/hub.env`; at or above a running `cloop ui`'s);
-  overlapping another project; or anywhere the older rules refuse (system trees, `/`, top-level
-  directories, the hub user's home). The exception is a root you put inside the
-  hub's own directory, as the packaged image does: projects inside such a root
-  are fine. Symbolic links are resolved before any of this is decided.
-- A directory that already holds a project is not initialised again — `cloop
-  init` overwrites the state it finds. To anyone but an administrator or someone
-  who can see that project, that refusal is the same `409 CONFLICT`, in the same
-  words, as every other refusal that depends on what is on the host, so creating
-  projects cannot be used to find out what exists where.
-- `?delete_root=true` on a project's removal deletes its directory only when this
-  hub made that directory itself, inside the root; an adopted one — a checkout
-  that existed first, a path an operator registered — is refused with `409` and
-  stays, with its project.
+- **Anyone without `executor.manage`** (maintainers using the dashboard's New
+  Project dialog, `cloop remote init --dir`) can create a project only strictly
+  inside the root, and not in a hidden directory. Outside it, the answer is
+  `403 FORBIDDEN`, naming `executor.manage` and the root. A project created by
+  name is always inside the root.
+- **Nobody** can create a project at the root itself or at a directory that
+  contains it; at, inside or above the hub's own directory or another hub's (one
+  holding `.cloop/hub.env`, or at or above a running `cloop ui`'s); overlapping
+  another project; or anywhere the older rules refuse (system directories, `/`,
+  top-level directories, the hub user's home). The exception is a root inside
+  the hub's own directory, as in the packaged image: projects inside such a root
+  are allowed. Symbolic links are resolved before any of this is checked.
+- A directory that already holds a project isn't initialised again, because
+  `cloop init` would overwrite the state it finds. To anyone other than an
+  administrator or someone who can see that project, this refusal is the same
+  `409 CONFLICT`, with the same wording, as every other refusal that depends on
+  what is on the host, so creating projects can't be used to discover what
+  exists where.
+- `?delete_root=true` on a project's removal deletes its directory only if this
+  hub created that directory itself, inside the root. For an adopted directory
+  (a checkout that existed first, a path an operator registered), the request is
+  refused with `409`, and the directory and the project stay.
 
-Projects registered before these rules, or named on `cloop ui --projects`, are
+Projects registered before these rules, or named with `cloop ui --projects`, are
 listed but flagged on the Projects tab, refused at every run, and failed by `cloop
 hub doctor` (`projects.confinement`) until an administrator moves or removes
-them — nothing is moved or deleted for you. See
+them. Nothing is moved or deleted automatically. See
 [which directory a project may be](../architecture/executors.md#which-directory-a-project-may-be).
 
 ### SCIM provisioning (`ui.oidc.scim`)
 
 The identity provider provisions the hub's users and groups at `/scim/v2`, and
-a deactivation there suspends the person here — sessions, API tokens, glasses
-links, leases and running tasks ended, a deny binding written — without an
-administrator. The provider authenticates with a credential minted by `cloop
-hub scim credential create` or under **Settings → Provisioning (SCIM)**; there
-is none in this file. `/scim/v2` is served only with `ui.oidc.enabled`. The
-walkthrough, Entra and Okta included, is
-[SCIM provisioning](../guides/scim-provisioning.md).
+deactivating a person there suspends them here without an administrator: their
+sessions, API tokens, glasses links, leases and running tasks are ended, and a
+deny binding is written. The provider authenticates with a credential created
+by `cloop hub scim credential create` or under
+**Settings → Provisioning (SCIM)**; it isn't stored in this file. `/scim/v2` is
+served only with `ui.oidc.enabled`. For a walkthrough, including Entra and
+Okta, see [SCIM provisioning](../guides/scim-provisioning.md).
 
 ```yaml
 ui:
@@ -2854,39 +2862,39 @@ ui:
 
 | Key | Default | Range | What it decides |
 | --- | --- | --- | --- |
-| `match_claim` | `email` | `email`, `preferred_username`, `oid`, `sub` | Which signed-in identity a provisioned user is: the user's primary email against the `email` claim, `userName` against `preferred_username`, or `externalId` against `oid` (Entra, with `objectId` mapped to `externalId`) or `sub` (Okta). A value two identities carry is refused a guess. Any other value stops the hub starting. |
-| `offboard_after_days` | `0` | `0`–`3650` | Runs the full offboarding — honouring a legal hold — for a user the provider has kept deactivated this long. `0` never does; Entra sends no `DELETE` for an account that was only unassigned, so this is what finishes those. |
+| `match_claim` | `email` | `email`, `preferred_username`, `oid`, `sub` | How a provisioned user is matched to a signed-in identity: the user's primary email against the `email` claim, `userName` against `preferred_username`, or `externalId` against `oid` (Entra, with `objectId` mapped to `externalId`) or `sub` (Okta). If two identities carry the same value, cloop doesn't guess between them. Any other setting value stops the hub from starting. |
+| `offboard_after_days` | `0` | `0`–`3650` | Runs the full offboarding (honouring a legal hold) for a user the provider has kept deactivated this long. `0` never does. Entra sends no `DELETE` for an account that was only unassigned, so this setting is what completes those. |
 | `rate_limit_per_minute` | `600` | `10`–`60000` | Each credential's request budget, refilled continuously, with bursts of a sixth. Past it, `429` with `Retry-After`. |
 
-Out-of-range values are clamped. All three are settable with `cloop config set
+Out-of-range values are clamped. All three can be set with `cloop config set
 ui.oidc.scim.<key>`, and take effect when the hub restarts.
 
-Provisioned groups are a claim kind, `scim_group`, that `role_mappings` and
-runtime bindings can name by the group's display name or `externalId`; the hub
+Provisioned groups are a claim kind, `scim_group`, which `role_mappings` and
+runtime bindings can name by the group's display name or `externalId`. The hub
 reads membership from its directory at every authorization decision, so it
-needs no group claim in the token. The provider's accounts add two more kinds
-a binding can name: `username` (`preferred_username`) and `oid`.
+needs no group claim in the token. The provider's accounts add two more kinds a
+binding can name: `username` (`preferred_username`) and `oid`.
 
 ### Web UI (`cloop ui`)
 
-Where the dashboard listens depends on whether it can tell people apart
-(Task 20393). A hub with **no sign-in** — neither `ui.oidc` nor a static
-`--token`/`CLOOP_UI_TOKEN` — answers every request from anyone who reaches it:
-it lists the projects, queues tasks and starts agent runs on this host. So it
-listens on **`127.0.0.1` only**, and says so at startup:
+Where the dashboard listens depends on whether it has sign-in. A hub with no
+sign-in (neither `ui.oidc` nor a static `--token`/`CLOOP_UI_TOKEN`) answers
+every request from anyone who can reach it: it lists the projects, queues tasks
+and starts agent runs on this host. So it listens on `127.0.0.1` only, and says
+so at startup:
 
 ```
 cloop dashboard running at http://127.0.0.1:8080, listening on 127.0.0.1:8080
 No sign-in is configured, so the dashboard listens on 127.0.0.1:8080 only. To reach it from another machine, configure SSO (ui.oidc) or a token (CLOOP_UI_TOKEN) — the hub then listens on every interface — or tunnel: ssh -L 8080:127.0.0.1:8080 <this-host>.
 ```
 
-A hub **with** sign-in listens on every interface, as every hub did before.
-`ui.listen` (or `--listen`, which overrides it) names an address instead —
-without the port, which stays `--port`:
+A hub with sign-in listens on every interface. `ui.listen` (or `--listen`, which
+overrides it) sets a specific address instead. It doesn't include the port,
+which is still set by `--port`:
 
 | | `ui.listen` unset | loopback: `127.0.0.1`, `::1`, `localhost` | beyond loopback: `0.0.0.0`, `::`, an interface's address, a host name |
 | --- | --- | --- | --- |
-| no sign-in | `127.0.0.1` | as named | **refused** — or, with `ui.allow_unauthenticated_network: true`, as named and with a warning at every start |
+| no sign-in | `127.0.0.1` | as named | **refused**, or with `ui.allow_unauthenticated_network: true`, as named, with a warning at every start |
 | static token | every interface | as named | as named |
 | `ui.oidc` | every interface | as named | as named |
 
@@ -2901,12 +2909,12 @@ ui:
 ```
 
 - **A scoped API token is not sign-in.** API tokens restrict the callers that
-  present one; a request presenting none is still served by a hub without
-  `ui.oidc` or a static token. Such a hub counts as having no sign-in — which
-  is why removing the static token from a hub without SSO
+  present one, but a hub without `ui.oidc` or a static token still serves
+  requests that present none. Such a hub counts as having no sign-in, so
+  removing the static token from a hub without SSO
   ([migrating off it](../security/model.md#migrating-off-the-static-token))
-  now takes it off the network instead of leaving it open there.
-- **The refusal says what to do.** A hub without sign-in asked for an address
+  takes the hub off the network instead of leaving it open there.
+- **The error says what to do.** A hub without sign-in that is asked to listen
   beyond loopback exits before it touches the control plane:
 
   ```
@@ -2916,46 +2924,49 @@ ui:
     To serve it without sign-in anyway, set ui.allow_unauthenticated_network: true in .cloop/config.yaml.
   ```
 
-- **Remote executor agents dial the hub**, so a hub that enrolls devices over
-  the network needs SSO or a token. A loopback-only hub serves agents on its
-  own machine, or through a tunnel.
-- **Loopback is read from the address, never resolved.** IP literals count by
-  their value, and `localhost` is bound as `127.0.0.1`. Every other host name —
-  `hub.localhost`, this machine's own name mapped to `127.0.1.1` — counts as
-  beyond loopback, whatever it resolves to today.
+- **Remote executor agents connect to the hub**, so a hub that enrolls devices
+  over the network needs SSO or a token. A loopback-only hub serves agents on
+  its own machine, or through a tunnel.
+- **Loopback is judged from the address, never by resolving it.** IP literals
+  count by their value, and `localhost` is bound as `127.0.0.1`. Every other
+  host name (`hub.localhost`, or this machine's own name mapped to `127.0.1.1`)
+  counts as beyond loopback, whatever it resolves to now.
 - **Behind a TLS proxy on the same host**, set `listen: 127.0.0.1` on a hub
-  with sign-in too: the proxy reaches it there, and nothing else reaches the
-  plaintext port. Startup prints a note, and `cloop hub doctor` warns
-  (`ui.exposure`), while a hub serves plaintext beyond loopback and its public
-  URL — `ui.external_url`, or `ui.oidc.redirect_url` without one — is https.
-- **Per process.** Where two hubs share a directory, `ui.listen` belongs in the
-  hub's own overlay, `config.ui-<port>.yaml` (below).
-- **Containers name the address.** A container's loopback is its own, so the
-  image, the Helm chart and the compose stack start `cloop ui --listen
-  0.0.0.0`; a container hub without sign-in refuses that and exits. See
+  with sign-in too: the proxy can reach it there, and nothing else can reach the
+  plaintext port. While a hub serves plaintext beyond loopback and its public
+  URL (`ui.external_url`, or `ui.oidc.redirect_url` if that is unset) is https,
+  startup prints a note and `cloop hub doctor` warns (`ui.exposure`).
+- **Per process.** Where two hubs share a directory, put `ui.listen` in each
+  hub's own overlay, `config.ui-<port>.yaml` (see below).
+- **Containers set the address.** A container has its own loopback, so the
+  image, the Helm chart and the compose stack start
+  `cloop ui --listen 0.0.0.0`. A container hub without sign-in refuses that and
+  exits. See
   [Deploying the cloop hub](../../deploy/README.md#listening-on-the-network).
 - **Hub-cluster members** reach each other at their advertise URLs, which
   default to the address the member is bound to, or to
   `http(s)://127.0.0.1:<port>` for a member on every interface.
 
 `cloop hub doctor --port N` reports `ui.exposure`. It reads where the process on
-port `N` actually listens from the kernel's socket table, and asks it for
-`/api/projects` without credentials: **fail** for a hub without sign-in that is
-reachable beyond loopback — whatever build it is, so an older binary that binds
-every interface regardless is caught too — and **warn** for the plaintext
-behind an https URL above. With nothing on the port it judges what
-`cloop ui --port N` would do with this configuration (a static token counts
-when `CLOOP_UI_TOKEN` is exported in the doctor's shell).
+port `N` actually listens from the kernel's socket table, and requests
+`/api/projects` from it without credentials. It reports **fail** for a hub
+without sign-in that can be reached beyond loopback, whatever its build, so an
+older binary that binds every interface regardless is caught too. It reports
+**warn** for plaintext behind an https URL, as described above. If nothing is
+listening on the port, it judges what `cloop ui --port N` would do with this
+configuration (a static token counts when `CLOOP_UI_TOKEN` is exported in the
+doctor's shell).
 
 > **`--token` / `CLOOP_UI_TOKEN` is deprecated.** It works until you retire it,
 > but it bypasses RBAC entirely, sees every project on the hub, never expires,
-> and cannot be revoked for one caller without breaking every other. Mint a
-> scoped API token per caller (above); once single sign-on works, retire the
-> static token — `cloop hub token static retire --reason "..."`, or Settings →
-> Static admin token → Retire — and drop the flag and the environment variable
-> at the next rollout. `cloop ui` prints a warning at startup while it is still
-> set, the Tokens panel shows a banner, and `cloop hub doctor` warns
-> `ui.static_token` while one is accepted beside an enforced role policy. See
+> and can't be revoked for one caller without breaking all the others. Create a
+> scoped API token per caller (see above). Once single sign-on works, retire the
+> static token with `cloop hub token static retire --reason "..."` or
+> **Settings → Static admin token → Retire**, and remove the flag and the
+> environment variable at the next rollout. While it is still set, `cloop ui`
+> prints a warning at startup and the Tokens panel shows a banner, and while it
+> is accepted alongside an enforced role policy, `cloop hub doctor` warns
+> `ui.static_token`. See
 > [Migrating off the static token](../security/model.md#migrating-off-the-static-token)
 > and [Retiring the static token](../security/model.md#retiring-the-static-token).
 
@@ -2963,38 +2974,36 @@ When a `--token` is set:
 
 - Every `/api/*` request must present `Authorization: Bearer <token>` or
   `?token=<token>`.
-- A **retired** token is refused by every hub member, without a restart, with a
-  `401` saying when and by whom it was retired and what to present instead —
-  in the header and as `?token=` alike, and without counting toward the
-  rate-limit lockout below. It stays configured: a token-only hub whose token is
-  retired stays closed and admits API tokens only. Retirements live in the
-  control plane's `retired_static_tokens` table, keyed by the token's
-  fingerprint; a member reads them before it serves, on the hub-bus notice a
-  retirement posts, and every 30 seconds. Deploying a new value is how a new
-  token is issued.
-- Failed authentication attempts are **rate-limited**: after 5 consecutive
-  failures from the same IP the endpoint returns HTTP 429 and blocks that IP
-  for 60 seconds.
-- The dashboard's assets under `/assets/` are served before authentication,
-  as the page that names them is: static files compiled into the binary,
-  identical on every hub. Until Task 20408 a token hub served its page and
-  refused its script.
-- All responses include hardened HTTP headers:
-  - `Content-Security-Policy` — only the hub's own script files run; see
+- A retired token is refused by every hub member, without a restart, with a
+  `401` saying when and by whom it was retired and what to present instead.
+  This applies in the header and as `?token=`, and doesn't count toward the
+  rate-limit lockout below. The token stays configured: a token-only hub whose
+  token is retired stays closed and accepts only API tokens. Retirements are
+  stored in the control plane's `retired_static_tokens` table, keyed by the
+  token's fingerprint. A member reads them before it starts serving, when a
+  retirement posts its notice on the hub bus, and every 30 seconds. To issue a
+  new token, deploy a new value.
+- Failed authentication attempts are rate-limited: after 5 consecutive failures
+  from the same IP, the endpoint returns HTTP 429 and blocks that IP for 60
+  seconds.
+- The dashboard's assets under `/assets/` are served before authentication, like
+  the page that references them. They are static files compiled into the binary,
+  the same on every hub.
+- All responses include these security headers:
+  - `Content-Security-Policy`: only the hub's own script files run; see
     [below](#content-security-policy-and-violation-reports)
   - `X-Content-Type-Options: nosniff`
-  - `X-Frame-Options: DENY` — with single sign-on configured, `SAMEORIGIN` on
-    `/auth/renew` and the OIDC callback only, which the dashboard frames to
-    renew a session's claims (`frame-ancestors 'self'` in the CSP, whose
-    `frame-src` then also names the identity provider)
+  - `X-Frame-Options: DENY`. With single sign-on configured, it is `SAMEORIGIN`
+    on `/auth/renew` and the OIDC callback only, which the dashboard loads in a
+    frame to renew a session's claims (`frame-ancestors 'self'` in the CSP,
+    whose `frame-src` then also names the identity provider)
   - `Referrer-Policy: no-referrer`
-- No CORS header is sent to anyone (Task 20394).
+- No CORS headers are sent to anyone.
 
 #### Content-Security-Policy and violation reports
 
-Every response the hub sends — the dashboard, the display-glasses page, the
-sign-in documents, assets and API answers alike — carries one policy (Task
-20408):
+Every response the hub sends (the dashboard, the display-glasses page, the
+sign-in documents, assets and API responses alike) carries one policy:
 
 ```text
 default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
@@ -3005,68 +3014,71 @@ report-uri /api/csp-report
 
 `frame-src` names the identity provider when single sign-on is configured, and
 `frame-ancestors` is `'self'` on `/auth/renew` and the OIDC callback, the two
-documents the silent renewal frames. Nothing else varies, and nothing is
-configurable.
+documents that silent renewal loads in a frame. Nothing else varies, and nothing
+is configurable.
 
-Only the hub's own script files run: no inline script, no inline event handler,
-no `eval`, no `javascript:` URL. The dashboard routes every control through one
-delegated dispatcher — a control names an action in a `data-action` attribute,
-which `pkg/ui/assets/js/00-core.js` looks up in a registry, and the pointer
+Only the hub's own script files run: no inline scripts, inline event handlers,
+`eval` or `javascript:` URLs. The dashboard routes every control through one
+delegated dispatcher. A control names an action in a `data-action` attribute,
+which `pkg/ui/assets/js/00-core.js` looks up in a registry, and a pointer
 passing over an element or a drag crossing it runs only what was registered for
-that very event — so a string a workload or a peer wrote that reaches the page
-past a missed escape cannot run, and neither can a handler somebody writes back
-into the markup: `TestNoInlineEventHandlers` fails the build first. The theme bootstrap and the
-display-glasses page's script are assets of their own, and the two sign-in
-documents carry their values in the markup and load `GET /auth/sign-in.js`.
-Inline *styles* are still allowed; see the
+that specific event. So a string written by a workload or a peer that reaches
+the page through a missed escape can't run, and neither can an event handler
+someone adds back into the markup: `TestNoInlineEventHandlers` fails the build
+first. The theme bootstrap and the display-glasses page's script are separate
+assets, and the two sign-in documents carry their values in the markup and load
+`GET /auth/sign-in.js`. Inline styles are still allowed; see the
 [threat model](../security/threat-model.md#out-of-scope).
 
 `report-uri` names the hub's own `POST /api/csp-report`. A browser sends it a
 report for each violation, and the hub:
 
 - counts it in [`cloop_csp_violations_total`](../operations/metrics.md#what-the-pages-policy-blocked),
-  by effective directive and by which of its documents it was;
-- logs it at warn level as `csp_violation`, its URLs credential-scrubbed;
+  by effective directive and by which of its documents it came from;
+- logs it at warn level as `csp_violation`, with credentials scrubbed from its
+  URLs;
 - records it as a telemetry event of kind `csp` where `ui.telemetry` collects
   that document's front end ([telemetry](../operations/telemetry.md)).
 
 The log line and the event name the signed-in user whose browser sent the
-report — it carries the session cookie, which a browser sends with a
-same-origin report — or nobody. Reading that session does not count the report
-as the user being active.
+report (the report carries the session cookie, which a browser sends with a
+same-origin report), or nobody. Reading that session doesn't count as activity
+by the user.
 
-The endpoint takes no credential and is served before authentication: the
-glasses page's credential is a header its script adds and the sign-in documents
-are for someone not yet signed in, so a browser has none to send with a report
-from either. It is bounded accordingly — `POST` only, `application/csp-report`
-or `application/reports+json` and nothing a form can send, a 64 KiB body, the
-first 32 reports of a batch, and the per-IP rate limit every route sits behind.
-The log line and the telemetry row come from two hub-wide budgets: 30 at once
-and 60 a minute for a signed-in browser's reports, and for every report on a
-hub that asks for no credential; 10 at once and one a minute for the rest — the
-glasses page's, a static-token dashboard's, a sign-in error page's, anyone's.
-Anonymous senders therefore cannot fill the log, turn over the telemetry table,
-which keeps its newest 50,000 rows, or crowd out a signed-in user's reports.
-The counter counts every report, as reported: anyone who can reach the hub can
-send one, so a rate is a reason to read the log lines' `client_ip` and `actor`,
-not proof on its own.
+The endpoint takes no credential and is served before authentication. The
+glasses page's credential is a header its script adds, and the sign-in
+documents are for someone not yet signed in, so a browser has no credential to
+send with a report from either. The endpoint is limited accordingly: `POST`
+only, `application/csp-report` or `application/reports+json` and nothing a form
+can send, a 64 KiB body, the first 32 reports of a batch, and the per-IP rate
+limit that applies to every route. Log lines and telemetry rows come from two
+hub-wide budgets. One allows 30 at once and 60 a minute, for a signed-in
+browser's reports and for every report on a hub that requires no credential.
+The other allows 10 at once and one a minute for everything else (the glasses
+page's, a static-token dashboard's, a sign-in error page's, anyone's). So
+anonymous senders can't fill the log, push older rows out of the telemetry table
+(which keeps its newest 50,000 rows), or crowd out a signed-in user's reports.
+The counter counts every report, as reported. Anyone who can reach the hub can
+send one, so treat a rising rate as a reason to read the log lines' `client_ip`
+and `actor`, not as proof on its own.
 
-A violation on the dashboard is a control the dispatcher does not route — a
-button that does nothing — or markup somebody injected that the policy stopped.
-Either is a defect to fix; alert on any rate.
+A violation on the dashboard means either a control the dispatcher doesn't route
+(a button that does nothing) or injected markup that the policy stopped. Both
+are defects to fix, so alert on any rate.
 
-`report-to` is deliberately not in the policy. A browser that knows it ignores
+The policy doesn't use `report-to`. A browser that supports it ignores
 `report-uri` when both are present, and delivers through the Reporting API in
-batches, later, and only to an endpoint it considers trustworthy — a hub
-reached over plain HTTP on a LAN address would get nothing. Measured on Chrome
-151, `report-uri` arrived at once and `report-to` not at all in ninety seconds.
+batches, later, and only to an endpoint it considers trustworthy, so a hub
+reached over plain HTTP on a LAN address would get nothing. In a test with
+Chrome 151, `report-uri` reports arrived at once, and `report-to` reports didn't
+arrive at all within ninety seconds.
 
 #### Two dashboards in one directory
 
 A hub reads `.cloop/config.yaml` from its working directory. When two hubs share
-that directory — a stable dashboard beside a bleeding-edge one, say — everything
-in that file is said to both of them, including the settings that can only be
-true of one:
+that directory (for example a stable dashboard and a development one), both read
+everything in that file, including settings that can only apply to one of
+them:
 
 ```ini
 # /etc/systemd/system/cloop-ui.service
@@ -3075,14 +3087,14 @@ ExecStart=/usr/local/bin/cloop ui --port 8080          # reachable at :1234
 ExecStart=/usr/local/bin/cloop-latest ui --port 8081   # reachable at :8888
 ```
 
-`ui.oidc.redirect_url` names one origin. Configure SSO for the second hub in the
-shared file and the first one starts authenticating people into a callback it
-does not serve — an endless login loop, or, on a binary predating the
-public-client support in `ui.oidc`, a refusal to start at all.
+`ui.oidc.redirect_url` names one origin. If you configure SSO for the second hub
+in the shared file, the first one starts sending people to a callback it doesn't
+serve. The result is an endless sign-in loop or, on a binary older than the
+public-client support in `ui.oidc`, a hub that refuses to start.
 
-So `cloop ui --port N` reads **`.cloop/config.ui-N.yaml`** after `config.yaml`
-and merges it over the top. The listen port is the key because it already
-distinguishes the two hubs. When an overlay applies, startup names it:
+So `cloop ui --port N` reads `.cloop/config.ui-N.yaml` after `config.yaml` and
+merges it on top. The file is named after the listen port because the port
+already distinguishes the two hubs. When an overlay applies, startup names it:
 
 ```
 Instance config: /srv/app/.cloop/config.ui-8081.yaml merged over /srv/app/.cloop/config.yaml
@@ -3100,25 +3112,24 @@ ui:
     admin_emails: [ops@example.com]
 ```
 
-- **Merge is per key.** A key present in the overlay replaces the value under
-  it; a key absent leaves the project's value alone. Sequences replace rather
-  than append — the `scopes` list above means those scopes, not those plus
-  whatever `config.yaml` listed.
-- **Bounds still apply.** Overlay values go through the same clamping as
-  `config.yaml`, so a limit cannot be escaped by writing it one file over.
-- **A parse error is fatal**, for the same reason it is in `config.yaml`: the
-  file decides whether anyone has to log in.
-- **Only `cloop ui` reads it.** Put settings that describe *this hub* in it:
-  the hub-scope keys below. Leave API keys, budgets, the provider and the model
-  in `config.yaml`, where every other command reads them. `cloop run` never
-  reads an overlay, so a provider written there would describe a run that
-  never happens.
-- **The Settings panel follows the hub.** Once an overlay exists, the panels
-  that save hub settings (`PUT /api/config/oidc`, `/api/config/telemetry`,
-  `/api/ci/config` and `/api/config/stt`) write the keys they edit *into the
-  overlay*. They keep the rest of that file and its comments, and leave
-  `config.yaml` byte for byte as it was. Without an overlay they write
-  `config.yaml` as before.
+- **Merging is per key.** A key in the overlay replaces the value from
+  `config.yaml`; a key missing from the overlay leaves the project's value
+  unchanged. Lists replace instead of appending: a `scopes` list in the overlay
+  means those scopes only, not those plus whatever `config.yaml` lists.
+- **Limits still apply.** Overlay values are clamped like `config.yaml` values,
+  so moving a setting to the overlay doesn't get around a limit.
+- **A parse error is fatal**, as it is in `config.yaml`, because the file
+  decides whether anyone has to sign in.
+- **Only `cloop ui` reads it.** Put settings that describe this hub in it: the
+  hub-scope keys below. Leave API keys, budgets, the provider and the model in
+  `config.yaml`, where every other command reads them. `cloop run` never reads
+  an overlay, so a provider set there would have no effect on any run.
+- **The Settings panel writes to the overlay.** Once an overlay exists, the
+  panels that save hub settings (`PUT /api/config/oidc`,
+  `/api/config/telemetry`, `/api/ci/config` and `/api/config/stt`) write the
+  keys they edit into the overlay. They keep the rest of that file and its
+  comments, and leave `config.yaml` unchanged. Without an overlay they write
+  `config.yaml`.
 - Give it mode `0600`: it can hold a client secret, and `cloop ui` warns if it
   is readable by anyone else.
 
@@ -3126,8 +3137,8 @@ ui:
 
 | Key | What the hub does with it |
 | --- | --- |
-| `executors.allow_host_process` | Whether a harness may run on this host at all. `false` in the overlay puts this hub in strict mode; `true` there relaxes a shared `config.yaml` that says `false`, for this hub alone. |
-| `executors.min_agent_build`, `executors.limits`, `executors.isolation_evidence`, `executors.image_provenance` | The oldest agent build the hub will place work on, the fleet resource ceiling, whether an executor whose isolation claim was never verified is refused, and whether one of cloop's own images whose signature was not verified is. As with `allow_host_process`, a value the overlay states replaces `config.yaml`'s. Once installed, nothing the process reads later can loosen any of them. |
+| `executors.allow_host_process` | Whether a harness may run on this host at all. `false` in the overlay puts this hub in strict mode; `true` there relaxes a shared `config.yaml` that says `false`, for this hub only. |
+| `executors.min_agent_build`, `executors.limits`, `executors.isolation_evidence`, `executors.image_provenance` | The oldest agent build the hub will place work on, the fleet resource ceiling, whether an executor whose isolation claim was never verified is refused, and whether one of cloop's own images with an unverified signature is refused. As with `allow_host_process`, a value set in the overlay replaces the one in `config.yaml`. Once applied, nothing the process reads later can loosen any of them. |
 | `executors.container`, `executors.kubernetes`, `executors.orphan_sweep_interval_minutes` | Which isolating drivers the hub registers at startup, and how often it sweeps their orphans. |
 | `executors.git_proxy`, `executors.kube_guard` | The git interception proxy and the Kubernetes access monitor, started at startup. |
 | `executors.egress` | The egress proxy, bound at startup. In a cluster each member binds its own, so `listen_addr` belongs here when two members share a host. |
@@ -3150,22 +3161,23 @@ the egress proxy, the executor ratchets) take effect at the next restart,
 whichever file they are in. The rest are read on each use.
 
 `cloop hub doctor --port N` diagnoses the hub on port `N` with its overlay
-merged. Without `--port` it diagnoses the hub a bare `cloop ui` starts — port
-8080, with `config.ui-8080.yaml` if there is one — and `--port 0` reads
-`config.yaml` alone. It names any overlay it did not merge.
+merged. Without `--port`, it diagnoses the hub that a plain `cloop ui` starts
+(port 8080, with `config.ui-8080.yaml` if there is one), and `--port 0` reads
+`config.yaml` alone. It lists any overlay it didn't merge.
 
-It is a separate file rather than a port-keyed section of `config.yaml` because
-of what an older binary sharing the directory does with a key it does not know:
-not ignore it, but drop it, the next time anything calls `Save()`. A block whose
-job is to require a login must not be deletable that way. Nothing opens a
-filename it has never heard of.
+The overlay is a separate file, not a port-keyed section of `config.yaml`,
+because an older binary sharing the directory doesn't ignore a key it doesn't
+know: it drops it the next time anything calls `Save()`. A block that makes
+sign-in required must not be deleted that way, and no binary opens a file name
+it doesn't know about.
 
 #### Several hubs, one control plane
 
 Hubs that share a directory are members of one
 [hub cluster](../architecture/hub-cluster.md): they serve the same state, forward
-to each other what only one of them can answer, and elect one leader. `ui.cluster`
-says how a member is reached and whether it may have company:
+to each other the requests only one of them can answer, and elect one leader.
+`ui.cluster` says how a member is reached and whether other members are
+allowed:
 
 ```yaml
 ui:
@@ -3177,25 +3189,25 @@ ui:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `advertise_url` | `http(s)://127.0.0.1:<port>` | Where the other members reach this one. Per process: set it in the instance overlay, or use `--advertise-url`, `CLOOP_CLUSTER_ADVERTISE_URL` or `CLOOP_CLUSTER_ADVERTISE_HOST` (a host only — cloop adds the scheme, brackets an IPv6 address and appends its port), which take precedence in that order. A bare origin: no path, query or credentials. |
-| `peer_server_name` | host of `ui.external_url` | The name an `https://` peer's certificate is verified against when it is advertised by IP. |
-| `peer_ca_file` | — | PEM bundle trusted for peers' certificates, on top of the system roots and this hub's own `ui.tls` certificate. |
-| `exclusive` | `false` | Take the control plane alone, as every hub did before clustering: refuse to start while another hub serves it, and make any other refuse while this one does. |
+| `advertise_url` | `http(s)://127.0.0.1:<port>` | Where the other members reach this one. Set it per process: in the instance overlay, or with `--advertise-url`, `CLOOP_CLUSTER_ADVERTISE_URL` or `CLOOP_CLUSTER_ADVERTISE_HOST` (a host only; cloop adds the scheme, brackets an IPv6 address and appends its port), which take precedence in that order. A bare origin: no path, query or credentials. |
+| `peer_server_name` | host of `ui.external_url` | The name an `https://` peer's certificate is verified against when the peer is advertised by IP address. |
+| `peer_ca_file` | — | PEM bundle trusted for peers' certificates, in addition to the system roots and this hub's own `ui.tls` certificate. |
+| `exclusive` | `false` | Use the control plane alone: refuse to start while another hub serves it, and make any other hub refuse to start while this one does. |
 
-On one machine the defaults are right and nothing needs setting. Forwarded
-requests carry the caller's credentials, so members that reach each other over
-a network others can observe should advertise `https://` URLs — see
+On one machine the defaults work and nothing needs setting. Forwarded requests
+carry the caller's credentials, so members that reach each other over a network
+others can observe should advertise `https://` URLs; see
 [the peer channel](../architecture/hub-cluster.md#the-peer-channel).
 
 #### Front-end telemetry
 
-The dashboard and the display-glasses page record a diagnostic trail — the
-gestures they received, the views they opened, the requests they issued and any
-errors — and post it to the hub, where `cloop hub telemetry` and the Telemetry
-tab read it back. It never leaves the deployment.
+The dashboard and the display-glasses page can record a diagnostic trail (the
+gestures they received, the views they opened, the requests they sent and any
+errors) and post it to the hub, where `cloop hub telemetry` and the Telemetry
+tab show it. It never leaves the deployment.
 
-**Collection is off by default.** Nothing is submitted, and each front end asks
-the hub before it sends anything at all.
+**Collection is off by default.** Nothing is sent, and each front end asks the
+hub before it sends anything.
 
 ```yaml
 ui:
@@ -3206,49 +3218,47 @@ ui:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `enabled` | `false` | The master switch. While off, both ingest routes answer `404` rather than silently discarding, so the setting is verifiable — and the front ends do not post in the first place. |
-| `sources` | all | Restricts collection to the named front ends: `dashboard`, `glasses`. An empty or absent list means every one of them. |
+| `enabled` | `false` | The main switch. While it is off, both ingest routes answer `404` instead of discarding data without notice, so you can verify the setting, and the front ends don't post anything. |
+| `sources` | all | Restricts collection to the named front ends: `dashboard`, `glasses`. An empty or absent list means all of them. |
 
-Off-by-default is the deliberate part. A trail carries the URLs somebody
-visited, the views they opened, their user agent and their address; collecting
-it is a decision about other people's data, and a deployment that has never
-heard of the setting has not made it.
+It is off by default because a trail contains the URLs someone visited, the
+views they opened, their user agent and their address, and collecting that is a
+decision each deployment should make for itself.
 
-Switch it on in **Settings → Telemetry** in the dashboard rather than here —
-it takes effect for the next page load, needs no restart, and leaves a
-`telemetry.config.updated` audit row naming who turned it on. Editing this block
-by hand does the same thing. It describes the hub, so where two hubs share a
-directory it belongs in that hub's
-[`.cloop/config.ui-<port>.yaml`](#two-dashboards-in-one-directory), and that is
+Turn it on in **Settings → Telemetry** in the dashboard. It takes effect on the
+next page load, needs no restart, and leaves a `telemetry.config.updated` audit
+row naming who turned it on. You can also edit this block by hand. The setting
+describes the hub, so where two hubs share a directory it belongs in that hub's
+[`.cloop/config.ui-<port>.yaml`](#two-dashboards-in-one-directory), which is
 where the panel saves it once the file exists.
 
-`sources: [glasses]` is the posture worth knowing about: the display-glasses
-page has no console and no network inspector, so it is the front end that cannot
-be debugged any other way, while the dashboard is the one that produces the bulk
-of the volume and holds the bulk of the privacy cost.
+`sources: [glasses]` is a useful setting: the display-glasses page has no
+console and no network inspector, so it can't be debugged any other way, while
+the dashboard produces most of the volume and most of the privacy cost.
 
-While on, credentials are scrubbed before storage and the table trims itself at
-50,000 rows. Turning collection off stops new events and deletes none — remove
-what was already collected with `cloop hub telemetry prune`. See
+While collection is on, credentials are scrubbed before storage and the table
+keeps at most 50,000 rows. Turning collection off stops new events but deletes
+none; remove what was already collected with `cloop hub telemetry prune`. See
 [front-end telemetry](../operations/telemetry.md).
 
 #### Resuming a capped run
 
-A run stopped by a Claude Code subscription cap records *when* the window it hit
-reopens, because the OAuth usage API reports each window's reset. That covers
-both kinds of cap: a configured `claudecode.max_*_pct`, and a window used up
-entirely while `budget.block_extra_usage` (on by default) keeps the run from
-spilling into extra usage. A window that reopens within 90 minutes is waited out
-by the run itself, which then carries on. A later one pauses the run, shown as
-*Paused: 5-hour window exhausted, resumes 23:30* in the dashboard. The hub sweeps
-every five minutes and restarts such runs once that instant has passed.
+A run stopped by a Claude Code subscription cap records when the usage window it
+hit reopens, because the OAuth usage API reports each window's reset time. This
+covers both kinds of cap: a configured `claudecode.max_*_pct`, and a window used
+up entirely while `budget.block_extra_usage` (on by default) keeps the run from
+going into extra usage. If the window reopens within 90 minutes, the run waits
+and then continues. Otherwise the run pauses, shown as *Paused: 5-hour window
+exhausted, resumes 23:30* in the dashboard. The hub checks every five minutes
+and restarts such runs once the reset time has passed.
 
-A task the harness cuts off at the limit, ending on *"You've hit your session
-limit · resets 11:30pm (UTC)"*, goes back to pending rather than being recorded
-as done. The run retries it after the reset the message names, read in the time
-zone the message gives. An auto-evolve round is held the same way, both before
-it starts and when the provider answers it with a limit message, so a plan that
-drains as its window runs out pauses rather than ending as complete.
+A task that the harness cuts off at the limit, ending with *"You've hit your
+session limit · resets 11:30pm (UTC)"*, goes back to pending instead of being
+recorded as done. The run retries it after the reset time in the message, read
+in the time zone the message gives. An auto-evolve round is held the same way,
+both before it starts and when the provider answers it with a limit message, so
+a plan that runs out of tasks as its window runs out pauses instead of
+ending as complete.
 
 ```yaml
 ui:
@@ -3257,53 +3267,53 @@ ui:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `auto_resume_on_cap_reset` | `true` | When false, a cap-paused run stays paused until someone presses Run. The pause reason and its `resumes_at` are still recorded either way, so the dashboard says when the window reopened regardless. |
+| `auto_resume_on_cap_reset` | `true` | When false, a run paused by a cap stays paused until someone presses **Run**. The pause reason and its `resumes_at` are recorded either way, so the dashboard still shows when the window reopened. |
 
-Only a usage cap is ever resumed this way, and only once its reset has passed. A
-run paused by a declined approval, a spent budget, an operator's Stop or a
-rejected credential is never restarted on a timer — each of those is a decision
-that a resume would override, and none of them ends by itself. A cap whose reset
-the API did not report is also left alone: without a reset there is nothing to
-say the wall has moved.
+Only a usage cap is resumed this way, and only once its reset time has passed.
+A run paused by a declined approval, a spent budget, an operator's Stop or a
+rejected credential is never restarted on a timer, because each of those is a
+decision a resume would override, and none of them ends by itself. A cap whose
+reset time the API didn't report is also left alone, because nothing says the
+limit has lifted.
 
-Builds from before Task 20440 recorded the extra-usage hold as a spent budget
-with no reset: *"Claude Code 5-hour window exhausted (100%) — pausing to avoid
+Older builds recorded the extra-usage hold as a spent budget with no reset
+time: *"Claude Code 5-hour window exhausted (100%) — pausing to avoid
 extra usage …"*. A run keeps the build it started with, and an edge device runs
-its own, so such pauses still appear after the hub is upgraded. The hub
-recognises that wording and restarts the run once the usage API shows no window
-exhausted. Every other budget pause stays put.
+its own build, so such pauses can still appear after the hub is upgraded. The
+hub recognises that wording and restarts the run once the usage API shows no
+exhausted window. Every other budget pause stays paused.
 
-**Whose account a resume runs on.** On a hub with single sign-on a resumed run
-acts for the person who started the run it resumes — recorded in the hub's own
-database when that run was dispatched, or, for a run older than the record, the
-project's owner — and runs on that person's Claude account: on an executor that
-shares the hub's filesystem, their own Claude home with the hub's ambient token
-cleared, exactly as when they pressed Run; on an isolating one, the credential
-the project is granted for them. The older build's pause above is judged by that
-person's own usage windows, not the hub's. A resume never creates a Claude home
-and never falls back to the hub's own login: when the person's home is gone
-(they were offboarded, or never signed in here), the hub denies them, or nobody
-can be named — a run started from a shell with `cloop run` is not the hub's to
-name anyone for — the run stays paused as *starter's Claude account
-unavailable*, naming them, and the project's Event History says why. Press Run
-to start it as yourself. A run started by a token that acts for no one — the static bearer
-token, a service token — ran on the hub's own login and resumes on it. A
-failover's replacement follows the same rules. See [resumed and failed-over
-runs](../security/claude-code-identity.md#resumed-and-failed-over-runs).
+**Whose account a resume runs on.** On a hub with single sign-on, a resumed run
+acts for the person who started the original run (recorded in the hub's own
+database when that run was dispatched, or the project's owner for a run older
+than that record), and runs on that person's Claude account. On an executor that
+shares the hub's filesystem, it uses their own Claude home with the hub's
+ambient token cleared, as when they pressed Run. On an isolating executor, it
+uses the credential the project is granted for them. The older builds' pauses
+described above are judged by that person's own usage windows, not the hub's. A
+resume never creates a Claude home and never falls back to the hub's own login.
+If the person's home is gone (they were offboarded, or never signed in here),
+the hub denies them, or nobody can be named (the hub can't name anyone for a run
+started from a shell with `cloop run`), the run stays paused as *starter's
+Claude account unavailable*, naming them, and the project's Event History says
+why. Press **Run** to start it as yourself. A run started by a token that acts
+for no one (the static bearer token, a service token) ran on the hub's own login
+and resumes on it. A failover's replacement run follows the same rules. See
+[resumed and failed-over runs](../security/claude-code-identity.md#resumed-and-failed-over-runs).
 
-Default-on is deliberate. The alternative is what it replaced: an unattended
-fleet parked for the rest of a weekly window over a condition that had already
-cleared, and whose exact clearing time the hub already knew.
+It is on by default because otherwise an unattended fleet would stay paused for
+the rest of a weekly window over a limit that had already lifted, at a time the
+hub already knew.
 
 #### Hub health cadence
 
-Each hub member runs `cloop hub doctor`'s checks on itself for Settings → **Hub
-health** and its header indicator, and pushes each report's summary to the
-dashboards of the administrators connected to it (Task 20446). It makes a report
-on a cadence, and sooner when one of its configuration files changes, when an
-executor, a hub CA rotation step or a sealing key changes, and when someone
-presses **Run the checks again**. Open dashboards never add reports: a page asks
-for the report only when its socket opens.
+Each hub member runs `cloop hub doctor`'s checks on itself for
+**Settings → Hub health** and its header indicator, and pushes a summary of each
+report to the dashboards of the administrators connected to it. It reports at a
+regular interval, and sooner when one of its configuration files changes, when
+an executor, a hub CA rotation step or a sealing key changes, and when someone
+presses **Run the checks again**. Open dashboards don't cause extra reports: a
+page asks for the report only when its socket opens.
 
 ```yaml
 ui:
@@ -3312,19 +3322,18 @@ ui:
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `hub_health_interval` | `5m` | How often a member reports on itself when nothing else made it. Shorter shows a certificate nearing expiry or a filling disk sooner, at one doctor run per interval per member. A value that does not parse, or lies outside `[1m, 1h]`, runs at the default, and `config.repaired` says so. |
+| `hub_health_interval` | `5m` | How often a member reports on itself when nothing else triggered a report. A shorter interval shows a certificate nearing expiry or a filling disk sooner, at the cost of one doctor run per interval per member. A value that doesn't parse, or is outside `[1m, 1h]`, runs at the default, and `config.repaired` says so. |
 
-Per process: where several hub processes share a directory, a member may set its
-own in its `config.ui-<port>.yaml` overlay. See [Hub health in the
+This is per process: where several hub processes share a directory, a member can
+set its own value in its `config.ui-<port>.yaml` overlay. See [Hub health in the
 dashboard](../operations/runbook.md#hub-health-in-the-dashboard).
 
 ### TLS
 
-**Serving.** `cloop ui` and `cloop serve` can terminate TLS themselves, or sit
-behind a proxy that does. Both are supported; a *half*-configuration is not —
-a certificate without a key (or the reverse) fails at startup rather than
-falling back to plaintext, because a server that quietly serves HTTP after
-being asked for HTTPS is discovered from a packet capture, if at all.
+**Serving.** `cloop ui` and `cloop serve` can terminate TLS themselves, or run
+behind a proxy that does. A partial configuration (a certificate without a key,
+or the reverse) fails at startup instead of falling back to plaintext, because
+a server that serves HTTP after being asked for HTTPS might never be noticed.
 
 ```yaml
 ui:
@@ -3339,90 +3348,91 @@ ui:
     min_version: "1.2"                      # or "1.3"; 1.0/1.1 are rejected
 ```
 
-Or per-invocation: `cloop ui --tls-cert <pem> --tls-key <pem>` (the flags
-override the config block, as a pair). Only AEAD cipher suites with forward
-secrecy are offered — no CBC, no static RSA. For local development,
-`cloop hub tls-init` generates a self-signed pair (key written 0600 through
-`pkg/atomicfile`, never briefly world-readable) and prints the pin to give
-devices.
+Or per invocation: `cloop ui --tls-cert <pem> --tls-key <pem>` (the two flags
+together override the config block). Only AEAD cipher suites with forward
+secrecy are offered: no CBC and no static RSA. For local development,
+`cloop hub tls-init` generates a self-signed pair (the key is written with mode
+0600 through `pkg/atomicfile`, so it is never readable by others, even briefly)
+and prints the pin to give to devices.
 
-**Proxies: `ui.trusted_proxies`.** Behind a reverse proxy the hub cannot see
-the browser's scheme, or — when the proxy rewrites `Host` — the name it used,
-or the client's address. The proxy says so in `X-Forwarded-Proto`,
-`X-Forwarded-Host` and `X-Forwarded-For`, and any client can send those headers
-too. So they are believed only from a peer on **loopback** (a proxy on this
-machine, always trusted) or inside a prefix of **`ui.trusted_proxies`** (CIDR
+**Proxies: `ui.trusted_proxies`.** Behind a reverse proxy, the hub can't see
+the browser's scheme, the host name it used (when the proxy rewrites `Host`), or
+the client's address. The proxy passes them in `X-Forwarded-Proto`,
+`X-Forwarded-Host` and `X-Forwarded-For`, but any client can send those headers
+too. So the hub trusts them only from a peer on loopback (a proxy on this
+machine, always trusted) or inside a prefix of `ui.trusted_proxies` (CIDR
 prefixes or addresses; one covering every address, `0.0.0.0/0` or `::/0`, is
-refused at startup), and ignored from every other peer (Task 20394). Until then
-`X-Forwarded-Proto` was also believed from *any* peer once `ui.external_url` was
-https, and `X-Forwarded-For` was read from its leftmost entry — which a proxy
-that appends (nginx's `$proxy_add_x_forwarded_for`) passes through from the
-client, so anybody could pick a fresh address for the rate limiter and the
-sign-in lockout. `X-Forwarded-For` is now walked from the right, past trusted
-proxies, to the first address that is not one.
+refused at startup), and ignores them from every other peer. Older builds also
+trusted `X-Forwarded-Proto` from any peer once `ui.external_url` was https, and
+read `X-Forwarded-For` from its leftmost entry, which a proxy that appends
+(nginx's `$proxy_add_x_forwarded_for`) passes through from the client, so anyone
+could pick a new address to get around the rate limiter and the sign-in lockout.
+`X-Forwarded-For` is now read from the right, skipping trusted proxies, up to
+the first address that isn't one.
 
-A TLS terminator on another host — an Ingress controller, a load balancer —
-belongs in `trusted_proxies`. Without it the hub treats that proxy's requests as
-plaintext: it refuses `/install.sh`, offers no one-line installer at enrollment
-and builds `ws://` agent URLs, and a browser without `Sec-Fetch-Site` is judged
-against an `http://` origin (set `external_url` and it is still matched). The
-same list applies to `cloop serve`. Members of a hub cluster need no entry: a
-request another member forwards is signed, and carries the browser's scheme and
-host with it.
+Add a TLS terminator on another host (an Ingress controller, a load balancer) to
+`trusted_proxies`. Otherwise the hub treats that proxy's requests as plaintext:
+it refuses `/install.sh`, offers no one-line installer at enrollment, builds
+`ws://` agent URLs, and checks a browser without `Sec-Fetch-Site` against an
+`http://` origin (with `external_url` set, it still matches). The same list
+applies to `cloop serve`. Members of a hub cluster need no entry, because a
+request forwarded by another member is signed and carries the browser's scheme
+and host with it.
 
-**HSTS and cookies.** Responses delivered over TLS — the hub's own listener, or
-a trusted proxy's `X-Forwarded-Proto: https` — carry
-`Strict-Transport-Security: max-age=31536000; includeSubDomains`, and so does
-every response of a hub whose public URL — `ui.external_url`, else
-`ui.oidc.redirect_url` — is https: the operator has declared the deployment
-HTTPS, and a browser ignores the header on a response that did arrive in
-plaintext. The OIDC session cookie becomes `Secure` +
-`SameSite=Strict` under `cookie_secure: auto` when the request arrived over TLS
-by the same rule, or when `ui.oidc.redirect_url` is https — the cookie is set on
-the response to that URL, so it reached the browser over TLS whatever a proxy
-said. Neither is applied on plaintext otherwise: HSTS on `http://localhost`
-would pin a developer's browser to HTTPS for a year and break every other local
-project on that hostname.
+**HSTS and cookies.** Responses delivered over TLS (by the hub's own listener,
+or with a trusted proxy's `X-Forwarded-Proto: https`) carry
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`. So does every
+response from a hub whose public URL (`ui.external_url`, otherwise
+`ui.oidc.redirect_url`) is https: the operator has declared the deployment
+HTTPS, and a browser ignores the header on a response that arrived over
+plaintext. Under `cookie_secure: auto`, the OIDC session cookie becomes
+`Secure` + `SameSite=Strict` when the request arrived over TLS by the same rule,
+or when `ui.oidc.redirect_url` is https, because the cookie is set on the
+response to that URL and so reached the browser over TLS whatever a proxy said.
+Otherwise neither is applied on plaintext: HSTS on `http://localhost` would
+force a developer's browser to use HTTPS there for a year and break every other
+local project on that host name.
 
 **The hub's own origins.** Several checks below ask whether a browser's request
-came from one of the hub's own pages. The hub's own origins are, matched
-exactly — scheme, host and port — the origin the request was addressed to (its
-scheme and `Host`, or a trusted proxy's `X-Forwarded-Proto` and
-`X-Forwarded-Host`), `ui.external_url`, the origin of `ui.oidc.redirect_url`,
-and `ui.allowed_origins` (`ui.allowed_ws_origins` too, for the dashboard socket).
-An entry is a full origin (`https://ops.example.com`, `http://hub.lan:8081`) or
-`host[:port]`, which means **https** — plaintext has to be asked for by name,
-because an `http` origin is one anybody on the network path can serve. An entry
-that does not parse matches nothing and is named in a warning at startup.
-Loopback is not special: a page on `http://localhost:3000` is another origin
-than a hub on `:8080`, and so is another port of the hub's own host name.
+came from one of the hub's own pages. The hub's own origins, matched exactly by
+scheme, host and port, are: the origin the request was addressed to (its scheme
+and `Host`, or a trusted proxy's `X-Forwarded-Proto` and `X-Forwarded-Host`),
+`ui.external_url`, the origin of `ui.oidc.redirect_url`, and
+`ui.allowed_origins` (plus `ui.allowed_ws_origins` for the dashboard socket). An
+entry is a full origin (`https://ops.example.com`, `http://hub.lan:8081`) or
+`host[:port]`, which means https. An `http` origin must be written out in full,
+because anyone on the network path can serve one. An entry that doesn't parse
+matches nothing and is named in a warning at startup. Loopback isn't treated
+specially: a page on `http://localhost:3000` is a different origin from a hub on
+`:8080`, and so is another port on the hub's own host name.
 
-**State-changing requests (Task 20394).** A `POST`, `PUT`, `PATCH` or `DELETE`
-— any method but `GET`, `HEAD` and `OPTIONS` — is refused with
-**403 `CROSS_ORIGIN`** unless it carries an `Authorization: Bearer` credential
-(API tokens, the static token, the CI relay, executor agents: a page elsewhere
-can attach one only after a CORS preflight, and the hub grants none), or:
+**State-changing requests.** A `POST`, `PUT`, `PATCH` or `DELETE` (any method
+except `GET`, `HEAD` and `OPTIONS`) is refused with 403 `CROSS_ORIGIN` unless it
+carries an `Authorization: Bearer` credential (API tokens, the static token, the
+CI relay, executor agents; a page on another origin can attach one only after a
+CORS preflight, and the hub allows none), or:
 
-- the browser's `Sec-Fetch-Site` — which every current browser sends and no page
-  can set — is `same-origin` or `none`; `same-site` (another port of the hub's
-  host, a sibling subdomain) and `cross-site` are refused whatever else the
+- the browser's `Sec-Fetch-Site` (which every current browser sends and no page
+  can set) is `same-origin` or `none`. `same-site` (another port on the hub's
+  host, a sibling subdomain) and `cross-site` are refused, whatever else the
   request says;
 - without `Sec-Fetch-Site`, its `Origin` is absent (not a browser) or exactly one
   of the hub's own origins.
 
-This holds on every hub, with or without sign-in — a hub with no credential has
-nothing for SameSite to withhold, and an authenticating proxy's own cookie or
-Basic credential rides along like a session cookie does. Its body, if it has a
-`Content-Type`, must be `application/json` (`multipart/form-data` on the three
-upload routes, `/api/voice`, `/api/transcribe` and `/api/glasses/transcribe`), or
-it is refused with **415 `UNSUPPORTED_MEDIA_TYPE`**: a form or `fetch(…,
-{mode: 'no-cors'})` on another origin can send only form data and `text/plain`
-without asking first. Every handler reads its JSON body through one decoder
-(`pkg/jsonbody`) that refuses the same, and a body with no `Content-Type`. The
-Anthropic relay under `/api/ci/anthropic/` passes bodies through unread and is
-exempt from the media type only. No route accepts a cross-site write; the one
-that would need to — an OIDC callback with `response_mode=form_post` — does not
-exist, because the hub's callback is a `GET`.
+This applies on every hub, with or without sign-in: a hub with no credential has
+nothing for SameSite to protect, and an authenticating proxy's own cookie or
+Basic credential is sent along like a session cookie. The request body, if
+it has a `Content-Type`, must be `application/json` (`multipart/form-data` on
+the three upload routes, `/api/voice`, `/api/transcribe` and
+`/api/glasses/transcribe`), or the request is refused with 415
+`UNSUPPORTED_MEDIA_TYPE`. Without a preflight, a form or a `fetch(…,
+{mode: 'no-cors'})` on another origin can send only form data and `text/plain`.
+Every handler reads its JSON body through one decoder (`pkg/jsonbody`) that
+refuses the same, and a body with no `Content-Type`. The Anthropic relay under
+`/api/ci/anthropic/` passes bodies through unread, and is exempt from the media
+type check only. No route accepts a cross-site write. The only one that would
+need to, an OIDC callback with `response_mode=form_post`, doesn't exist, because
+the hub's callback is a `GET`.
 
 A refusal names `ui.allowed_origins` and the origin the hub thinks the request
 was addressed to, is counted in `cloop_cross_origin_refusals_total` and is
@@ -3431,53 +3441,53 @@ CORS headers to any origin.
 
 **Host names a hub without sign-in answers to: `ui.allowed_hosts`.** On a hub
 with neither SSO nor a static token, a request whose `Host` (or trusted
-`X-Forwarded-Host`) is not one the hub answers to gets **421
-`MISDIRECTED_REQUEST`**. DNS rebinding points a name the attacker controls at
-127.0.0.1, which makes a page on that name same-origin with a loopback hub —
-every check above then truthfully says "same-origin" — so the hub refuses the
-name itself. It answers to `localhost` and `*.localhost`, any IP address (a
-browser sends an IP-literal `Host` only to a page whose own origin is that
-address), `ui.external_url`'s host, the advertise hosts of its cluster members,
-and the entries of `ui.allowed_hosts` (a host name, any port, or `host:port`).
-`/healthz` and `/readyz` answer any name. A hub with sign-in does not check:
-a rebound name carries none of its credentials. Refusals are counted
-(`reason="unknown_host"`) and audited as `request.host_refused`.
+`X-Forwarded-Host`) is not one the hub answers to gets 421
+`MISDIRECTED_REQUEST`. DNS rebinding points a name the attacker controls at
+127.0.0.1, which makes a page on that name same-origin with a loopback hub, so
+every check above would correctly report "same-origin". The hub therefore
+refuses the name itself. It answers to `localhost` and `*.localhost`, any IP
+address (a browser sends an IP-literal `Host` only to a page whose own origin is
+that address), `ui.external_url`'s host, the advertise hosts of its cluster
+members, and the entries of `ui.allowed_hosts` (a host name, any port, or
+`host:port`). `/healthz` and `/readyz` answer any name. A hub with sign-in
+doesn't check, because a rebound name carries none of its credentials. Refusals
+are counted (`reason="unknown_host"`) and audited as `request.host_refused`.
 
-**WebSocket origins.** Both the dashboard socket and the executor-agent
-endpoint accept an upgrade only from an `Origin` that is exactly one of the
-hub's own (above). A request with *no* `Origin` is allowed, because that is what
-every non-browser agent sends and a browser cannot suppress the header. A
-cross-origin upgrade gets 403 with the reason, before any token is examined — so
-it cannot burn a single-use enrollment token on the way to being refused.
+**WebSocket origins.** Both the dashboard socket and the executor-agent endpoint
+accept an upgrade only from an `Origin` that is exactly one of the hub's own
+(see above). A request with no `Origin` is allowed, because every non-browser
+agent sends none and a browser can't leave the header out. A cross-origin
+upgrade gets 403 with the reason before any token is examined, so it can't use
+up a single-use enrollment token on the way to being refused.
 
-The two allowlists differ in blast radius and are deliberately not merged:
-`allowed_origins` is deployment-wide and reaches `/api/executors/connect`,
-where an entry can open an agent connection; `allowed_ws_origins` is scoped to
-the dashboard socket only. Prefer setting `external_url` — it covers the
-reverse-proxy case without either list. Until Task 20394 both endpoints also
-admitted every loopback origin and every port of the hub's host name.
+The two allowlists differ in what they expose and are kept separate:
+`allowed_origins` is deployment-wide and reaches `/api/executors/connect`, where
+an entry can open an agent connection; `allowed_ws_origins` applies to the
+dashboard socket only. Prefer setting `external_url`, which covers the
+reverse-proxy case without either list. Older builds also admitted every
+loopback origin and every port of the hub's host name on both endpoints.
 
 **Outbound.** All three remote providers (Anthropic, OpenAI, custom
 OpenAI-compatible) and the executor agent validate certificates against the
-system CA pool. There is **no `InsecureSkipVerify` option** in cloop, and
+system CA pool. cloop has no `InsecureSkipVerify` option, and
 `tests/security/transport_test.go` fails the build if one appears on the
-agent's dial path. Reaching a server with a private CA is done by *adding* a
-root (`--ca-file`), not by removing verification.
+agent's dial path. To reach a server with a private CA, add a root
+(`--ca-file`) instead of turning verification off.
 
 For self-hosted models on plain HTTP (Ollama), set `ollama.base_url` to the
-local endpoint. Outbound traffic to Anthropic/OpenAI is always TLS.
+local endpoint. Outbound traffic to Anthropic and OpenAI always uses TLS.
 
 ### Shell hooks and command injection
 
-Pre/post task hooks (`hooks.pre_task`, `hooks.post_task`, etc.) are **user-
-configured shell commands** from `.cloop/config.yaml`. Task context
-(title, status, role) is passed as **environment variables** — never
-interpolated into the hook command string — so task content cannot inject shell
-commands through the hook mechanism.
+Pre- and post-task hooks (`hooks.pre_task`, `hooks.post_task`, etc.) are shell
+commands that users configure in `.cloop/config.yaml`. Task context (title,
+status, role) is passed to them as environment variables and never inserted
+into the hook command string, so task content can't inject shell commands
+through a hook.
 
 ### Dependency security
 
 cloop uses `govulncheck` (golang.org/x/vuln) for dependency audits. The
-`toolchain` directive in `go.mod` pins the minimum Go version to one that
-resolves all known stdlib vulnerabilities.
+`toolchain` directive in `go.mod` pins the minimum Go version to one that fixes
+all known standard library vulnerabilities.
 
