@@ -220,7 +220,7 @@ Examples:
 			fmt.Printf("  Tasks: %d pre-defined tasks loaded (skipping AI decomposition)\n", len(tmpl.Tasks))
 		}
 		fmt.Printf("  Max steps: %d\n", maxSteps)
-		fmt.Printf("  State: %s\n", state.StatePath(workdir))
+		fmt.Printf("  State: %s\n", state.DBPath(workdir))
 		fmt.Printf("  Config: %s\n", config.ConfigPath(workdir))
 
 		prov := initProvider
@@ -238,11 +238,10 @@ Examples:
 		if instructions != "" {
 			fmt.Printf("  Instructions: %s\n", instructions)
 		}
-		fmt.Printf("\nRun 'cloop run' to start.\n")
 		if tmpl != nil {
-			fmt.Printf("Pre-defined tasks loaded from template '%s'. Run 'cloop run' to execute them.\n", tmpl.Name)
+			fmt.Printf("\nPre-defined tasks loaded from template '%s'. Run 'cloop run' to execute them.\n", tmpl.Name)
 		} else {
-			fmt.Printf("Run 'cloop run' to decompose your goal into tasks and execute them.\n")
+			fmt.Printf("\nRun 'cloop run' to decompose your goal into tasks and execute them.\n")
 		}
 		return nil
 	},

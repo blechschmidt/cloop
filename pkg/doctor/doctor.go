@@ -152,17 +152,16 @@ func checkDirStructure(workdir string, add addFn) {
 	}
 }
 
-// checkStateJSON validates .cloop/state.json is well-formed JSON.
+// checkStateJSON validates a legacy .cloop/state.json, if there is one.
+//
+// Project state lives in state.db. A state.json appears only when an older
+// cloop wrote one, or when a project seed is placed in a workspace, and the
+// next load migrates it into state.db. Its absence is the normal case, so it
+// reports nothing: a warning here would never clear.
 func checkStateJSON(workdir string, add addFn) {
 	statePath := filepath.Join(workdir, ".cloop", "state.json")
 	data, err := os.ReadFile(statePath)
 	if os.IsNotExist(err) {
-		add(Result{
-			Name:    ".cloop/state.json",
-			Level:   Warn,
-			Message: "state.json not found — no session has been run yet",
-			Fix:     "Run: cloop run to start a session",
-		})
 		return
 	}
 	if err != nil {

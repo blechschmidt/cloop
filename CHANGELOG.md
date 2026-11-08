@@ -748,6 +748,16 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **`cloop init` prints the database it created, and `cloop doctor` no longer
+  warns about a missing `state.json`.** The banner's `State:` line named
+  `.cloop/state.json`, a file cloop has not written since project state moved
+  into `.cloop/state.db`, and it told you twice to run `cloop run`. Now it names
+  `state.db` and says it once. `cloop doctor` warned "state.json not found — no
+  session has been run yet" on every project, however many runs it had; a
+  missing legacy file is now the normal case and reports nothing, while a
+  `state.json` that is present (an older cloop's, or a project seed waiting to
+  be migrated) is still checked (Task 20476).
+
 - **`cloop serve` records the address it listens on before its port answers.**
   The API server bound its listener, printed its banner and logged, and only
   then recorded the address `BoundAddr` returns; a connection succeeds as soon
