@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/blechschmidt/cloop/cmd"
 	"github.com/blechschmidt/cloop/internal/hometest"
 	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
@@ -18,5 +19,11 @@ func TestMain(m *testing.M) {
 	// A hub this binary runs dispatches people's work into the host sandbox,
 	// whose helper is this binary (Task 20480).
 	hostsandbox.InstallTestHelper()
+	if os.Getenv(asCLIEnv) == "1" {
+		// A child of a test's hub (selfAsCLI), whose environment — HOME
+		// included — is already the test's: act as cloop.
+		cmd.Execute()
+		os.Exit(0)
+	}
 	os.Exit(hometest.Isolate(m))
 }

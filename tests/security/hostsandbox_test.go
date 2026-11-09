@@ -1,4 +1,4 @@
-package cmd
+package security
 
 // People's work on the hub's own host, end to end (Task 20480): a hub with
 // single sign-on in this process dispatches a model call for one person to
@@ -19,15 +19,34 @@ import (
 	"github.com/blechschmidt/cloop/internal/ssohubtest"
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
 	"github.com/blechschmidt/cloop/pkg/hostsandbox"
+	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
-	"gopkg.in/yaml.v3"
 )
 
-// sandboxProbeClaude writes a stand-in `claude` first on PATH that answers
-// every prompt with what it could reach: each probe prints name:ok or
-// name:denied.
-func sandboxProbeClaude(t *testing.T, probes map[string]string) {
+// asCLIEnv makes this test binary act as the cloop CLI (TestMain), for the
+// hub in the test to dispatch its work to.
+const asCLIEnv = "CLOOP_SECURITY_TEST_AS_CLI"
+
+// selfAsCLI writes the wrapper the hub dispatches its work through: this
+// binary, told to act as cloop.
+func selfAsCLI(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "cloop")
+	script := "#!/bin/sh\n" + asCLIEnv + "=1 exec '" + strings.ReplaceAll(exe, "'", `'\''`) + "' \"$@\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// probeClaude writes a stand-in `claude` first on PATH that answers every
+// prompt with what it could reach: each probe prints name:ok or name:denied.
+func probeClaude(t *testing.T, probes map[string]string) {
 	t.Helper()
 	bin := t.TempDir()
 	var script strings.Builder
@@ -43,19 +62,12 @@ func sandboxProbeClaude(t *testing.T, probes map[string]string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// newPersonProject creates a project as who and returns its directory and the
-// index who addresses it by.
-func newPersonProject(t *testing.T, hub *ssohubtest.Hub, browser *http.Client, name string) (string, int) {
+// ownedProject makes a project owned by owner, with one task and the
+// claudecode provider, as the dashboard would have registered it.
+func ownedProject(t *testing.T, hub *ssohubtest.Hub, name, owner string) string {
 	t.Helper()
-	code, raw := hubCall(t, hub, browser, http.MethodPost, "/api/projects/new", map[string]any{"name": name, "goal": "Ship " + name})
-	var out struct {
-		Dir string `json:"dir"`
-		Idx int    `json:"project_idx"`
-	}
-	if err := json.Unmarshal(raw, &out); code != http.StatusOK || err != nil || out.Dir == "" || out.Idx < 0 {
-		t.Fatalf("create %s = %d %s (%v)", name, code, raw, err)
-	}
-	ps, err := state.Load(out.Dir)
+	dir := filepath.Join(hub.Home, "projects", name)
+	ps, err := state.Init(dir, "Ship "+name, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,26 +77,59 @@ func newPersonProject(t *testing.T, hub *ssohubtest.Hub, browser *http.Client, n
 	if err := ps.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(out.Dir, ".cloop", "config.yaml"), []byte("provider: claudecode\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".cloop", "config.yaml"), []byte("provider: claudecode\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return out.Dir, out.Idx
+	if err := multiui.AddPathsOwned([]string{dir}, owner); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// indexOf is the index browser addresses dir by.
+func indexOf(t *testing.T, hub *ssohubtest.Hub, browser *http.Client, dir string) int {
+	t.Helper()
+	code, raw := hub.Call(t, browser, http.MethodGet, "/api/projects", nil)
+	if code != http.StatusOK {
+		t.Fatalf("projects = %d %s", code, raw)
+	}
+	var list []struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil {
+		var wrapped struct {
+			Projects []struct {
+				Path string `json:"path"`
+			} `json:"projects"`
+		}
+		if err := json.Unmarshal(raw, &wrapped); err != nil {
+			t.Fatalf("projects: %v %s", err, raw)
+		}
+		list = wrapped.Projects
+	}
+	for i, p := range list {
+		if p.Path == dir {
+			return i
+		}
+	}
+	t.Fatalf("%s is not among the projects: %s", dir, raw)
+	return -1
 }
 
 func TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles(t *testing.T) {
 	if err := hostsandbox.Available(); err != nil {
 		t.Skipf("no host sandbox on this host: %v", err)
 	}
-	hub := ssohubtest.Start(t, ssohubtest.Options{SelfExe: cliSelfExe(t), AdminEmails: []string{rootEmail}})
+	const alice, bob, root = "alice@example.com", "bob@example.com", "root@example.com"
+	hub := ssohubtest.Start(t, ssohubtest.Options{SelfExe: selfAsCLI(t), AdminEmails: []string{root}})
 	// The hub's root key, in its own environment as a key a unit file sets.
 	t.Setenv("CLOOP_SECRET_KEY", "the-hubs-root-key-0123456789abcdef")
 
-	const alice, bob = "alice@example.com", "bob@example.com"
 	aliceB := hub.SignIn(t, alice, ssohubtest.GroupMaintainers)
-	bobB := hub.SignIn(t, bob, ssohubtest.GroupMaintainers)
-	rootB := hub.SignIn(t, rootEmail, ssohubtest.GroupMaintainers)
-	aliceDir, aliceIdx := newPersonProject(t, hub, aliceB, "alice-app")
-	bobDir, _ := newPersonProject(t, hub, bobB, "bob-app")
+	rootB := hub.SignIn(t, root, ssohubtest.GroupMaintainers)
+	aliceDir := ownedProject(t, hub, "alice-app", alice)
+	bobDir := ownedProject(t, hub, "bob-app", bob)
+	rootDir := ownedProject(t, hub, "root-app", root)
 	if err := os.WriteFile(filepath.Join(bobDir, "secret.txt"), []byte("bob's unreleased code\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +152,7 @@ func TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles(t *testing.T) {
 	}
 	otherTmp.Close()
 	t.Cleanup(func() { os.Remove(otherTmp.Name()) })
-	sandboxProbeClaude(t, map[string]string{
+	probeClaude(t, map[string]string{
 		"own-project":    "cat " + filepath.Join(aliceDir, ".cloop", "config.yaml"),
 		"own-home":       "ls " + aliceHome,
 		"write-project":  "touch " + filepath.Join(aliceDir, "built.txt"),
@@ -122,7 +167,7 @@ func TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles(t *testing.T) {
 
 	revise := func(t *testing.T, b *http.Client, idx int) string {
 		t.Helper()
-		code, raw := hubCall(t, hub, b, http.MethodPost, fmt.Sprintf("/api/tasks/1/revise?project_idx=%d", idx),
+		code, raw := hub.Call(t, b, http.MethodPost, fmt.Sprintf("/api/tasks/1/revise?project_idx=%d", idx),
 			map[string]any{"instruction": "and the indexes", "description": "Move every table."})
 		if code != http.StatusOK || !strings.Contains(string(raw), "probes:") {
 			t.Fatalf("revise = %d %s", code, raw)
@@ -131,7 +176,7 @@ func TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles(t *testing.T) {
 	}
 
 	t.Run("a person's model call is sandboxed", func(t *testing.T) {
-		got := revise(t, aliceB, aliceIdx)
+		got := revise(t, aliceB, indexOf(t, hub, aliceB, aliceDir))
 		for _, want := range []string{
 			"own-project:ok", "own-home:ok", "write-project:ok",
 			"bob-project:denied", "bob-login:denied", "hub-database:denied", "hub-registry:denied",
@@ -144,44 +189,16 @@ func TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles(t *testing.T) {
 	})
 
 	t.Run("an administrator's is sandboxed on a project a sandboxed person writes", func(t *testing.T) {
-		code, raw := hubCall(t, hub, rootB, http.MethodGet, "/api/projects", nil)
-		if code != http.StatusOK {
-			t.Fatalf("projects = %d %s", code, raw)
-		}
-		var list []struct {
-			Path string `json:"path"`
-		}
-		if err := json.Unmarshal(raw, &list); err != nil {
-			var wrapped struct {
-				Projects []struct {
-					Path string `json:"path"`
-				} `json:"projects"`
-			}
-			if err := json.Unmarshal(raw, &wrapped); err != nil {
-				t.Fatalf("projects: %v %s", err, raw)
-			}
-			list = wrapped.Projects
-		}
-		idx := -1
-		for i, p := range list {
-			if p.Path == aliceDir {
-				idx = i
-			}
-		}
-		if idx < 0 {
-			t.Fatalf("the administrator cannot see alice's project: %s", raw)
-		}
 		// alice's agent may have left a hook in her project, which the
-		// administrator's run would otherwise run with the whole host.
-		got := revise(t, rootB, idx)
+		// administrator's call would otherwise run with the whole host.
+		got := revise(t, rootB, indexOf(t, hub, rootB, aliceDir))
 		if !strings.Contains(got, "bob-project:denied") || !strings.Contains(got, "root-key:absent") {
 			t.Errorf("the administrator's call on alice's project under mode auto: %s", got)
 		}
 	})
 
 	t.Run("an administrator's is not on a project only administrators write, and holds no root key", func(t *testing.T) {
-		_, rootIdx := newPersonProject(t, hub, rootB, "root-app")
-		got := revise(t, rootB, rootIdx)
+		got := revise(t, rootB, indexOf(t, hub, rootB, rootDir))
 		if !strings.Contains(got, "bob-project:ok") || !strings.Contains(got, "root-key:absent") {
 			t.Errorf("the administrator's call on their own project under mode auto: %s", got)
 		}
@@ -196,45 +213,11 @@ func TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles(t *testing.T) {
 		if err := ps.Save(); err != nil {
 			t.Fatal(err)
 		}
-		code, raw := hubCall(t, hub, aliceB, http.MethodPost, "/api/tasks/1/revise?project_idx=0",
-			map[string]any{"instruction": "x", "description": "y"})
+		code, raw := hub.Call(t, aliceB, http.MethodPost, fmt.Sprintf("/api/tasks/1/revise?project_idx=%d",
+			indexOf(t, hub, aliceB, hub.Dir)), map[string]any{"instruction": "x", "description": "y"})
 		if code != http.StatusConflict || !strings.Contains(string(raw), "host sandbox") ||
 			!strings.Contains(string(raw), "Only a hub administrator") {
 			t.Errorf("alice's call on the hub's own directory = %d %s", code, raw)
 		}
 	})
-}
-
-// hostSandboxOff turns the host sandbox off on hub, for a test in which people
-// work on the hub's own directory, which the sandbox refuses them, to test
-// something the sandbox does not change: whose account a call runs on, what a
-// requirement check reads. Call it after the test has written the hub's
-// config.yaml, which it merges into.
-func hostSandboxOff(t *testing.T, hub *ssohubtest.Hub) {
-	t.Helper()
-	path := filepath.Join(hub.Dir, ".cloop", "config.yaml")
-	raw, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	doc := map[string]any{}
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		t.Fatal(err)
-	}
-	executors, _ := doc["executors"].(map[string]any)
-	if executors == nil {
-		executors = map[string]any{}
-	}
-	executors["host_sandbox"] = map[string]any{"mode": "off"}
-	doc["executors"] = executors
-	out, err := yaml.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
-		t.Fatal(err)
-	}
 }

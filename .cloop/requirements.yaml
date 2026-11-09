@@ -727,7 +727,7 @@ requirements:
       Promised in docs/security/model.md, "The host sandbox".
     tests:
       - name: end to end, through a real hub and the real sandbox
-        command: go test ./cmd -run '^TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles$'
+        command: go test ./tests/security -run '^TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles$'
         timeout: 20m
       - name: the sandbox itself
         command: go test ./pkg/hostsandbox -run '^(TestTheSandboxGrantsItsPolicyAndNothingElse|TestNamespaceModeHidesTheHostsProcessesSocketsAndCapabilities|TestNamespaceModeLeavesOnlyTheWritableGrantsWritable|TestALinkLeftInAWritableGrantIsNeverFollowedOutOfIt|TestTheHostsTerminalsAreOutOfReach|TestTheRunsOwnLeaseFilesAreReadable|TestAFileOutsideTheGrantsCannotBeOpenedByItsHandle|TestOnlyHarmlessSettingsAreInheritedByDefault|TestAPolicyTheHelperCannotHonourIsRefusedBeforeTheWorkloadRuns|TestHubCredentialsAreScrubbedUnlessALeaseDeliveredThem)$'

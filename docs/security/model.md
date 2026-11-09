@@ -4895,7 +4895,7 @@ Retiring the static token while the hub runs (see
 | Operator `ExtraArgs` can't reopen the sandbox | `TestContainerRejectsSandboxEscapingExtraArgs` |
 | Secret values never enter the argv; they are forwarded as bare `--env NAME` | `TestContainerSecretsNeverEnterArgv` |
 
-### Host sandbox — `hub_host_sandbox_test.go` (cmd) and the package suites
+### Host sandbox — `hostsandbox_test.go` and the package suites
 
 | Guarantee | Test |
 | --- | --- |
