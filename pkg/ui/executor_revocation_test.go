@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -150,6 +152,66 @@ func TestAnAnnouncedChangeTheStoreDoesNotRecordTakesNothing(t *testing.T) {
 	if rep.Refused != "" || !rep.Acted || len(rep.Leases) != 1 || rep.Leases[0].LeaseID != leaseID ||
 		rep.Leases[0].State != executor.RevokeStateRevoked {
 		t.Fatalf("a recorded cordon's announcement: %+v, want the lease taken back", rep)
+	}
+}
+
+// TestAMemberWhoseJanitorDroppedTheAgentFirstSaysItDroppedIt: a revocation
+// typed at the terminal reaches a member twice — as the CLI's announcement on
+// the bus, and at the lease janitor's next pass, which reads the revocation
+// from the store (Task 20481). When that pass lands between the store's record
+// and the announcement, the janitor drops the session first and the cluster
+// forgets the member held it. The member's answer must still say that it held
+// the agent's connection and dropped it: it used to find nothing connected and
+// answer that it neither held nor dropped it, so the CLI told the operator no
+// member had held the connection (tests/cluster failed on exactly that). A
+// member that never dropped the agent does not claim to have.
+func TestAMemberWhoseJanitorDroppedTheAgentFirstSaysItDroppedIt(t *testing.T) {
+	h, _, _, db := deviceWithLease(t, "edge-janitor-first")
+	store, err := executorstore.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const dropped, elsewhere = "agent-janitor-dropped", "agent-never-here"
+	for _, id := range []string{dropped, elsewhere} {
+		if err := store.PutAgent(remote.AgentRecord{AgentID: id, Name: id,
+			SecretHash: strings.Repeat("0", 64), CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := remote.Revoke(store, id, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A member that leads, as the one left holding the agent did in the
+	// cluster test: with no live owner of the agent's session on record, it is
+	// the member that acts.
+	node, err := hubcluster.Join(fastClusterOptions(state.DBPath(h.dir), "http://127.0.0.1:1"))
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	node.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		_ = node.Close()
+	})
+	waitCluster(t, "the member to lead", node.IsLeader)
+	s := &Server{WorkDir: h.dir, Cluster: node}
+
+	// What the janitor's pass records as it drops a connected revoked agent.
+	revokedAgentDrops.note(dropped, time.Now())
+
+	rep := s.executorRevocationHere(context.Background(), executorRevocationRequest{
+		ExecutorID: dropped, Op: ExecutorOpRevoke, Actor: "cli:operator",
+	})
+	if rep.Refused != "" || !rep.Disconnected || !rep.DroppedEarlier || !rep.HoldsSession {
+		t.Fatalf("the answer of the member whose janitor dropped the agent = %+v; want it to say it held "+
+			"the connection and dropped the agent before the announcement", rep)
+	}
+	rep = s.executorRevocationHere(context.Background(), executorRevocationRequest{
+		ExecutorID: elsewhere, Op: ExecutorOpRevoke, Actor: "cli:operator",
+	})
+	if rep.Refused != "" || rep.Disconnected || rep.DroppedEarlier || rep.HoldsSession {
+		t.Fatalf("the answer about an agent this member never held = %+v; want no drop and no connection", rep)
 	}
 }
 

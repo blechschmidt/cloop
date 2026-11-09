@@ -78,6 +78,8 @@ func printExecutorRevocationReport(id, op string, rep ui.ExecutorRevocationRepor
 		case m.Refused != "":
 			warn.Printf("  %s did not act: %s\n", where, m.Refused)
 			continue
+		case m.DroppedEarlier:
+			fmt.Printf("  %s held %s's connection", where, rep.Device)
 		case m.HoldsSession:
 			fmt.Printf("  %s holds %s's connection", where, rep.Device)
 		case m.Acted:
@@ -94,6 +96,9 @@ func printExecutorRevocationReport(id, op string, rep ui.ExecutorRevocationRepor
 		if m.Disconnected {
 			disconnected = true
 			fmt.Print(", and dropped the agent")
+			if m.DroppedEarlier {
+				fmt.Print(" when its lease janitor found the revocation, just before this announcement")
+			}
 		} else if op == ui.ExecutorOpRevoke {
 			fmt.Print("; the agent is out of its registry")
 		}

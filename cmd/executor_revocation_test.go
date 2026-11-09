@@ -443,3 +443,34 @@ func TestCLICordonWithNoHubServingSaysSoAndRecordsTheRevocation(t *testing.T) {
 		t.Fatalf("the lease's revocation on record = %+v, %v; want it pending for the next hub", revs, err)
 	}
 }
+
+// TestARevocationReportNamesTheMemberWhoseJanitorDroppedTheAgent: a member
+// whose lease janitor dropped the agent between the store's record and the
+// announcement answers that it held the connection and dropped the agent
+// (Task 20481). The report says so, and does not go on to say that no member
+// held the agent's connection.
+func TestARevocationReportNamesTheMemberWhoseJanitorDroppedTheAgent(t *testing.T) {
+	rep := ui.ExecutorRevocationReport{Device: "edge-1", Answered: []ui.ExecutorRevocationMemberReport{
+		{Member: "hub_a", HoldsSession: true, Acted: true, Disconnected: true, DroppedEarlier: true},
+		{Member: "hub_b"},
+	}}
+	out, err := captureStdout(t, func() error {
+		printExecutorRevocationReport("edge-1", ui.ExecutorOpRevoke, rep, nil, time.Second)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"hub member hub_a held edge-1's connection: no lease to take back, and dropped the agent when its lease " +
+			"janitor found the revocation",
+		"hub member hub_b does not hold edge-1's connection; the agent is out of its registry",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not say %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "No hub member held") {
+		t.Errorf("the report says no member held the connection, though one dropped it:\n%s", out)
+	}
+}

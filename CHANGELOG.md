@@ -851,6 +851,15 @@ schema and the hub's HTTP API may change in any release.
   restored, as a request for a session whose holder is known to be gone
   already did (Task 20481).
 
+- **`cloop executor revoke` no longer reports that no hub member held the
+  agent's connection when one had just dropped it.** A revocation typed at the
+  terminal reaches a member twice: as the announcement on the hub bus, and at
+  the member's lease janitor's next pass, which finds the revocation in the
+  store. When that pass came first, it took the agent's leases back and dropped
+  its session, and the member then answered the announcement as if it had never
+  held the agent. The report now says which member held the connection and
+  dropped the agent, and that its lease janitor got there first (Task 20481).
+
 - **A long task no longer marks its project "stalled".** The dashboard called
   a running project stalled once its state had gone fifteen minutes without a
   write. A run writes its state when a task starts and when it ends, and

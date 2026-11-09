@@ -51,6 +51,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -122,6 +123,10 @@ type ExecutorRevocationMemberReport struct {
 	// Disconnected reports, for a revoked agent, that this member dropped the
 	// session it held.
 	Disconnected bool `json:"disconnected,omitempty"`
+	// DroppedEarlier reports that this member had dropped the agent before
+	// the announcement reached it: its lease janitor found the revocation in
+	// the store first (Task 20481). Disconnected and HoldsSession are set too.
+	DroppedEarlier bool `json:"dropped_earlier,omitempty"`
 	// Leases is what each lease came to on this member.
 	Leases []LeaseTakeBack `json:"leases,omitempty"`
 }
@@ -440,6 +445,14 @@ func (s *Server) executorRevocationHere(ctx context.Context, req executorRevocat
 	}
 	if req.Op == ExecutorOpRevoke {
 		rep.Disconnected = s.retireRevokedAgent(agent)
+		if !rep.Disconnected && revokedAgentDrops.droppedHere(agent) {
+			// The lease janitor's pass got here between the store's record
+			// and this announcement, took the leases back and dropped the
+			// session: this member held it, and dropped it for this
+			// revocation. Saying it held nothing would send the operator
+			// looking for a connection no member has.
+			rep.Disconnected, rep.DroppedEarlier, rep.HoldsSession = true, true, true
+		}
 	}
 	return rep
 }
@@ -535,6 +548,11 @@ func (s *Server) retireRevokedAgent(agent string) bool {
 	if ex, ok := hub.Executor(agent); ok {
 		connected = ex.Connected()
 	}
+	if connected {
+		// Before the teardown: an announcement answered while it runs reads
+		// the session as gone, and must find who dropped it.
+		revokedAgentDrops.note(agent, time.Now())
+	}
 	tearDownRevokedAgent(hub, agent)
 	executor.DefaultRegistry.Unregister(agent)
 	for _, ex := range executor.List() {
@@ -544,6 +562,51 @@ func (s *Server) retireRevokedAgent(agent string) bool {
 	}
 	s.broadcastExecutorUpdateLocal("revoked", agent)
 	return connected
+}
+
+// revokedAgentDrops records which revoked agents' sessions this process
+// dropped, and when (Task 20481). A revocation made at the terminal reaches a
+// member twice: as the CLI's announcement on the bus, and at its lease
+// janitor's next pass, which reads the revocation from the store. When that
+// pass falls between the store's record and the announcement, the janitor
+// drops the session first, and the announcement used to find nothing
+// connected: the member answered that it neither held nor dropped the agent,
+// and the CLI said no member had held its connection. The answer reads this
+// record instead.
+//
+// A revoked agent cannot reconnect, so each is dropped once. A drop is kept
+// long enough to outlast any announcement of its revocation, which the CLI
+// writes right after the store's record and waits half a minute to have
+// answered, and is forgotten after that.
+var revokedAgentDrops = &agentDropRecord{at: map[string]time.Time{}}
+
+// revokedAgentDropMemory is how long a drop is remembered.
+const revokedAgentDropMemory = 10 * time.Minute
+
+type agentDropRecord struct {
+	mu sync.Mutex
+	at map[string]time.Time
+}
+
+// note records that agent's session was dropped here at now.
+func (r *agentDropRecord) note(agent string, now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, at := range r.at {
+		if now.Sub(at) > revokedAgentDropMemory {
+			delete(r.at, id)
+		}
+	}
+	r.at[agent] = now
+}
+
+// droppedHere reports whether this process dropped agent's session for its
+// revocation within the memory.
+func (r *agentDropRecord) droppedHere(agent string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	at, ok := r.at[agent]
+	return ok && time.Since(at) <= revokedAgentDropMemory
 }
 
 // retireRevokedAgents drops every agent connected here whose credential the
