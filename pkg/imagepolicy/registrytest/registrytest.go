@@ -13,10 +13,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -55,6 +57,8 @@ type Request struct {
 type Registry struct {
 	t   testing.TB
 	srv *httptest.Server
+	// listener is the registry's port, held from New to the end of the test.
+	listener *refusingListener
 
 	mu        sync.Mutex
 	manifests map[string]manifest          // by digest
@@ -79,7 +83,10 @@ func New(t testing.TB) *Registry {
 		tags:      map[string]map[string]string{},
 		private:   map[string]bool{},
 	}
-	r.srv = httptest.NewTLSServer(http.HandlerFunc(r.serve))
+	r.srv = httptest.NewUnstartedServer(http.HandlerFunc(r.serve))
+	r.listener = &refusingListener{Listener: r.srv.Listener}
+	r.srv.Listener = r.listener
+	r.srv.StartTLS()
 	t.Cleanup(r.srv.Close)
 	return r
 }
@@ -95,7 +102,45 @@ func (r *Registry) Client() *http.Client { return r.srv.Client() }
 
 // Close stops the registry: every request after it fails to connect, as an
 // unreachable registry does.
-func (r *Registry) Close() { r.srv.Close() }
+//
+// The port stays the registry's until the test ends, turning every connection
+// away. Released, it would be free for the kernel to hand to any listener on
+// the host that asks for a port: another httptest server in this test binary,
+// or in a package `go test ./...` runs beside it. Every httptest TLS server
+// presents the same built-in certificate, which Client trusts, so a request
+// meant to find the registry unreachable would be answered by that server
+// instead ("has no manifest", from its 404), and a test asserting how an
+// unreachable registry is reported would fail on the wording.
+func (r *Registry) Close() {
+	r.listener.refuse()
+	r.srv.CloseClientConnections()
+	r.srv.Client().CloseIdleConnections()
+}
+
+// refusingListener is a registry's listener: it hands every connection to the
+// server until refuse is called and resets every one after, while keeping the
+// port bound so no other listener can take it.
+type refusingListener struct {
+	net.Listener
+	refusing atomic.Bool
+}
+
+func (l *refusingListener) refuse() { l.refusing.Store(true) }
+
+// Accept returns the next connection, resetting each one that arrives once the
+// registry is closed.
+func (l *refusingListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil || !l.refusing.Load() {
+			return c, err
+		}
+		if tc, ok := c.(*net.TCPConn); ok {
+			_ = tc.SetLinger(0) // RST: the nearest a listener comes to refusing
+		}
+		_ = c.Close()
+	}
+}
 
 // RequireLogin makes repository private: its token service grants a pull only
 // to login.
