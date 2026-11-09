@@ -364,11 +364,19 @@ func TestAnUndecidedWorkspaceTakeoverIsRetried(t *testing.T) {
 	}
 	waitFor(t, 10*time.Second, "a retry", func() bool { return attempts.Load() >= 2 })
 	release()
-	waitFor(t, 10*time.Second, "the workspace lease to be taken over", func() bool {
-		sl := registeredLease(leaseID)
-		return sl != nil && sl.isWorkspace()
+	// The retry runs on a goroutine of its own, and an attempt registers
+	// the lease before it restores the session the lease feeds
+	// (takeOverWorkspace): the lease showing up says the takeover is under
+	// way, not done. It is done once endTakeover forgets it, after the
+	// attempt has returned — the session restored, the history written.
+	waitFor(t, 10*time.Second, "the retried workspace takeover to be decided", func() bool {
+		return pendingTakeovers.get(takeoverWorkspace, leaseID) == nil
 	})
-	stopKeepaliveForTest(registeredLease(leaseID))
+	taken := registeredLease(leaseID)
+	if taken == nil || !taken.isWorkspace() {
+		t.Fatal("the retried takeover was decided without the workspace lease held here")
+	}
+	stopKeepaliveForTest(taken)
 	if row, _ := r.session(statedb.ProxySessionGit, sessionID); row.Holder != "hub_new" || !row.Open() {
 		t.Fatalf("the pinned session's record after the retried takeover = %+v", row)
 	}

@@ -765,18 +765,27 @@ func (s *restartScene) restartMidRun(sig syscall.Signal, dir string, whileDown f
 	}
 	s.startHub()
 	s.waitAgentOnline()
-	s.waitFor("the restarted hub to take the run over", 60*time.Second, func() bool {
-		m, _ := s.runOwner(dir)
-		return m != "" && m != r.oldMember
+	// The new process claims the run's owner row first and only then takes
+	// over what the row names: the lease's record moves to it before the
+	// lease is registered — and so listed — and before the sessions it feeds
+	// are restored. The adoption is over once the process has recorded the
+	// run as its own, as adopted and naming nothing it is still trying to
+	// take over, which it writes after all of that. A row merely claimed, or
+	// the lease's record alone, is the takeover read halfway.
+	s.waitFor("the restarted hub to adopt the run", 60*time.Second, func() bool {
+		m, meta := s.runOwner(dir)
+		undecided, _ := meta["takeovers"].([]any)
+		return m != "" && m != r.oldMember && meta["handler"] == "adopted" && len(undecided) == 0
 	})
 	r.newMember, meta = s.runOwner(dir)
 	t.Logf("run adopted by %s", r.newMember)
 
 	// The lease came with it: the same lease, recorded as the new process's,
 	// listed by it, and the takeover on the lease's own trail.
-	s.waitFor("the restarted hub to hold the run's lease", 30*time.Second, func() bool {
-		return s.leaseHolder(r.lease) == r.newMember
-	})
+	if got := s.leaseHolder(r.lease); got != r.newMember {
+		t.Fatalf("lease %s is recorded as held by %q once the run was adopted, want the adopter %s", r.lease, got,
+			r.newMember)
+	}
 	if !contains(s.listedLeases(), r.lease) {
 		t.Errorf("the restarted hub does not list the run's lease %s, which it holds", r.lease)
 	}
