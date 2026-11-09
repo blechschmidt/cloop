@@ -260,6 +260,13 @@ which the UI relies on to stop a run. It doesn't create a new process group, so
 Ctrl-C at a terminal still reaches the children. `TimeoutMinutes` is enforced
 with a `time.AfterFunc` that sends SIGKILL.
 
+`Stream` drops the chunks a consumer falls behind on, so a stalled log viewer
+can't stall a run. `executor.Run`, which the hub uses for helper subcommands
+whose replies it parses, can't afford a gap. The driver implements
+`executor.Collector`, and `Run` starts through its `StartCollected`: the
+collector is subscribed before the first byte and is never dropped a chunk; the
+workload's output waits for it instead.
+
 [Strict mode](../security/model.md#the-no-host-execution-guarantee) exists to
 forbid this backend. It is still the default for single-user local development,
 where the hub and the workload are in the same trust domain anyway.

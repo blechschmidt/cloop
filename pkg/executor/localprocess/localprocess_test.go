@@ -49,6 +49,9 @@ const (
 	modePrintCwd = "cwd"
 	// modePrintEnv writes CLOOP_TEST_VAR to stdout.
 	modePrintEnv = "env"
+	// modeBlast writes blastLines numbered lines as fast as the pipe takes
+	// them — several times what a subscriber's buffer holds — and exits.
+	modeBlast = "blast"
 	// exitCodeEnv carries the exit code the modeExit fixture should use.
 	exitCodeEnv = "CLOOP_LOCALPROCESS_EXIT_CODE"
 )
@@ -93,6 +96,9 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	case modePrintEnv:
 		fmt.Fprint(os.Stdout, os.Getenv("CLOOP_TEST_VAR")+"\n")
+		os.Exit(0)
+	case modeBlast:
+		_, _ = os.Stdout.WriteString(blastOutput())
 		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown fixture mode %q\n", os.Getenv(fixtureEnv))

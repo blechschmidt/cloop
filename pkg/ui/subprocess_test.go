@@ -20,9 +20,14 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/internal/statedbtest"
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 // sleepBin returns the path to /bin/sleep (or the equivalent on the host).
@@ -121,5 +126,58 @@ func TestRunCloopSubcommand_NilCtxAccepted(t *testing.T) {
 	}
 	if elapsed > 5*time.Second {
 		t.Fatalf("nil-ctx path did not honour timeout; elapsed=%s", elapsed)
+	}
+}
+
+// replyExec answers every workload with a framed reply in two chunks, the
+// second numbered as if one between them had been dropped when gap is set —
+// what a driver's stream looks like after it drops chunks a reader fell
+// behind on.
+type replyExec struct {
+	*harnessExec
+	gap bool
+}
+
+func (e replyExec) Stream(context.Context, string) (<-chan executor.LogLine, error) {
+	second := uint64(2)
+	if e.gap {
+		second = 3
+	}
+	ch := make(chan executor.LogLine, 2)
+	ch <- executor.LogLine{Seq: 1, Text: "<<<cloop-json:begin>>>\n{\"content\": \"the start of the file"}
+	ch <- executor.LogLine{Seq: second, Text: " and its end\"}\n<<<cloop-json:end>>>\n"}
+	close(ch)
+	return ch, nil
+}
+
+// TestASubcommandReplyWithAPartMissingIsRefused: a helper subcommand's reply
+// that arrives with a stretch missing fails the call, saying so, rather than
+// being parsed as the shorter document it now reads as — a spec file was
+// recorded as read with its middle gone that way (Task 20481). The same reply
+// whole is taken as it is.
+func TestASubcommandReplyWithAPartMissingIsRefused(t *testing.T) {
+	newHarnessFixture(t)
+	for _, gap := range []bool{true, false} {
+		project := statedbtest.Dir(t)
+		ex := replyExec{harnessExec: newHarnessExec(fmt.Sprintf("reply-stub-%v", gap), executor.KindContainer,
+			executor.IsolationContainer), gap: gap}
+		registerStub(t, ex)
+		if err := executor.Bind(project, ex.ID()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { executor.DefaultRegistry.Unbind(project) })
+		out, err := runWorkloadEnvFor(t.Context(), project, []string{"cloop", "requirements", "validate", "--json"},
+			nil, nil, nil)
+		if !gap {
+			if err != nil || !strings.Contains(string(out), "the start of the file and its end") {
+				t.Fatalf("a whole reply = %q, %v; want it taken as it is", out, err)
+			}
+			continue
+		}
+		if !errors.Is(err, errIncompleteOutput) || !strings.Contains(err.Error(), "`cloop requirements validate`") ||
+			!strings.Contains(err.Error(), ex.ID()) {
+			t.Fatalf("a reply with a part missing = %q, %v; want the call refused, naming the subcommand and the executor",
+				out, err)
+		}
 	}
 }

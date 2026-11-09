@@ -178,23 +178,53 @@ type record struct {
 // is cancelled (browser tab closed) could close ch while the pump goroutine
 // is mid-send on the very same channel — a "send on closed channel" panic in
 // the middle of a run. A plain non-blocking select cannot avoid it: when both
-// the send and the closed-signal are ready, Go picks at random. Since send is
-// always non-blocking, holding this mutex is O(1) and cannot deadlock.
+// the send and the closed-signal are ready, Go picks at random. A send to an
+// ordinary subscriber never blocks, so holding this mutex is O(1) and cannot
+// deadlock; one to a lossless subscriber can wait, and leaving is what ends
+// that wait before close takes the mutex.
 type subscriber struct {
 	mu     sync.Mutex
 	ch     chan executor.LogLine
 	done   chan struct{}
 	closed bool
+
+	// lossless marks the consumer StartCollected attached (Task 20481): a
+	// send waits for it to make room rather than dropping the chunk, holding
+	// the pump — and, once the pipe fills, the workload's writes — back until
+	// it reads or leaves.
+	lossless bool
+	// leaving is closed as the subscriber goes, releasing a send waiting on
+	// a lossless subscriber that will not read again.
+	leaving     chan struct{}
+	leavingOnce sync.Once
 }
 
-// send delivers line unless the subscriber is gone or its buffer is full.
-// Dropping is deliberate: blocking here would back-pressure into the child
-// process's writes, so one stalled log viewer would stall the agent.
-// Consumers detect drops via gaps in LogLine.Seq.
+// newSubscriber returns a subscriber with its channels made.
+func newSubscriber(lossless bool) *subscriber {
+	return &subscriber{
+		ch:       make(chan executor.LogLine, subscriberBuffer),
+		done:     make(chan struct{}),
+		lossless: lossless,
+		leaving:  make(chan struct{}),
+	}
+}
+
+// send delivers line unless the subscriber is gone or, for an ordinary one,
+// its buffer is full. Dropping is deliberate: blocking here would
+// back-pressure into the child process's writes, so one stalled log viewer
+// would stall the agent. Consumers detect drops via gaps in LogLine.Seq. A
+// lossless subscriber asked for exactly that back-pressure, and is waited for.
 func (s *subscriber) send(line executor.LogLine) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
+		return
+	}
+	if s.lossless {
+		select {
+		case s.ch <- line:
+		case <-s.leaving:
+		}
 		return
 	}
 	select {
@@ -206,6 +236,9 @@ func (s *subscriber) send(line executor.LogLine) {
 // close shuts the subscriber's channel down exactly once. Called both by the
 // pump when the workload ends and by the per-subscriber context watcher.
 func (s *subscriber) close() {
+	// First, and without the mutex: a send waiting on this subscriber holds
+	// it, and gives up only once leaving is closed.
+	s.leavingOnce.Do(func() { close(s.leaving) })
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -323,6 +356,42 @@ func (e *Executor) HealthCheck(ctx context.Context) error {
 // Start forks the workload described by spec and returns its handle. The
 // child outlives ctx: ctx only bounds the act of starting.
 func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Handle, error) {
+	return e.start(ctx, spec, nil)
+}
+
+// StartCollected implements executor.Collector: Start, with a lossless
+// consumer subscribed before the workload's first byte is read, so neither a
+// late subscription (the replay backlog keeps only its last
+// replayBufferBytes) nor a consumer that falls behind costs it a chunk (Task
+// 20481). It is unsubscribed when consumer is cancelled.
+func (e *Executor) StartCollected(ctx context.Context, spec executor.Spec, consumer context.Context) (executor.Handle, <-chan executor.LogLine, error) {
+	if consumer == nil {
+		consumer = context.Background()
+	}
+	sub := newSubscriber(true)
+	h, err := e.start(ctx, spec, sub)
+	if err != nil {
+		return h, nil, err
+	}
+	rec, err := e.lookup(h.ID)
+	if err != nil {
+		// Started, and pruned already: what the record held is gone with it.
+		sub.close()
+		return h, sub.ch, nil
+	}
+	go func() {
+		select {
+		case <-consumer.Done():
+			rec.removeSubscriber(sub)
+		case <-sub.done:
+		}
+	}()
+	return h, sub.ch, nil
+}
+
+// start is Start, with collector subscribed before the output pump runs when
+// it is not nil.
+func (e *Executor) start(ctx context.Context, spec executor.Spec, collector *subscriber) (executor.Handle, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return executor.Handle{}, err
@@ -487,6 +556,10 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		redactor:    spec.Redactor(),
 		gitCADir:    gitCADir,
 		sandboxDir:  sandboxDir,
+	}
+	if collector != nil {
+		// Before the pump exists, so it is handed the first chunk.
+		rec.subscribers[collector] = struct{}{}
 	}
 
 	e.mu.Lock()
@@ -786,10 +859,7 @@ func (e *Executor) Stream(ctx context.Context, handleID string) (<-chan executor
 		return nil, err
 	}
 
-	sub := &subscriber{
-		ch:   make(chan executor.LogLine, subscriberBuffer),
-		done: make(chan struct{}),
-	}
+	sub := newSubscriber(false)
 
 	rec.mu.Lock()
 	// Replay under the lock so a chunk emitted concurrently cannot slip

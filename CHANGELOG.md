@@ -826,6 +826,19 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A helper subcommand's reply is no longer cut short on a busy hub.** The
+  dashboard runs `cloop … --json` subcommands on a project's executor to read
+  its spec file, split a task, chat about the plan and more, and collects what
+  they print. The host executor drops output a reader falls behind on, so a
+  live log viewer can never stall a run, and the collector inherited that: when
+  its goroutine was not scheduled for the millisecond or two a fast command
+  took to print a few megabytes, the middle of the reply went missing. The
+  shortened reply was then used as if it were whole; a spec file read that way
+  was recorded with part of its content gone. A synchronous call on the host
+  executor now receives every byte and holds the command back instead of
+  dropping anything, and a reply that still arrives with a gap, from any
+  executor, fails the call with a message saying so (Task 20481).
+
 - **A long task no longer marks its project "stalled".** The dashboard called
   a running project stalled once its state had gone fifteen minutes without a
   write. A run writes its state when a task starts and when it ends, and

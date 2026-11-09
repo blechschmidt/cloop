@@ -1226,6 +1226,26 @@ type RunResult struct {
 	Bundle []byte
 }
 
+// Collector is implemented by a driver that can start a workload with a
+// consumer attached from its first byte, handed every chunk of its output in
+// order: none dropped when the consumer falls behind, the workload's output
+// held back instead until the consumer reads it (Task 20481).
+//
+// Stream drops what a consumer falls behind on, and must: a stalled log viewer
+// may not stall the workload. Run cannot afford the drop. What it collects is
+// parsed — a subcommand's JSON reply, a spec file read on the executor — and a
+// reply that lost its middle parses as a shorter one, which a loaded host
+// produced whenever Run's goroutine was not scheduled for the millisecond a
+// fast workload took to outrun Stream's buffer. Run starts workloads through
+// StartCollected where the driver offers it.
+type Collector interface {
+	// StartCollected is Start, returning with it a stream of the workload's
+	// whole output. The stream closes once the workload has finished, or when
+	// consumer is cancelled: cancel it when no longer reading, or the
+	// workload's output stays held back.
+	StartCollected(ctx context.Context, spec Spec, consumer context.Context) (Handle, <-chan LogLine, error)
+}
+
 // runOutputCap bounds how much output Run buffers in memory. A misbehaving
 // workload that prints unboundedly must not OOM the control plane; callers
 // of Run only ever want an error message or a short report, so 4 MiB is
@@ -1293,24 +1313,36 @@ func Run(ctx context.Context, ex Executor, spec Spec, opts ...RunOption) (RunRes
 		return RunResult{}, err
 	}
 
-	handle, err := ex.Start(context.WithoutCancel(ctx), spec)
-	if err != nil {
-		return RunResult{}, err
-	}
-	result := RunResult{Handle: handle}
-
 	// Subscribe with a context we control so we can unsubscribe on return
 	// without killing the workload's other subscribers.
 	streamCtx, unsubscribe := context.WithCancel(context.WithoutCancel(ctx))
 	defer unsubscribe()
 
-	lines, err := ex.Stream(streamCtx, handle.ID)
-	if err != nil && !errors.Is(err, ErrUnsupported) {
-		// We started something we can no longer observe — kill it rather
-		// than leaking an unsupervised workload.
-		_ = ex.Signal(context.WithoutCancel(ctx), handle.ID, SignalKill)
-		return result, fmt.Errorf("executor: stream %s: %w", handle.ID, err)
+	var (
+		handle Handle
+		lines  <-chan LogLine
+		err    error
+	)
+	if c, ok := ex.(Collector); ok {
+		// Every byte, from the first: see Collector.
+		handle, lines, err = c.StartCollected(context.WithoutCancel(ctx), spec, streamCtx)
+		if err != nil {
+			return RunResult{}, err
+		}
+	} else {
+		handle, err = ex.Start(context.WithoutCancel(ctx), spec)
+		if err != nil {
+			return RunResult{}, err
+		}
+		lines, err = ex.Stream(streamCtx, handle.ID)
+		if err != nil && !errors.Is(err, ErrUnsupported) {
+			// We started something we can no longer observe — kill it rather
+			// than leaking an unsupervised workload.
+			_ = ex.Signal(context.WithoutCancel(ctx), handle.ID, SignalKill)
+			return RunResult{Handle: handle}, fmt.Errorf("executor: stream %s: %w", handle.ID, err)
+		}
 	}
+	result := RunResult{Handle: handle}
 
 	var (
 		buf     []byte

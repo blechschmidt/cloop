@@ -1167,7 +1167,34 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 			runErr = &workloadEndedError{err: runErr}
 		}
 	}
+	if runErr == nil && res.Dropped {
+		// Every caller parses what it gets — a JSON reply, a spec file, a
+		// plan — and a reply missing a stretch parses as a shorter one: a
+		// spec file recorded as read with its middle gone (Task 20481).
+		// Part of it was lost, or it ran past what Run keeps, so the call
+		// failed.
+		runErr = fmt.Errorf("%w: `cloop %s` on executor %s lost part of its output on the way, or printed "+
+			"more than the hub keeps of a reply, so what arrived cannot be trusted",
+			errIncompleteOutput, subcommandName(argv), ex.ID())
+	}
 	return res.Output, runErr
+}
+
+// errIncompleteOutput is a helper subcommand whose output the executor
+// delivered with a stretch missing.
+var errIncompleteOutput = errors.New("the command's output arrived incomplete")
+
+// subcommandName is the subcommand argv runs — its words up to the first
+// flag, at most two — for a message that must not quote its arguments.
+func subcommandName(argv []string) string {
+	var words []string
+	for _, a := range argv[min(1, len(argv)):] {
+		if strings.HasPrefix(a, "-") || len(words) == 2 {
+			break
+		}
+		words = append(words, a)
+	}
+	return strings.Join(words, " ")
 }
 
 // workloadEndedError is a helper workload that was started and did not end
