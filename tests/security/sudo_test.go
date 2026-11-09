@@ -23,6 +23,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/blechschmidt/cloop/internal/ssohubtest"
+	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
@@ -102,6 +103,31 @@ func TestStaleSessionMustConfirmItsYouForPrivilegedActions(t *testing.T) {
 	}
 	if execID == "" {
 		t.Fatal("no sandbox was seeded")
+	}
+	closeAttach(t, hub, conn)
+}
+
+// closeAttach hangs up a terminal the test opened and waits for the hub to
+// record that it closed. The hub appends that audit event when the session
+// ends, on the handler's goroutine, which the test server does not wait for:
+// one still writing as the test's temporary directory was removed failed the
+// cleanup once ("directory not empty", Task 20481).
+func closeAttach(t *testing.T, hub *ssohubtest.Hub, conn *websocket.Conn) {
+	t.Helper()
+	db := hub.ControlPlane(t)
+	closes := func() int {
+		rows, _, err := db.ListAuditEvents(statedb.AuditFilter{EventType: string(auditaction.ActionSandboxAttachClose)})
+		if err != nil {
+			t.Fatalf("read the audit trail: %v", err)
+		}
+		return len(rows)
+	}
+	before := closes()
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+	for deadline := time.Now().Add(15 * time.Second); closes() == before; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the hub did not record the terminal's close within 15s")
+		}
 	}
 }
 
