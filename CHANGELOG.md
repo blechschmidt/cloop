@@ -12,6 +12,38 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **People's runs on the hub's own host are sandboxed from each other, and no
+  host run inherits the hub's root key.** The host executor ran every person's
+  run, and the agent in it, as the hub's own user, so on a hub with single
+  sign-on one person's agent could read every other person's projects and
+  Claude login, other runs' lease files and environments, and the hub's
+  database; on a hub running as root the Docker and systemd sockets gave it
+  the whole machine. Every run, resume, failover and model call the hub now
+  forks on its host for a person who is not a hub administrator runs in the
+  host sandbox (`pkg/hostsandbox`), and so does an administrator's of a project
+  such a person may write, which would otherwise run what their agent left
+  there. Landlock (Linux 6.2 or later) limits the run to its project, its
+  person's Claude login and a home kept for them there, a private temporary
+  directory, its own lease files and the system's read-only directories, under
+  `no_new_privs`, and never follows a link a run left in what it may write. On
+  a root hub it also gets private mount, PID and IPC namespaces, which hide
+  `/run`, the host's terminals and other people's processes, a filesystem that
+  is read-only outside its grants, and only the file-access capabilities. A
+  host that cannot sandbox refuses the run; the hub's own directory, which
+  holds the control plane, is left to administrators, and the in-process
+  replays are refused to people whose runs are sandboxed.
+  `executors.host_sandbox.mode` is `auto` by default, `all` sandboxes
+  administrators too, and `off`, which `cloop hub doctor` fails on a hub with
+  sign-in, sandboxes nobody. Separately, every workload the host driver starts
+  now loses the hub's own credentials from its environment (`CLOOP_SECRET_KEY`
+  and the other root key variables, `CREDENTIALS_DIRECTORY`, `CLOOP_UI_TOKEN`,
+  `CLOOP_OIDC_CLIENT_SECRET`, `CLOOP_NOTIFY_*`), and a sandboxed one inherits
+  only an allow-list of harmless settings (plus `executors.host_sandbox.pass_env`):
+  a hub whose service unit set the root key handed it to every run. And a
+  person who is not an administrator can no longer grant themselves the hub's
+  directory, the identity root or another person's project as a `local_repo`,
+  on any executor (Task 20480).
+
 - **A knowledge source can no longer be pointed at the hub's own network, and
   pasted Atlassian tokens are scrubbed.** The Confluence connector accepts only
   an `https` base URL with no credentials, query or fragment in it. It checks

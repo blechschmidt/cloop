@@ -198,7 +198,7 @@ func (s *Server) handleProviderCallReplay(w http.ResponseWriter, r *http.Request
 	// The replay runs the provider here, in the hub's process: with
 	// claudecode, `claude` on the hub's host (Task 20442). Refused where the
 	// project's own runs could not run there, before anything is read.
-	if denyInlineModelCall(w, workDir, "provider call replay") {
+	if denyInlineModelCall(w, workDir, "provider call replay", s.harnessWhoFor(r)) {
 		return
 	}
 	original, err := state.LoadProviderCall(workDir, id)

@@ -1305,6 +1305,54 @@ proxy on the same host, set `ui.listen: 127.0.0.1` so the plaintext port can be
 reached only through the proxy. `cloop hub doctor` checks both (`ui.exposure`);
 see [Web UI](#web-ui-cloop-ui).
 
+### The host sandbox
+
+On a hub with single sign-on that still allows host execution, the people it
+serves run on one machine as one operating-system user. The host sandbox keeps
+each person's runs and model calls there to their own project and Claude login;
+see [the host sandbox](../security/model.md#the-host-sandbox) for exactly what
+a sandboxed run can open and how Linux enforces it.
+
+```yaml
+executors:
+  host_sandbox:
+    mode: auto          # auto (default) | all | off
+    read_only:          # optional: further paths every sandboxed run may read
+      - /srv/toolchains/jdk-21
+    pass_env:           # optional: more of the hub's environment to pass on
+      - PIP_INDEX_URL
+```
+
+| Key | Meaning |
+| --- | --- |
+| `mode` | `auto`: on a hub with sign-in, every run on the hub's host for a person who is not a hub administrator is sandboxed, and an administrator's run too on a project such a person may write. `all`: every administrator's run and the hub's own login's too. `off`: none, which `cloop hub doctor` fails on a hub with sign-in. Unset is `auto`; any other value stops the hub from starting. |
+| `read_only` | Absolute paths every sandboxed run may read and execute, for a toolchain installed outside `/usr` (`/opt` and `/snap` are not granted by default). A path that would expose the hub's files or another person's (the filesystem's root, the hub's directory, the identity root, another project, or a directory above one of them) is left out at dispatch, and the doctor names it. |
+| `pass_env` | Names of variables in the hub's own environment that a sandboxed run inherits as well as the default allow-list (`PATH`, the locale, the proxies and CA bundles, the Go toolchain's and the harness's settings). A name here is passed even if it holds a credential, so list only what every sandboxed run may have. |
+
+The sandbox needs Linux 6.2 or later with Landlock enabled (`landlock` in the
+kernel's `lsm=` list, the default on current Ubuntu and Fedora). On a hub that
+runs as root it also creates mount, PID and IPC namespaces, which a hub in an
+unprivileged container may not be allowed to do. Where the sandbox is needed
+and unavailable, the hub refuses the run with `409` rather than run it
+unsandboxed. A project whose `.git` is a file pointing at a repository outside
+the project directory cannot use that repository from inside the sandbox.
+
+A sandboxed run's `HOME` is `sandbox-home` inside its person's Claude login
+directory. It starts empty, so git needs an identity
+(`git config --global user.email …` from a run, or the project's own config)
+and tools fill their caches there once per person. Credentials reach it the way
+they reach a container: through grants, never through the hub user's
+`~/.ssh` or dotfiles.
+
+Every workload the host driver starts, sandboxed or not, starts without the
+hub's own credentials in its environment: `CLOOP_SECRET_KEY` and the other root
+key variables, `CREDENTIALS_DIRECTORY`, `CLOOP_UI_TOKEN` and the
+`CLOOP_NOTIFY_*` webhook URLs, and `CLOOP_OIDC_CLIENT_SECRET`. A sandboxed
+run inherits only the allow-list above and `pass_env`, so not the hub's own
+`OPENAI_API_KEY` or `GITHUB_TOKEN`: a person's run gets its credentials through
+grants. A person's `local_repo` grant may not name the hub's directory, the
+identity root or another person's project, on any executor.
+
 ### Minimum agent build
 
 The oldest cloop build a remote executor agent can run and still receive work,
@@ -3141,6 +3189,7 @@ ui:
 | `executors.min_agent_build`, `executors.limits`, `executors.isolation_evidence`, `executors.image_provenance` | The oldest agent build the hub will place work on, the fleet resource ceiling, whether an executor whose isolation claim was never verified is refused, and whether one of cloop's own images with an unverified signature is refused. As with `allow_host_process`, a value set in the overlay replaces the one in `config.yaml`. Once applied, nothing the process reads later can loosen any of them. |
 | `executors.container`, `executors.kubernetes`, `executors.orphan_sweep_interval_minutes` | Which isolating drivers the hub registers at startup, and how often it sweeps their orphans. |
 | `executors.git_proxy`, `executors.kube_guard` | The git interception proxy and the Kubernetes access monitor, started at startup. |
+| `executors.host_sandbox` | Whose runs on this host run in the [host sandbox](#the-host-sandbox), read at every dispatch, so an edit applies to the next run. |
 | `executors.egress` | The egress proxy, bound at startup. In a cluster each member binds its own, so `listen_addr` belongs here when two members share a host. |
 | `executors.auto_install_harness` | Whether a device may be asked to install a missing harness. Read on each dispatch. |
 | `executors.feature_bundle_mb` | The cap on a feature's branch and returned work when it runs on an isolating executor. Read at startup. |

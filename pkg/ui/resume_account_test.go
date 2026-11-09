@@ -25,6 +25,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -58,6 +59,9 @@ type resumeHub struct {
 
 func newResumeHub(t *testing.T) *resumeHub {
 	t.Helper()
+	// People run the hub's own directory here, which the host sandbox
+	// refuses them; what is under test is whose account a resume acts for.
+	withHostSandboxMode(t, config.HostSandboxOff)
 	t.Setenv(secretbroker.EnvPassphraseKey, "resume-account-passphrase")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -587,6 +591,8 @@ func enableOIDC(t *testing.T, srv *Server, base string) {
 // starter of the run.
 func newHostFailoverRig(t *testing.T) *trackRig {
 	t.Helper()
+	// As newResumeHub: the hub's own directory, run for a person.
+	withHostSandboxMode(t, config.HostSandboxOff)
 	r := newTrackRig(t, 2, []*pm.Task{{ID: 1, Title: "only", Status: pm.TaskPending}})
 	for _, n := range r.nodes {
 		n.mu.Lock()
@@ -1007,5 +1013,33 @@ func TestALegacyPauseWithNoUsageToReadIsHeld(t *testing.T) {
 	if pr := h.pause(t); pr.Code != pausereason.CodeStarterUnavailable || !strings.Contains(pr.Detail, "frank@example.com") ||
 		!strings.Contains(pr.Detail, "usage") {
 		t.Fatalf("the pause is %s %q, want starter_unavailable naming frank and the usage it cannot read", pr.Code, pr.Detail)
+	}
+}
+
+// A run of the hub's own directory that a person started on its host before
+// the host sandbox existed is not resumed for them once it does: the sandbox
+// cannot keep the control plane from it, so the resume is held, saying why,
+// rather than refused again at every sweep (Task 20480).
+func TestAResumeTheHostSandboxRefusesIsHeldSayingWhy(t *testing.T) {
+	h := newResumeHub(t)
+	h.run(t, "alice")
+	now := h.capPause(t)
+	h.srv.nowFn = func() time.Time { return now }
+	before := len(h.claudeRuns(t))
+
+	withHostSandboxMode(t, config.HostSandboxAuto) // the hub is upgraded
+	if h.srv.maybeAutoResume(h.dir) {
+		t.Fatal("the sweep resumed alice's run of the hub's own directory on its host")
+	}
+	if got := len(h.claudeRuns(t)); got != before {
+		t.Fatalf("the refused resume ran claude %d time(s)", got-before)
+	}
+	reason := h.pause(t)
+	if reason == nil || reason.Code != pausereason.CodeStarterUnavailable ||
+		!strings.Contains(reason.Detail, resumeAlice) || !strings.Contains(reason.Detail, "host sandbox") {
+		t.Fatalf("the run is paused %+v, want starter_unavailable naming alice and the host sandbox", reason)
+	}
+	if h.srv.maybeAutoResume(h.dir) {
+		t.Fatal("a held run was resumed at the next sweep")
 	}
 }

@@ -293,6 +293,9 @@ requirements:
 // for an operator; a viewer may look and may do neither.
 func TestTheDashboardReadsTheSpecFileOnTheExecutor(t *testing.T) {
 	hub := ssohubtest.Start(t, ssohubtest.Options{SelfExe: cliSelfExe(t), AdminEmails: []string{rootEmail}})
+	// alice reads the hub's own directory's spec, which the host sandbox
+	// refuses people; what is under test is where the read runs.
+	hostSandboxOff(t, hub)
 	const alice, vic = "alice@example.com", "vic@example.com"
 	op := hub.SignIn(t, alice, ssohubtest.GroupOperators)
 	viewer := hub.SignIn(t, vic, ssohubtest.GroupViewers)

@@ -48,6 +48,7 @@ import (
 	"testing"
 
 	"github.com/blechschmidt/cloop/internal/hometest"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
 
 // enableEnv opts the suite in. Unset means skip: this drives the container
@@ -111,7 +112,12 @@ func envInt(key string, def int) int {
 // both read the developer's real projects into its tenant index — silently
 // changing which project a tenant's index 0 resolves to — and write its own
 // throwaway ones back out. tests/hermetic enforces this.
-func TestMain(m *testing.M) { os.Exit(hometest.Isolate(m)) }
+func TestMain(m *testing.M) {
+	// A hub this binary runs dispatches people's work into the host sandbox,
+	// whose helper is this binary (Task 20480).
+	hostsandbox.InstallTestHelper()
+	os.Exit(hometest.Isolate(m))
+}
 
 // gate skips unless the suite is opted in and the machine can actually run it.
 //

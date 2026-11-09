@@ -345,14 +345,20 @@ type harnessWho struct {
 	// hub with single sign-on. Without it there is one person and every grant
 	// is theirs, so the rule has nothing to say.
 	personal bool
+	// hubAdmin says identity administers the hub, whose runs on its own host
+	// are not put in the host sandbox under executors.host_sandbox.mode auto
+	// (Task 20480).
+	hubAdmin bool
 }
 
 // harnessWhoFor resolves whom r's dispatch acts for while the request is still
 // in hand — a run outlives its handler, and r must not.
 func (s *Server) harnessWhoFor(r *http.Request) harnessWho {
+	id := s.recipientIdentity(r)
 	return harnessWho{
-		identity: secretbroker.NormalizeOwner(s.recipientIdentity(r).OwnerKey()),
+		identity: secretbroker.NormalizeOwner(id.OwnerKey()),
 		personal: s.oidcEnabled(),
+		hubAdmin: id != nil && s.identityIsHubAdmin(id),
 	}
 }
 

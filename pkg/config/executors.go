@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -236,6 +237,9 @@ func ValidateExecutors(e ExecutorsConfig) error {
 			e.FeatureBundleMB, MaxFeatureBundleMB)
 	}
 	if err := ValidateRemoteExecutors(e.Remote); err != nil {
+		return err
+	}
+	if err := e.HostSandbox.Validate(); err != nil {
 		return err
 	}
 	if err := validateHarnessCredentialExempt(e.HarnessCredentialExempt); err != nil {
@@ -1199,4 +1203,69 @@ func (e ExecutorsConfig) ConfiguredExecutorLabels() map[string]map[string]string
 		}
 	}
 	return out
+}
+
+// The host sandbox's modes (Task 20480).
+const (
+	// HostSandboxAuto, the default: on a hub with sign-in, every host
+	// workload acting for a person who is not a hub administrator runs in the
+	// sandbox. Without sign-in there is one person, and nothing to keep apart.
+	HostSandboxAuto = "auto"
+	// HostSandboxAll: every host workload acting for anyone — administrators,
+	// the static token, the hub's own automatic dispatches — runs in it.
+	HostSandboxAll = "all"
+	// HostSandboxOff: none does. On a hub with sign-in, people's runs on its
+	// host can read each other's files, and `cloop hub doctor` says so.
+	HostSandboxOff = "off"
+)
+
+// HostSandboxConfig is executors.host_sandbox (Task 20480).
+type HostSandboxConfig struct {
+	// Mode is auto (the default), all or off.
+	Mode string `yaml:"mode,omitempty"`
+	// ReadOnly are further paths every sandboxed workload may read and
+	// execute: a toolchain installed outside /usr and /opt, a shared
+	// read-only dataset. A path that would expose the hub's own files or
+	// another person's (the control plane, the identity root, a project, or
+	// a directory above one of them) is left out at dispatch, and `cloop hub
+	// doctor` names it.
+	ReadOnly []string `yaml:"read_only,omitempty"`
+	// PassEnv names variables of the hub's own environment a sandboxed run
+	// inherits beyond the locale, the proxies, the CA bundles and the
+	// toolchains' and harness's settings it gets by default. A name here is
+	// passed even if it holds a credential: the operator chose to share it
+	// with every sandboxed run.
+	PassEnv []string `yaml:"pass_env,omitempty"`
+}
+
+// EffectiveMode is Mode normalised: unset is auto.
+func (h HostSandboxConfig) EffectiveMode() string {
+	switch m := strings.ToLower(strings.TrimSpace(h.Mode)); m {
+	case "":
+		return HostSandboxAuto
+	default:
+		return m
+	}
+}
+
+// Validate refuses a mode this hub does not know and a relative path.
+func (h HostSandboxConfig) Validate() error {
+	switch h.EffectiveMode() {
+	case HostSandboxAuto, HostSandboxAll, HostSandboxOff:
+	default:
+		return fmt.Errorf("executors.host_sandbox.mode: %q is not a mode; use %q (the default) to sandbox "+
+			"every person's runs on the hub's host but its administrators', %q to sandbox everyone's, or %q",
+			strings.TrimSpace(h.Mode), HostSandboxAuto, HostSandboxAll, HostSandboxOff)
+	}
+	for _, p := range h.ReadOnly {
+		if !filepath.IsAbs(strings.TrimSpace(p)) {
+			return fmt.Errorf("executors.host_sandbox.read_only: %q is not an absolute path", p)
+		}
+	}
+	for _, n := range h.PassEnv {
+		if n == "" || strings.ContainsAny(n, "= \t\n") {
+			return fmt.Errorf("executors.host_sandbox.pass_env: %q is not a variable name", n)
+		}
+	}
+	return nil
 }

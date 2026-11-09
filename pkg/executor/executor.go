@@ -590,6 +590,12 @@ type Spec struct {
 	// pre-existing behaviour alone.
 	Workspace Workspace `json:"workspace,omitempty"`
 
+	// HostSandbox confines a workload a driver forks on its own host to the
+	// files of the person it acts for (Task 20480). nil runs it as the host's
+	// user with the user's whole filesystem, as before; a driver that cannot
+	// honour a non-nil one refuses the workload. See HostSandbox.
+	HostSandbox *HostSandbox `json:"-"`
+
 	// WriteBack says how the file changes the workload produces get back to
 	// the hub. It carries no credential either — a push reuses the grant
 	// Workspace named — for the reasons set out in writeback.go. The zero
@@ -697,6 +703,9 @@ func (s Spec) Validate() error {
 		}
 	}
 	if err := ValidateSpecMounts(s.Mounts); err != nil {
+		return err
+	}
+	if err := s.HostSandbox.Validate(); err != nil {
 		return err
 	}
 	// Host mounts are checked here too, not only by the driver that honours

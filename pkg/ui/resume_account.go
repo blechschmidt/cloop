@@ -188,7 +188,12 @@ const (
 	reasonElsewhere = "this run was not started from this hub — its own record names a run the hub did not " +
 		"dispatch — so the hub does not know whose Claude account to carry it on"
 	reasonNoPlane = "whom this run was started for cannot be read: this process holds no control plane"
-	reasonUnread  = "whom this run was started for could not be read from the hub's control plane"
+	// reasonSandboxedHubDir follows the person: their runs on the hub's host
+	// run in the host sandbox, which cannot keep the control plane from a run
+	// of the hub's own directory (Task 20480).
+	reasonSandboxedHubDir = "may not run the hub's own directory on its host, where the host sandbox their " +
+		"runs need cannot keep the control plane out of reach"
+	reasonUnread = "whom this run was started for could not be read from the hub's control plane"
 	// reasonNotOnExecutor is for an executor restricted to an access list
 	// that does not name them (or, nobody named, cannot be checked).
 	reasonNotOnExecutor = "may not use the executor this project runs on"
@@ -298,6 +303,9 @@ func (s *Server) resumeAccountFor(workDir string) *resumeAccount {
 			Cause: "no Claude home: they were offboarded, or never signed in on this hub"})
 	}
 	acct.scope = claudeScope{Owner: acct.who.identity, ConfigDir: home}
+	// Whether the run it carries on is put in the host sandbox (Task 20480):
+	// decided again now, so a starter demoted since is sandboxed.
+	acct.who.hubAdmin = s.ownerKeyIsHubAdmin(acct.who.identity)
 	return acct
 }
 

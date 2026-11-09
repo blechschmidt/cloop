@@ -60,6 +60,7 @@ import (
 	"testing"
 
 	"github.com/blechschmidt/cloop/internal/hometest"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
 
 // Environment variables that change what the suite runs against.
@@ -86,6 +87,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// A hub this binary runs dispatches people's work into the host sandbox,
+	// whose helper is this binary (Task 20480).
+	hostsandbox.InstallTestHelper()
 	goEnv = captureGoEnv()
 	if dir, err := os.UserCacheDir(); err == nil {
 		userCacheDir = dir

@@ -9,6 +9,7 @@ import (
 	// for an answer that, under a script's pty, never comes.
 	_ "github.com/blechschmidt/cloop/internal/termquery"
 	"github.com/blechschmidt/cloop/pkg/caps"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 	"github.com/blechschmidt/cloop/pkg/isolationprobe"
 )
 
@@ -18,6 +19,12 @@ func main() {
 	// rely on: it leaves before anything else in the binary runs.
 	if isolationprobe.IsInvocation(os.Args) {
 		os.Exit(isolationprobe.Main(os.Stdout, os.Stderr))
+	}
+	// The host sandbox's helper (Task 20480) confines itself and becomes the
+	// workload it was started for. Nothing of the CLI may run before it: the
+	// workload's restrictions must be the first thing the process does.
+	if hostsandbox.IsInvocation(os.Args) {
+		os.Exit(hostsandbox.Main())
 	}
 	// Before anything can start a child process: a capability this process
 	// was started with — the executor agent's CAP_NET_ADMIN — stays with it

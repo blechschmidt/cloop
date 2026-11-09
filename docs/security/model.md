@@ -714,6 +714,134 @@ shallow by default. None of them makes a sandbox live longer or see more.
 
 ---
 
+## The host sandbox
+
+> On a hub with single sign-on, a run or model call the hub forks on its own
+> host for a person can open that person's project and Claude login, and
+> nothing that belongs to anyone else.
+
+The host executor starts `cloop run`, and the agent it runs, as the hub's own
+operating-system user. Without a sandbox that user's permissions are the only
+limit, so one person's agent could read every other project on the hub, every
+other person's Claude login under the identity root, the lease files in
+`/dev/shm` that hold other runs' credentials, other runs' environments in
+`/proc`, and the hub's database. On a hub running as root, the Docker and
+systemd sockets let it do anything at all. The host sandbox closes that gap for
+the people a hub serves.
+
+**Who is sandboxed** is `executors.host_sandbox.mode`:
+
+| Mode | Dispatches to the hub's host that run in the sandbox |
+| --- | --- |
+| `auto` (default) | On a hub with sign-in, every one that acts for a person who is not a hub administrator. One that acts for an administrator, or for no one (the static token, the hub's own automatic work), is sandboxed too when the project is one somebody whose runs are sandboxed may write. Without sign-in there is one person, and nobody to keep apart |
+| `all` | Every one that acts for anyone, hub administrators and the hub's own login included |
+| `off` | None. On a hub with sign-in, `cloop hub doctor` fails `executors.host_sandbox` |
+
+This covers everything the hub starts on its host for a person: runs, the
+automatic resume and failover of a run (which act for its starter, and ask
+again whether the starter is an administrator), the dashboard's model calls,
+brainstorming and requirement checks. Work that acts for nobody and runs only
+cloop's own code, such as `cloop init` for a new project, is not sandboxed.
+
+An administrator's run is sandboxed on a project a sandboxed person may write
+because it would otherwise run whatever that person's agent left there, with
+the hub's whole filesystem: a hook in `.claude/settings.json`, a git hook, a
+build script. "May write" follows the access model: the project's owner is not
+an administrator, or it is shared with people or a team at `operator` or
+above, or the role policy gives somebody who is not an administrator a role
+that runs work on it. When the hub cannot tell, the run is sandboxed.
+
+**What a sandboxed workload can open:**
+
+| Path | Access |
+| --- | --- |
+| Its project's directory, feature checkouts included | read and write |
+| The Claude login directory of the person it acts for, with their Copilot home inside it | read and write |
+| `sandbox-home` inside that directory, which becomes `HOME`, so caches and `~/.gitconfig` are per person and go when the person is offboarded | read and write |
+| A private temporary directory, which becomes `TMPDIR` (on a root hub, `/tmp` itself) | read and write |
+| Its own lease files and the hub CA file the driver wrote for it | read |
+| Local repositories its grants open on the host. A read-only `local_repo` grant is enforced here, where before it was only advice | as the grant says |
+| `/usr`, `/bin`, `/sbin`, `/lib*`, `/nix/store`, `/proc`, `/sys`, the resolver file `/etc/resolv.conf` points to, and a list of files under `/etc` that leaves out `shadow`, the SSH host keys, TLS private keys, systemd units and any key file | read and execute |
+| Where the hub found `claude` and `copilot`, whose directories also go first on `PATH` | read and execute |
+| `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, `/dev/tty`; on a root hub also a terminal instance of its own | read and write |
+| `executors.host_sandbox.read_only`, except a path that would expose the hub's files or another person's (the filesystem's root, the control plane, the identity root, another project, or a directory above one of them), which is left out and named by the doctor. `/opt` and `/snap` are not granted by default, because software keeps keys and whole hubs there; name a toolchain's own directory here | read and execute |
+
+**How it is enforced** (`pkg/hostsandbox`). The host driver starts the cloop
+binary as a helper, which restricts itself and then execs the workload, so the
+restrictions hold from the workload's first instruction and nothing it does
+can lift them:
+
+- **Landlock** (Linux 6.2 or later, ABI 3) makes every file open, and every
+  truncate, outside the list above fail. It also stops the workload reading the
+  memory, environment or file descriptors of any process outside its sandbox,
+  and from ABI 6 it stops it signalling one or connecting to its abstract
+  sockets.
+- **`no_new_privs`**, so no setuid or file-capability binary gives anything back.
+- **On a hub running as root**, fresh mount, PID and IPC namespaces. `/tmp`,
+  `/var/tmp`, `/dev/shm` and `/run` are private, which hides the Docker,
+  containerd, systemd and D-Bus sockets that trust a caller for being root,
+  and `/dev/pts` is an instance of the workload's own, so the host's terminals
+  are out of reach. The whole filesystem is then read-only except the writable
+  grants, which stops what Landlock does not cover (`chmod`, `chown`, `utimes`,
+  extended attributes) everywhere else. The workload sees only its own
+  processes, and when it ends everything it left running is killed. Every
+  capability but `CAP_CHOWN`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_FSETID`
+  and `CAP_NET_BIND_SERVICE` is dropped from the bounding set, so loading a
+  kernel module, BPF, raw sockets, changing the network and opening a file by
+  its handle (which would reach a file outside the grants through a mount the
+  workload may write) are gone for good.
+
+A host that cannot give the sandbox (no Landlock ABI 3, or a root hub that may
+not create namespaces) refuses the dispatch. The hub never runs it without.
+
+The sandbox's grants are worked out from whom the dispatch acts for and from
+its lease, never from its environment, so a grant that sets
+`CLAUDE_CONFIG_DIR` or `HOME` to another person's login opens nothing. Every
+granted path that lies inside a directory the workload may write is opened
+without following a link out of that directory, so a link an earlier run left
+there (`sandbox-home` turned into a link to `/`) is refused, and the hub
+replaces such a link with a directory before it grants the home.
+
+**The environment.** Every workload the host driver starts, sandboxed or not,
+starts without the hub's own credentials: `CLOOP_SECRET_KEY` and the other root
+key variables, `CREDENTIALS_DIRECTORY`, `CLOOP_UI_TOKEN`,
+`CLOOP_OIDC_CLIENT_SECRET` and the `CLOOP_NOTIFY_*` webhook URLs. A sandboxed
+workload inherits from the hub's environment only an allow-list: `PATH`, the
+locale, the terminal, who it runs as, the proxies and CA bundles, and the Go
+toolchain's and the harness's settings that hold no credential
+(`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_*`). Anything else the hub was started
+with, such as its own `OPENAI_API_KEY`, a `GITHUB_TOKEN`, a webhook URL or a
+database DSN, stays with the hub unless `executors.host_sandbox.pass_env`
+names it. What the hub set for the run and what a lease delivered are not
+inherited, and stay. A sandboxed workload also loses the variables that lead
+to the hub user's session (an SSH agent, D-Bus, a display, a Docker host, the
+XDG directories) and any variable that points into the hub user's home outside
+what it was granted, such as a `GOPATH` there.
+
+**Local repositories.** A `local_repo` secret is a path that anyone with
+`secret.own` may mint and grant to their own project. So a dispatch acting for
+a person who is not a hub administrator is refused, on any executor, when its
+lease would open the filesystem's root, the hub's own directory, the identity
+root, a project of somebody else's, or a directory above one of them. A
+project the person owns may be granted to another of theirs.
+
+**The hub's own directory** cannot be sandboxed from itself: a run of it needs
+the project's state, and that state is the control plane. Under `auto`, only a
+hub administrator may run it on the hub's host, and a dispatch of it for anyone
+else is refused with `409`. Under `all` nobody may, and it has to be bound to a
+container executor. The voice-command dialog runs `cloop listen`, which carries
+out what it heard in the hub's own directory, so it is refused the same way;
+dictating into a field is not a dispatch and works for everyone. A paused run
+of the hub's own directory that a person started before the sandbox existed is
+not resumed for them: it is held with the reason `starter_unavailable`.
+
+**Inline replays.** The provider-call replay and the task replay run the
+provider in the hub's own process, where there is no sandbox to run it in. For
+a person whose runs are sandboxed they are refused with `409`
+`inline_call_unsandboxed`.
+
+---
+
 ## The lease-revocation guarantee
 
 Secret grants are leased with a TTL, so that the lease, not the grant, limits
@@ -4767,6 +4895,30 @@ Retiring the static token while the hub runs (see
 | Operator `ExtraArgs` can't reopen the sandbox | `TestContainerRejectsSandboxEscapingExtraArgs` |
 | Secret values never enter the argv; they are forwarded as bare `--env NAME` | `TestContainerSecretsNeverEnterArgv` |
 
+### Host sandbox — `hub_host_sandbox_test.go` (cmd) and the package suites
+
+| Guarantee | Test |
+| --- | --- |
+| A person's model call on the hub's host reads and writes their own project and Claude home, and reaches neither another person's project nor their Claude login, the hub's database, the project registry, another run's temporary files or the hub's environment; it carries no root key; under `auto` an administrator's call is sandboxed on a project such a person writes and not on one only administrators write; and a person's call on the hub's own directory is refused, through a real hub, the real driver and the real sandbox | `TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles` |
+| The sandbox grants exactly its policy, in Landlock-only and namespace mode: no write to a read-only tree, no `mknod`, no `/etc/shadow`, no other run's `/dev/shm`, no other process's environment | `TestTheSandboxGrantsItsPolicyAndNothingElse` |
+| On a root hub the workload sees neither the host's `/run` nor its processes, and keeps only the file-access capabilities, under `no_new_privs` | `TestNamespaceModeHidesTheHostsProcessesSocketsAndCapabilities` |
+| On a root hub everything but the writable grants is read-only, so `chmod`, `chown` and `utimes` fail on files the workload may not open | `TestNamespaceModeLeavesOnlyTheWritableGrantsWritable` |
+| A link an earlier run left in a directory it may write is never followed out of it, and the hub replaces a link left for the sandbox home | `TestALinkLeftInAWritableGrantIsNeverFollowedOutOfIt`, `TestHostSandbox_ALinkLeftForTheSandboxHomeIsReplaced` |
+| A root workload cannot open a file outside its grants by the file's handle | `TestAFileOutsideTheGrantsCannotBeOpenedByItsHandle` |
+| A person's lease cannot open the hub's own directory, the identity root or another person's project as a local repository, on any executor | `TestALocalRepoGrantCannotOpenAnotherPersonsDirectory` |
+| A sandboxed workload inherits only harmless settings of the hub's environment, and what the operator passes | `TestOnlyHarmlessSettingsAreInheritedByDefault`, `TestASandboxedWorkloadInheritsNoCredentialOfTheHubs` |
+| The host's terminals are out of the workload's reach | `TestTheHostsTerminalsAreOutOfReach` |
+| The run's own lease files stay readable, and only readable | `TestTheRunsOwnLeaseFilesAreReadable` |
+| A policy the helper cannot honour fails before the workload runs | `TestAPolicyTheHelperCannotHonourIsRefusedBeforeTheWorkloadRuns`, `TestASandboxTheDriverCannotHonourIsRefusedOrFailsBeforeTheWorkloadRuns` |
+| No host workload inherits the hub's root key, static token, OIDC client secret or notifier URLs, and no sandboxed one any credential of the hub's environment, unless a lease delivered the variable or the hub set it for the run | `TestTheHubsCredentialsNeverReachAHostWorkload`, `TestHubCredentialsAreScrubbedUnlessALeaseDeliveredThem`, `TestASandboxedWorkloadInheritsNoCredentialOfTheHubs` |
+| `auto` sandboxes every person but the administrators, `all` everyone, `off` nobody; a container dispatch and cloop's own work for nobody are never given one | `TestHostSandbox_AutoSandboxesEveryPersonButTheAdministrators`, `TestHostSandbox_AllSandboxesAdministratorsAndOffNobody` |
+| Under `auto` an administrator's run of a project somebody with sandboxed runs may write is sandboxed, as the access model decides who may write it | `TestHostSandbox_AnAdministratorsRunOfAProjectSandboxedPeopleWriteIsSandboxed`, `TestProjectExposureFollowsTheAccessModel` |
+| The grants come from whom the dispatch acts for, never from its environment | `TestHostSandbox_SandboxesDecideFromThePersonNotTheEnvironment` |
+| An operator's `read_only` path that would expose the hub or another person is left out | `TestHostSandbox_OperatorPathsThatWouldExposeOthersAreLeftOut` |
+| The inline replays are refused to a person whose runs are sandboxed | `TestInlineReplaysAreRefusedToAPersonWhoseRunsAreSandboxed` |
+| A paused run of the hub's own directory that a person started before the sandbox is held, naming them and why, instead of being resumed for them | `TestAResumeTheHostSandboxRefusesIsHeldSayingWhy` |
+| `cloop hub doctor` fails a hub with sign-in whose people's runs are not sandboxed, or which cannot sandbox them | `TestHostSandboxFindingsAcrossTheMatrix` |
+
 ### Sandbox egress filtering — `netfilter_test.go` and the package suites
 
 These test the properties in [the network section](#the-network-the-sandbox-sits-on)
@@ -5835,6 +5987,74 @@ project's grants and the git proxy's rules. So anyone who can edit a bound
 space or project can try to steer the runs of every project it is bound to, and
 a credential shape that pkg/redact doesn't know passes both scrubs
 ([retrieved text is untrusted](#retrieved-text-is-untrusted)).
+
+**A sandboxed run shares the hub's network.** The host sandbox confines files,
+processes and, on a root hub, the sockets under `/run`, but not the network: a
+service another person's run listens on at loopback, or one of the hub's own
+listeners, is reachable from a sandboxed run, which still needs a credential
+to get anywhere with the hub's. Landlock can restrict TCP ports but not
+addresses, so the sandbox does not use it (`pkg/hostsandbox/landlock_linux.go`).
+Run people's projects on container executors where the network matters.
+
+**A hub administrator's run of a project only administrators may write is not
+sandboxed under `auto`.** It runs as the hub's user with the whole filesystem,
+as every run did before, and so can read other people's projects and Claude
+logins (`TestHostSandbox_AutoSandboxesEveryPersonButTheAdministrators`). So
+can a run that acts for no one there, such as the static token's. Set
+`executors.host_sandbox.mode: all` to sandbox them too. A resumed run decides
+again from the starter's address alone, so an administrator only by a group
+mapping is sandboxed when their run resumes, and so are their runs of projects
+they own (`TestProjectExposureFollowsTheAccessModel`).
+
+**Without namespaces, a sandboxed run can still reach what a socket path leads
+to, and change the metadata of the hub user's files.** On a hub that does not
+run as root there are no namespaces. Connecting to a Unix socket is not a file
+open, so Landlock does not stop it: if the hub's user may use the Docker
+socket, a sandboxed run can too, and with it the whole host. Landlock does not
+cover `chmod`, `chown`, `utimes` or extended attributes either, so a sandboxed
+run can change those on any file the hub's user owns, its database included,
+though not read or write it. Before Landlock ABI 6 such a run can also signal
+the hub user's other processes and connect to their abstract sockets, and
+`stat` and other processes' command lines stay readable
+(`pkg/hostsandbox/landlock_linux.go`). Keep the hub's user out of the `docker`
+group. Without namespaces there is no private `/dev/shm` either, so a tool
+that needs POSIX shared memory fails in the sandbox.
+
+**On a root hub below Landlock ABI 6, a sandboxed run can reach the host
+daemons' abstract sockets.** The namespaces hide the sockets under `/run`, but
+abstract sockets belong to the network namespace, which the run shares with the
+host, and some daemons (`iscsid`, `multipathd`) trust a caller for being root.
+`cloop hub doctor` warns about it (`TestHostSandboxFindingsAcrossTheMatrix`).
+Linux 6.12 scopes abstract sockets with Landlock, and a hub that does not run
+as root is not trusted by those daemons in the first place.
+
+**A run acts with the credentials of whoever starts it, whatever its project
+holds.** A sandboxed run can read its own person's Claude login and the
+grants its lease delivered, so a hook or build script somebody else left in a
+shared project runs with the credentials of the next person, administrator or
+not, who starts a run of it (`pkg/ui/host_sandbox.go`). This is the same for a
+container. Share a project only with people you would let act as you there.
+
+**Whether an administrator's run is sandboxed is decided when it starts.** A
+run already going when its project is first shared with somebody whose runs
+are sandboxed keeps running outside the sandbox until it ends, and so picks up
+what their model calls write there in the meantime
+(`TestHostSandbox_AnAdministratorsRunOfAProjectSandboxedPeopleWriteIsSandboxed`).
+
+**A read-only grant inside a writable one is writable.** Landlock adds the
+rights of every rule along a path, so a read-only `local_repo` grant that lies
+inside the project is as writable as the project (`pkg/hostsandbox/landlock_linux.go`).
+
+**A proxy URL in the hub's environment reaches sandboxed runs.** The proxies
+are on the allow-list because runs need the network, so credentials in a
+proxy URL (`http://user:password@proxy:3128`) are visible to every sandboxed
+run (`TestOnlyHarmlessSettingsAreInheritedByDefault`).
+
+**A device that runs payloads on its own host does not sandbox them.** The
+host sandbox is for the hub's own host: the request never travels to a device
+(`pkg/executor/hostsandbox.go`), so a device in host mode still runs every
+project's payload as its agent's user. Give a device that serves more than one
+person a container engine.
 
 **An agent on a local executor can open a human review gate itself.** No agent
 is handed a gate (`TestRunStopsAtAReviewGateUntilItIsApproved`), the MCP

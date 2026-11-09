@@ -537,6 +537,12 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		lease.Close()
 		return nil, executor.Handle{}, err
 	}
+	// Nor may a person's lease open somebody else's directory as a local
+	// repository, on any executor (Task 20480).
+	if err := checkRepoGrants(lease, workDir, clear); err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
 
 	// Host devices the lease opened, for the same reason and in the same place:
 	// an executor that cannot expose hardware should be refused naming the grant
@@ -685,6 +691,13 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// The person's Copilot home, after every step that adds to the
 	// environment: no grant may point a run at another person's.
 	spec = pinCopilotHome(spec, copilotPin)
+	// The host sandbox, for a person whose runs on this host must not reach
+	// anyone else's files (Task 20480): after everything that shapes the
+	// environment and the lease, which it starts from.
+	if spec, err = applyHostSandbox(spec, ex, workDir, clear, lease); err != nil {
+		lease.Close()
+		return nil, executor.Handle{}, err
+	}
 
 	// Last gate before dispatch, and deliberately after every step that can add
 	// a binding to the spec: the lease, the repository grants and the workspace
@@ -1061,6 +1074,9 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	if err != nil {
 		return nil, err
 	}
+	if err := checkRepoGrants(lease, workDir, clear); err != nil {
+		return nil, err
+	}
 	spec, err = applyDeviceGrants(spec, ex, lease)
 	if err != nil {
 		return nil, err
@@ -1124,6 +1140,11 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	logResourceClamps(workDir, clamps)
 	logUnenforceableCeiling(ex, workDir, clamps)
 	spec = pinCopilotHome(spec, copilotPin)
+	// The host sandbox, as startWorkloadAs applies it (Task 20480): a model
+	// call runs the harness with its tools as much as a run does.
+	if spec, err = applyHostSandbox(spec, ex, workDir, clear, lease); err != nil {
+		return nil, err
+	}
 
 	// On record for as long as it runs (Task 20419): a member that dies in
 	// the middle of a helper subcommand leaves its intent, and the member that

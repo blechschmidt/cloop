@@ -92,6 +92,12 @@ func NewWithBackground(policy BackgroundPolicy) *Provider {
 func (p *Provider) Name() string         { return ProviderName }
 func (p *Provider) DefaultModel() string { return "" }
 
+// FindBinary locates the claude binary the way a run does, for the hub to
+// grant a sandboxed run its installation (Task 20480): the PATH, then the
+// installers' locations under the hub user's home, which a sandboxed run's
+// own home no longer leads to. It returns "claude" when there is none.
+func FindBinary() string { return findClaude() }
+
 // findClaude locates the claude binary. It checks PATH first, then common
 // install locations that may not be in PATH when launched from a web server.
 func findClaude() string {

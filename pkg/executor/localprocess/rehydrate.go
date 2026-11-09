@@ -512,6 +512,9 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 		// an unparsable row degrades to a record that refuses to signal rather
 		// than to one that signals unchecked.
 		adopted: &want,
+		// A sandboxed workload's private directory goes when it ends, whoever
+		// is watching it then (Task 20480).
+		sandboxDir: saved.Meta[metaSandboxDir],
 	}
 
 	e.mu.Lock()

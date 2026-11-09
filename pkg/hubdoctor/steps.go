@@ -78,6 +78,9 @@ type stepSet struct {
 func steps(dir string, cfg *config.Config, opts Options, wal walSample, rep *Report, set stepSet) []step {
 	s := []step{
 		{"policy", "Host execution policy", func(_ context.Context, add addFn) { checkExecutionPolicy(cfg, add) }},
+		// Beside the policy it qualifies: whether people's runs on this host
+		// are kept out of each other's files (Task 20480).
+		{"executors.host_sandbox", "Host sandbox", func(_ context.Context, add addFn) { checkHostSandbox(dir, cfg, add) }},
 		// What loading changed comes first: every check below reads the result.
 		{"config.repaired", "Configuration repairs", func(_ context.Context, add addFn) { checkLoadRepairs(cfg, add) }},
 		{"oidc", "Single sign-on", func(ctx context.Context, add addFn) { checkOIDC(ctx, cfg, opts, add) }},

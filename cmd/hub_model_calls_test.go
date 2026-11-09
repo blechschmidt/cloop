@@ -147,7 +147,11 @@ func TestHubModelCallsRunOnTheCallersClaudeAccount(t *testing.T) {
 	if err := ps.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hub.Dir, ".cloop", "config.yaml"), []byte("provider: claudecode\n"), 0o600); err != nil {
+	// alice and bob call on the hub's own directory, which the host sandbox
+	// refuses people (Task 20480); what is under test here is whose account
+	// each call runs on, so the sandbox is off.
+	if err := os.WriteFile(filepath.Join(hub.Dir, ".cloop", "config.yaml"),
+		[]byte("provider: claudecode\nexecutors:\n  host_sandbox:\n    mode: \"off\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

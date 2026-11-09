@@ -705,3 +705,36 @@ requirements:
         command: go test ./pkg/hubteam -run '^(TestWhoIsOnATeam|TestAShareNeedsItsTeam|TestCreateUpdateDeleteAndAudit)$'
       - name: the binding that names a project
         command: go test ./pkg/authz -run '^TestProjectPinnedTellsABindingNamingTheProjectFromAHubWideOne$'
+  - id: R-36
+    title: An agent working on the hub's own host for one person shall reach none of another person's projects, Claude login or credential files, nor the hub's database or root key.
+    status: approved
+    priority: must
+    tags: [security, sandbox, isolation]
+    details: |-
+      On a hub with single sign-on that allows host execution, every run, resume,
+      failover and model call the hub forks on its own host for a person who is
+      not a hub administrator runs in the host sandbox (executors.host_sandbox.mode
+      auto; all includes administrators), and so does an administrator's of a
+      project such a person may write. Landlock limits it to its project, its
+      person's Claude login and the home kept there, a private temporary
+      directory, its own lease files and the system's read-only directories,
+      under no_new_privs. On a hub running as root, private mount, PID and IPC
+      namespaces hide /run and other people's processes, and the capability
+      bounding set keeps only the file-access capabilities. A host that cannot
+      sandbox refuses the dispatch, the hub's own directory is refused to anyone
+      the mode sandboxes, and so are the in-process replays. No workload the host
+      driver starts inherits the hub's root key, static token or notifier URLs.
+      Promised in docs/security/model.md, "The host sandbox".
+    tests:
+      - name: end to end, through a real hub and the real sandbox
+        command: go test ./cmd -run '^TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles$'
+        timeout: 20m
+      - name: the sandbox itself
+        command: go test ./pkg/hostsandbox -run '^(TestTheSandboxGrantsItsPolicyAndNothingElse|TestNamespaceModeHidesTheHostsProcessesSocketsAndCapabilities|TestNamespaceModeLeavesOnlyTheWritableGrantsWritable|TestALinkLeftInAWritableGrantIsNeverFollowedOutOfIt|TestTheHostsTerminalsAreOutOfReach|TestTheRunsOwnLeaseFilesAreReadable|TestAFileOutsideTheGrantsCannotBeOpenedByItsHandle|TestOnlyHarmlessSettingsAreInheritedByDefault|TestAPolicyTheHelperCannotHonourIsRefusedBeforeTheWorkloadRuns|TestHubCredentialsAreScrubbedUnlessALeaseDeliveredThem)$'
+      - name: the driver
+        command: go test ./pkg/executor/localprocess -run '^(TestTheHubsCredentialsNeverReachAHostWorkload|TestASandboxedWorkloadInheritsNoCredentialOfTheHubs|TestASandboxedWorkloadReachesItsProjectAndNotAnothers|TestASandboxTheDriverCannotHonourIsRefusedOrFailsBeforeTheWorkloadRuns)$'
+      - name: who is sandboxed
+        command: go test ./pkg/ui -run '^(TestHostSandbox_AutoSandboxesEveryPersonButTheAdministrators|TestHostSandbox_AllSandboxesAdministratorsAndOffNobody|TestHostSandbox_TheHubsOwnDirectoryIsRefusedRatherThanSandboxed|TestHostSandbox_SandboxesDecideFromThePersonNotTheEnvironment|TestHostSandbox_OperatorPathsThatWouldExposeOthersAreLeftOut|TestInlineReplaysAreRefusedToAPersonWhoseRunsAreSandboxed|TestAResumeTheHostSandboxRefusesIsHeldSayingWhy|TestHostSandbox_AnAdministratorsRunOfAProjectSandboxedPeopleWriteIsSandboxed|TestProjectExposureFollowsTheAccessModel|TestHostSandbox_ALinkLeftForTheSandboxHomeIsReplaced|TestALocalRepoGrantCannotOpenAnotherPersonsDirectory)$'
+        timeout: 20m
+      - name: the doctor
+        command: go test ./pkg/hubdoctor -run '^TestHostSandboxFindingsAcrossTheMatrix$'

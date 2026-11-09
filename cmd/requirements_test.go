@@ -216,6 +216,9 @@ func TestTheDashboardChecksRequirementsOnTheExecutor(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(hub.Dir, ".cloop", "config.yaml"), []byte("provider: claudecode\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// alice checks the hub's own directory, which the host sandbox refuses
+	// people; what is under test is where the check runs.
+	hostSandboxOff(t, hub)
 	if err := os.WriteFile(filepath.Join(hub.Dir, "probe.txt"), []byte("present"), 0o600); err != nil {
 		t.Fatal(err)
 	}

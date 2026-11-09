@@ -149,6 +149,13 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 		}
 		s.log().Warn(logger.EventSessionStart, 0, "auto-resume: could not restart cap-paused run",
 			map[string]interface{}{"project": workDir, "error": err.Error()})
+		if errors.Is(err, errHostSandboxRefused) && acct != nil {
+			// The starter may no longer run this project on the hub's host
+			// (Task 20480): held, saying so, rather than asked again at every
+			// sweep.
+			err = &starterUnavailableError{Identity: acct.who.identity, Basis: acct.basis,
+				Reason: reasonSandboxedHubDir, Cause: err.Error()}
+		}
 		s.holdRefusedResume(workDir, err)
 		return false
 	}

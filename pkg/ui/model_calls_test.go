@@ -28,6 +28,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/clijson"
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/pm"
@@ -264,6 +265,9 @@ func TestBlocker_PostAnalysesOnTheExecutorAndApplies(t *testing.T) {
 // on the hub's host. It is task.mutate now; detection stays a read.
 func TestBlocker_AViewerCannotStartTheAnalysis(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// An operator analyses a task of the hub's own directory, which the host
+	// sandbox refuses people; what is under test is who may.
+	withHostSandboxMode(t, config.HostSandboxOff)
 	idp := newUIFakeIdP(t)
 	srv, ts := newOIDCTestServer(t, idp, "", nil)
 	resolver, err := authz.New(authz.Config{Bindings: []authz.Binding{

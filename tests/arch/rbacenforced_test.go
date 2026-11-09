@@ -78,6 +78,9 @@ var defaultRoleUses = map[string]string{
 	"cmd/config_cmd.go:applyConfigKey": "sets the value from `cloop config set`",
 	"pkg/ui/request_approvers.go:requestApprovers": "whether an unmapped identity may approve a grant request, " +
 		"read only past the s.authzActive check that returns for a hub without a policy",
+	"pkg/ui/host_sandbox.go:projectExposedToSandboxedPeople": "whether an unmapped identity may run a project " +
+		"nobody owns, so an administrator's run of it is sandboxed; read only past the s.authzActive check " +
+		"that answers for a hub without a policy",
 }
 
 // rbacAsks lists, per reporter, the function that has to call the predicate:

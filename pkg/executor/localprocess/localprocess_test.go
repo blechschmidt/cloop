@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
 
 // Fixture-child protocol. The parent re-execs the test binary with
@@ -52,6 +53,9 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	// Started as the host sandbox's helper, run it; it never reaches the
+	// fixtures or the tests.
+	hostsandbox.InstallTestHelper()
 	switch os.Getenv(fixtureEnv) {
 	case "":
 		os.Exit(m.Run())

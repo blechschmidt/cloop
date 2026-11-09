@@ -133,6 +133,9 @@ func TestHubCopilotActsForThePersonEndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(hub.Dir, ".cloop", "config.yaml"), []byte("provider: copilot\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// People work on the hub's own directory here, which the host sandbox
+	// refuses them; what is under test is whose Copilot sign-in they get.
+	hostSandboxOff(t, hub)
 
 	const alice, bob, carol = "alice@example.com", "bob@example.com", "carol@example.com"
 	browsers := map[string]*http.Client{

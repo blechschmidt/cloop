@@ -902,6 +902,11 @@ type ExecutorsConfig struct {
 	// ModelRelay keeps a sandboxed run's Claude credential on the hub and
 	// meters its spend there (Task 20435). See ModelRelayConfig.
 	ModelRelay ModelRelayConfig `yaml:"model_relay,omitempty"`
+
+	// HostSandbox decides which workloads the hub forks on its own host run
+	// in the host sandbox, confined to the files of the person they act for
+	// (Task 20480). See HostSandboxConfig.
+	HostSandbox HostSandboxConfig `yaml:"host_sandbox,omitempty"`
 }
 
 // KubeGuardConfig configures the Kubernetes access monitor (Task 20277).

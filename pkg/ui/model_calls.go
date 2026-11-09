@@ -212,7 +212,7 @@ func (s *Server) refuseModelCallDispatch(w http.ResponseWriter, c *harnessCleara
 // project bound to an executor that keeps its runs off the hub's host, or
 // whose executor cannot be resolved to say otherwise. It reports whether it
 // refused.
-func denyInlineModelCall(w http.ResponseWriter, workDir, what string) bool {
+func denyInlineModelCall(w http.ResponseWriter, workDir, what string, who harnessWho) bool {
 	if denyHostSideEffect(w, workDir, what) {
 		return true
 	}
@@ -227,6 +227,17 @@ func denyInlineModelCall(w http.ResponseWriter, workDir, what string) bool {
 			fmt.Sprintf("%s calls the project's provider inside the hub, on its host, and %s runs on %s, "+
 				"which keeps its runs off that host", what, workDir, ex.ID()),
 			"Run the task again instead: a run goes to the project's executor.", nil)
+		return true
+	}
+	// A call in the hub's own process has no sandbox to be made in (Task
+	// 20480): for a person whose runs on this host are sandboxed, it would
+	// run the harness, tools and all, with the hub's whole filesystem.
+	if hostSandboxApplies(who, workDir) {
+		writeSandboxDenied(w, "inline_call_unsandboxed",
+			fmt.Sprintf("%s calls the project's provider inside the hub's own process, and your runs on "+
+				"this host run in the host sandbox (executors.host_sandbox), which a call there "+
+				"cannot be made in", what),
+			"Run the task again instead: a run goes to the project's executor, in the sandbox.", nil)
 		return true
 	}
 	return false

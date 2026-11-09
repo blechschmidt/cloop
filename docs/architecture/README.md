@@ -1014,6 +1014,7 @@ calls helpers that use a model: `pkg/clarify`, `pkg/coach`, `pkg/diagnosis`,
 | `pkg/executor/featurehub` | the hub's half of a feature on an isolating executor |
 | `pkg/executorstore` | enrollment, agent credentials and handles in the database |
 | `pkg/sandbox` | parsing and validating `.cloop/sandbox.yaml` |
+| `pkg/hostsandbox` | keeping a person's runs on the hub's own host to their own files (Landlock, namespaces) |
 | `pkg/imagepolicy` | which images may run, pinned to a digest |
 | `pkg/isolationprobe` | what a sandbox's kernel says about itself, and the verdict |
 | `pkg/isolationverify` | running the probe under each executor's runtime |

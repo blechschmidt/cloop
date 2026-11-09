@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 	"github.com/blechschmidt/cloop/pkg/projectconfine"
 	"github.com/blechschmidt/cloop/pkg/redact"
 )
@@ -141,6 +142,10 @@ type record struct {
 	// git trusts for the proxy's URL (Spec.GitCA, Task 20409), removed when
 	// it finishes. Empty when the Spec carried none.
 	gitCADir string
+	// sandboxDir is the private directory of a sandboxed workload: its
+	// temporary files, and its home when the hub gave it none of its own.
+	// Removed when it ends.
+	sandboxDir string
 
 	// redactor removes this workload's own leased credentials from its
 	// output. Nil when it holds none.
@@ -424,14 +429,46 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		// Inherited plus the CA's configuration: no PATH or HOME floor, which
 		// is for an explicit environment, not an inherited one.
 		cmd.Env = env
+	} else {
+		cmd.Env = os.Environ()
 	}
+	// The hub's own credentials — the root key every stored secret is sealed
+	// under, the static admin token — are in the environment it was started
+	// with, and nothing a workload does needs them (Task 20480). Taken out of
+	// every workload, sandboxed or not, unless a lease delivered a variable of
+	// the same name, which is the workload's.
+	cmd.Env = hostsandbox.WithoutHubCredentials(cmd.Env, leaseEnvKeys(spec))
 	cmd.Stdout = pipeW
 	cmd.Stderr = pipeW
+
+	// The person's sandbox (Task 20480), last, because it starts from the
+	// environment and the files everything above prepared.
+	var sandboxDir string
+	if spec.HostSandbox != nil {
+		if sandboxDir, err = sandboxCommand(cmd, spec, gitCADir); err != nil {
+			_ = pipeR.Close()
+			_ = pipeW.Close()
+			removeGitCA(gitCADir)
+			return executor.Handle{}, err
+		}
+	}
 
 	if err := cmd.Start(); err != nil {
 		_ = pipeR.Close()
 		_ = pipeW.Close()
 		removeGitCA(gitCADir)
+		removeSandboxDir(sandboxDir)
+		if spec.HostSandbox != nil {
+			if errors.Is(err, syscall.EPERM) && hostsandbox.UsesNamespaces() {
+				// A hub running as root that may not create namespaces: in an
+				// unprivileged container, most often.
+				return executor.Handle{}, fmt.Errorf("%w: localprocess: this hub runs as root, and the host sandbox "+
+					"needs private mount, PID and IPC namespaces it is not allowed to create (%v); run the hub "+
+					"as a non-root user, or bind people's projects to container executors",
+					executor.ErrUnsupported, err)
+			}
+			return executor.Handle{}, fmt.Errorf("localprocess: start %q in the host sandbox: %w", spec.Argv[0], err)
+		}
 		return executor.Handle{}, fmt.Errorf("localprocess: start %q: %w", spec.Argv[0], err)
 	}
 	// The parent never writes to the pipe; closing its end is what makes the
@@ -449,6 +486,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		subscribers: make(map[*subscriber]struct{}),
 		redactor:    spec.Redactor(),
 		gitCADir:    gitCADir,
+		sandboxDir:  sandboxDir,
 	}
 
 	e.mu.Lock()
@@ -527,7 +565,7 @@ func (e *Executor) Start(ctx context.Context, spec executor.Spec) (executor.Hand
 		// exists — but adoption will decline it rather than guess. And the run
 		// id, so the workload is found by it if this process dies before the
 		// hub records the run (Task 20419).
-		Meta: executor.WithRunID(ident.meta(), spec),
+		Meta: withSandboxDir(executor.WithRunID(ident.meta(), spec), sandboxDir),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this process. Names and paths only — the credential
@@ -1079,6 +1117,7 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// driver is e.mu before rec.mu (see pruneLocked).
 	if final.Terminal() {
 		removeGitCA(rec.gitCADir)
+		removeSandboxDir(rec.sandboxDir)
 		executor.ForgetHandle(e.handleStore(), rec.id)
 		// And the lease attribution with it: the process is gone, so this
 		// handle must stop answering HoldsLease. Leaving it bound would make

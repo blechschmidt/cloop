@@ -25,6 +25,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
+	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/copilotauth"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
@@ -63,6 +64,9 @@ func personToken(tag string) string {
 // executor that shares the hub's host.
 func newCopilotHub(t *testing.T) *harnessHub {
 	t.Helper()
+	// People run the hub's own directory here, which the host sandbox
+	// refuses them; what is under test is whose Copilot sign-in a run gets.
+	withHostSandboxMode(t, config.HostSandboxOff)
 	setHubCopilotEnv(t)
 	h := newHarnessHub(t)
 	host := newHarnessExec("copilot-hub-host", executor.KindLocalProcess, executor.IsolationNone)

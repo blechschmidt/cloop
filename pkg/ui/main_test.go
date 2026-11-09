@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/blechschmidt/cloop/internal/hometest"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
 
 // TestMain redirects the per-user state directory at a temporary one for the
@@ -38,6 +39,9 @@ import (
 // this package reach handlers that touch the registry or fork, and the next one
 // to be added should not have to know that.
 func TestMain(m *testing.M) {
+	// Started as the host sandbox's helper by a dispatch a test made, run it
+	// and never reach the tests (Task 20480).
+	hostsandbox.InstallTestHelper()
 	stub, cleanup, err := writeExecStub()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pkg/ui tests: cannot create the exec stub: %v\n", err)

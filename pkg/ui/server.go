@@ -1080,6 +1080,9 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	// Every dispatch re-checks its project against the projects this hub
 	// serves, which only the Server can list (Task 20418).
 	setProjectListSource(srv.allProjectEntries)
+	// And whether a project is one people whose runs are sandboxed may write,
+	// which decides whether an administrator's run of it is (Task 20480).
+	setHostSandboxExposure(srv.projectExposedToSandboxedPeople)
 	// And the broker hands it every grant revoked in this process, to take
 	// back from the workloads holding it (Task 20403).
 	ensureGrantRevocationHook()
@@ -6972,7 +6975,7 @@ func (s *Server) handleReplayRunCreate(w http.ResponseWriter, r *http.Request) {
 	// process — with claudecode, `claude` on the hub's host. That is host
 	// execution driven by an HTTP request, so strict mode refuses it, and so
 	// does a project whose own runs are kept off the host (Task 20442).
-	if denyInlineModelCall(w, workDir, "git (inline task replay)") {
+	if denyInlineModelCall(w, workDir, "git (inline task replay)", s.harnessWhoFor(r)) {
 		return
 	}
 

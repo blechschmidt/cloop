@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/internal/hometest"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
 
 // ─────────────────────────────────────────────
@@ -634,6 +635,9 @@ func writeFixtureSnapshot(t *testing.T, workDir string, version int) {
 // the real ~/.cloop/projects.json — with none of the in-process safeguards
 // applying, because the leak happens in a different process.
 func TestMain(m *testing.M) {
+	// A hub this binary runs dispatches people's work into the host sandbox,
+	// whose helper is this binary (Task 20480).
+	hostsandbox.InstallTestHelper()
 	// Parse flags so -update works.
 	// testing.Init() is called automatically; we just call flag.Parse to catch -update.
 	// Note: we do this manually since TestMain replaces the default main.

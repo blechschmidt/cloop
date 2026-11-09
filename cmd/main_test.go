@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/blechschmidt/cloop/internal/hometest"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
 
 // cliReexecEnv makes this test binary act as the cloop CLI instead of running
@@ -25,6 +26,9 @@ const cliReexecEnv = "CLOOP_CMD_TEST_AS_CLI"
 // See internal/hometest for why this is done once per package rather than
 // per test, and for the leak that motivated it.
 func TestMain(m *testing.M) {
+	// Started as the host sandbox's helper by a test's hub, run it, before
+	// anything else this binary does (Task 20480).
+	hostsandbox.InstallTestHelper()
 	// No test reaches the host's systemd-creds: run as root, its first
 	// encryption creates the host's credential secret (Task 20425). A test
 	// that wants the encrypted path installs a stand-in of its own.
