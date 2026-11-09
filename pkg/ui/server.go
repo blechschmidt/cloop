@@ -5189,7 +5189,20 @@ func (s *Server) handleTaskBlocker(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	jsonOK(w, blocker.Detect(workDir, task, ps.Plan))
+	jsonOK(w, blocker.Detect(workDir, task, ps.Plan, s.blockerRun(workDir)))
+}
+
+// blockerRun answers the blocker's one question about liveness — is a run
+// executing this project? — for its stalled heuristic, which calls a task in
+// progress stalled only when nothing is (Task 20479). projectExecuting is the
+// answer stale-run recovery acts on, and it fails closed: an executor that
+// cannot be reached counts as still running its workload, so a task is never
+// called stalled because its device was slow to answer.
+func (s *Server) blockerRun(workDir string) blocker.Run {
+	if s.projectExecuting(workDir) {
+		return blocker.RunLive
+	}
+	return blocker.RunGone
 }
 
 // handleTaskBlockerAnalyze asks the AI for a blocked task's root cause, three
@@ -5257,7 +5270,7 @@ func (s *Server) handleTaskBlockerAnalyze(w http.ResponseWriter, r *http.Request
 		return
 	}
 	report.TaskID, report.TaskTitle = task.ID, task.Title
-	report.Detection = blocker.Detect(workDir, task, ps.Plan)
+	report.Detection = blocker.Detect(workDir, task, ps.Plan, s.blockerRun(workDir))
 
 	if apply {
 		annotation := "[ai-blocker] Recommendation: " + strings.ToUpper(report.Recommendation) +
@@ -6192,6 +6205,21 @@ func (s *Server) cachedRunningClaims() map[string]struct{} {
 	return claims
 }
 
+// livenessMoved reports whether any cached project status disagrees with this
+// tick's scan about whether a run is executing the project. running is keyed
+// by the paths the scan covered; a status for a path it did not cover is left
+// to the membership check, which notices the project left the list.
+func (s *Server) livenessMoved(running map[string]bool) bool {
+	s.projMu.RLock()
+	defer s.projMu.RUnlock()
+	for _, st := range s.projStatuses {
+		if live, scanned := running[st.Path]; scanned && live != st.Running {
+			return true
+		}
+	}
+	return false
+}
+
 // refreshProjectStatuses rebuilds the projStatuses cache from disk, reloading
 // every project.
 func (s *Server) refreshProjectStatuses() {
@@ -6213,8 +6241,8 @@ func (s *Server) refreshProjectStatuses() {
 // nil changed set reloads everything, which is what a caller with no idea what
 // moved has to do.
 //
-// The reused entries still get their liveness and their staleness re-derived:
-// those are the two fields that move without the project's state moving.
+// The reused entries still get their liveness and their health re-derived:
+// liveness moves without the project's state moving, and health follows it.
 func (s *Server) refreshProjectStatusesUsing(entries []multiui.ProjectEntry, live multiui.RunningDirs, changed map[string]struct{}) {
 	var cached map[string]multiui.ProjectStatus
 	if changed != nil {
@@ -6471,6 +6499,12 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 	// Features are removed far more often than projects, from the dashboard
 	// and from terminals alike, so the membership itself is compared.
 	listChanged := s.entrySetChanged(entries)
+	// Liveness moves without the state moving: a run killed outright writes
+	// nothing on its way out, and one started from a terminal is seen here
+	// before its first write. A project's Running flag and its health both
+	// follow liveness (Task 20479), so a cached status the scan contradicts
+	// is republished even though nothing needs reloading.
+	livenessMoved := s.livenessMoved(running)
 	for _, e := range entries {
 		if !sw.statDue(e.Path, now, running[e.Path], subscribed) {
 			continue
@@ -6497,7 +6531,7 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 			changed[e.Path] = struct{}{}
 		}
 	}
-	if len(changedPaths) > 0 || listChanged {
+	if len(changedPaths) > 0 || listChanged || livenessMoved {
 		s.refreshProjectStatusesUsing(entries, live, changed)
 		s.broadcastProjectsUpdate()
 

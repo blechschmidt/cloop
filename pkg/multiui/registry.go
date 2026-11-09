@@ -772,7 +772,12 @@ func hasCloop(dir string) bool {
 type Health string
 
 const (
-	HealthRunning  Health = "running"
+	// HealthRunning: the status says a run is in flight, and one is executing
+	// the project — however long it has been since it last wrote anything.
+	HealthRunning Health = "running"
+	// HealthStalled: the status says a run is in flight, but nothing is
+	// executing the project, so nothing will advance it. It is never a
+	// verdict on how long a run has been quiet; see healthFrom.
 	HealthStalled  Health = "stalled"
 	HealthFailed   Health = "failed"
 	HealthComplete Health = "complete"
@@ -798,15 +803,11 @@ type ProjectStatus struct {
 	ActiveTasks  int                 `json:"active_tasks"`
 	TotalSteps   int                 `json:"total_steps"`
 	LastActivity time.Time           `json:"last_activity"`
-	// LastStepTime is the timestamp of the project's most recent step. It is
-	// kept off the wire and exists so RefreshHealth can re-derive staleness
-	// from a cached status without reloading the project.
-	LastStepTime time.Time `json:"-"`
-	Provider     string    `json:"provider,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	PMMode       bool      `json:"pm_mode"`
-	HasProject   bool      `json:"has_project"` // false if no state file found
-	Running      bool      `json:"running"`     // true if cloop run is actually executing
+	Provider     string              `json:"provider,omitempty"`
+	Model        string              `json:"model,omitempty"`
+	PMMode       bool                `json:"pm_mode"`
+	HasProject   bool                `json:"has_project"` // false if no state file found
+	Running      bool                `json:"running"`     // true if cloop run is actually executing
 
 	// Error explains why a registered project could not be loaded.
 	//
@@ -914,6 +915,10 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 		Name:   entry.Name,
 		Path:   entry.Path,
 		Health: HealthUnknown,
+		// A fact about the directory, so it is reported even for a project
+		// whose state cannot be read: a process is executing there either way,
+		// and the hub's sweep compares this against its scan on every tick.
+		Running: running,
 	}
 	if entry.IsFeature() {
 		ps.Parent = entry.Parent
@@ -921,10 +926,10 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 	} else if _, err := os.Stat(filepath.Join(entry.Path, ".git")); err == nil {
 		ps.HasGit = true
 	}
-	// Lite-load: this function only reads metadata, plan task counts, the
-	// step total, and the timestamp of the most recent step. Decoding every
-	// step's Output here was wasted work — handleProjects calls this for
-	// every registered project on a 2 s tick (Task 20125).
+	// Lite-load: this function only reads metadata, plan task counts and the
+	// step total. Decoding every step's Output here was wasted work —
+	// handleProjects calls this for every registered project on a 2 s tick
+	// (Task 20125).
 	st, err := state.LoadLite(entry.Path)
 	if err != nil {
 		ps.HasProject = false
@@ -974,53 +979,52 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 		}
 	}
 
-	ps.LastStepTime = st.LastStepTime
-	ps.Health = computeHealth(st)
-	ps.Running = running
+	ps.Health = computeHealth(st, running)
 	return ps
 }
 
-// RefreshHealth recomputes the time-derived part of Health from the fields the
-// status already carries, so a caller holding a cached ProjectStatus can keep
-// its staleness indicator current without reloading the project.
+// RefreshHealth recomputes Health from the fields the status already carries,
+// so a caller holding a cached ProjectStatus keeps it in step with Running
+// without reloading the project.
 //
-// Health is the one field that moves on its own: a run that stops writing is
-// "running" for fifteen minutes and "stalled" after, with no state change in
-// between to notice. Everything else in a ProjectStatus only changes when the
-// project's state does.
+// Health moves whenever liveness does, and liveness can move without the
+// project's state moving: a run killed outright writes nothing on its way out.
+// Everything else in a ProjectStatus only changes when the project's state
+// does.
 func (ps *ProjectStatus) RefreshHealth() {
 	if !ps.HasProject {
 		return
 	}
-	ps.Health = healthFrom(ps.Status, ps.Goal, ps.LastActivity, ps.LastStepTime)
+	ps.Health = healthFrom(ps.Status, ps.Goal, ps.Running)
 }
 
-// computeHealth derives a Health indicator from the project state.
-func computeHealth(st *state.ProjectState) Health {
-	return healthFrom(st.Status, st.Goal, st.UpdatedAt, st.LastStepTime)
+// computeHealth derives a Health indicator from the project state and whether
+// a run is executing the project.
+func computeHealth(st *state.ProjectState, running bool) Health {
+	return healthFrom(st.Status, st.Goal, running)
 }
 
-// healthFrom holds the health rules over exactly the four fields they read, so
-// the same rules serve both a freshly loaded state and a cached ProjectStatus.
-func healthFrom(status, goal string, updatedAt, lastStepTime time.Time) Health {
+// healthFrom holds the health rules over exactly the three things they read,
+// so the same rules serve both a freshly loaded state and a cached
+// ProjectStatus.
+//
+// Whether a run is healthy is a question of liveness, never of time. The
+// project's state is written when a task starts and when it ends, and the
+// agent's whole turn in between is one provider call with no deadline by
+// default (Task 20148) — so a task that takes an hour leaves the state an hour
+// old while the agent works through it. This rule used to call a run
+// "stalled" once nothing had been written for fifteen minutes, which flagged
+// every long task as stuck while its process was alive and working (Task
+// 20479). What does make a run stalled is a status claiming one is in flight
+// with nothing executing the project: then nothing will advance it, and the
+// hub's stale-run recovery repairs the status within seconds.
+func healthFrom(status, goal string, running bool) Health {
 	switch status {
 	case "running", "evolving":
-		// If state was updated recently the run is still active — never stalled.
-		if !updatedAt.IsZero() && time.Since(updatedAt) <= 15*time.Minute {
+		if running {
 			return HealthRunning
 		}
-		// Check for stall: last step older than 15 minutes while status is
-		// running. Reads LastStepTime so this works under both Load and
-		// LoadLite (where Steps is nil but LastStepTime is populated from a
-		// cheap SQL aggregate — Task 20125).
-		if !lastStepTime.IsZero() && time.Since(lastStepTime) > 15*time.Minute {
-			return HealthStalled
-		}
-		// If we have no steps but UpdatedAt is older than 15 min, consider stalled.
-		if !updatedAt.IsZero() && time.Since(updatedAt) > 15*time.Minute {
-			return HealthStalled
-		}
-		return HealthRunning
+		return HealthStalled
 	case "complete":
 		return HealthComplete
 	case "failed":

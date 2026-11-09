@@ -249,8 +249,10 @@ type ProjectState struct {
 
 	// LastStepTime is the timestamp of the most recent step row. Same
 	// semantics as StepCount: set by both Load (last element) and LoadLite
-	// (cheap lookup of the newest step row); used by health probes to detect stalled
-	// runs without scanning the Steps slice.
+	// (cheap lookup of the newest step row), so it can be read without
+	// scanning the Steps slice. It says when a task last ended, not whether a
+	// run is alive: a run writes no step while a task is in progress, however
+	// long that takes, so project health is decided by liveness (Task 20479).
 	LastStepTime time.Time `json:"-"`
 
 	// base is every task as this process last read or wrote it: what the

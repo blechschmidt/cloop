@@ -19,9 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
 // statDue is where the "skip the stat" decision is made, and every promptness
@@ -283,33 +285,142 @@ func TestSweepRediscoversADeregisteredProject(t *testing.T) {
 	}
 }
 
-// TestRefreshHealthTracksStallWithoutAReload is what lets the sweep skip
-// reloading an unchanged project. Health is the one field that moves on its own
-// — a run that stops writing reads as "running" for fifteen minutes and
-// "stalled" after — so if it could not be re-derived from a cached status, not
-// reloading would have quietly disabled stall detection (Task 20209).
-func TestRefreshHealthTracksStallWithoutAReload(t *testing.T) {
-	fresh := multiui.ProjectStatus{
+// TestRefreshHealthFollowsLivenessNotTime is what lets the sweep skip reloading
+// an unchanged project. Health follows liveness, which moves without the state
+// moving, so a cached status has to reach the same verdict a reload would.
+//
+// And the verdict is liveness alone (Task 20479): a status last written three
+// hours ago is the ordinary state of a run three hours into one task, which is
+// running while a run executes it — the old rule called it "stalled" fifteen
+// minutes in — and stalled only once nothing does.
+func TestRefreshHealthFollowsLivenessNotTime(t *testing.T) {
+	long := multiui.ProjectStatus{
 		HasProject:   true,
 		Status:       "running",
 		Goal:         "something",
-		LastActivity: time.Now().Add(-time.Minute),
-		LastStepTime: time.Now().Add(-time.Minute),
+		LastActivity: time.Now().Add(-3 * time.Hour),
+		Running:      true,
 		Health:       multiui.HealthUnknown,
 	}
-	fresh.RefreshHealth()
-	if fresh.Health != multiui.HealthRunning {
-		t.Errorf("a recently-written running project = %v, want %v", fresh.Health, multiui.HealthRunning)
+	long.RefreshHealth()
+	if long.Health != multiui.HealthRunning {
+		t.Errorf("a run three hours into one task = %v, want %v — a long task is not a stalled one",
+			long.Health, multiui.HealthRunning)
 	}
 
-	stalled := fresh
-	stalled.LastActivity = time.Now().Add(-30 * time.Minute)
-	stalled.LastStepTime = time.Now().Add(-30 * time.Minute)
-	stalled.RefreshHealth()
-	if stalled.Health != multiui.HealthStalled {
-		t.Errorf("a running project that stopped writing = %v, want %v — stall detection "+
-			"does not survive being served from the status cache",
-			stalled.Health, multiui.HealthStalled)
+	gone := long
+	gone.LastActivity = time.Now()
+	gone.Running = false
+	gone.RefreshHealth()
+	if gone.Health != multiui.HealthStalled {
+		t.Errorf("a running status with nothing executing it = %v, want %v — stall detection "+
+			"does not survive being served from the status cache", gone.Health, multiui.HealthStalled)
+	}
+}
+
+// writeRunningStatusAt records a "running" project status as written at the
+// given moment, with one in-progress task that started then: exactly what a
+// project looks like that far into a task, because a run writes its state when
+// a task starts and when it ends, and nothing in between.
+func writeRunningStatusAt(t *testing.T, dir string, at time.Time) {
+	t.Helper()
+	ps, err := state.Load(dir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	started := at
+	ps.Plan.Tasks[0].Status = pm.TaskInProgress
+	ps.Plan.Tasks[0].StartedAt = &started
+	ps.Status = "running"
+	if err := ps.SaveDirect(); err != nil {
+		t.Fatalf("state.SaveDirect: %v", err)
+	}
+	// SaveDirect stamps the time of the write; put it back where the task
+	// left it.
+	db, err := statedb.Open(state.StateDBPath(dir))
+	if err != nil {
+		t.Fatalf("statedb.Open: %v", err)
+	}
+	defer db.Close()
+	if err := db.SaveRunStatus("running", nil, at); err != nil {
+		t.Fatalf("SaveRunStatus: %v", err)
+	}
+}
+
+// TestSweepNeverCallsALongRunningTaskStalled drives the real tick end to end,
+// in both directions (Task 20479).
+//
+// The long project is three hours into one task with its run executing; the
+// abandoned one wrote "running" a moment ago and has nothing behind it. The old
+// rule judged both by the age of the last write, and got both wrong: the long
+// task was "stalled" fifteen minutes in, and the abandoned run "running" for
+// fifteen minutes after it died.
+func TestSweepNeverCallsALongRunningTaskStalled(t *testing.T) {
+	long := setupProjectDir(t, "a long task", []*pm.Task{{ID: 1, Title: "train the model", Status: pm.TaskPending}})
+	abandoned := setupProjectDir(t, "an abandoned run", []*pm.Task{{ID: 1, Title: "one", Status: pm.TaskPending}})
+	writeRunningStatusAt(t, long, time.Now().Add(-3*time.Hour))
+	writeRunningStatusAt(t, abandoned, time.Now())
+
+	srv := New(long, 0, "")
+	srv.Projects = []string{abandoned}
+	srv.trackRun(long, &stubExecutor{status: executor.Status{State: executor.StateRunning}}, "h1")
+	t.Cleanup(func() { srv.untrackRun(long) })
+	sw := newProjectSweep()
+
+	// Several ticks, so the verdict is not an artefact of the first one.
+	for i := 0; i < 3; i++ {
+		srv.sweepProjectsTick(sw, time.Now())
+		got := statusFor(t, srv, long)
+		if !got.Running || got.Health != multiui.HealthRunning {
+			t.Fatalf("tick %d: a run three hours into one task reported running=%v health=%v, "+
+				"want running=true health=%v", i, got.Running, got.Health, multiui.HealthRunning)
+		}
+	}
+	_, statuses := srv.cachedProjectView()
+	if active := multiui.Aggregate(statuses).ActiveRuns; active != 1 {
+		t.Errorf("ActiveRuns = %d, want 1 — the long task's run is active", active)
+	}
+
+	// The abandoned run is read before stale-run recovery's grace has passed,
+	// so the status still claims a run: that, with nothing executing it, is a
+	// stall, however recently it was written.
+	got := statusFor(t, srv, abandoned)
+	if got.Running || got.Health != multiui.HealthStalled {
+		t.Errorf("a running status written just now with no run behind it reported running=%v "+
+			"health=%v, want running=false health=%v", got.Running, got.Health, multiui.HealthStalled)
+	}
+}
+
+// TestSweepRepublishesLivenessWithoutAStateWrite: health follows liveness, and
+// liveness moves without the state moving — a run started from a terminal is
+// seen before its first write, and one killed outright writes nothing on its
+// way out. The sweep reloads only projects whose state files moved, so unless
+// it also notices the scan contradicting a cached status, the card's Run/Stop
+// button and its health would wait for some unrelated write to catch up.
+func TestSweepRepublishesLivenessWithoutAStateWrite(t *testing.T) {
+	dir := setupProjectDir(t, "liveness only", []*pm.Task{{ID: 1, Title: "one", Status: pm.TaskPending}})
+	srv := New(dir, 0, "")
+	sw := newProjectSweep()
+
+	srv.sweepProjectsTick(sw, time.Now())
+	if got := statusFor(t, srv, dir); got.Running {
+		t.Fatalf("precondition: a project with nothing executing it reported running: %+v", got)
+	}
+
+	// A run appears; the project's state is not touched.
+	srv.trackRun(dir, &stubExecutor{status: executor.Status{State: executor.StateRunning}}, "h1")
+	srv.sweepProjectsTick(sw, time.Now())
+	if got := statusFor(t, srv, dir); !got.Running {
+		t.Fatal("a run that appeared without writing the state was not published — the " +
+			"cached status still says nothing is executing the project")
+	}
+
+	// And it goes, again without a write. Its status never claimed a run, so
+	// stale-run recovery has nothing to repair and writes nothing either.
+	srv.untrackRun(dir)
+	srv.sweepProjectsTick(sw, time.Now())
+	if got := statusFor(t, srv, dir); got.Running {
+		t.Fatal("a run that vanished without writing the state is still published as running")
 	}
 }
 

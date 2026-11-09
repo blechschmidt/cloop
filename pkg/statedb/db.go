@@ -43,8 +43,8 @@ type State struct {
 	StepCount int
 	// LastStepTime is the timestamp of the newest step row. Populated by
 	// both LoadState (last element of Steps) and LoadStateLite (cheap
-	// lookup of the highest step number); used by health probes to detect
-	// stalled runs without scanning the full Steps slice.
+	// lookup of the highest step number), so it can be read without
+	// scanning the full Steps slice.
 	LastStepTime      time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
@@ -595,8 +595,8 @@ func (d *DB) LoadState() (*State, error) {
 // LoadStateLite is like LoadState but skips loading the per-step rows
 // (which on long-running projects can be megabytes of Output strings). The
 // returned State has Steps == nil; StepCount and LastStepTime are filled
-// from cheap aggregate SQL so handlers that only render counts or check
-// last-activity for health don't pay for decoding every Output (Task 20125).
+// from cheap aggregate SQL so handlers that only render counts or the newest
+// step's time don't pay for decoding every Output (Task 20125).
 func (d *DB) LoadStateLite() (*State, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -15,49 +15,64 @@ import (
 )
 
 // TestComputeHealth verifies the Health classification for each documented
-// state.Status value plus the running-vs-stalled time-based logic.
+// state.Status value, and that a run's health follows its liveness alone.
+//
+// The cases that matter most are the long task (Task 20479). The state is
+// written when a task starts and when it ends, so an agent three hours into one
+// task leaves a state three hours old while it works. The old rule called that
+// "stalled" after fifteen minutes; it is running, because a run is executing
+// it. The mirror image — a status written a second ago with nothing behind it —
+// is the run that really is stalled.
 func TestComputeHealth(t *testing.T) {
 	now := time.Now()
+	hoursAgo := now.Add(-3 * time.Hour)
 
 	cases := []struct {
-		name string
-		st   *state.ProjectState
-		want Health
+		name    string
+		st      *state.ProjectState
+		running bool
+		want    Health
 	}{
 		{
-			name: "running with recent UpdatedAt is active",
-			st: &state.ProjectState{
-				Status:    "running",
-				UpdatedAt: now.Add(-1 * time.Minute),
-			},
-			want: HealthRunning,
+			name:    "running with a live run, recently written",
+			st:      &state.ProjectState{Status: "running", UpdatedAt: now.Add(-time.Minute)},
+			running: true,
+			want:    HealthRunning,
 		},
 		{
-			name: "evolving with recent UpdatedAt is active",
+			name: "running with a live run three hours into one task",
 			st: &state.ProjectState{
-				Status:    "evolving",
-				UpdatedAt: now.Add(-1 * time.Minute),
+				Status:       "running",
+				UpdatedAt:    hoursAgo,
+				LastStepTime: hoursAgo,
+				Steps:        []state.StepResult{{Time: hoursAgo}},
 			},
-			want: HealthRunning,
+			running: true,
+			want:    HealthRunning,
 		},
 		{
-			name: "running with stale last step is stalled",
-			st: &state.ProjectState{
-				Status:    "running",
-				UpdatedAt: now.Add(-30 * time.Minute),
-				Steps: []state.StepResult{
-					{Time: now.Add(-30 * time.Minute)},
-				},
-			},
-			want: HealthStalled,
+			name:    "evolving with a live run, quiet for hours",
+			st:      &state.ProjectState{Status: "evolving", UpdatedAt: hoursAgo, LastStepTime: hoursAgo},
+			running: true,
+			want:    HealthRunning,
 		},
 		{
-			name: "running with no steps but old UpdatedAt is stalled",
-			st: &state.ProjectState{
-				Status:    "running",
-				UpdatedAt: now.Add(-30 * time.Minute),
-			},
-			want: HealthStalled,
+			name:    "running with nothing executing it, written a second ago",
+			st:      &state.ProjectState{Status: "running", UpdatedAt: now.Add(-time.Second), LastStepTime: now},
+			running: false,
+			want:    HealthStalled,
+		},
+		{
+			name:    "evolving with nothing executing it",
+			st:      &state.ProjectState{Status: "evolving", UpdatedAt: now},
+			running: false,
+			want:    HealthStalled,
+		},
+		{
+			name:    "running with nothing executing it and no timestamps at all",
+			st:      &state.ProjectState{Status: "running"},
+			running: false,
+			want:    HealthStalled,
 		},
 		{
 			name: "complete",
@@ -75,9 +90,12 @@ func TestComputeHealth(t *testing.T) {
 			want: HealthIdle,
 		},
 		{
-			name: "initialized is idle",
-			st:   &state.ProjectState{Status: "initialized"},
-			want: HealthIdle,
+			// A run that has just been started may be seen before it writes
+			// its first status; the status, not the process, decides.
+			name:    "initialized is idle, even with a process starting up",
+			st:      &state.ProjectState{Status: "initialized"},
+			running: true,
+			want:    HealthIdle,
 		},
 		{
 			name: "unknown status with goal is idle",
@@ -93,11 +111,36 @@ func TestComputeHealth(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeHealth(tc.st)
+			got := computeHealth(tc.st, tc.running)
 			if got != tc.want {
-				t.Errorf("computeHealth() = %v, want %v", got, tc.want)
+				t.Errorf("computeHealth(running=%v) = %v, want %v", tc.running, got, tc.want)
+			}
+			// A cached status must reach the same verdict without the state.
+			ps := ProjectStatus{HasProject: true, Status: tc.st.Status, Goal: tc.st.Goal,
+				LastActivity: tc.st.UpdatedAt, Running: tc.running}
+			ps.RefreshHealth()
+			if ps.Health != tc.want {
+				t.Errorf("RefreshHealth(running=%v) = %v, want %v — the cached status and "+
+					"the loaded state disagree", tc.running, ps.Health, tc.want)
 			}
 		})
+	}
+}
+
+// TestGetStatusUsingReportsLivenessForAnUnreadableProject: Running is a fact
+// about the directory, not about its state. The hub's sweep compares it against
+// its scan on every tick, so a status that dropped it for a project whose
+// database would not open would read as a liveness change forever.
+func TestGetStatusUsingReportsLivenessForAnUnreadableProject(t *testing.T) {
+	ps := GetStatusUsing(ProjectEntry{Name: "fresh", Path: t.TempDir()}, true)
+	if ps.HasProject {
+		t.Fatalf("precondition: an empty directory loaded as a project: %+v", ps)
+	}
+	if !ps.Running {
+		t.Error("Running = false for a directory a run is executing in")
+	}
+	if ps.Health != HealthUnknown {
+		t.Errorf("Health = %v, want %v", ps.Health, HealthUnknown)
 	}
 }
 
@@ -299,9 +342,11 @@ func TestPerProjectTaskIsolation(t *testing.T) {
 	}
 
 	// Pick statuses for each project by path so this test is order-independent.
+	// p1's run is handed in as executing rather than found in /proc: a running
+	// status is only healthy with a run behind it.
 	var st1, st2 ProjectStatus
 	for _, e := range entries {
-		s := GetStatus(e)
+		s := GetStatusUsing(e, e.Path == p1)
 		switch s.Path {
 		case p1:
 			st1 = s

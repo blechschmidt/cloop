@@ -794,6 +794,23 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A long task no longer marks its project "stalled".** The dashboard called
+  a running project stalled once its state had gone fifteen minutes without a
+  write. A run writes its state when a task starts and when it ends, and
+  nothing in between, so every task that took longer than fifteen minutes
+  turned its project's health dot yellow and dropped it from the active-runs
+  count while the agent was still working. A project's health now follows
+  whether a run is executing it: running while one is, however long the task
+  takes, and stalled only when the status says a run is in flight and nothing
+  is executing the project. The project list's running flag and health also
+  update when a run starts or ends without writing its state. `cloop status`,
+  `cloop task ai-blocker` and `GET /api/tasks/{id}/blocker` had the same fault
+  with a thirty-minute limit: a task with no checkpoint or artifact written for
+  half an hour was reported blocked, and the blocker analysis told the model it
+  was stalled. They now call a task stalled only when it is in progress and
+  nothing is executing its project, and the detection reports what it knew
+  about the run in a new `run` field (`live` or `gone`) (Task 20479).
+
 - **Moving a task up or down now takes effect between tasks of equal
   priority.** `cloop task move <id> up|down` and the dashboard's move endpoint
   swapped the task's priority with its neighbour's in priority order over the

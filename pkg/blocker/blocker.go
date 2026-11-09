@@ -1,6 +1,8 @@
 // Package blocker detects blocked tasks and generates AI-powered resolution suggestions.
 // A task is considered blocked if any of the following heuristics fire:
-//   - It is in_progress and no artifact or checkpoint file has been touched in >30 min
+//   - It is in_progress and nothing is executing its project, so nothing will
+//     advance it ("stalled"). How long it has been in progress plays no part:
+//     a task a run is working on is never stalled, however long it takes.
 //   - It has at least one failed dependency
 //   - Any of its annotations contains the word "blocked"
 package blocker
@@ -23,9 +25,33 @@ import (
 type BlockReason string
 
 const (
-	BlockReasonStalled    BlockReason = "stalled"    // in_progress, no activity >30 min
+	BlockReasonStalled    BlockReason = "stalled"    // in_progress, but nothing is executing it
 	BlockReasonFailedDep  BlockReason = "failed_dep" // a dependency task has failed
 	BlockReasonAnnotation BlockReason = "annotation" // annotation explicitly mentions "blocked"
+)
+
+// Run is what the caller knows about whether a run is executing the project a
+// task belongs to. Only the caller can say: a run may be a local process, a
+// container, or a workload on an edge device, and which of those can be seen
+// depends on where the question is asked.
+//
+// It is the stalled heuristic's only input besides the task's status. That
+// heuristic used to fire on a task in progress with no checkpoint or artifact
+// written for thirty minutes, which is every long task: the agent's turn on a
+// task is one provider call with no deadline by default (Task 20148), and it
+// can work for hours without writing either (Task 20479).
+type Run string
+
+const (
+	// RunUnknown: the caller cannot tell. A task is never called stalled on
+	// this, however long it has been in progress.
+	RunUnknown Run = ""
+	// RunLive: a run is executing the project. Its task in progress is being
+	// worked on, however long that takes.
+	RunLive Run = "live"
+	// RunGone: nothing is executing the project. A task in progress is then
+	// stranded: nothing will advance it until a run starts and recovers it.
+	RunGone Run = "gone"
 )
 
 // BlockerInfo holds the detection results for a single task.
@@ -34,7 +60,13 @@ type BlockerInfo struct {
 	TaskTitle string        `json:"task_title"`
 	Blocked   bool          `json:"blocked"`
 	Reasons   []BlockReason `json:"reasons,omitempty"`
-	// StalledSince is set when BlockReasonStalled is detected.
+	// Run is what the detection was told about a run executing the project,
+	// and so why a task in progress was or was not called stalled. Omitted
+	// when the caller could not tell.
+	Run Run `json:"run,omitempty"`
+	// StalledSince is set when BlockReasonStalled is detected: the task's last
+	// recorded activity — its newest checkpoint or artifact write, else when
+	// it started — after which nothing advanced it.
 	StalledSince *time.Time `json:"stalled_since,omitempty"`
 	// FailedDeps contains the IDs of failed dependency tasks.
 	FailedDeps []int `json:"failed_deps,omitempty"`
@@ -50,27 +82,26 @@ type BlockerReport struct {
 	Recommendation string       `json:"recommendation"` // "retry", "skip", or "reassign"
 }
 
-// stalledThreshold is the minimum idle duration before a task is considered stalled.
-const stalledThreshold = 30 * time.Minute
-
-// Detect checks whether a task is blocked without calling the AI.
-// workDir is used to inspect checkpoint and artifact file mtimes.
-func Detect(workDir string, task *pm.Task, plan *pm.Plan) *BlockerInfo {
+// Detect checks whether a task is blocked without calling the AI. run is what
+// the caller knows about a run executing the project (see Run); workDir is
+// used to date a stalled task's last activity from its checkpoint and artifact
+// files.
+func Detect(workDir string, task *pm.Task, plan *pm.Plan, run Run) *BlockerInfo {
 	info := &BlockerInfo{
 		TaskID:    task.ID,
 		TaskTitle: task.Title,
+		Run:       run,
 	}
 
-	// Heuristic 1: in_progress with no recent checkpoint/artifact activity
-	if task.Status == pm.TaskInProgress {
-		lastActivity := latestActivityTime(workDir, task)
-		if !lastActivity.IsZero() && time.Since(lastActivity) > stalledThreshold {
-			info.Reasons = append(info.Reasons, BlockReasonStalled)
-			info.StalledSince = &lastActivity
-		} else if lastActivity.IsZero() && task.StartedAt != nil && time.Since(*task.StartedAt) > stalledThreshold {
-			// No checkpoint/artifact at all; use StartedAt as proxy
-			info.Reasons = append(info.Reasons, BlockReasonStalled)
-			info.StalledSince = task.StartedAt
+	// Heuristic 1: in progress with nothing executing it. Never a matter of
+	// how long the task has been in progress — see Run.
+	if task.Status == pm.TaskInProgress && run == RunGone {
+		info.Reasons = append(info.Reasons, BlockReasonStalled)
+		if last := latestActivityTime(workDir, task); !last.IsZero() {
+			info.StalledSince = &last
+		} else if task.StartedAt != nil {
+			since := *task.StartedAt
+			info.StalledSince = &since
 		}
 	}
 
@@ -104,13 +135,13 @@ func Detect(workDir string, task *pm.Task, plan *pm.Plan) *BlockerInfo {
 }
 
 // DetectAll scans every task in the plan and returns blocked tasks only.
-func DetectAll(workDir string, plan *pm.Plan) []*BlockerInfo {
+func DetectAll(workDir string, plan *pm.Plan, run Run) []*BlockerInfo {
 	var blocked []*BlockerInfo
 	for _, t := range plan.Tasks {
 		if t.Status == pm.TaskDone || t.Status == pm.TaskSkipped {
 			continue
 		}
-		info := Detect(workDir, t, plan)
+		info := Detect(workDir, t, plan, run)
 		if info.Blocked {
 			blocked = append(blocked, info)
 		}
@@ -122,8 +153,8 @@ func DetectAll(workDir string, plan *pm.Plan) []*BlockerInfo {
 // The AI receives the task spec, detection reasons, failure/timeout history,
 // and dependency statuses, then outputs root-cause + 3 unblocking actions +
 // a retry/skip/reassign recommendation.
-func Analyze(ctx context.Context, p provider.Provider, model string, timeout time.Duration, task *pm.Task, plan *pm.Plan, workDir string) (*BlockerReport, error) {
-	info := Detect(workDir, task, plan)
+func Analyze(ctx context.Context, p provider.Provider, model string, timeout time.Duration, task *pm.Task, plan *pm.Plan, workDir string, run Run) (*BlockerReport, error) {
+	info := Detect(workDir, task, plan, run)
 	prompt := buildPrompt(task, plan, info, workDir)
 
 	result, err := p.Complete(ctx, prompt, provider.Options{
@@ -185,15 +216,26 @@ func buildPrompt(task *pm.Task, plan *pm.Plan, info *BlockerInfo, workDir string
 
 	// Why it was flagged as blocked
 	b.WriteString("## BLOCKER DETECTION\n")
+	if task.Status == pm.TaskInProgress && info.Run == RunLive {
+		// Said outright, because the framing above presumes a stuck task and
+		// a model told only "in_progress since 09:00" reads the hours as the
+		// problem — and recommends retrying or skipping work that is simply
+		// still being done (Task 20479).
+		b.WriteString("- IN PROGRESS: a run is executing this task right now. However long it has taken, " +
+			"that is not by itself a sign the task is stuck.\n")
+	}
+	if len(info.Reasons) == 0 {
+		b.WriteString("- none of the heuristics (stalled, failed dependencies, a \"blocked\" annotation) fired\n")
+	}
 	for _, r := range info.Reasons {
 		switch r {
 		case BlockReasonStalled:
+			line := "- STALLED: the task is in_progress but no run is executing it, so nothing will advance it " +
+				"until a run starts and recovers it"
 			if info.StalledSince != nil {
-				idle := time.Since(*info.StalledSince).Round(time.Minute)
-				b.WriteString(fmt.Sprintf("- STALLED: task has been in_progress with no checkpoint/artifact activity for %s\n", idle))
-			} else {
-				b.WriteString("- STALLED: task has been in_progress with no checkpoint/artifact activity for >30 min\n")
+				line += fmt.Sprintf(" (last activity %s ago)", time.Since(*info.StalledSince).Round(time.Minute))
 			}
+			b.WriteString(line + "\n")
 		case BlockReasonFailedDep:
 			depStrs := make([]string, len(info.FailedDeps))
 			for i, d := range info.FailedDeps {

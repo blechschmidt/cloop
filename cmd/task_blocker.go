@@ -11,6 +11,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/blocker"
 	"github.com/blechschmidt/cloop/pkg/clijson"
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -35,7 +36,8 @@ var taskBlockerCmd = &cobra.Command{
 the AI for a root-cause hypothesis and 3 concrete unblocking actions.
 
 Detection heuristics (any one triggers a BLOCKED classification):
-  - Task is in_progress with no artifact/checkpoint activity in >30 minutes
+  - Task is in_progress but no run is executing the project (stalled); a
+    task a run is working on is never called stalled, however long it takes
   - One or more dependency tasks have failed
   - Any annotation on the task contains the word "blocked"
 
@@ -143,6 +145,7 @@ Examples:
 		if task == nil {
 			return fail(fmt.Errorf("task #%d not found: %w", taskID, statedb.ErrTaskNotFound))
 		}
+		run := blockerRun(workdir, s)
 
 		cyan := color.New(color.FgCyan, color.Bold)
 		dim := color.New(color.Faint)
@@ -157,7 +160,7 @@ Examples:
 			dim.Printf("\n\n")
 
 			// Quick detection before calling AI
-			info := blocker.Detect(workdir, task, s.Plan)
+			info := blocker.Detect(workdir, task, s.Plan, run)
 			if !info.Blocked {
 				color.New(color.FgGreen).Printf("No blockers detected for task #%d (%s)\n\n", task.ID, task.Title)
 				color.New(color.Faint).Printf("Heuristics checked: stalled, failed deps, blocked annotation\n")
@@ -168,7 +171,7 @@ Examples:
 			dim.Printf("\nCalling AI for root-cause analysis...\n\n")
 		}
 
-		report, err := blocker.Analyze(ctx, prov, model, timeout, task, s.Plan, workdir)
+		report, err := blocker.Analyze(ctx, prov, model, timeout, task, s.Plan, workdir, run)
 		if err != nil {
 			return fail(fmt.Errorf("blocker analysis failed: %w", err))
 		}
@@ -194,6 +197,28 @@ Examples:
 	},
 }
 
+// blockerRun is what this process can tell about a run executing the project
+// at workdir, for the blocker's stalled heuristic (Task 20479).
+//
+// A local `cloop run` is conclusive. Without one, a status that claims a run is
+// in flight may still be right — the run can be executing in a container or on
+// an edge device this process cannot see — so the answer is unknown, and the
+// heuristic never calls a task stalled on unknown. Only a status that claims no
+// run at all, with no local process either, says nothing is executing it.
+//
+// The dashboard's blocker analysis runs this command on the project's executor,
+// so the same caution holds from there; the hub then replaces the report's
+// detection with its own, made with its own liveness checks.
+func blockerRun(workdir string, s *state.ProjectState) blocker.Run {
+	if multiui.IsCloopRunningInDir(workdir) {
+		return blocker.RunLive
+	}
+	if s.ClaimsLiveRun() {
+		return blocker.RunUnknown
+	}
+	return blocker.RunGone
+}
+
 // runBlockerAll scans all non-complete tasks, reports blockers, and optionally annotates them.
 func runBlockerAll(ctx context.Context, prov provider.Provider, model string, timeout time.Duration, s *state.ProjectState, workdir string) error {
 	cyan := color.New(color.FgCyan, color.Bold)
@@ -203,7 +228,8 @@ func runBlockerAll(ctx context.Context, prov provider.Provider, model string, ti
 
 	cyan.Printf("━━━ cloop task ai-blocker --all ━━━\n\n")
 
-	blocked := blocker.DetectAll(workdir, s.Plan)
+	run := blockerRun(workdir, s)
+	blocked := blocker.DetectAll(workdir, s.Plan, run)
 	if len(blocked) == 0 {
 		green.Printf("No blocked tasks detected across %d tasks.\n", len(s.Plan.Tasks))
 		return nil
@@ -227,7 +253,7 @@ func runBlockerAll(ctx context.Context, prov provider.Provider, model string, ti
 		cyan.Printf("  Analysing #%d: %s\n", task.ID, task.Title)
 
 		taskCtx, cancel := context.WithTimeout(ctx, timeout)
-		report, err := blocker.Analyze(taskCtx, prov, model, timeout, task, s.Plan, workdir)
+		report, err := blocker.Analyze(taskCtx, prov, model, timeout, task, s.Plan, workdir, run)
 		cancel()
 		if err != nil {
 			color.New(color.FgRed).Printf("  Error: %v\n\n", err)
@@ -265,10 +291,9 @@ func printDetectionBadges(info *blocker.BlockerInfo) {
 	for _, r := range info.Reasons {
 		switch r {
 		case blocker.BlockReasonStalled:
-			badge := "STALLED"
+			badge := "STALLED: in progress, but no run is executing it"
 			if info.StalledSince != nil {
-				idle := time.Since(*info.StalledSince).Round(time.Minute)
-				badge = fmt.Sprintf("STALLED (%s idle)", idle)
+				badge += fmt.Sprintf("; last activity %s ago", time.Since(*info.StalledSince).Round(time.Minute))
 			}
 			yellow.Printf("          [%s]\n", badge)
 		case blocker.BlockReasonFailedDep:

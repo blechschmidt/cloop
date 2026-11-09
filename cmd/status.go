@@ -104,7 +104,7 @@ var statusCmd = &cobra.Command{
 					return sorted[i].Priority < sorted[j].Priority
 				})
 				// Pre-compute blocked task IDs for O(1) lookup
-				blockedInfos := blocker.DetectAll(workdir, s.Plan)
+				blockedInfos := blocker.DetectAll(workdir, s.Plan, blockerRun(workdir, s))
 				blockedIDs := make(map[int]*blocker.BlockerInfo, len(blockedInfos))
 				for _, bi := range blockedInfos {
 					blockedIDs[bi.TaskID] = bi
