@@ -423,6 +423,28 @@ type Client struct {
 // ForwardAs is Forward with everything the forwarding member knows about the
 // client.
 func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Client) error {
+	return n.forward(w, r, to, c, false)
+}
+
+// ErrMemberUnreachable is what ForwardOrPass returns, having answered nothing,
+// when the member could not be reached at all: it was judged unresponsive, or
+// nothing accepted the connection. Nothing of the request was sent.
+var ErrMemberUnreachable = errors.New("hubcluster: the member cannot be reached")
+
+// ForwardOrPass is ForwardAs for a caller that has somewhere else to take the
+// request (Task 20481). When the member cannot be reached at all it writes
+// nothing to w and returns an error wrapping ErrMemberUnreachable, leaving the
+// request to the caller, body unread. A member killed moments ago is the case:
+// until its heartbeat goes stale — at the next membership refresh on its own
+// host, where its PID is checked, and at its TTL on another — it is as alive
+// as any other, and a request forwarded to it would fail with a 502 its owner
+// never wrote.
+func (n *Node) ForwardOrPass(w http.ResponseWriter, r *http.Request, to Member, c Client) error {
+	return n.forward(w, r, to, c, true)
+}
+
+// forward is ForwardAs, and with pass set ForwardOrPass.
+func (n *Node) forward(w http.ResponseWriter, r *http.Request, to Member, c Client, pass bool) error {
 	clientIP := c.IP
 	if n == nil || n.peer == nil {
 		return errors.New("hubcluster: not a cluster member")
@@ -435,6 +457,9 @@ func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Cl
 	// A member judged unresponsive is not asked at all (Task 20419): the
 	// request would wait on it for the header timeout and fail anyway.
 	if err := n.unresponsiveErr(to.ID); err != nil {
+		if pass {
+			return fmt.Errorf("%w: %w", ErrMemberUnreachable, err)
+		}
 		writePeerError(w, http.StatusBadGateway,
 			fmt.Sprintf("the hub member that owns this request (%s) is not answering: %v", to.ID, err))
 		return err
@@ -443,6 +468,12 @@ func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Cl
 	defer cancel(nil)
 	defer n.peer.track(to.ID, cancel)()
 	r = r.WithContext(ctx)
+	if pass && r.Body != nil && r.Body != http.NoBody {
+		// The proxy closes the body it sends, sent or not; a request passed
+		// back must keep it open for whoever takes it next. The server closes
+		// it when the handler returns, as it does every request's.
+		r.Body = keptOpen{r.Body}
+	}
 	var proxyErr error
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -474,6 +505,12 @@ func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Cl
 			if cause := context.Cause(ctx); errors.Is(cause, ErrMemberUnresponsive) {
 				err = cause
 			}
+			if pass && notConnected(err) {
+				// Nothing has been written: the response is still the
+				// caller's to give.
+				proxyErr = fmt.Errorf("%w: %w", ErrMemberUnreachable, err)
+				return
+			}
 			proxyErr = err
 			writePeerError(rw, http.StatusBadGateway,
 				fmt.Sprintf("the hub member that owns this request (%s) could not be reached: %v", to.ID, err))
@@ -482,6 +519,19 @@ func (n *Node) ForwardAs(w http.ResponseWriter, r *http.Request, to Member, c Cl
 	rp.ServeHTTP(w, r)
 	return proxyErr
 }
+
+// notConnected reports whether err is a failure to connect at all: the
+// transport sends nothing of a request before it holds a connection, so the
+// request's body is still unread.
+func notConnected(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
+// keptOpen is a request body whose Close is left to its server.
+type keptOpen struct{ io.Reader }
+
+func (keptOpen) Close() error { return nil }
 
 // Call makes a JSON request to a peer's internal API: in is sent as the body
 // (nil for none) and a 2xx response is decoded into out (nil to discard). A

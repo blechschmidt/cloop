@@ -839,6 +839,18 @@ schema and the hub's HTTP API may change in any release.
   dropping anything, and a reply that still arrives with a gap, from any
   executor, fails the call with a message saying so (Task 20481).
 
+- **A git, Kubernetes or model-relay request no longer fails with a 502 while
+  its run is adopted from a hub member that has just died.** Each session is
+  served by the member that minted it, and a request reaching another member
+  is forwarded there. A killed member keeps counting as alive until its
+  heartbeat goes stale: up to a heartbeat interval on its own host and its
+  whole TTL from another one. In that time the member adopting the run was
+  still restoring the session, so the first push or `kubectl` call forwarded to
+  the dead member failed with a 502 and left nothing in the audit trail. A
+  forward that cannot reach the member at all now waits for the session to be
+  restored, as a request for a session whose holder is known to be gone
+  already did (Task 20481).
+
 - **A long task no longer marks its project "stalled".** The dashboard called
   a running project stalled once its state had gone fifteen minutes without a
   write. A run writes its state when a task starts and when it ends, and

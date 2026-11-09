@@ -111,9 +111,11 @@ func recordedSessionAwaitingRestore(db *statedb.DB, kind, id, token string) (sta
 		return statedb.ProxySessionRow{}, false
 	}
 	if row.Holder != "" && row.Holder != leaseHolderID() {
-		if n := currentCluster(); n != nil && n.Serving(row.Holder) {
+		if n := currentCluster(); n != nil && n.Serving(row.Holder) && !unreachablePeers.passedOver(row.Holder) {
 			// Held by a live peer that does not claim to serve it: that
-			// peer's business, and nothing a wait here would change.
+			// peer's business, and nothing a wait here would change. One a
+			// forward just failed to reach is not live, whatever its last
+			// heartbeat says (Task 20481).
 			return statedb.ProxySessionRow{}, false
 		}
 	}
@@ -259,7 +261,7 @@ func proxySessionHold(w http.ResponseWriter, r *http.Request, owner, internalPat
 	if n := currentCluster(); n != nil {
 		claimed = func() bool {
 			o, found, err := n.Lookup(owner, sessionID)
-			return err == nil && found && !o.Self && o.Alive
+			return err == nil && found && !o.Self && o.Alive && !unreachablePeers.passedOver(o.InstanceID)
 		}
 	}
 	here, elsewhere := awaitSessionRestore(r.Context(), row, served, claimed)

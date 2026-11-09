@@ -1079,6 +1079,13 @@ token is refused at once. Requests presenting one session share one wait, at
 most 64 sessions are waited for at a time, and a proxy that stops ends every
 wait. To git, a restart looks like a slow response instead of a failure.
 
+A member that was killed still counts as alive until its heartbeat goes stale:
+until the next membership refresh on its own host, where its process is
+checked, and for its whole TTL from another host. A request for one of its
+sessions is forwarded to it in that time. When nothing accepts the connection,
+the request waits as above instead of failing with a 502, and the member is
+passed over for the TTL.
+
 The leader's janitor retires the records of closed sessions; of open ones whose
 holder is gone, once the session or its lease lapses; and of any open one well
 past its TTL, whoever holds it.

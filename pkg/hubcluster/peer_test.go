@@ -323,3 +323,63 @@ func TestForwardToAnUnreachableMemberIsA502(t *testing.T) {
 		t.Fatalf("Forward with no advertise URL = %v, want ErrNoRoute", err)
 	}
 }
+
+// writeTracker records whether anything was written to it.
+type writeTracker struct {
+	*httptest.ResponseRecorder
+	wrote bool
+}
+
+func (w *writeTracker) WriteHeader(code int) {
+	w.wrote = true
+	w.ResponseRecorder.WriteHeader(code)
+}
+
+func (w *writeTracker) Write(b []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseRecorder.Write(b)
+}
+
+// TestForwardOrPassHandsBackARequestNoMemberAccepted: a member that accepts
+// no connection — killed moments ago, its heartbeat not yet stale — is not
+// answered for (Task 20481). ForwardOrPass writes nothing, says the member
+// cannot be reached, and leaves the request's body unread and open for the
+// caller to serve the request another way; a member that answers is
+// forwarded to as Forward does.
+func TestForwardOrPassHandsBackARequestNoMemberAccepted(t *testing.T) {
+	a, b, _ := pair(t)
+	m := memberOf(t, a, b.ID())
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	reachable := m.AdvertiseURL
+	m.AdvertiseURL = "http://" + ln.Addr().String()
+	ln.Close() // nothing listens there now
+
+	const body = "a push's pack, which must still be there to read"
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body))
+	w := &writeTracker{ResponseRecorder: httptest.NewRecorder()}
+	err := a.ForwardOrPass(w, req, m, hubcluster.Client{})
+	if !errors.Is(err, hubcluster.ErrMemberUnreachable) {
+		t.Fatalf("ForwardOrPass to a member nothing listens for = %v, want ErrMemberUnreachable", err)
+	}
+	if w.wrote {
+		t.Fatalf("ForwardOrPass answered the request it handed back: %d %q", w.Code, w.Body.String())
+	}
+	if got, err := io.ReadAll(req.Body); err != nil || string(got) != body {
+		t.Fatalf("the handed-back request's body = %q, %v; want it whole and open", got, err)
+	}
+
+	// Forward itself still answers the 502 for a caller with nowhere else to
+	// take the request.
+	rec := httptest.NewRecorder()
+	if err := a.Forward(rec, httptest.NewRequest(http.MethodGet, "/x", nil), m, ""); err == nil ||
+		errors.Is(err, hubcluster.ErrMemberUnreachable) || rec.Code != http.StatusBadGateway {
+		t.Fatalf("Forward = %v with %d, want its 502", err, rec.Code)
+	}
+
+	m.AdvertiseURL = reachable
+	w = &writeTracker{ResponseRecorder: httptest.NewRecorder()}
+	if err := a.ForwardOrPass(w, httptest.NewRequest(http.MethodGet, "/echo", nil), m, hubcluster.Client{}); err != nil ||
+		!w.wrote || w.Code != http.StatusOK {
+		t.Fatalf("ForwardOrPass to a member that answers = %v with %d (wrote %v), want it forwarded", err, w.Code, w.wrote)
+	}
+}

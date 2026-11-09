@@ -17,6 +17,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -882,6 +884,84 @@ func TestHeldRequestIsRefusedWithoutAdoption(t *testing.T) {
 	if maxWaits != 1 || maxWaiters < 2 {
 		t.Fatalf("a burst on one session held %d wait(s) with at most %d request(s) sharing one; want one shared wait",
 			maxWaits, maxWaiters)
+	}
+}
+
+// TestARequestForASessionWhoseHolderCannotBeReachedWaitsForItsRestore: the
+// member that minted a run's sessions is killed. Until its heartbeat goes
+// stale — at the next membership refresh on its own host, at its TTL on
+// another — the other members count it alive, and a request for one of its
+// sessions was forwarded to it and failed with a 502 nothing recorded: the
+// workload's first push after the adoption, in tests/cluster (Task 20481).
+// Now the forward finds nothing listening and the request waits, as one for a
+// session whose holder is gone does, and is served once the survivor has
+// restored the session.
+func TestARequestForASessionWhoseHolderCannotBeReachedWaitsForItsRestore(t *testing.T) {
+	setSessionAdoptionWait(t, 20*time.Second)
+	r := newRestoreRig(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := "http://" + ln.Addr().String()
+	_ = ln.Close()
+	// The dispatcher: it heartbeats on, as a killed member does in the others'
+	// view for a while, and nothing answers at the address it advertises.
+	victim := joinTestNode(t, r.dir, func(o *hubcluster.Options) { o.AdvertiseURL = gone })
+	survivor := joinTestNode(t, r.dir, nil)
+	waitCluster(t, "the members to see each other", func() bool { return victim.HasPeers() && survivor.HasPeers() })
+
+	asProcess(t, victim)
+	r.holder.Store(victim.ID())
+	d := r.dispatch()
+	if o, found, err := survivor.Lookup(ownerGitProxy, d.gitID); err != nil || !found ||
+		o.InstanceID != victim.ID() || !o.Alive {
+		t.Fatalf("the git session's claim = %+v (found %v, %v); want the dispatcher's, alive", o, found, err)
+	}
+
+	asProcess(t, survivor)
+	r.restart(d, survivor.ID())
+	type answer struct {
+		code int
+		err  error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, r.gitSrv.URL+"/"+restoreRepo+"/info/refs?service=git-upload-pack", nil)
+		req.SetBasicAuth(d.gitID, d.gitToken)
+		resp, err := r.gitSrv.Client().Do(req)
+		if err != nil {
+			got <- answer{err: err}
+			return
+		}
+		_ = resp.Body.Close()
+		got <- answer{code: resp.StatusCode}
+	}()
+	waitFor(t, 10*time.Second, "the request to wait for the session's restore", func() bool {
+		select {
+		case a := <-got:
+			t.Fatalf("the request was answered %d (%v) before the session was restored; want it held", a.code, a.err)
+		default:
+		}
+		sessionWaits.mu.Lock()
+		defer sessionWaits.mu.Unlock()
+		return sessionWaits.m[pendingKey(statedb.ProxySessionGit, d.gitID)] != nil
+	})
+	if !unreachablePeers.passedOver(victim.ID()) {
+		t.Fatal("the member that refused the forward is not passed over")
+	}
+
+	// The survivor adopts the run, and with its lease restores the session.
+	if sl := r.takeOver(d); sl == nil {
+		t.Fatal("the survivor did not take the lease over")
+	}
+	select {
+	case a := <-got:
+		if a.err != nil || a.code != http.StatusOK {
+			t.Fatalf("the held request = %d (%v), want it served once the session was restored", a.code, a.err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the held request was not answered after the session was restored")
 	}
 }
 

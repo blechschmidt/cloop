@@ -13,11 +13,15 @@ package ui
 // that has never heard of it can look it up without learning the secret.
 
 import (
+	"errors"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/claudeproxy"
 	"github.com/blechschmidt/cloop/pkg/gitproxy"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/kubeguard"
 )
 
@@ -114,23 +118,78 @@ func clusterProxyFallback(kind, internalPath string) func(http.ResponseWriter, *
 }
 
 // forwardProxyRequest forwards r to the live member claiming the session, and
-// reports whether there was one.
+// reports whether it answered r: false when no live member claims it, and
+// when the one that does cannot be reached at all.
+//
+// A member killed moments ago is the second case (Task 20481): its heartbeat
+// keeps it alive in this member's view until the next membership refresh —
+// and to members on other hosts for its whole TTL — while the process
+// adopting its run restores the session. The forward used to fail such a
+// request with a 502, the one answer the hold below exists to spare a
+// workload; it now falls through to the hold, which passes the member over
+// while it waits.
 func forwardProxyRequest(w http.ResponseWriter, r *http.Request, kind, internalPath, sessionID string) bool {
 	n := currentCluster()
 	if n == nil {
 		return false
 	}
 	o, found, err := n.Lookup(kind, sessionID)
-	if err != nil || !found || o.Self || !o.Alive {
+	if err != nil || !found || o.Self || !o.Alive || unreachablePeers.passedOver(o.InstanceID) {
 		return false
 	}
 	fwd := r.Clone(r.Context())
 	fwd.URL.Path = internalPath + r.URL.Path
 	fwd.URL.RawPath = ""
-	if err := n.Forward(w, fwd, o.Member, remoteAddrIP(r)); err != nil {
+	err = n.ForwardOrPass(w, fwd, o.Member, hubcluster.Client{IP: remoteAddrIP(r)})
+	if errors.Is(err, hubcluster.ErrMemberUnreachable) {
+		unreachablePeers.note(o.InstanceID, time.Now())
+		clusterLogf("%s session %s: member %s cannot be reached (%v); the request waits for the session to be "+
+			"restored instead", kind, sessionID, o.InstanceID, err)
+		return false
+	}
+	if err != nil {
 		clusterLogf("forward %s session %s to member %s: %v", kind, sessionID, o.InstanceID, err)
 	}
 	return true
+}
+
+// unreachablePeers are the members a proxy session's forward could not reach,
+// and when (Task 20481). For peerRefusalMemory after, the proxy fallbacks and
+// the session hold treat such a member as one that is not alive: by then its
+// heartbeat has gone stale everywhere if it is gone, and a member that is
+// back is forwarded to again.
+var unreachablePeers = &peerRefusals{at: map[string]time.Time{}}
+
+// peerRefusalMemory is how long a member that could not be reached is passed
+// over: the TTL in which a dead member's heartbeat goes stale.
+const peerRefusalMemory = hubcluster.DefaultMemberTTL
+
+type peerRefusals struct {
+	mu sync.Mutex
+	at map[string]time.Time
+}
+
+// note records that member could not be reached at now.
+func (p *peerRefusals) note(member string, now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for id, at := range p.at {
+		if now.Sub(at) > peerRefusalMemory {
+			delete(p.at, id)
+		}
+	}
+	p.at[member] = now
+}
+
+// passedOver reports whether member could not be reached within the memory.
+func (p *peerRefusals) passedOver(member string) bool {
+	if member == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	at, ok := p.at[member]
+	return ok && time.Since(at) <= peerRefusalMemory
 }
 
 // ciRelayFallback forwards a CI relay call to the member that serves its
