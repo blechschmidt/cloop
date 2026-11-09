@@ -1376,7 +1376,7 @@
 0.00 TestRecoverGoroutine_LoopBodyContinuesAfterPanic
 0.00 TestRecoverGoroutine_PanicValueLogged
 0.00 TestRedispatchArgsOnlyRestartsARun
-0.00 TestRefreshHealthTracksStallWithoutAReload
+0.00 TestRefreshHealthFollowsLivenessNotTime
 0.00 TestRefusalAuditIsRateLimited
 0.00 TestRegisterRoutesUsesTheRouteTable
 0.00 TestRepoAccessPermissions
