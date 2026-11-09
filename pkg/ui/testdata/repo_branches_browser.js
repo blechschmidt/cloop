@@ -163,11 +163,18 @@ const visibleExpr = sel =>
 // five seconds: the dashboard re-renders panels as its own start-up requests
 // land, and on a loaded machine that can still be happening when a scenario
 // begins. A button that never becomes clickable is still a failure.
+//
+// The check and the press are separate round trips, and the page can move the
+// element in between: the presence bar that ends the socket's connect burst
+// pushes the whole tab down 33 px. So the check arms a guard on the window
+// that lets through the mousedown, mouseup and click that reach the element
+// and swallows any that land elsewhere; a swallowed press is aimed and made
+// again, within the same hundred tries.
 async function click(cdp, sel) {
-  let pt = null, hit = false;
-  for (let i = 0; i < 100 && !hit; i++) {
+  let why = '';
+  for (let i = 0; i < 100; i++) {
     if (i) await sleep(50);
-    pt = await cdp.eval(`(() => {
+    const pt = await cdp.eval(`(() => {
       const e = document.querySelector(${JSON.stringify(sel)});
       if (!e) return null;
       e.scrollIntoView({block: 'center'});
@@ -175,19 +182,38 @@ async function click(cdp, sel) {
       if (!r.width || !r.height) return null;
       return {x: r.left + r.width / 2, y: r.top + r.height / 2};
     })()`);
-    if (!pt) continue;
+    if (!pt) { why = 'nothing clickable at ' + sel; continue; }
     // What is actually on top at that point is what the click lands on.
-    hit = await cdp.eval(`(() => {
+    const armed = await cdp.eval(`(() => {
       const e = document.elementFromPoint(${pt.x}, ${pt.y});
       const want = document.querySelector(${JSON.stringify(sel)});
-      return !!e && !!want && (e === want || want.contains(e));
+      if (!e || !want || !(e === want || want.contains(e))) return false;
+      const seen = {}, types = ['mousedown', 'mouseup', 'click'];
+      const guard = ev => {
+        if (!ev.isTrusted) return; // the page's own clicks are not the press
+        seen[ev.type] = ev.target === want || want.contains(ev.target);
+        if (!seen[ev.type]) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+      };
+      types.forEach(t => window.addEventListener(t, guard, true));
+      // The click is dispatched with the mouseup, before the release returns;
+      // the pause covers a press that brought no click at all.
+      window.__pressSeen = () => new Promise(res => setTimeout(() => {
+        types.forEach(t => window.removeEventListener(t, guard, true));
+        res(seen);
+      }, 'click' in seen ? 0 : 100));
+      return true;
     })()`);
+    if (!armed) { why = sel + ' is covered by another element'; continue; }
+    for (const type of ['mousePressed', 'mouseReleased']) {
+      await cdp.send('Input.dispatchMouseEvent', {type, x: pt.x, y: pt.y, button: 'left', clickCount: 1});
+    }
+    // The click decides: it is what runs the control's action, and it reaches
+    // the element only when the press began and ended inside it.
+    const seen = await cdp.eval(`window.__pressSeen()`);
+    if (seen.click === true) return;
+    why = 'click' in seen ? sel + ' moved between the aim and the press' : 'a press on ' + sel + ' brought no click';
   }
-  if (!pt) throw new Error('nothing clickable at ' + sel);
-  if (!hit) throw new Error(sel + ' is covered by another element');
-  for (const type of ['mousePressed', 'mouseReleased']) {
-    await cdp.send('Input.dispatchMouseEvent', {type, x: pt.x, y: pt.y, button: 'left', clickCount: 1});
-  }
+  throw new Error(why);
 }
 
 // setSelect changes a <select> and dispatches the real change event.

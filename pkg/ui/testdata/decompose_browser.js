@@ -174,12 +174,22 @@ async function waitFor(cdp, expr, what, diag) {
 // click scrolls an element into view and clicks its centre with the mouse,
 // once it is laid out and on top — a control covered by another element (the
 // sticky header, a toast) fails here the way it would fail a user.
+//
+// The page can still move the element between that check and the press, which
+// are separate round trips. The socket's connect burst ends with the presence
+// bar, which boot does not wait for and which pushes the whole tab down 33 px:
+// a press made as it landed fell on the tab's background and did nothing (the
+// review gates' driver timed out that way in CI, on 4c022890). So
+// the check arms a guard on the window that lets through the mousedown and
+// click that reach the element and swallows any that do not, which keeps a
+// moved press from setting off whatever slid under the pointer; a swallowed
+// press is aimed and made again.
 async function click(cdp, sel) {
-  let pt = null, hit = false;
   const deadline = Date.now() + WAIT_MS;
-  for (let i = 0; !hit && (i === 0 || Date.now() < deadline); i++) {
+  let why = '';
+  for (let i = 0; i === 0 || Date.now() < deadline; i++) {
     if (i) await sleep(50);
-    pt = await cdp.eval(`(() => {
+    const pt = await cdp.eval(`(() => {
       const e = document.querySelector(${q(sel)});
       if (!e) return null;
       e.scrollIntoView({block: 'center'});
@@ -187,18 +197,37 @@ async function click(cdp, sel) {
       if (!r.width || !r.height) return null;
       return {x: r.left + r.width / 2, y: r.top + r.height / 2};
     })()`);
-    if (!pt) continue;
-    hit = await cdp.eval(`(() => {
+    if (!pt) { why = 'nothing clickable at ' + sel; continue; }
+    const armed = await cdp.eval(`(() => {
       const e = document.elementFromPoint(${pt.x}, ${pt.y});
       const want = document.querySelector(${q(sel)});
-      return !!e && !!want && (e === want || want.contains(e));
+      if (!e || !want || !(e === want || want.contains(e))) return false;
+      const seen = {}, types = ['mousedown', 'mouseup', 'click'];
+      const guard = ev => {
+        if (!ev.isTrusted) return; // the page's own clicks are not the press
+        seen[ev.type] = ev.target === want || want.contains(ev.target);
+        if (!seen[ev.type]) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+      };
+      types.forEach(t => window.addEventListener(t, guard, true));
+      // The click is dispatched with the mouseup, before the release returns;
+      // the pause covers a press that brought no click at all.
+      window.__pressSeen = () => new Promise(res => setTimeout(() => {
+        types.forEach(t => window.removeEventListener(t, guard, true));
+        res(seen);
+      }, 'click' in seen ? 0 : 100));
+      return true;
     })()`);
+    if (!armed) { why = sel + ' is covered by another element'; continue; }
+    for (const type of ['mousePressed', 'mouseReleased']) {
+      await cdp.send('Input.dispatchMouseEvent', {type, x: pt.x, y: pt.y, button: 'left', clickCount: 1});
+    }
+    // The click decides: it is what runs the control's action, and it reaches
+    // the element only when the press began and ended inside it.
+    const seen = await cdp.eval(`window.__pressSeen()`);
+    if (seen.click === true) return;
+    why = 'click' in seen ? sel + ' moved between the aim and the press' : 'a press on ' + sel + ' brought no click';
   }
-  if (!pt) throw new Error('nothing clickable at ' + sel);
-  if (!hit) throw new Error(sel + ' is covered by another element');
-  for (const type of ['mousePressed', 'mouseReleased']) {
-    await cdp.send('Input.dispatchMouseEvent', {type, x: pt.x, y: pt.y, button: 'left', clickCount: 1});
-  }
+  throw new Error(why);
 }
 
 // typeInto clicks into a field and types, as a person does. A click that
