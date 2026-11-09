@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/hometest"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
@@ -58,7 +59,8 @@ func TestMain(m *testing.M) {
 	hostsandbox.InstallTestHelper()
 	switch os.Getenv(fixtureEnv) {
 	case "":
-		os.Exit(m.Run())
+		// The sandbox reads the hub user's home directory (Task 20480).
+		os.Exit(hometest.Isolate(m))
 	case modeEcho:
 		fmt.Fprint(os.Stdout, "stdout-marker\n")
 		fmt.Fprint(os.Stderr, "stderr-marker\n")
