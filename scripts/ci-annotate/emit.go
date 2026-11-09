@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -234,15 +235,78 @@ func clean(s string) string {
 
 // clip keeps at most n lines: the first two thirds and the last third, since
 // a failure's log ends with what failed and begins with what led to it.
+//
+// Unless what that leaves out holds the test's own reports ("x_test.go:12:
+// …", how t.Error and t.Fatal begin). A test that fails and then has its
+// cleanup print what its processes logged puts its failure in the middle,
+// between what it logged on the way and the dumps: on 92a6aaff the upgrade
+// rehearsal's cause was cut out that way (Task 20481). Then the head and the
+// tail keep a quarter each, and the middle its last reports, with what was
+// left out around them marked.
 func clip(ls []string, n int) []string {
 	if len(ls) <= n {
 		return append([]string{}, ls...)
 	}
 	tail := n / 3
 	head := n - tail - 1
+	if hasReport(ls[head : len(ls)-tail]) {
+		h, t := n/4, n/4
+		if mid := clipReports(ls[h:len(ls)-t], n-h-t); mid != nil {
+			out := append(append([]string{}, ls[:h]...), mid...)
+			return append(out, ls[len(ls)-t:]...)
+		}
+	}
 	out := append([]string{}, ls[:head]...)
 	out = append(out, fmt.Sprintf("… %d more lines …", len(ls)-head-tail))
 	return append(out, ls[len(ls)-tail:]...)
+}
+
+// reReport is a test's report, at the start of a de-indented line: what
+// t.Log, t.Error and t.Fatal print. Continuation lines are indented.
+var reReport = regexp.MustCompile(`^[\w.+-]+_test\.go:\d+: `)
+
+func hasReport(ls []string) bool {
+	for _, l := range ls {
+		if reReport.MatchString(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// clipReports renders mid in at most room lines: its last reports, each gap
+// between them a "… n more lines …" line. Nil when not even one fits.
+func clipReports(mid []string, room int) []string {
+	var rev []string // built from the end
+	end := len(mid)  // where the part already rendered begins
+	for i := len(mid) - 1; i >= 0; i-- {
+		if !reReport.MatchString(mid[i]) {
+			continue
+		}
+		need := 1 // the report
+		if end-i-1 > 0 {
+			need++ // the gap after it
+		}
+		if i > 0 {
+			need++ // the gap before it, should it be the first kept
+		}
+		if len(rev)+need > room {
+			break
+		}
+		if gap := end - i - 1; gap > 0 {
+			rev = append(rev, fmt.Sprintf("… %d more lines …", gap))
+		}
+		rev = append(rev, mid[i])
+		end = i
+	}
+	if len(rev) == 0 {
+		return nil
+	}
+	if end > 0 {
+		rev = append(rev, fmt.Sprintf("… %d more lines …", end))
+	}
+	slices.Reverse(rev)
+	return rev
 }
 
 func clipLine(s string, n int) string {

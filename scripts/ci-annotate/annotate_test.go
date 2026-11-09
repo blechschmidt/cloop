@@ -288,6 +288,62 @@ func TestCleaning(t *testing.T) {
 	}
 }
 
+// TestClipKeepsTheFailureBetweenTheLogAndTheDumps: a test that logs its way
+// along, fails, and then has its cleanup print each process's log puts the
+// failure in the middle of its lines. Clipped to the head and the tail, the
+// annotation said everything but why it failed — the upgrade rehearsal on
+// 92a6aaff (Task 20481). The middle's reports are kept now, the failure among
+// them, and every line left out is counted; output with no report in its
+// middle is clipped as before.
+func TestClipKeepsTheFailureBetweenTheLogAndTheDumps(t *testing.T) {
+	var ls []string
+	for i := 0; i < 20; i++ {
+		ls = append(ls, fmt.Sprintf("forward_test.go:%d: control plane migration %d: additive", 600+i, 80+i))
+	}
+	ls = append(ls, "forward_test.go:731: the release member's sign-in ended with 400:", "    body: state mismatch")
+	for p := 0; p < 4; p++ {
+		ls = append(ls, fmt.Sprintf("world_test.go:475: ── member-%d (tail) ──", p))
+		for i := 0; i < 60; i++ {
+			ls = append(ls, fmt.Sprintf("    member-%d log line %d", p, i))
+		}
+	}
+	got := clip(ls, maxBodyLines)
+	if len(got) > maxBodyLines {
+		t.Fatalf("clip kept %d lines, more than the %d asked for", len(got), maxBodyLines)
+	}
+	text := strings.Join(got, "\n")
+	if !strings.Contains(text, "forward_test.go:731: the release member's sign-in ended with 400:") {
+		t.Fatalf("the failure was clipped out:\n%s", text)
+	}
+	if !strings.HasPrefix(got[0], "forward_test.go:600:") || got[len(got)-1] != ls[len(ls)-1] {
+		t.Fatalf("clip lost the first or the last line:\n%s", text)
+	}
+	// Every line is either kept or counted.
+	n := 0
+	for _, l := range got {
+		var skipped int
+		if _, err := fmt.Sscanf(l, "… %d more lines …", &skipped); err == nil {
+			n += skipped
+		} else {
+			n++
+		}
+	}
+	if n != len(ls) {
+		t.Fatalf("the clipped lines account for %d of %d:\n%s", n, len(ls), text)
+	}
+
+	// No report in the middle: the head and the tail, as before.
+	plain := make([]string, 100)
+	for i := range plain {
+		plain[i] = fmt.Sprintf("    log line %d", i)
+	}
+	got = clip(plain, maxBodyLines)
+	head := maxBodyLines - maxBodyLines/3 - 1
+	if len(got) != maxBodyLines || got[head] != fmt.Sprintf("… %d more lines …", 100-head-maxBodyLines/3) {
+		t.Fatalf("output with no report was clipped differently: %q", got)
+	}
+}
+
 // failingLog is plain go test output with n failing tests in one package,
 // and a package after it that did not build.
 func failingLog(n int) []byte {
