@@ -438,6 +438,23 @@ func (s *Server) ReconcileQuotas() {
 		}
 	}
 
+	// A run waiting in an executor pool's queue holds the slot it was
+	// admitted with (Task 20482): its queue row records it, and the run's
+	// project says pool_capacity, not running, so the loop above does not
+	// count it. One already started counts there instead.
+	if store, err := s.poolStore(); err == nil {
+		if open, err := store.DB().ListPoolQueue("", statedb.PoolQueueWaiting, statedb.PoolQueueAssigned); err == nil {
+			for _, q := range open {
+				if st, err := state.LoadLite(q.ProjectPath); err == nil && st != nil && st.ClaimsLiveRun() {
+					continue
+				}
+				if slot := s.slotFromRow(q.Slot); slot != nil && quota.Resource(slot.slot.Resource) == quota.ResConcurrentTasks {
+					live.Tasks[slot.slot.Identity] += slot.slot.N
+				}
+			}
+		}
+	}
+
 	// Executors are counted from the enrollment records rather than from the
 	// executors table, because the enrollment is where the minting identity
 	// is recorded — ExecutorRow.EnrolledBy holds a token id, not a person.

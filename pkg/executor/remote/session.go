@@ -219,6 +219,10 @@ func Accept(ctx context.Context, conn Conn, opts AcceptOptions) (*Session, error
 		Credential:       opts.IssuedCredential,
 		HeartbeatSeconds: int(HeartbeatInterval / time.Second),
 		ResumeAccepted:   acks,
+		// An executor pool's runner keeps its credential in memory and exits
+		// cleanly when retired (Task 20482); an older agent would only ignore
+		// the field.
+		Ephemeral: opts.Executor.Ephemeral() && SupportsEphemeral(version),
 	})
 	if err != nil {
 		_ = conn.Close("welcome encode failed")

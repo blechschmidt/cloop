@@ -80,6 +80,21 @@ func (h *heldSlot) giveBack() {
 	h.s.releaseQuota(h.slot.Identity, quota.Resource(h.slot.Resource), h.slot.N)
 }
 
+// disown lets go of the slot without giving it back: whoever closed the queue
+// row it was handed over from already gave it back (Task 20482). Nil-safe.
+func (h *heldSlot) disown() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.done = true
+	exID, handleID := h.exID, h.handleID
+	h.mu.Unlock()
+	if handleID != "" {
+		h.s.slots().drop(exID, handleID, h)
+	}
+}
+
 // bind makes the slot the run's: its owner row names it from now on, for the
 // member that adopts the run. Nil-safe.
 func (h *heldSlot) bind(exID, handleID string) {

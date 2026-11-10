@@ -150,6 +150,62 @@ var (
 	})
 )
 
+// Executor pools (Task 20482): ephemeral runners a controller starts on
+// demand. Never labelled by pool: pools are created per team and per site,
+// which is the per-tenant cardinality the catalog's rules forbid; the per-pool
+// numbers are in each controller's feed. The two gauges are read from the
+// shared database and exported by the cluster leader only; the counters are
+// each member's own.
+var (
+	ExecutorPoolDemand = Default.MustRegister(Definition{
+		Name:   "cloop_executor_pool_demand",
+		Help:   "Runs waiting in executor pools' queues that their pools may see and run: what the pools' controllers are asked to meet, summed over pools. Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: nil,
+	})
+	// state is one of the ExecutorPoolRunner* values.
+	ExecutorPoolRunners = Default.MustRegister(Definition{
+		Name:   "cloop_executor_pool_runners",
+		Help:   "Executor pool runners by state: busy (handed a run), idle (enrolled, waiting for one), pending (a runner token minted and not yet redeemed). Exported by the cluster leader only.",
+		Type:   TypeGauge,
+		Labels: []string{"state"},
+	})
+	// reason is one of the ExecutorPoolRefusal* values.
+	ExecutorPoolMintRefusals = Default.MustRegister(Definition{
+		Name:   "cloop_executor_pool_mint_refusals_total",
+		Help:   "Runner-token requests from executor pool controllers that were refused, by reason: max_runners (the pool would exceed it), revoked (the pool or the credential was revoked), invalid_credential, invalid_request.",
+		Type:   TypeCounter,
+		Labels: []string{"reason"},
+	})
+	ExecutorPoolRunnersMinted = Default.MustRegister(Definition{
+		Name: "cloop_executor_pool_runners_minted_total",
+		Help: "Runner tokens issued to executor pool controllers.",
+		Type: TypeCounter,
+	})
+	// reason is one of the ExecutorPoolRetired* values.
+	ExecutorPoolRunnersRetired = Default.MustRegister(Definition{
+		Name:   "cloop_executor_pool_runners_retired_total",
+		Help:   "Executor pool runners retired, by reason: run_settled, left_idle (it went offline before it was handed a run), idle_timeout, pool_revoked, credential_revoked (the controller credential that minted it was revoked), lost (its run was lost with it), start_failed (a queued run could not be started on it), token_expired (minted and never redeemed), other.",
+		Type:   TypeCounter,
+		Labels: []string{"reason"},
+	})
+)
+
+// ExecutorPoolRunners state values.
+const (
+	ExecutorPoolRunnerBusy    = "busy"
+	ExecutorPoolRunnerIdle    = "idle"
+	ExecutorPoolRunnerPending = "pending"
+)
+
+// ExecutorPoolMintRefusals reason values.
+const (
+	ExecutorPoolRefusalMaxRunners        = "max_runners"
+	ExecutorPoolRefusalRevoked           = "revoked"
+	ExecutorPoolRefusalInvalidCredential = "invalid_credential"
+	ExecutorPoolRefusalInvalidRequest    = "invalid_request"
+)
+
 // IsolationProbes status values.
 const (
 	IsolationProbeVerified     = "verified"

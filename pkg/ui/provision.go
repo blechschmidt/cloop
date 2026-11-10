@@ -160,9 +160,16 @@ func (s *Server) authorizeProjectAccess(w http.ResponseWriter, r *http.Request, 
 // and a 500.
 func validateProjectAccess(bs *brokerSet, viewer secretbroker.Viewer, a projectAccessRequest) error {
 	if id := strings.TrimSpace(a.ExecutorID); id != "" {
+		if _, isPool := executor.PoolOf(id); isPool {
+			return fmt.Errorf("executor %q is an executor pool; create the project, then bind it to the pool", id)
+		}
 		ex, err := executor.Get(id)
 		if err != nil {
 			return fmt.Errorf("executor %q is not available on this control plane: %w", id, err)
+		}
+		// A pool's runner is never bound by name (Task 20482).
+		if executor.IsEphemeral(ex) {
+			return fmt.Errorf("executor %q: %w", id, executor.ErrEphemeralRunner)
 		}
 		if blocked, reason := blockedFor(ex); blocked {
 			return fmt.Errorf("executor %q cannot be used: %s", id, reason)

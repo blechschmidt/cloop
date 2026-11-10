@@ -355,6 +355,33 @@ func (s *Server) holdRefusedResume(workDir string, err error) {
 		return
 	}
 	s.repauseIfOverDiskLimit(workDir, err)
+	s.repauseForPool(workDir, err)
+}
+
+// repauseForPool holds a cap-paused run of a project bound to an executor pool
+// (Task 20482): a run the hub resumes by itself is not queued for a pool — its
+// access list is checked against the person starting it, who is not there —
+// so the run waits for that person to press Run, saying so, instead of being
+// tried again at every sweep.
+func (s *Server) repauseForPool(workDir string, err error) {
+	var poolWait *executor.PoolCapacityError
+	if !errors.As(err, &poolWait) {
+		return
+	}
+	st, lerr := state.Load(workDir)
+	if lerr != nil || st == nil || st.Status != "paused" || !resumablePause(st, s.clock()) {
+		return
+	}
+	st.SetPaused(pausereason.New(pausereason.CodeAbort, "this project runs on executor pool "+poolWait.PoolID+
+		", and a run the hub resumes by itself is not queued for a pool; press Run to queue it"))
+	if serr := st.SaveDirect(); serr != nil {
+		s.log().Warn(logger.EventSessionStart, 0, "auto-resume: could not record why the run is held",
+			map[string]interface{}{"project": workDir, "error": serr.Error()})
+		return
+	}
+	s.broadcastStateDiff(workDir, st)
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
 }
 
 // repauseForStarter records that a cap-paused run cannot be resumed for the

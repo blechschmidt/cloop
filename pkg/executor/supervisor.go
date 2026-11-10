@@ -762,6 +762,11 @@ func (sv *Supervisor) placeReplacement(deadID string, sess Session) (Candidate, 
 		if c.ID() == deadID {
 			continue
 		}
+		// An executor pool's runner is started for the one run its pool's
+		// queue assigns it (Task 20482): never a failover target.
+		if IsEphemeral(c.Executor) {
+			continue
+		}
 		if sv.candidateFilter != nil && c.Executor != nil && !sv.candidateFilter(c.Executor) {
 			continue
 		}

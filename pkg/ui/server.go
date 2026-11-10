@@ -920,6 +920,11 @@ type Server struct {
 	// membership store; nil means no team exists, and only Everyone does.
 	teams teamStoreState
 
+	// pools is the executor pool machinery (Task 20482): the pool store, the
+	// controllers' feeds' wake-ups, and the dispatcher's kick channel. See
+	// executor_pools.go.
+	pools poolState
+
 	// streamJoinHook, when set, runs after a realtime stream has passed the
 	// gate and before it joins its room — the window a revocation can land
 	// in unseen by the eviction pass. Tests set it to land one there (Task
@@ -1543,6 +1548,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.watchState(watcherCtx)
 	go s.watchProjects(watcherCtx)
+	// Executor pools (Task 20482): every member hands queued runs to the
+	// idle runners it holds; the leader expires lapsed runner tokens.
+	s.startPools(watcherCtx)
 	// Every member re-checks the forwarded devices it relays to runs against
 	// their bindings and forwarders, and the leader stamps lapsed bindings
 	// (Task 20430). See forwarder_dispatch.go. The ledger of devices this
@@ -1787,6 +1795,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// And the project memberships, read from the same path.
 	s.closeMemberStore()
 	s.closeTeamStore()
+	// And the executor pools' handle, which the agent endpoint and the
+	// controllers' feeds read through until the listener stopped.
+	s.closePools()
 	// Stop the git interception proxy. A session nothing will restore is
 	// closed, so the audit trail records why it ended rather than leaving rows
 	// that simply stop; a recorded one is suspended for the process that
@@ -2163,8 +2174,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // false, and the rate limiter still applies: it sits outside this middleware.
 func servedBeforeAuth(r *http.Request) bool {
 	return isPublicShell(r) || isPublicIcon(r) || isPublicAsset(r) || isCSPReport(r) || isCIFederationEndpoint(r) ||
-		isDeviceGrantEndpoint(r) || isSCIMEndpoint(r) || isModelRelayEndpoint(r) || isKnowledgeRunEndpoint(r)
+		isDeviceGrantEndpoint(r) || isSCIMEndpoint(r) || isModelRelayEndpoint(r) || isKnowledgeRunEndpoint(r) ||
+		isPoolControllerEndpoint(r)
 }
+
+// The executor pool controller's endpoints (Task 20482,
+// isPoolControllerEndpoint) are the second kind: a controller presents the
+// cloop_pool1_ credential minted for its pool, which
+// executor_pool_controller.go checks, and holds no session — a person's
+// session or API token standing in for it would let any leaked one start
+// runners. Every request without a live pool credential is refused there.
 
 // The run-scoped knowledge search (Task 20472, isKnowledgeRunEndpoint) is the
 // second kind: a run presents the knowledge session token the hub minted for
@@ -3886,6 +3905,14 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	exe := s.selfExe()
 	workDir := s.resolveWorkDir(r)
 
+	// A project bound to an executor pool (Task 20482): its run waits in the
+	// pool's queue for a runner rather than being dispatched now, holding the
+	// slot it was just admitted with. See executor_pool_queue.go.
+	if poolID, bound := s.poolOfProject(workDir); bound {
+		s.queuePoolRun(w, r, workDir, poolID, "run", slot)
+		return
+	}
+
 	// The harness is never forked here. It is handed to whichever executor
 	// this project is bound to — the local host by default, a container or
 	// a remote edge agent when configured (Task 20156).
@@ -4064,6 +4091,11 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 	// The member streaming the run is the one that can signal it (Task 20354).
 	if s.routeRunOwner(w, r, workDir) {
+		return
+	}
+	// A run still waiting for its executor pool's runner leaves the queue
+	// (Task 20482); there is nothing to signal yet.
+	if s.stopQueuedPoolRun(w, r, workDir, nil) {
 		return
 	}
 	d := s.interruptRun(workDir)
@@ -7340,6 +7372,13 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 	slot := s.holdRunSlot(quotaID, quota.ResConcurrentTasks, 1)
 	releaseSlot := slot.giveBack
 
+	// Queued for its executor pool's runner, as handleRun queues it (Task
+	// 20482).
+	if poolID, bound := s.poolOfProject(entry.Path); bound {
+		s.queuePoolRun(w, r, entry.Path, poolID, "project-run", slot)
+		return
+	}
+
 	exe := s.selfExe()
 	args := []string{"run"}
 	if req.PM {
@@ -7407,6 +7446,9 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.routeRunOwner(w, r, entry.Path) {
+		return
+	}
+	if s.stopQueuedPoolRun(w, r, entry.Path, map[string]any{"project": entry.Name}) {
 		return
 	}
 	// Project-scoped: only this project's workload and the cloop run

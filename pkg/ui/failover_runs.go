@@ -199,6 +199,13 @@ func (s *Server) startReplacement(ctx context.Context, dir string, ev executor.F
 	if !hasProjectDB(projectPath) || !s.isRegisteredProject(projectPath) {
 		return nil, fmt.Errorf("failover: session %s belongs to %s, which this hub no longer serves", ev.Session.ID, projectPath)
 	}
+	// A project bound to an executor pool runs only on its pool's runners
+	// (Task 20482): a failover does not move it off them. Started again, it
+	// waits in the pool's queue for a fresh runner.
+	if poolID, bound := s.poolOfProject(projectPath); bound {
+		return nil, fmt.Errorf("failover: %s runs on executor pool %s, and a failover does not move a run off its "+
+			"pool; press Run to queue it for a new runner", projectPath, poolID)
+	}
 	target, err := executor.Get(ev.To)
 	if err != nil {
 		return nil, fmt.Errorf("failover: replacement executor %s: %w", ev.To, err)
@@ -248,6 +255,11 @@ func (s *Server) startReplacement(ctx context.Context, dir string, ev executor.F
 // exactly as admitExecutorAudience fails closed for a person.
 func failoverPlaceable(ex executor.Executor) bool {
 	if ex == nil {
+		return false
+	}
+	// An executor pool's runner is started for the run its pool's queue
+	// hands it (Task 20482), and takes no other.
+	if executor.IsEphemeral(ex) {
 		return false
 	}
 	entries, err := executorAudience(ex.ID())
@@ -677,6 +689,9 @@ func failoverStopCause(ev executor.FailoverEvent, out failoverOutcome) error {
 // executor_lost reason, and the journal says which executor was lost and
 // why the run stopped there. s is this process's hub, which may be nil.
 func settleLostRun(s *Server, dir string, ev executor.FailoverEvent, out failoverOutcome, cause error) {
+	// An executor pool's runner lost with its run is retired, not waited for
+	// (Task 20482): nothing will reconnect to it that should run again.
+	s.retireLostPoolRunner(ev.From)
 	projectPath := executorstore.FailoverProjectPath(ev.Session)
 	if projectPath == "" {
 		return

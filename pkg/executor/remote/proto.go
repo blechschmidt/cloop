@@ -294,7 +294,19 @@ const (
 	// review it stands for — so the hub refuses to dispatch a plan holding a
 	// pending gate to such a device and names the upgrade. See
 	// MinHumanGateVersion.
-	ProtocolVersion = 27
+	//
+	// v28 adds ephemeral runners (Task 20482): an executor pool's runner
+	// enrolls with a single-use runner token, takes one run and is retired.
+	// The welcome gains ephemeral, telling the agent to keep its credential in
+	// memory rather than on disk — it is good for one run — and the bye gains
+	// retired, the hub's "your run is over, exit cleanly", which an ephemeral
+	// agent answers by ending its process with success instead of reporting a
+	// refusal. No frame changes. Gated on the hub side and degraded rather than
+	// refused: an older agent ignores ephemeral and saves the credential, and
+	// reads the retiring bye as a permanent refusal, so it exits all the same —
+	// with an error — and the hub retires its executor either way. See
+	// MinEphemeralVersion.
+	ProtocolVersion = 28
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -546,6 +558,15 @@ const MinHumanGateVersion = 27
 // SupportsHumanGates reports whether an agent speaking this protocol version
 // honours the human review gates in a seeded plan.
 func SupportsHumanGates(version int) bool { return version >= MinHumanGateVersion }
+
+// MinEphemeralVersion is the first protocol whose agents know they may be an
+// executor pool's ephemeral runner (Task 20482): told so in the welcome, they
+// keep the credential in memory, and a bye marked retired ends them cleanly.
+const MinEphemeralVersion = 28
+
+// SupportsEphemeral reports whether an agent speaking this protocol version
+// honours the welcome's ephemeral flag and the bye's retired flag.
+func SupportsEphemeral(version int) bool { return version >= MinEphemeralVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.
@@ -1211,6 +1232,10 @@ type WelcomePayload struct {
 	// a workload must stop it rather than merely stop reporting it: nothing
 	// will ever read its output, collect its result, or be able to signal it.
 	ResumeAccepted []ResumeAck `json:"resume_accepted,omitempty"`
+	// Ephemeral tells the agent it is an executor pool's runner (Task 20482,
+	// v28): it takes one run and is then retired, so its credential is kept
+	// in memory only, and a bye with Retired set ends it with success.
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // ResumeAction is the control plane's verdict on one resume offer.
@@ -1840,6 +1865,10 @@ type ByePayload struct {
 	// credential was revoked or the agent deregistered, so an agent that
 	// obeys it stops hammering a control plane that will never accept it.
 	Reconnect bool `json:"reconnect"`
+	// Retired says the bye ends an ephemeral runner whose run is over (Task
+	// 20482, v28). Reconnect is false with it; an agent that knows the flag
+	// exits cleanly rather than reporting a refusal.
+	Retired bool `json:"retired,omitempty"`
 }
 
 // ErrorPayload reports a request-scoped failure.

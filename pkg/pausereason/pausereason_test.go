@@ -151,7 +151,7 @@ func TestCodesOrder(t *testing.T) {
 		"approval", "abort", "cancelled", "plan_only",
 		"idle", "operator", "stale", "state_not_persisted",
 		"uncommitted_work", "disk_low", "executor_lost", "disk_limit",
-		"starter_unavailable",
+		"starter_unavailable", "pool_capacity",
 	}
 	got := Codes()
 	if len(got) != len(want) {

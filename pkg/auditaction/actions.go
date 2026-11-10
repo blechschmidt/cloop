@@ -250,6 +250,39 @@ const (
 	// allows, so nothing re-dispatches it (Task 20391).
 	ActionExecutorFailoverExhausted Action = "executor.failover_exhausted"
 
+	// ── executor_pool ──────────────────────────────────────────────────────
+
+	// ActionExecutorPoolCreate records an executor pool being created (Task
+	// 20482): a set of ephemeral runners a controller starts on demand.
+	ActionExecutorPoolCreate Action = "executor_pool.create"
+	// ActionExecutorPoolUpdate records a pool's definition changing: its
+	// labels, capabilities, max_runners, owner or workdir root.
+	ActionExecutorPoolUpdate Action = "executor_pool.update"
+	// ActionExecutorPoolRevoke records a pool being revoked, together with
+	// everything that went with it.
+	ActionExecutorPoolRevoke Action = "executor_pool.revoke"
+	// ActionExecutorPoolAudience records a change to who may run work on a
+	// pool's runners.
+	ActionExecutorPoolAudience Action = "executor_pool.audience"
+	// ActionExecutorPoolCredentialMint records a controller credential being
+	// minted for a pool.
+	ActionExecutorPoolCredentialMint Action = "executor_pool.credential_mint"
+	// ActionExecutorPoolCredentialRevoke records one controller credential
+	// being revoked.
+	ActionExecutorPoolCredentialRevoke Action = "executor_pool.credential_revoke"
+	// ActionExecutorPoolTokenMint records a controller being issued runner
+	// tokens.
+	ActionExecutorPoolTokenMint Action = "executor_pool.token_mint"
+	// ActionExecutorPoolRunnerEnroll records a runner redeeming its token and
+	// joining the pool.
+	ActionExecutorPoolRunnerEnroll Action = "executor_pool.runner_enroll"
+	// ActionExecutorPoolRunnerRetire records a runner being retired: its run
+	// settled, it left before it was given one, or its pool was revoked.
+	ActionExecutorPoolRunnerRetire Action = "executor_pool.runner_retire"
+	// ActionExecutorPoolRunQueue records a project's run entering, leaving or
+	// being handed on from a pool's queue.
+	ActionExecutorPoolRunQueue Action = "executor_pool.run_queue"
+
 	// ── forwarder ──────────────────────────────────────────────────────────
 
 	// ActionForwarderEnroll records a device forwarder's enrollment token being

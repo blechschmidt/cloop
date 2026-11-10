@@ -443,7 +443,11 @@ func (s *Server) startClusterBus() {
 		onBusHubCA(ev)
 		s.hubHealthEvent()
 	})
+	// An executor pool changed on another member (Task 20482): its feeds and
+	// dispatcher here wake, and runners it retired are let go of here.
+	n.Subscribe(busTopicPool, s.onBusPool)
 	n.OnBusGap(s.onBusGap)
+	n.OnBusGap(s.onPoolBusGap)
 	n.OnMembership(s.onMembershipChange)
 }
 

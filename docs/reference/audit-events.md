@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 244 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 254 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 211 |
+| `control-plane` | the hub's own state.db | 221 |
 | `project` | the project's .cloop/state.db | 29 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-244 actions in 52 families. Every action is listed: this section is the whole
+254 actions in 53 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (10) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -368,6 +368,39 @@ Payload keys:
 
 - `forwarder.bind` — Gated on executor.manage, like enrollment. A run of the project gets the device in its sandbox while the binding is in force.
 - `forwarder.enroll` — A forwarder bridges one on-prem USB or layer-2 device to the hub and runs no workload; it is not an executor.
+
+### executor_pool.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `executor_pool.audience` | `executor_pool` | control-plane | beta | An administrator admits a principal to a pool's access list, or withdraws one. |
+| `executor_pool.create` | `executor_pool` | control-plane | beta | An administrator creates an executor pool. |
+| `executor_pool.credential_mint` | `executor_pool` | control-plane | beta | An administrator mints a controller credential for a pool. |
+| `executor_pool.credential_revoke` | `executor_pool` | control-plane | beta | An administrator revokes one of a pool's controller credentials. |
+| `executor_pool.revoke` | `executor_pool` | control-plane | beta | An administrator revokes a pool: its controller credentials, unredeemed runner tokens, live runners and queued runs go with it. |
+| `executor_pool.run_queue` | `executor_pool` | control-plane | beta | A project's run is queued for a pool, handed to a runner, or leaves the queue cancelled or failed. |
+| `executor_pool.runner_enroll` | `executor_pool` | control-plane | beta | A runner redeems its runner token and joins its pool as an ephemeral executor. |
+| `executor_pool.runner_retire` | `executor_pool` | control-plane | beta | A runner is retired: its one run settled, it left before it was given a run, or its pool was revoked. |
+| `executor_pool.token_mint` | `executor_pool` | control-plane | beta | A pool's controller is issued runner tokens: single-use, bound to the pool, valid for ten minutes at most. |
+| `executor_pool.update` | `executor_pool` | control-plane | beta | An administrator changes a pool's labels, capabilities, max_runners, owner or workdir root. |
+
+Payload keys:
+
+- `executor_pool.audience` — `pool_id`, `action`, `kind`, `value`, `restricted`
+- `executor_pool.create` — `pool_id`, `name`, `labels`, `capabilities`, `max_runners`, `owner`, `workdir_root`
+- `executor_pool.credential_mint` — `pool_id`, `credential_id`
+- `executor_pool.credential_revoke` — `pool_id`, `credential_id`
+- `executor_pool.revoke` — `pool_id`, `name`, `credentials`, `tokens`, `runners`, `cancelled_runs`
+- `executor_pool.run_queue` — `pool_id`, `queue_id`, `action`, `project_path`, `starter`, `executor_id`, `reason`
+- `executor_pool.runner_enroll` — `pool_id`, `enrollment_id`, `executor_id`, `name`, `member`
+- `executor_pool.runner_retire` — `pool_id`, `executor_id`, `reason`, `queue_id`, `project_path`
+- `executor_pool.token_mint` — `pool_id`, `credential_id`, `count`, `enrollment_ids`, `expires_at`, `runners`, `max_runners`
+- `executor_pool.update` — `pool_id`, `name`, `changed`, `labels`, `capabilities`, `max_runners`, `owner`, `workdir_root`
+
+- `executor_pool.credential_mint` — The credential itself is shown once to the administrator and never recorded; the row names its public ID.
+- `executor_pool.revoke` — `runners` lists the executor IDs whose credentials were revoked; each is also recorded as executor_pool.runner_retire when its hub member ends its connection.
+- `executor_pool.run_queue` — `action` is queued, assigned, dispatched, cancelled or failed.
+- `executor_pool.token_mint` — A refused request — the pool at max_runners, or revoked — is counted in cloop_executor_pool_mint_refusals_total rather than recorded here.
 
 ### workspace.*
 

@@ -211,6 +211,41 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Executor pools: runners a controller starts on demand, one run each.** A
+  pool is modelled on GitHub's Actions Runner Controller scale sets: an
+  administrator creates one (`/api/executor-pools`) with the labels and
+  capabilities its runners advertise, `max_runners`, an owner and the access
+  list executors already use, and binds projects to it with `executor_id`
+  `pool:<id>`. A run of such a project is queued for the pool instead of
+  dispatched, and waits paused with the new reason `pool_capacity`, which says
+  whether a runner is coming. The pool's controller presents a long-lived,
+  revocable credential (`cloop_pool1_…`, stored as a SHA-256 and recognised by
+  the credential scanners) to two endpoints: a demand feed, over a WebSocket
+  or a long-poll, that is pushed how many queued runs the pool could take and
+  how many of its runners are busy, idle and starting; and
+  `/api/pool-controller/runners`, which issues single-use runner tokens
+  (`clrt1.…`, ten minutes at most) bound to the pool. The hub refuses tokens
+  past `max_runners` in one transaction, so two controllers or two hub members
+  cannot both pass the count. A runner enrolls as an ephemeral agent (protocol
+  v28: it keeps its credential, which has its own `clrc1.` prefix, in memory
+  and exits with success when retired), and is never bound, defaulted or
+  dispatched to by name. The hub member holding its connection hands it the
+  oldest queued run the pool may see, and once that run is settled the runner
+  is retired and removed from the fleet rather than reported as a failed
+  device. A pool learns only of runs queued for it whose project is still
+  bound to it, under the access list the run was admitted with, whose project
+  its owner may read, and whose requirements its runners meet by the
+  scheduler's own placement rules. Revoking a pool revokes its credentials,
+  its unredeemed tokens and its runners, takes back their leases through the
+  revocation push, and cancels its queue; revoking one controller credential
+  takes back the tokens and runners it minted. Any hub member serves the feed
+  from the shared database; a change on another member reaches it through the
+  cluster bus. New audit actions `executor_pool.*`, metrics
+  `cloop_executor_pool_*`. A failover never moves a pool-bound project's run
+  off its pool, and a model call on such a project is refused with
+  `waiting_for_pool_capacity` rather than taking a runner a queued run is
+  waiting for (Task 20482).
+
 - **Projects are private to whoever creates them, and can be shared with
   people and teams at a role.** On a hub with single sign-on, a project you
   create is visible only to you and the hub's administrators until you share

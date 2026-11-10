@@ -110,6 +110,12 @@ func remoteParent(id string) (*remote.Executor, bool) {
 		return nil, false
 	}
 	parent, ok := ex.(*remote.Executor)
+	// An executor pool's runner is no device to put virtual executors under
+	// (Task 20482): one bound to them would be a way to dispatch to the
+	// runner by name, round its pool's queue.
+	if ok && parent.Ephemeral() {
+		return nil, false
+	}
 	return parent, ok
 }
 

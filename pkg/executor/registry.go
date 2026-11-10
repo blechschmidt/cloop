@@ -80,7 +80,9 @@ func (r *Registry) Register(ex Executor) error {
 		return fmt.Errorf("%w: %q", ErrAlreadyRegistered, id)
 	}
 	r.executors[id] = ex
-	if r.defaultID == "" {
+	// An executor pool's runner is never the default: unbound projects would
+	// otherwise land on a machine started for one queued run (Task 20482).
+	if r.defaultID == "" && !IsEphemeral(ex) {
 		r.defaultID = id
 	}
 	return nil
@@ -109,8 +111,10 @@ func (r *Registry) Unregister(id string) {
 	}
 	r.defaultID = ""
 	ids := make([]string, 0, len(r.executors))
-	for k := range r.executors {
-		ids = append(ids, k)
+	for k, ex := range r.executors {
+		if !IsEphemeral(ex) {
+			ids = append(ids, k)
+		}
 	}
 	sort.Strings(ids)
 	if len(ids) > 0 {
@@ -302,14 +306,28 @@ func (r *Registry) Resolve(projectPath string) (Executor, error) {
 // Executors panel, `cloop executor list`) are not told it is forbidden.
 func (r *Registry) resolveBinding(projectPath string) (Executor, error) {
 	if id, ok := r.Binding(projectPath); ok {
+		// A project bound to an executor pool has no executor until its run
+		// is assigned a runner (Task 20482, pool.go).
+		if poolID, isPool := PoolOf(id); isPool {
+			return r.resolvePool(poolID, projectPath)
+		}
 		ex, err := r.Get(id)
 		if err != nil {
 			return nil, fmt.Errorf("project %q is bound to executor %q which is not available: %w",
 				projectPath, id, err)
 		}
+		// A runner takes only the run its pool hands it (Task 20482): a
+		// binding naming one — however it was written — resolves to nothing.
+		if IsEphemeral(ex) {
+			return nil, fmt.Errorf("project %q is bound to executor %q: %w", projectPath, id, ErrEphemeralRunner)
+		}
 		return ex, nil
 	}
-	return r.Default()
+	ex, err := r.Default()
+	if err == nil && IsEphemeral(ex) {
+		return nil, fmt.Errorf("the default executor %q: %w", ex.ID(), ErrEphemeralRunner)
+	}
+	return ex, err
 }
 
 // canonicalProjectKey normalizes a project path for use as a binding key so

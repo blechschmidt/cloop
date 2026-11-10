@@ -1060,6 +1060,7 @@ const pauseReasonLabels = {
   executor_lost: 'executor lost',
   disk_limit: 'workspace over its disk limit',
   starter_unavailable: "starter's Claude account unavailable",
+  pool_capacity: 'waiting for pool capacity',
 };
 
 // pauseReasonText renders a pause reason as one line of prose:

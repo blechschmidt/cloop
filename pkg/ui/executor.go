@@ -843,6 +843,9 @@ type dispatchOptions struct {
 	// exists — the project's run owner row (recordingRun) — and a failure to
 	// is a refusal like a session that cannot be written (Task 20419).
 	record func(ex executor.Executor, handleID string) error
+	// poolRun says target is the executor pool runner a queued run was
+	// assigned (Task 20482): the one dispatch a runner takes.
+	poolRun bool
 }
 
 // recordingRun has the dispatch record the project's run as handler started
@@ -874,6 +877,11 @@ func (o dispatchOptions) resolve(workDir string) (executor.Executor, error) {
 			return nil, fmt.Errorf("no executor available for %s: %w", workDir, err)
 		}
 		return ex, nil
+	}
+	// A runner is dispatched to only with the run its pool's queue assigned
+	// it (Task 20482), never as anybody's chosen target.
+	if executor.IsEphemeral(o.target) && !o.poolRun {
+		return nil, fmt.Errorf("dispatch to %s: %w", o.target.ID(), executor.ErrEphemeralRunner)
 	}
 	// Placement already asks for isolation when the policy forbids the host;
 	// this is the dispatch path's own copy of that rule, as Resolve is for a

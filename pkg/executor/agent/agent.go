@@ -202,6 +202,10 @@ type Agent struct {
 	// the reconnect ladder resets rather than creeping to its ceiling on a
 	// device that reconnects successfully every few hours.
 	connected bool
+	// ephemeral is set once the hub said this agent is an executor pool's
+	// runner (Task 20482): its credential lives in cred only, and a retiring
+	// bye ends Run with success.
+	ephemeral bool
 }
 
 // workload is one running task on this device.
@@ -564,9 +568,21 @@ func (a *Agent) Run(ctx context.Context) error {
 		case err == nil:
 			// Clean shutdown requested by the control plane.
 			return nil
+		case errors.Is(err, errRetired):
+			// An ephemeral runner retired after its run (Task 20482): the
+			// ordinary end of its life, not a refusal.
+			a.cfg.logf("ephemeral runner retired: %v", errors.Unwrap(err))
+			return nil
 		case errors.Is(err, errDoNotReconnect):
 			a.cfg.logf("control plane refused this agent permanently: %v", errors.Unwrap(err))
 			return err
+		case errors.Is(err, remote.ErrCredentialInvalid) && a.isEphemeral():
+			// An ephemeral runner whose credential the hub stopped accepting
+			// while it was away (Task 20482): it was retired, and there is no
+			// enrollment to fall back to. A device would retry until an
+			// operator re-enrolled it; a runner is replaced by its controller.
+			a.cfg.logf("ephemeral runner's credential was refused; it was retired while disconnected: %v", err)
+			return fmt.Errorf("%w: %v", errDoNotReconnect, err)
 		case errors.Is(err, context.Canceled):
 			return nil
 		}
@@ -591,6 +607,17 @@ func (a *Agent) Run(ctx context.Context) error {
 // ladder, so a device that reconnects successfully every few hours does not
 // creep up to the two-minute ceiling and stay there.
 var errDoNotReconnect = errors.New("agent: control plane declined reconnection")
+
+// errRetired is an ephemeral runner told its run is over (Task 20482).
+var errRetired = errors.New("agent: ephemeral runner retired")
+
+// isEphemeral reports whether this agent enrolled as an executor pool's
+// ephemeral runner.
+func (a *Agent) isEphemeral() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ephemeral
+}
 
 func (a *Agent) consumeConnectedFlag() bool {
 	a.mu.Lock()

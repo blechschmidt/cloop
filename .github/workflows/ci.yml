@@ -1952,6 +1952,34 @@ jobs:
             exit 1
           fi
 
+      # Executor pools (Task 20482): a pool administered on one member, its
+      # controller's feed served by the other, a run queued on the first pushed
+      # to that feed, a runner minted on the second taking the run as an
+      # ephemeral agent and retired after it, and a revocation on one member
+      # refused by the other.
+      - name: Serve an executor pool from two members
+        timeout-minutes: 5 # observed locally: ~5s with a plain binary
+        env:
+          CLOOP_CLUSTER_E2E: "1"
+          CLOOP_CLUSTER_BIN: /tmp/cloop-cluster-bin
+          CLOOP_CLUSTER_KEEP: "1"
+          TMPDIR: /tmp/cloop-cluster-e2e-pool
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          go test ./tests/cluster/ -run TestExecutorPoolOnAHubCluster -v -count=1 -timeout 4m 2>&1 | tee /tmp/cluster-pool.log
+          grep -qE '^--- PASS: TestExecutorPoolOnAHubCluster \(' /tmp/cluster-pool.log || {
+            echo "::error::go test succeeded but TestExecutorPoolOnAHubCluster did not pass — it was skipped"
+            exit 1
+          }
+          if races=$(grep -rl "WARNING: DATA RACE" "$TMPDIR" --include='*.log'); then
+            echo "$races"
+            echo "::error::a hub member or the runner reported a data race (files above)"
+            # shellcheck disable=SC2086 # one word per file
+            go run ./scripts/ci-annotate $races
+            exit 1
+          fi
+
       # A run whose device dies (Task 20396): two members, an agent on each,
       # the first agent killed mid-task. The replacement is started on the
       # second agent by the member holding its socket and followed there as

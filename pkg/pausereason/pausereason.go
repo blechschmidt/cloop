@@ -111,6 +111,13 @@ const (
 	// and why. A human decides: start the run as themselves, which acts on
 	// their own account.
 	CodeStarterUnavailable Code = "starter_unavailable"
+	// CodePoolCapacity is a run waiting in an executor pool's queue for a
+	// runner (Task 20482): the project is bound to a pool, none of whose
+	// runners was free when the run was started, and its controller has been
+	// asked for one. Not an error, and it ends on its own: the hub starts the
+	// run on the first runner that can take it. The detail names the pool and
+	// says why nothing runs yet. Stop takes the run out of the queue.
+	CodePoolCapacity Code = "pool_capacity"
 )
 
 // ExitStateNotPersisted is the exit status of a `cloop run` that stopped for
@@ -141,6 +148,7 @@ var codeLabels = map[Code]string{
 	CodeExecutorLost:       "executor lost",
 	CodeDiskLimit:          "workspace over its disk limit",
 	CodeStarterUnavailable: "starter's Claude account unavailable",
+	CodePoolCapacity:       "waiting for pool capacity",
 }
 
 // Known reports whether c is a code this package defines. The persistence
@@ -159,7 +167,7 @@ func Codes() []Code {
 		CodeApproval, CodeAbort, CodeCancelled, CodePlanOnly,
 		CodeIdle, CodeOperator, CodeStale, CodeStateNotPersisted,
 		CodeUncommittedWork, CodeDiskLow, CodeExecutorLost, CodeDiskLimit,
-		CodeStarterUnavailable,
+		CodeStarterUnavailable, CodePoolCapacity,
 	}
 }
 

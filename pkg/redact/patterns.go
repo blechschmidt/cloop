@@ -577,6 +577,32 @@ var specs = []spec{
 		before:     isWordByte,
 	},
 	{
+		name:  "cloop-runner-token",
+		label: "cloop executor pool runner token",
+		recognises: "`clrt1.<id>.<secret>.<mac>`, the single-use token an executor pool's ephemeral runner " +
+			"enrolls with (Task 20482).",
+		pattern:  `(?P<kind>clrt1\.)[0-9A-Za-z_\-]{4,}\.[0-9A-Za-z_\-]{8,}(?:\.[0-9A-Za-z_\-]+)?`,
+		keywords: []string{"clrt1."},
+		before:   isWordByte,
+	},
+	{
+		name:  "cloop-runner-credential",
+		label: "cloop executor pool runner credential",
+		recognises: "`clrc1.<agent>.<secret>.<mac>`, the credential an executor pool's ephemeral runner " +
+			"reconnects with during its one run (Task 20482).",
+		pattern:  `(?P<kind>clrc1\.)[0-9A-Za-z_\-]{4,}\.[0-9A-Za-z_\-]{8,}(?:\.[0-9A-Za-z_\-]+)?`,
+		keywords: []string{"clrc1."},
+		before:   isWordByte,
+	},
+	{
+		name:  "cloop-pool-credential",
+		label: "cloop executor pool controller credential",
+		recognises: "`cloop_pool1_<id>.<secret>`, the long-lived credential an executor pool's controller " +
+			"presents to the hub's demand feed and runner endpoint (Task 20482).",
+		pattern:  `(?P<kind>cloop_pool1_)[0-9A-Za-z_\-]{4,}\.[0-9A-Za-z_\-]{8,}`,
+		keywords: []string{"cloop_pool1_"},
+	},
+	{
 		name:       "cloop-enrollment-bundle",
 		label:      "cloop executor enrollment bundle",
 		recognises: "`cloopenroll1.<base64url>`, the copy-paste bundle that carries an enrollment token.",

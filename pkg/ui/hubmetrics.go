@@ -36,6 +36,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorstore"
 	"github.com/blechschmidt/cloop/pkg/hubca"
+	"github.com/blechschmidt/cloop/pkg/executorpool"
 	"github.com/blechschmidt/cloop/pkg/hubmetrics"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/quota"
@@ -221,12 +222,55 @@ func registerHubCollectors() {
 			Collect:  withScrape(collectAuditForward),
 		},
 		hubmetrics.CollectorSpec{
+			Name:     "executor_pools",
+			Families: []*hubmetrics.Metric{hubmetrics.ExecutorPoolDemand, hubmetrics.ExecutorPoolRunners},
+			Collect:  withScrape(collectExecutorPools),
+		},
+		hubmetrics.CollectorSpec{
 			Name: "knowledge_index",
 			Families: []*hubmetrics.Metric{hubmetrics.KnowledgeIndexDocuments, hubmetrics.KnowledgeIndexChunks,
 				hubmetrics.KnowledgeIndexBytes, hubmetrics.KnowledgeIndexVectors},
 			Collect: withScrape(collectKnowledgeIndex),
 		},
 	)
+}
+
+// collectExecutorPools publishes the executor pools' demand and runners (Task
+// 20482), summed over live pools. Leader only: both are read from the shared
+// database. A hub with no pools exports zeros, which an alert can tell from a
+// hub that stopped reporting.
+func collectExecutorPools(sc *metricsScrape) {
+	if !sc.leader {
+		return
+	}
+	db := sc.controlDB()
+	if db == nil {
+		return
+	}
+	store := executorpool.NewStore(db)
+	pools, err := store.List()
+	if err != nil {
+		return
+	}
+	access := poolAccess{s: sc.srv, db: db}
+	var demand, busy, idle, pending int
+	for _, p := range pools {
+		if p.Revoked() {
+			continue
+		}
+		snap, _, err := store.Snapshot(p, access)
+		if err != nil {
+			continue
+		}
+		demand += snap.Demand
+		busy += snap.Busy
+		idle += snap.Idle
+		pending += snap.Pending
+	}
+	hubmetrics.ExecutorPoolDemand.Set(float64(demand))
+	hubmetrics.ExecutorPoolRunners.Set(float64(busy), hubmetrics.ExecutorPoolRunnerBusy)
+	hubmetrics.ExecutorPoolRunners.Set(float64(idle), hubmetrics.ExecutorPoolRunnerIdle)
+	hubmetrics.ExecutorPoolRunners.Set(float64(pending), hubmetrics.ExecutorPoolRunnerPending)
 }
 
 // collectStateDBWAL publishes the size of the control plane's write-ahead log

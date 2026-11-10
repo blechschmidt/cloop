@@ -1297,6 +1297,27 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "DELETE /api/ci/sessions/{id}", Handler: s.handleCISessionRevoke, Perm: secRevoke, Scope: scopeGlobal},
 		{Pattern: "GET /api/ci/exchanges", Handler: s.handleCIExchanges, Perm: secGrant, Scope: scopeGlobal},
 
+		// ── Executor pools (Task 20482) ──────────────────────────────
+		// Administering a pool is an administrator's: it decides which
+		// machines run which projects, and its credential starts runners.
+		// executor.manage on every route, a recent sign-in on the writes.
+		{Pattern: "GET /api/executor-pools", Handler: s.handleExecutorPoolsList, Perm: execMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/executor-pools", Handler: s.handleExecutorPoolCreate, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "GET /api/executor-pools/{id}", Handler: s.handleExecutorPoolDetail, Perm: execMgmt, Scope: scopeGlobal},
+		{Pattern: "PUT /api/executor-pools/{id}", Handler: s.handleExecutorPoolUpdate, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/executor-pools/{id}/revoke", Handler: s.handleExecutorPoolRevoke, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/executor-pools/{id}/credentials", Handler: s.handleExecutorPoolCredentialMint, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/executor-pools/{id}/credentials/{cid}", Handler: s.handleExecutorPoolCredentialRevoke, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "GET /api/executor-pools/{id}/audience", Handler: s.handleExecutorPoolAudience, Perm: execMgmt, Scope: scopeGlobal},
+		{Pattern: "POST /api/executor-pools/{id}/audience", Handler: s.handleExecutorPoolAudience, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/executor-pools/{id}/audience", Handler: s.handleExecutorPoolAudience, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		// A pool's controller: public for the reason the CI relay is — the
+		// controller presents the cloop_pool1_ credential minted for its pool,
+		// which the handlers check, and holds no hub session by design.
+		// servedBeforeAuth carries the two paths past the hub's own auth.
+		{Pattern: "GET /api/pool-controller/feed", Handler: s.handlePoolControllerFeed, Perm: public, Scope: scopeGlobal},
+		{Pattern: "POST /api/pool-controller/runners", Handler: s.handlePoolControllerRunners, Perm: public, Scope: scopeGlobal},
+
 		// ── SCIM 2.0 provisioning (Task 20415) ───────────────────────
 		// The identity provider's routes are public for the reason the CI
 		// exchange is: the handler authenticates — a cloop_scim_ credential,

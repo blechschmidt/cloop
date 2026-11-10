@@ -3905,6 +3905,87 @@ checks once more: `install --upgrade` refuses a staged binary that speaks an
 older protocol than the installed one (see the table above), or that does not
 report the version its signed manifest names.
 
+## Executor pools (Task 20482)
+
+An executor pool is a set of runners that a controller outside the hub starts
+on demand, each of which takes one run and is retired. It is modelled on
+GitHub's Actions Runner Controller scale sets, and the division of work is the
+same: the hub knows what is waiting and who may run it, the controller knows
+how to start a machine. `pkg/executorpool` decides; `pkg/statedb` stores; the
+hub's routes and queue are in `pkg/ui/executor_pool*.go`.
+
+A project is bound to a pool rather than to a runner, because a runner does not
+exist until a run asks for one: the binding's value is `pool:<id>`, stored where
+every other binding is. `Registry.Resolve` answers such a binding with a
+`*executor.PoolCapacityError` and never with an executor, so nothing is
+dispatched to a pool directly. A run of the project is instead queued
+(`executor_pool_queue`): the person starting it is checked against the pool's
+access list and the project against the pool's owner and the pool's runner
+template, its concurrency slot moves to the queue row, and the project waits
+paused with the reason `pool_capacity`. Any other dispatch to the project, such
+as a model call, is refused with `waiting_for_pool_capacity`: a runner takes one
+run, and a helper call that took it would leave the queued run waiting for
+another.
+
+The controller authenticates with a pool credential, `cloop_pool1_<id>.<secret>`,
+which the hub keeps as a SHA-256. It reads the pool's demand feed,
+`GET /api/pool-controller/feed`, as a WebSocket or a long-poll
+(`?after=<revision>&wait=<seconds>`): how many queued runs the pool could take,
+and how many of its runners are busy, idle and pending. It asks for runners
+with `POST /api/pool-controller/runners` and `{"count": N}`, and gets one
+configuration per runner: a single-use runner token (`clrt1.…`, bound to the
+pool, valid for ten minutes at most) and the hub's agent URL and certificate
+pin. The count against `max_runners`, which takes in every unexpired token and
+every runner not yet retired, is made in the same transaction as the inserts,
+so two controllers or two hub members minting at once cannot both pass it.
+
+A runner is an agent like any other on the wire. It redeems its runner token
+on the agent endpoint, where the hub asks the pools whether the token's pool
+and the controller credential that minted it are still live before claiming
+the token, and enrolls as an **ephemeral** executor. Its credential has a
+prefix of its own (`clrc1.`), which a hub build that predates pools refuses
+rather than adopting the runner as a permanent device, and a hub that cannot
+tell whether an agent is a runner refuses it. From protocol v28 the runner is
+told it is ephemeral in the welcome, keeps its credential in memory, and exits
+with success when the hub sends it a bye marked `retired`.
+The hub member holding the runner's connection hands it the oldest queued run
+the pool may see (`AssignPoolQueueEntry` moves the run to `assigned` and the
+runner to `busy` in one transaction) and starts it the way an automatic resume
+starts a run: acting for the person who queued it, on their grants. The remote
+executor refuses a second start on an ephemeral runner whatever asks for it;
+neither placement nor a failover ever picks one, and a runner is never a
+project's binding, the registry's default, or a virtual executor's parent. A
+start that fails for a reason that is the run's own (no harness credential, a
+starter the hub cannot act for) fails the run; any other failure retires the
+runner and queues the run again, at most three runners in turn. A hand-over
+whose member died, or that has not started within 20 minutes, is taken back by
+the leader. When the run is settled the
+runner is retired: its credential revoked, its connection ended, its
+executors, health and isolation-evidence rows removed. A runner that goes
+offline before it is handed a run is retired at once, one that idles for 15
+minutes is retired by the leader, and one lost with its run is retired when the
+failover settles the run. None of them is reported as a failed device.
+
+What a pool learns about the queue is the part with a security argument.
+`executorpool.Visible` counts a queued run towards a pool, and lets a runner be
+handed it, only while the project is still bound to the pool, the pool's access
+list has the fingerprint it had when the run was admitted, the pool's owner
+(when it has one) may read the project, and the pool's runners meet the run's
+requirements by `executor.MatchCandidate`, the scheduler's own rules. A run
+that can never become visible leaves the queue and its project says why.
+
+Every hub member serves the feed from the shared database. A change on one
+member (a run queued, a runner enrolled or retired, the pool revoked) wakes
+that member's feeds and dispatcher and is published on the cluster bus, so a
+feed on another member is answered within a bus poll; each feed also re-reads
+the pool and its credential every 15 seconds. Revoking a pool revokes its
+credentials, its unredeemed runner tokens and its live runners' credentials,
+cancels its queue (giving back each run's slot) in one transaction, and takes
+back the runners' leases through the revocation push before their connections
+end. Revoking one controller credential does the same for what that credential
+minted: a credential that leaked does not leave behind the runners it started
+or tokens that still redeem.
+
 ---
 
 ## See also

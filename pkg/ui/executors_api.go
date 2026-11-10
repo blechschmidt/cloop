@@ -1569,6 +1569,13 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 	}
 	defer db.Close()
 
+	// A pool (Task 20482): "pool:<id>" binds the project to an executor pool,
+	// whose runners take its queued runs.
+	if poolID, isPool := executor.PoolOf(id); isPool {
+		s.bindProjectToPool(w, r, db, entry, poolID)
+		return
+	}
+
 	if id == "" {
 		if err := db.UnbindProjectExecutor(entry.Path); err != nil {
 			jsonErr(w, "unbind executor: "+err.Error(), http.StatusInternalServerError)
@@ -1591,6 +1598,15 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 	}
 
 	ex, getErr := executor.Get(id)
+	if getErr == nil && executor.IsEphemeral(ex) {
+		// A pool's runner takes only the run its pool hands it (Task
+		// 20482): bound by name, it would be a way round the pool's access
+		// list and its queue.
+		writeExecutorBlocked(w, "executor_is_pool_runner",
+			fmt.Sprintf("executor %q is an executor pool's runner", id),
+			"bind the project to the runner's pool, as pool:<id>, instead")
+		return
+	}
 	if getErr != nil {
 		// An enrolled-but-unregistered executor is still a legitimate
 		// target: Hub.Restore re-registers agents at startup, so this only
@@ -1789,6 +1805,13 @@ func writeHostExecutionDenied(w http.ResponseWriter, denied *executor.HostExecut
 // the same way. A handler that fell back to a bare 500 would tell the operator
 // "something broke" about the one failure mode that is not a break at all.
 func jsonWorkloadErr(w http.ResponseWriter, err error) {
+	// A project bound to an executor pool (Task 20482), asked for something
+	// that is not a run: its pool's runners take queued runs only.
+	var poolWait *executor.PoolCapacityError
+	if errors.As(err, &poolWait) {
+		writeJSONStatus(w, http.StatusConflict, poolCapacityBody(poolWait))
+		return
+	}
 	var denied *executor.HostExecutionDeniedError
 	if errors.As(err, &denied) {
 		writeHostExecutionDenied(w, denied, "")

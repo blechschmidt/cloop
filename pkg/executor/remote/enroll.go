@@ -54,6 +54,20 @@ import (
 const (
 	enrollTokenPrefix = "clet1"
 	credentialPrefix  = "clac1"
+	// runnerTokenPrefix marks an executor pool's runner token (Task 20482): an
+	// enrollment token minted for a controller, bound to one pool, whose agent
+	// is an ephemeral runner. A prefix of its own rather than clet1, so that a
+	// hub build that predates pools — one sharing this database, say — refuses
+	// it outright instead of enrolling a permanent device with the pool's
+	// labels: such a build reads anything not clet1 as an agent credential and
+	// finds the prefix wrong.
+	runnerTokenPrefix = "clrt1"
+	// runnerCredentialPrefix marks the credential a runner token is redeemed
+	// for. Its own prefix for the token's reason: a hub build that predates
+	// pools reads it as malformed and refuses the runner, where a clac1
+	// credential would let a runner that reconnected to such a member become a
+	// permanent device it never retires.
+	runnerCredentialPrefix = "clrc1"
 )
 
 // Secret sizing. 32 bytes is well beyond brute-force reach; the 16-byte ID is
@@ -74,6 +88,13 @@ const DefaultEnrollTTL = 15 * time.Minute
 // provisioning is awkward; that converts a single-use token into a standing
 // credential, which is the thing this design exists to avoid.
 const MaxEnrollTTL = 24 * time.Hour
+
+// MaxRunnerTTL bounds an executor pool's runner token (Task 20482), and is
+// also its default. A controller redeems the token within seconds of minting
+// it — it starts the runner that carries it — so ten minutes covers an image
+// pull on a cold node and leaves a token that leaked from a Pod spec or a log
+// inert long before anyone reads it.
+const MaxRunnerTTL = 10 * time.Minute
 
 // b64 encodes secrets without padding so tokens stay copy-pasteable as a
 // single shell word.
@@ -255,10 +276,86 @@ func Mint(store Store, opts MintOptions) (token string, rec EnrollmentRecord, er
 	return encodeToken(enrollTokenPrefix, id, secret), rec, nil
 }
 
+// PrepareRunnerToken creates an executor pool's runner token and the record
+// to persist for it, without persisting anything (Task 20482).
+//
+// Separate from Mint because the pool's store writes the record in the same
+// transaction as its runner row and its count against the pool's
+// max_runners: a token persisted on its own could outlive a refusal, or two
+// controllers minting at once could both pass the count.
+//
+// opts.TTL is bounded by MaxRunnerTTL, which is also its default.
+func PrepareRunnerToken(opts MintOptions) (token string, rec EnrollmentRecord, err error) {
+	name := strings.TrimSpace(opts.Name)
+	if name == "" {
+		return "", EnrollmentRecord{}, fmt.Errorf("remote: runner token: a runner name is required")
+	}
+	ttl := opts.TTL
+	if ttl <= 0 {
+		ttl = MaxRunnerTTL
+	}
+	if ttl > MaxRunnerTTL {
+		return "", EnrollmentRecord{}, fmt.Errorf(
+			"remote: runner token: ttl %s exceeds the %s maximum for a runner token", ttl, MaxRunnerTTL)
+	}
+	labels := executor.NormalizeLabels(opts.Labels)
+	if err := executor.ValidateLabels(labels); err != nil {
+		return "", EnrollmentRecord{}, fmt.Errorf("remote: runner token: labels: %w", err)
+	}
+	id, err := randomID(idBytes)
+	if err != nil {
+		return "", EnrollmentRecord{}, fmt.Errorf("remote: runner token: generate id: %w", err)
+	}
+	secret, err := randomString(secretBytes)
+	if err != nil {
+		return "", EnrollmentRecord{}, fmt.Errorf("remote: runner token: generate secret: %w", err)
+	}
+	now := opts.now()
+	rec = EnrollmentRecord{
+		ID:          id,
+		Name:        name,
+		SecretHash:  hashSecret(secret),
+		WorkDirRoot: strings.TrimSpace(opts.WorkDirRoot),
+		Labels:      labels,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(ttl),
+		CreatedBy:   opts.CreatedBy,
+	}
+	return encodeToken(runnerTokenPrefix, id, secret), rec, nil
+}
+
+// IsRunnerToken reports whether token is shaped as an executor pool's runner
+// token. A shape, not a verdict: RedeemRunner decides.
+func IsRunnerToken(token string) bool {
+	return strings.HasPrefix(strings.TrimSpace(token), runnerTokenPrefix+".")
+}
+
+// IsRunnerCredential reports whether credential is shaped as the credential
+// an executor pool's runner reconnects with (Task 20482).
+func IsRunnerCredential(credential string) bool {
+	return strings.HasPrefix(strings.TrimSpace(credential), runnerCredentialPrefix+".")
+}
+
+// RunnerTokenID is the public ID of a runner token, or "" when token is not
+// one. The ID is what the pool's runner row is keyed by.
+func RunnerTokenID(token string) string {
+	id, _, err := decodeToken(runnerTokenPrefix, token)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
 // RedeemOptions parameterises redemption.
 type RedeemOptions struct {
 	// Now overrides the clock for tests.
 	Now func() time.Time
+	// Admit, when set, has the last word before the token is claimed: a
+	// runner token is redeemable only while its pool is (Task 20482). It runs
+	// after every check of the token itself, so a refusal leaves a token that
+	// was valid unredeemed, and before the claim, so a refused redemption
+	// leaves no credential behind.
+	Admit func(rec EnrollmentRecord) error
 }
 
 func (o RedeemOptions) now() time.Time {
@@ -279,10 +376,28 @@ func (o RedeemOptions) now() time.Time {
 //
 // The returned credential string is shown once and stored only as a hash.
 func Redeem(store Store, token string, opts RedeemOptions) (credential string, agent AgentRecord, err error) {
+	return redeem(store, enrollTokenPrefix, credentialPrefix, token, opts)
+}
+
+// RedeemRunner is Redeem for an executor pool's runner token (Task 20482):
+// the same checks in the same order, the same single-use claim, and the same
+// long-lived credential — which the hub retires with its runner after one
+// run. opts.Admit is where the pool is asked; a hub without one has no pools,
+// and refuses.
+func RedeemRunner(store Store, token string, opts RedeemOptions) (credential string, agent AgentRecord, err error) {
+	if opts.Admit == nil {
+		return "", AgentRecord{}, fmt.Errorf("%w: this control plane has no executor pools to admit a runner to", ErrTokenInvalid)
+	}
+	return redeem(store, runnerTokenPrefix, runnerCredentialPrefix, token, opts)
+}
+
+// redeem is Redeem for a token of the given prefix, issuing a credential of
+// credPrefix.
+func redeem(store Store, prefix, credPrefix, token string, opts RedeemOptions) (credential string, agent AgentRecord, err error) {
 	if store == nil {
 		return "", AgentRecord{}, fmt.Errorf("remote: redeem: nil store")
 	}
-	id, secret, err := decodeToken(enrollTokenPrefix, token)
+	id, secret, err := decodeToken(prefix, token)
 	if err != nil {
 		return "", AgentRecord{}, err
 	}
@@ -310,6 +425,11 @@ func Redeem(store Store, token string, opts RedeemOptions) (credential string, a
 	}
 	if !secretMatches(secret, rec.SecretHash) {
 		return "", AgentRecord{}, fmt.Errorf("%w: secret does not match token %s", ErrTokenInvalid, id)
+	}
+	if opts.Admit != nil {
+		if err := opts.Admit(rec); err != nil {
+			return "", AgentRecord{}, err
+		}
 	}
 
 	agentID, err := randomID(idBytes)
@@ -340,7 +460,7 @@ func Redeem(store Store, token string, opts RedeemOptions) (credential string, a
 	if err := store.PutAgent(agent); err != nil {
 		return "", AgentRecord{}, fmt.Errorf("remote: redeem: persist agent: %w", err)
 	}
-	return encodeToken(credentialPrefix, agentID, agentSecret), agent, nil
+	return encodeToken(credPrefix, agentID, agentSecret), agent, nil
 }
 
 // Authenticate verifies a long-lived agent credential and returns the agent it
@@ -352,7 +472,11 @@ func Authenticate(store Store, credential string, now time.Time) (AgentRecord, e
 	if store == nil {
 		return AgentRecord{}, fmt.Errorf("remote: authenticate: nil store")
 	}
-	agentID, secret, err := decodeToken(credentialPrefix, credential)
+	prefix := credentialPrefix
+	if IsRunnerCredential(credential) {
+		prefix = runnerCredentialPrefix
+	}
+	agentID, secret, err := decodeToken(prefix, credential)
 	if err != nil {
 		// Report a credential-shaped error rather than a token-shaped one so
 		// the agent's log says "your saved credential is bad; re-enroll".

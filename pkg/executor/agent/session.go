@@ -224,7 +224,13 @@ func (a *Agent) handshake(ctx context.Context, sess *deviceSession, isEnrollment
 		return remote.WelcomePayload{}, err
 	}
 
-	if welcome.Credential != "" {
+	if welcome.Credential != "" && welcome.Ephemeral {
+		// An executor pool's runner (Task 20482): the credential is good for
+		// one run, so it is kept in memory for reconnects during that run and
+		// never written where it would outlive the process.
+		a.keepEphemeralCredential(welcome)
+		a.cfg.logf("enrolled as ephemeral runner %s; credential kept in memory", welcome.ExecutorID)
+	} else if welcome.Credential != "" {
 		if err := a.persistCredential(welcome); err != nil {
 			// A credential we cannot persist is worse than useless: the
 			// enrollment token is now spent, so a restart would leave the
@@ -239,6 +245,25 @@ func (a *Agent) handshake(ctx context.Context, sess *deviceSession, isEnrollment
 	}
 	a.cfg.logf("connected to %s as %s (protocol v%d)", a.cfg.Server, welcome.ExecutorID, welcome.ProtocolVersion)
 	return welcome, nil
+}
+
+// keepEphemeralCredential holds an ephemeral runner's credential for this
+// process only (Task 20482), and removes the spent token file as an enrolment
+// that saved its credential would.
+func (a *Agent) keepEphemeralCredential(w remote.WelcomePayload) {
+	a.mu.Lock()
+	a.cred = Credential{
+		Server:      a.cfg.Server,
+		AgentID:     w.ExecutorID,
+		Name:        a.cred.Name,
+		Credential:  w.Credential,
+		WorkDirRoot: a.root,
+		Pin:         a.cfg.Pin,
+		EnrolledAt:  a.cfg.now(),
+	}
+	a.ephemeral = true
+	a.mu.Unlock()
+	a.retireTokenFile()
 }
 
 // persistCredential stores a newly issued credential.
@@ -554,6 +579,12 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 
 		case remote.TypeBye:
 			bye, _ := remote.DecodeBye(frame)
+			if bye.Retired && a.isEphemeral() {
+				// An ephemeral runner whose run is over (Task 20482): its
+				// work is done, and ending with success is what tells
+				// whatever started it — a Kubernetes Pod — that it is.
+				return fmt.Errorf("%w: %s", errRetired, bye.Reason)
+			}
 			if !bye.Reconnect {
 				return fmt.Errorf("%w: %s", errDoNotReconnect, bye.Reason)
 			}

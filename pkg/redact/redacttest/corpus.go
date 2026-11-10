@@ -396,6 +396,20 @@ func positives(r *rand.Rand) []Positive {
 	add(Positive{Name: "cloop-enrollment-bundle/agent-install", Detector: "cloop-enrollment-bundle",
 		Text:    "sudo cloop executor agent install --bundle " + bundle + " --packet-filter",
 		Secrets: []string{bundle}, Keep: []string{"sudo cloop executor agent install --bundle ", " --packet-filter"}})
+	// An executor pool's runner token and its controller's credential (Task
+	// 20482), as a Pod spec and a controller's secret carry them.
+	clrt := "clrt1." + generated(r, b64url, 16) + "." + generated(r, b64url, 43) + "." + pick(r, hexChars, 32)
+	add(Positive{Name: "cloop-runner-token/pod-args", Detector: "cloop-runner-token",
+		Text:    "args: [\"executor\", \"agent\", \"--server\", \"wss://hub.example.com/api/executors/connect\", \"--token\", \"" + clrt + "\"]",
+		Secrets: []string{clrt}, Keep: []string{"args: [\"executor\", \"agent\", \"--server\", \"wss://hub.example.com/api/executors/connect\", \"--token\", \""}})
+	clrc := "clrc1." + generated(r, b64url, 16) + "." + generated(r, b64url, 43) + "." + pick(r, hexChars, 32)
+	add(Positive{Name: "cloop-runner-credential/agent-log", Detector: "cloop-runner-credential",
+		Text:    "debug: reconnecting with Authorization: Bearer " + clrc + " (attempt 2)",
+		Secrets: []string{clrc}, Keep: []string{"debug: reconnecting with Authorization: Bearer ", " (attempt 2)"}})
+	poolCred := "cloop_pool1_" + generated(r, b64url, 16) + "." + generated(r, b64url, 43)
+	add(Positive{Name: "cloop-pool-credential/controller-secret", Detector: "cloop-pool-credential",
+		Text:    "stringData:\n  credential: " + poolCred + "\n  feed: https://hub.example.com/api/pool-controller/feed\n",
+		Secrets: []string{poolCred}, Keep: []string{"stringData:", "feed: https://hub.example.com/api/pool-controller/feed"}})
 	clac := "clac1." + generated(r, b64url, 16) + "." + generated(r, b64url, 43) + "." + pick(r, hexChars, 32)
 	add(Positive{Name: "cloop-agent-credential/credential-file", Detector: "cloop-agent-credential",
 		Text:    "# /var/lib/cloop-agent/credential\n" + clac + "\n",

@@ -63,6 +63,11 @@ var (
 	// ErrAgentNotFound: no agent with the requested ID is enrolled.
 	ErrAgentNotFound = errors.New("remote: agent not enrolled")
 
+	// ErrRunnerSpent: an executor pool's ephemeral runner already took its
+	// one workload (Task 20482). Nothing is dispatched to it again: it is
+	// retired once that workload's run is settled.
+	ErrRunnerSpent = errors.New("remote: ephemeral runner already took its run")
+
 	// ErrRevocationUnsupported: the agent speaks a protocol version older
 	// than MinRevocationVersion, so material handed to it could never be
 	// taken back mid-run. Placing a workload that carries revocable secrets

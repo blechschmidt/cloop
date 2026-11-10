@@ -16,6 +16,7 @@ package remote
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -150,10 +151,36 @@ type HubOptions struct {
 	// OnOriginRefused, when set, is told of every handshake refused for its
 	// Origin, so the hub can count and audit it with the dashboard's own.
 	OnOriginRefused func(*http.Request)
+	// Runners is the executor pools' say over runner tokens and the runners
+	// they enroll (Task 20482). Nil means this hub has no pools: a runner
+	// token is refused like any unknown credential.
+	Runners RunnerAuthority
 	// Logf receives operational messages. Nil discards them.
 	Logf func(format string, args ...any)
 	// Now overrides the clock for tests.
 	Now func() time.Time
+}
+
+// RunnerAuthority is what the hub asks about an executor pool's runners (Task
+// 20482). A runner is an agent like any other on the wire; what makes it a
+// runner is the pool that minted its token, and that lives with the pools,
+// not here.
+type RunnerAuthority interface {
+	// AdmitRunner decides whether the runner token recorded as rec may be
+	// redeemed now — its pool must still be live. It runs after every check
+	// of the token itself and before the token is claimed, so a refusal
+	// leaves no credential behind.
+	AdmitRunner(rec EnrollmentRecord) error
+	// RunnerEnrolled records that agent redeemed the runner token it was
+	// minted from (agent.EnrollmentID). An error retires the agent at once:
+	// a runner its pool does not know of would be a permanent device carrying
+	// the pool's labels.
+	RunnerEnrolled(agent AgentRecord) error
+	// IsRunner reports whether agentID is an executor pool's runner, for an
+	// agent reconnecting with its credential and for one restored after a
+	// hub restart. An error refuses the agent: guessing "no" would make a
+	// runner a permanent device that takes run after run.
+	IsRunner(agentID string) (bool, error)
 }
 
 func (o HubOptions) now() time.Time {
@@ -214,10 +241,16 @@ func (h *Hub) Restore() error {
 		if a.Revoked() {
 			continue
 		}
+		ephemeral, err := h.isRunner(a.AgentID)
+		if err != nil {
+			// Restored when it reconnects, which asks again.
+			h.opts.logf("remote: restore agent %s: is it a pool's runner: %v", a.AgentID, err)
+			continue
+		}
 		if _, err := h.executorFor(a, AgentCapabilities{
 			WorkDirRoot: a.WorkDirRoot,
 			Labels:      a.Labels,
-		}); err != nil {
+		}, ephemeral); err != nil {
 			h.opts.logf("remote: restore agent %s: %v", a.AgentID, err)
 		}
 	}
@@ -245,7 +278,7 @@ func (h *Hub) Executors() []*Executor {
 
 // executorFor returns the durable executor for an agent, creating and
 // registering it on first use.
-func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor, error) {
+func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities, ephemeral bool) (*Executor, error) {
 	h.mu.Lock()
 	if ex, ok := h.executors[agent.AgentID]; ok {
 		h.mu.Unlock()
@@ -257,6 +290,7 @@ func (h *Hub) executorFor(agent AgentRecord, caps AgentCapabilities) (*Executor,
 		Capabilities:   caps,
 		OnStatusChange: h.opts.OnStatusChange,
 		OnRevokeAck:    h.opts.OnRevokeAck,
+		Ephemeral:      ephemeral,
 		// Passed at construction rather than attached afterwards, because
 		// NewExecutor rehydrates and this is called from ServeHTTP: an agent
 		// that dials in immediately after a restart must find its handles
@@ -317,6 +351,56 @@ func (h *Hub) Revoke(agentID string) error {
 	}
 	ex.failAllHandles("agent credential was revoked")
 	ex.setStatus(StatusOffline)
+	return nil
+}
+
+// isRunner reports whether agentID is an executor pool's runner. A hub with
+// no pools has none.
+func (h *Hub) isRunner(agentID string) (bool, error) {
+	if h.opts.Runners == nil {
+		return false, nil
+	}
+	return h.opts.Runners.IsRunner(agentID)
+}
+
+// Retire ends an executor pool's runner (Task 20482): its credential is
+// revoked so it cannot come back, it is told its run is over — an agent that
+// knows the protocol's retired flag exits with success — and its executor
+// leaves the registry. Unlike Revoke this is the runner's ordinary end, not a
+// response to anything wrong, so its link closing is reported to nobody as a
+// device going offline.
+//
+// Retiring an agent this hub holds no executor for still revokes the
+// credential: a runner whose socket another hub member holds is retired
+// there, and this is the half every member can do.
+func (h *Hub) Retire(agentID, reason string) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return fmt.Errorf("remote: retire: agent id is required")
+	}
+	if reason == "" {
+		reason = "ephemeral runner retired"
+	}
+	if _, err := Revoke(h.opts.Store, agentID, h.opts.now()); err != nil && !errors.Is(err, ErrAgentNotFound) {
+		return fmt.Errorf("remote: retire runner %s: %w", agentID, err)
+	}
+	h.mu.Lock()
+	ex := h.executors[agentID]
+	delete(h.executors, agentID)
+	h.mu.Unlock()
+	if ex == nil {
+		return nil
+	}
+	ex.retired.Store(true)
+	if sess := ex.currentSession(); sess != nil {
+		sess.sendRetire(reason)
+		sess.closeWithReason(reason)
+	}
+	// A runner retired with its run settled holds nothing; one retired early
+	// — its pool revoked — has its work failed rather than left to a link
+	// that is gone.
+	ex.failAllHandles(reason)
+	h.reg.Unregister(agentID)
 	return nil
 }
 
@@ -600,6 +684,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(token, enrollTokenPrefix+"."):
 		issued, agent, err = Redeem(h.opts.Store, token, RedeemOptions{Now: h.opts.Now})
 		enrolledNw = err == nil
+	case IsRunnerToken(token):
+		// An executor pool's runner (Task 20482): its pool admits it, then
+		// learns which agent it became.
+		issued, agent, err = h.redeemRunner(token)
+		enrolledNw = err == nil
 	default:
 		agent, err = Authenticate(h.opts.Store, token, now)
 	}
@@ -610,8 +699,27 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Whether it is an executor pool's runner (Task 20482): a runner token's
+	// redemption says so; anything else asks the pools, and a credential of
+	// the runner shape must belong to a runner they know.
+	ephemeral := enrolledNw && IsRunnerToken(token)
+	if !ephemeral {
+		isRunner, rerr := h.isRunner(agent.AgentID)
+		if rerr != nil {
+			h.opts.logf("remote: connect from %s: is agent %s a pool's runner: %v", r.RemoteAddr, agent.AgentID, rerr)
+			writeHTTPError(w, http.StatusServiceUnavailable, "executor unavailable")
+			return
+		}
+		ephemeral = isRunner
+	}
+	if IsRunnerCredential(token) && !ephemeral {
+		h.opts.logf("remote: connect rejected from %s: agent %s presents a runner credential and is no live runner",
+			r.RemoteAddr, agent.AgentID)
+		writeHTTPError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	caps := AgentCapabilities{WorkDirRoot: agent.WorkDirRoot, Labels: agent.Labels}
-	ex, err := h.executorFor(agent, caps)
+	ex, err := h.executorFor(agent, caps, ephemeral)
 	if err != nil {
 		h.opts.logf("remote: executor for %s: %v", agent.AgentID, err)
 		writeHTTPError(w, http.StatusInternalServerError, "executor unavailable")
@@ -659,6 +767,26 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.opts.logf("remote: agent %s disconnected", agent.AgentID)
 }
 
+// redeemRunner redeems an executor pool's runner token. A runner its pool
+// could not record is retired at once rather than left a permanent agent.
+func (h *Hub) redeemRunner(token string) (string, AgentRecord, error) {
+	var admit func(EnrollmentRecord) error
+	if h.opts.Runners != nil {
+		admit = h.opts.Runners.AdmitRunner
+	}
+	issued, agent, err := RedeemRunner(h.opts.Store, token, RedeemOptions{Now: h.opts.Now, Admit: admit})
+	if err != nil {
+		return "", AgentRecord{}, err
+	}
+	if err := h.opts.Runners.RunnerEnrolled(agent); err != nil {
+		if _, rerr := Revoke(h.opts.Store, agent.AgentID, h.opts.now()); rerr != nil {
+			h.opts.logf("remote: revoke unrecorded runner %s: %v", agent.AgentID, rerr)
+		}
+		return "", AgentRecord{}, fmt.Errorf("remote: runner %s could not be recorded with its pool: %w", agent.AgentID, err)
+	}
+	return issued, agent, nil
+}
+
 // bearerToken extracts the credential from the request. The Authorization
 // header is the supported form; the query parameter exists because some
 // constrained WebSocket clients on embedded devices cannot set headers on the
@@ -676,6 +804,21 @@ func writeHTTPError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// sendRetire tells an ephemeral runner its run is over: a bye that asks it not
+// to reconnect and, from protocol v28, says it was retired rather than
+// refused, so it exits with success (Task 20482).
+func (s *Session) sendRetire(reason string) {
+	frame, err := s.frame(TypeBye, "", "", ByePayload{
+		Reason: reason, Reconnect: false, Retired: SupportsEphemeral(s.Version()),
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = s.write(ctx, frame)
 }
 
 // sendBye tells the peer the session is ending and whether to reconnect.

@@ -286,6 +286,26 @@ func AuditExecutorLifecycle(d *DB, in ExecutorAuditInput) {
 	})
 }
 
+// AuditExecutorPool records one executor pool event (Task 20482) on the
+// control plane's chain. Best-effort like every emitter in this file: a
+// wedged audit log must not stop an administrator revoking a pool.
+func AuditExecutorPool(d *DB, action auditaction.Action, poolID, actor string, payload map[string]any) {
+	if action == "" {
+		return
+	}
+	body := map[string]any{"pool_id": poolID}
+	for k, v := range payload {
+		body[k] = v
+	}
+	emit(d, &AuditEvent{
+		Actor:      actorOrSystem(actor),
+		EventType:  string(action),
+		EntityType: "executor_pool",
+		EntityID:   poolID,
+		Payload:    MarshalAuditPayload(body),
+	})
+}
+
 // ProjectFirewallAuditInput carries one change to a project's firewall rule set
 // (Task 20363).
 type ProjectFirewallAuditInput struct {

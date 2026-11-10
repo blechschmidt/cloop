@@ -334,6 +334,51 @@ counts the probes it ran, so sum across members.
 increase(cloop_executor_isolation_probes_total{status="contradicted"}[1d]) > 0
 ```
 
+### Executor pools
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_executor_pool_demand` | gauge | none |
+| `cloop_executor_pool_runners` | gauge | `state` |
+| `cloop_executor_pool_mint_refusals_total` | counter | `reason` |
+| `cloop_executor_pool_runners_minted_total` | counter | none |
+| `cloop_executor_pool_runners_retired_total` | counter | `reason` |
+
+An executor pool is a set of runners a controller starts on demand; each takes
+one run and is retired. `cloop_executor_pool_demand` is the number of runs
+waiting in the pools' queues that their pools may see and run, summed over
+pools: what the controllers are being asked to meet. `cloop_executor_pool_runners`
+counts the pools' runners by `state`: `busy` (handed a run), `idle` (enrolled,
+waiting for one) and `pending` (a runner token minted and not yet redeemed).
+Both gauges are read from the shared database and exported by the cluster
+leader only. Neither is labelled by pool: each controller's feed carries its
+own pool's numbers.
+
+`cloop_executor_pool_mint_refusals_total` counts the runner-token requests the
+hub refused, by `reason`: `max_runners` (the pool would exceed it),
+`revoked` (the pool or the controller's credential was revoked),
+`invalid_credential` or `invalid_request`. The minted and retired counters
+count runners in and out; a retired runner's `reason` is `run_settled`,
+`left_idle` (it went offline before it was handed a run), `idle_timeout`,
+`pool_revoked`, `credential_revoked` (the controller credential that minted it
+was revoked), `lost` (its run was lost with it), `start_failed` (a queued run
+could not be started on it), `token_expired` (minted and never redeemed) or
+`other`. Each member counts what it did.
+
+**Runs wait and no runner comes.** The controller is down, or cannot start
+runners:
+
+```promql
+cloop_executor_pool_demand > 0 and sum(cloop_executor_pool_runners) == 0
+```
+
+**A controller keeps asking past its pool's max_runners**, or with a revoked
+credential:
+
+```promql
+increase(cloop_executor_pool_mint_refusals_total[15m]) > 10
+```
+
 ## Secrets and leases
 
 | Metric | Type | Labels |

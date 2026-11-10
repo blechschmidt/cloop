@@ -386,6 +386,10 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// A feature that completed and asked for it gets its pull request now
 	// (Task 20341). A no-op for everything else; the work is backgrounded.
 	s.maybeAutoOpenFeaturePR(workDir)
+	// An executor pool's runner took its one run, now settled: it is retired
+	// (Task 20482) — last, after everything above read what it had to from
+	// the runner.
+	s.retireEphemeralAfterRun(ex)
 }
 
 // errNoWorkload stands in for a Status nobody could ask for: no executor, or

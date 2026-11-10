@@ -155,7 +155,11 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			// clusterAgentStatus outermost (Task 20354): on a control plane
 			// several hub members serve, only the member holding an agent's
 			// socket may report it, and the one it just left must not.
-			OnStatusChange: s.clusterAgentStatus(s.makeExecutorStatusBroadcaster(makeExecutorStatusMirror(db))),
+			//
+			// poolRunnerStatus innermost-but-one (Task 20482): an executor
+			// pool's runner that goes offline before it was handed a run is
+			// retired, not left to be reported as an unreachable device.
+			OnStatusChange: s.poolRunnerStatus(s.clusterAgentStatus(s.makeExecutorStatusBroadcaster(makeExecutorStatusMirror(db)))),
 			OnEnroll:       s.makeExecutorEnrollBroadcaster(makeExecutorEnrollRecorder(db)),
 			// Every connect, not just the enrolling one: a device's build
 			// version and hardware are what change when it is upgraded, so
@@ -164,7 +168,11 @@ func (s *Server) remoteHub() (*remote.Hub, error) {
 			//
 			// And starts the isolation probe of the device's runtimes, here,
 			// on the member holding its socket (Task 20439).
-			OnConnect: s.makeExecutorConnectBroadcaster(makeExecutorConnectProber(makeExecutorConnectRecorder(db))),
+			OnConnect: s.poolRunnerOnConnect(s.makeExecutorConnectBroadcaster(makeExecutorConnectProber(makeExecutorConnectRecorder(db)))),
+			// Executor pools' runner tokens and the runners they enroll (Task
+			// 20482): the pools admit a token, learn which agent it became, and
+			// say which agents are ephemeral runners.
+			Runners: poolRunnerAuthority{s: s},
 			Logf: func(format string, args ...any) {
 				fmt.Fprintf(os.Stderr, format+"\n", args...)
 			},

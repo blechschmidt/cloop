@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -160,6 +161,12 @@ type Options struct {
 	// between online/offline/unreachable. The hub uses it to mirror status
 	// into statedb without this package importing storage.
 	OnStatusChange func(executorID, status string, at time.Time)
+	// Ephemeral marks an executor pool's runner (Task 20482): it accepts one
+	// workload, ever, and is then retired by the hub. A second Start is
+	// refused with ErrRunnerSpent whatever asked for it — a stale binding, a
+	// failover, a second queued run — so a runner a controller started for
+	// one run can never carry another tenant's.
+	Ephemeral bool
 	// OnRevokeAck, when set, is called when an agent acknowledges a lease
 	// revocation. It is a callback for the same reason OnStatusChange is:
 	// the audit trail lives in storage and this package must not depend on
@@ -334,6 +341,14 @@ type Executor struct {
 	// link they arrived on, and a budget that came back with each reconnect
 	// would be no budget at all. See resultbudget.go.
 	budget *ResultBudget
+
+	// spent is set once an ephemeral runner has been handed its one workload
+	// (Task 20482). Guarded by mu.
+	spent bool
+	// retired is set once the hub retired this runner: its session's close
+	// is then no status change anybody should be told of — the executor is
+	// gone, not offline.
+	retired atomic.Bool
 }
 
 // NewExecutor builds a remote executor for an enrolled agent. It starts
@@ -570,9 +585,45 @@ func (e *Executor) setStatus(status string) {
 	e.status = status
 	cb := e.opts.OnStatusChange
 	e.mu.Unlock()
-	if cb != nil {
+	// A retired runner's link closing is not the device going offline: there
+	// is no device left to report on (Task 20482).
+	if cb != nil && !e.retired.Load() {
 		cb(e.id, status, e.opts.now())
 	}
+}
+
+// Ephemeral reports whether this executor is an executor pool's runner, which
+// takes one workload and is then retired (Task 20482). It implements
+// executor.Ephemeral.
+func (e *Executor) Ephemeral() bool { return e.opts.Ephemeral }
+
+// Spent reports whether an ephemeral runner has been handed its workload.
+func (e *Executor) Spent() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.spent || (e.opts.Ephemeral && len(e.handles) > 0)
+}
+
+// claimRunner takes an ephemeral runner's one workload slot, or refuses. The
+// returned release gives it back for a start that never reached the device —
+// refused before a frame was sent — and is a no-op otherwise.
+func (e *Executor) claimRunner() (release func(), err error) {
+	if !e.opts.Ephemeral {
+		return func() {}, nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.spent || len(e.handles) > 0 {
+		return nil, fmt.Errorf("%w: runner %s (%s) already took its run", ErrRunnerSpent, e.id, e.name)
+	}
+	e.spent = true
+	return func() {
+		e.mu.Lock()
+		if len(e.handles) == 0 {
+			e.spent = false
+		}
+		e.mu.Unlock()
+	}, nil
 }
 
 // Start implements executor.Executor by dispatching the spec to the device.
@@ -621,6 +672,19 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 		return executor.Handle{}, fmt.Errorf("%w: cannot start work on agent %s (%s): not connected",
 			ErrAgentUnreachable, e.id, e.name)
 	}
+	// An executor pool's runner takes one workload, ever (Task 20482). The
+	// slot is given back only by a start refused before its handle existed:
+	// once the start frame may have gone out, the device may be running it.
+	releaseRunner, err := e.claimRunner()
+	if err != nil {
+		return executor.Handle{}, err
+	}
+	handleInserted := false
+	defer func() {
+		if err != nil && !handleInserted {
+			releaseRunner()
+		}
+	}()
 
 	// A workload carrying revocable credentials may not be placed on an agent
 	// that cannot give them back. Refusing here — rather than running it and
@@ -963,6 +1027,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	e.pruneLocked()
 	store := e.store
 	e.mu.Unlock()
+	handleInserted = true
 
 	// Persisted after the map insert and *before* the start frame goes out,
 	// which is the opposite of where the container and Kubernetes drivers put

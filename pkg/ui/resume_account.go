@@ -276,7 +276,47 @@ func (s *Server) resumeAccountFor(workDir string) *resumeAccount {
 			return refuse(&starterUnavailableError{Reason: reasonNobody})
 		}
 	}
+	return s.finishResumeAccount(acct, db, workDir)
+}
 
+// accountForStarter is resumeAccountFor for a dispatch that records whom it
+// acts for itself: a run queued for an executor pool (Task 20482), started by
+// identity — "" for a caller acting for no one — and dispatched once a runner
+// is free. The same checks of that person apply as to a resume.
+func (s *Server) accountForStarter(workDir, identity string) *resumeAccount {
+	acct := &resumeAccount{workDir: workDir, who: harnessWho{personal: s.oidcEnabled()}}
+	if !acct.who.personal {
+		return acct
+	}
+	acct.who.identity, acct.basis = secretbroker.NormalizeOwner(identity), actedForStarter
+	if acct.who.identity == "" {
+		return acct
+	}
+	dir := controlPlaneDir()
+	if dir == "" {
+		acct.unavailable = &starterUnavailableError{Identity: acct.who.identity, Basis: acct.basis,
+			Reason: reasonNoPlane, AnyExecutor: true}
+		return acct
+	}
+	db, err := statedb.Open(state.DBPath(dir))
+	if err != nil {
+		acct.unavailable = &starterUnavailableError{Identity: acct.who.identity, Basis: acct.basis,
+			Reason: reasonUnread, Cause: err.Error(), AnyExecutor: true, Transient: true}
+		return acct
+	}
+	defer db.Close() //nolint:errcheck
+	return s.finishResumeAccount(acct, db, workDir)
+}
+
+// finishResumeAccount checks the person an automatic dispatch acts for — who
+// is decided — against the hub: their standing, a deny binding on the
+// project, their Claude home.
+func (s *Server) finishResumeAccount(acct *resumeAccount, db *statedb.DB, workDir string) *resumeAccount {
+	refuse := func(e *starterUnavailableError) *resumeAccount {
+		e.Identity, e.Basis = acct.who.identity, acct.basis
+		acct.unavailable = e
+		return acct
+	}
 	standing, err := readOwnerStanding(db, acct.who.identity)
 	if err != nil {
 		return refuse(&starterUnavailableError{Reason: reasonUnread, Cause: err.Error(), AnyExecutor: true, Transient: true})
