@@ -111,8 +111,8 @@ func runFileWatchMode(workdir string) error {
 		filewatch.PrintEvent(evt)
 
 		if len(evt.ResetTaskIDs) > 0 && watchAutoRun {
-			bold.Printf("[watch] triggering cloop run --pm ...\n")
-			runArgs := []string{"run", "--pm"}
+			bold.Printf("[watch] triggering cloop run ...\n")
+			runArgs := []string{"run"}
 			runCmd := exec.CommandContext(ctx, os.Args[0], runArgs...)
 			runCmd.Stdout = os.Stdout
 			runCmd.Stderr = os.Stderr

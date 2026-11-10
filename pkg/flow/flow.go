@@ -300,7 +300,7 @@ func ExampleFlow() *Flow {
 			{
 				Name:      "run tasks",
 				Command:   "run",
-				Args:      []string{"--pm", "--dry-run"},
+				Args:      []string{"--dry-run"},
 				OnFailure: OnFailureAbort,
 				Env:       map[string]string{"CLOOP_TIMEOUT": "300"},
 			},

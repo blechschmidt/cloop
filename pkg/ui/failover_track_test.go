@@ -982,7 +982,7 @@ func TestRedispatchArgsOnlyRestartsARun(t *testing.T) {
 		want string
 	}{
 		{[]string{"/usr/bin/cloop", "run"}, "run"},
-		{[]string{"cloop", "run", "--pm"}, "run --pm"},
+		{[]string{"cloop", "run", "--pm"}, "run"}, // recorded by an older hub; dropped
 		{[]string{"cloop", "init", "goal"}, ""},
 		{[]string{"cloop"}, ""},
 		{[]string{"cloop", "run", "--provider", "x"}, ""},

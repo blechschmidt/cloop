@@ -152,6 +152,10 @@ var errProjectRunningAgain = errors.New("the project is running again")
 // a `cloop run`, and the session row is read back from a database. A row that
 // asks for anything else — or for a flag a run is never dispatched with — is
 // refused rather than started.
+//
+// A row recorded before Task 20491 may carry --pm, which hubs passed until
+// then. It is dropped rather than passed on: cloop run had no such flag, and a
+// device on an older build would still refuse it.
 func redispatchArgs(spec executor.Spec) ([]string, error) {
 	if len(spec.Argv) < 2 || spec.Argv[1] != "run" {
 		return nil, fmt.Errorf("failover: the recorded workload is %q, not a run; only a run is re-dispatched",
@@ -161,7 +165,7 @@ func redispatchArgs(spec executor.Spec) ([]string, error) {
 	for _, a := range spec.Argv[2:] {
 		switch a {
 		case "--pm":
-			args = append(args, a)
+			// Recorded by an older hub; see above.
 		default:
 			return nil, fmt.Errorf("failover: the recorded run carries %q, which no dispatch passes; not re-dispatched", a)
 		}

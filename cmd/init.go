@@ -283,5 +283,6 @@ func init() {
 	initCmd.Flags().IntVar(&initMaxMinutes, "max-minutes", 0, "Default per-task execution time budget in minutes for this project (0 = no limit)")
 	initCmd.Flags().BoolVar(&initSkipClarify, "skip-clarify", false, "Skip the interactive goal clarification Q&A dialog before plan decomposition")
 	initCmd.Flags().BoolVarP(&initInteractive, "interactive", "i", false, "Launch the step-by-step interactive setup wizard")
+	acceptRemovedPMFlag(initCmd)
 	rootCmd.AddCommand(initCmd)
 }

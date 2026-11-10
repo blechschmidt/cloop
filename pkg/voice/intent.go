@@ -91,7 +91,7 @@ cloop command mapping:
 - mark_done      → ["task", "status", "<id>", "done"]
 - mark_failed    → ["task", "status", "<id>", "failed"]
 - set_priority   → ["task", "edit", "<id>", "--priority", "<p>"]
-- start_run      → ["run", "--pm"]
+- start_run      → ["run"]
 - stop_run       → ["stop"]  (placeholder; actual stop is via the daemon)
 - show_status    → ["status"]
 - show_goal      → ["status"]

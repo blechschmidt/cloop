@@ -896,7 +896,23 @@ func init() {
 	runCmd.Flags().StringVar(&requirementsGate, "requirements-gate", "", "PM mode: a task is done only once its requirements pass: linked (the ones it implements), linked+must (and every approved must requirement), or off. Stored with the project (see cloop requirements gate)")
 	runCmd.Flags().BoolVar(&followBuilds, "follow-builds", false, "Adopt a newly deployed cloop build at the next task boundary instead of running the build this run started with until it ends (host-process runs on Linux; --follow-builds=false turns it off). Stored with the project")
 	runCmd.Flags().BoolVar(&coachMode, "coach", false, "PM mode: before each task, run an AI coaching session with 3-5 actionable tips, a key clarifying question, and success criteria (sequential only)")
+	acceptRemovedPMFlag(runCmd)
 	rootCmd.AddCommand(runCmd)
+}
+
+// acceptRemovedPMFlag gives c a --pm flag that does nothing. --pm once
+// switched on planning: the goal decomposed into tasks that are then worked
+// one by one. Every run has worked that way since May 2026, when the flag was
+// removed, but the dashboard's New Project dialog, `cloop watch --auto-run`,
+// `cloop serve`'s /run/start, voice commands and the example recipe kept
+// passing it, and the help text kept telling people to. Each of those then
+// stopped at "unknown flag: --pm" (Task 20491). The flag is hidden from help,
+// and using it prints a one-line deprecation notice.
+func acceptRemovedPMFlag(c *cobra.Command) {
+	c.Flags().Bool("pm", false, "")
+	if err := c.Flags().MarkDeprecated("pm", "every run plans its tasks from the goal; drop --pm"); err != nil {
+		panic(err) // the flag was registered on the line above
+	}
 }
 
 // buildHooksConfig converts a config.HooksConfig into the runtime hooks.Config

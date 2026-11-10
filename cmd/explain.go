@@ -143,7 +143,6 @@ Examples:
 				return nil
 			}
 			// Hand off to run command.
-			runCmd.Flags().Set("pm", "true") //nolint:errcheck
 			return runCmd.RunE(runCmd, []string{})
 		}
 

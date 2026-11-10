@@ -384,7 +384,6 @@ steps:
     on_failure: continue
   - name: run
     command: run
-    args: ["--pm"]
     if: test -f .cloop/state.db
     on_failure: abort
 `,

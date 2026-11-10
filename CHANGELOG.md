@@ -1050,6 +1050,17 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Runs that cloop started with `--pm` start again.** A project created in
+  the dashboard with *PM mode* and *Start run immediately* ticked,
+  `cloop watch --auto-run`, `cloop serve`'s `/run/start` with `"pm": true`,
+  the voice command that starts a run and the example recipe all ran
+  `cloop run --pm`. `cloop run` has had no `--pm` flag since planning became
+  how every run works, so each of those runs stopped at once with "unknown
+  flag: --pm", and so did scripts that followed the help text's advice to
+  pass it. Nothing passes the flag now. `cloop run` and `cloop init` accept
+  it again, ignore it and print one line saying it is deprecated
+  (Task 20491).
+
 - **Reopen and Keep on a task recorded done on a refusal leave their own
   message on screen.** Both reloaded the project after the hub had saved the
   verdict, and the reload's "Refreshed" message replaced theirs, usually

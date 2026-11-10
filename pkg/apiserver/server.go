@@ -915,8 +915,9 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 
 // POST /run/start — start `cloop run` as a subprocess.
 func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
+	// Older clients send "pm": true. It asked for `cloop run --pm`, which
+	// selected the planning every run does now, and it is ignored (Task 20491).
 	var req struct {
-		PM          bool   `json:"pm"`
 		AutoEvolve  bool   `json:"auto_evolve"`
 		PlanOnly    bool   `json:"plan_only"`
 		RetryFailed bool   `json:"retry_failed"`
@@ -937,9 +938,6 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	args := []string{"run"}
-	if req.PM {
-		args = append(args, "--pm")
-	}
 	if req.AutoEvolve {
 		args = append(args, "--auto-evolve")
 	}
@@ -1430,7 +1428,11 @@ func buildOpenAPISpec(port int, hasAuth bool) map[string]any {
 							"schema": map[string]any{
 								"type": "object",
 								"properties": map[string]any{
-									"pm":           map[string]any{"type": "boolean"},
+									"pm": map[string]any{
+										"type":        "boolean",
+										"deprecated":  true,
+										"description": "Ignored. Every run plans its tasks from the goal.",
+									},
 									"auto_evolve":  map[string]any{"type": "boolean"},
 									"plan_only":    map[string]any{"type": "boolean"},
 									"retry_failed": map[string]any{"type": "boolean"},

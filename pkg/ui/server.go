@@ -7342,9 +7342,11 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		PM bool `json:"pm"`
-	}
+	// The body carries nothing a run needs. A client may still send
+	// {"pm": true}, which used to become `cloop run --pm`, a flag cloop run
+	// no longer had (Task 20491); it is read and ignored, and the body is
+	// still held to decodeOptionalJSON's rules like every other.
+	var req struct{}
 	if !decodeOptionalJSON(w, r, &req) {
 		return
 	}
@@ -7391,9 +7393,6 @@ func (s *Server) handleProjectRun(w http.ResponseWriter, r *http.Request) {
 
 	exe := s.selfExe()
 	args := []string{"run"}
-	if req.PM {
-		args = append(args, "--pm")
-	}
 	// Dispatched to the project's bound executor rather than forked here
 	// (Task 20156).
 	payer := s.runIdentity(r, entry.Path)
@@ -7495,7 +7494,7 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 // POST /api/projects/new
 // Body: { "dir": "/abs/or/relative/path", "goal": "...", "provider": "...",
 //
-//	"model": "...", "pmMode": false, "autoRun": false }
+//	"model": "...", "autoRun": false }
 //
 // "name" in place of "dir" puts the project under the hub's projects root
 // (Task 20417): a terminal creating a project from a checkout on another
@@ -7516,8 +7515,10 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 		Effort   string `json:"effort"`
-		PMMode   bool   `json:"pmMode"`
-		AutoRun  bool   `json:"autoRun"`
+		// AutoRun starts a run once the project exists. A "pmMode" field
+		// from older dashboards is ignored: every project plans its tasks
+		// from the goal (Task 20491).
+		AutoRun bool `json:"autoRun"`
 		// Access is the executor and the grants the project should have on
 		// creation (Task 20187). Absent means an ordinary project on the
 		// default executor with no credentials, which is what every existing
@@ -7773,9 +7774,6 @@ func (s *Server) handleProjectNew(w http.ResponseWriter, r *http.Request) {
 	var autorunRefused map[string]any
 	if req.AutoRun {
 		runArgs := []string{"run"}
-		if req.PMMode {
-			runArgs = append(runArgs, "--pm")
-		}
 		autoPayer := s.runIdentity(r, abs)
 		// The run meets handleRun's admission gates (Task 20391) — the
 		// executor's access list, the daily budget, a concurrency slot. A
