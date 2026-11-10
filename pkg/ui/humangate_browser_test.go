@@ -98,6 +98,7 @@ func TestHumanReviewGates_InBrowser(t *testing.T) {
 		LedgerBefore  bool          `json:"ledger_before"`
 		LedgerAfter   bool          `json:"ledger_after"`
 		ReopenToast   string        `json:"reopen_toast"`
+		ReopenedRow   *humanGateRow `json:"reopened_row"`
 	}
 	if jerr := json.Unmarshal(out, &got); jerr != nil {
 		stderr := ""
@@ -181,6 +182,11 @@ func TestHumanReviewGates_InBrowser(t *testing.T) {
 		}
 		if !strings.Contains(got.ReopenToast, "Task 7 reopened") {
 			t.Errorf("Reopen toasted %q", got.ReopenToast)
+		}
+		// Reopen does not refetch the state (its "Refreshed" toast replaced
+		// the one above): the row catches up from the pushed state_diff.
+		if got.ReopenedRow == nil || got.ReopenedRow.offers("Reopen") {
+			t.Errorf("task 7's row after Reopen = %+v: the list did not catch up", got.ReopenedRow)
 		}
 		st, err := state.Load(dir)
 		if err != nil {

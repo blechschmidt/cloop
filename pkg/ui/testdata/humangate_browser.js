@@ -314,6 +314,12 @@ async function main() {
       'the reopen toast', `document.getElementById('toast').textContent`);
     results.reopen_toast = await cdp.eval(`document.getElementById('toast').textContent`);
     results.ledger_after = await cdp.eval(ledgerFetched);
+    // Reopen no longer refetches the state, whose "Refreshed" toast used to
+    // replace the one above: the row has to catch up from the state_diff the
+    // hub pushes.
+    await waitFor(cdp, `(() => { const r = ${rowExpr(7)}; return !!r && r.buttons.indexOf('Reopen') === -1; })()`,
+      'the reopened task\'s row to leave the ledger', `JSON.stringify(${rowExpr(7)})`);
+    results.reopened_row = await cdp.eval(rowExpr(7));
   } finally {
     killChrome(proc);
     try { fs.rmSync(dir, {recursive: true, force: true}); } catch (_) { /* best effort */ }

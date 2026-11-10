@@ -15,11 +15,15 @@
   'use strict';
 
   window.cloopLedgerPanel = function (h) {
-    const {api, pUrl, toast, refreshState} = h;
+    const {api, pUrl, toast} = h;
 
+    // Neither verdict refetches the state: the row catches up from the
+    // state_diff the hub sends every page on the project once it has saved.
+    // Refetching as well toasted "Refreshed" over the verdict's own toast,
+    // often before it could be read (the same fix as deferred/split.js).
     function reopen(id) {
       api(pUrl('/api/tasks/' + id + '/reopen-aborted'), {}).then(d => {
-        if (d.ok) { toast('Task ' + id + ' reopened — it never ran', 'ok'); refreshState(); }
+        if (d.ok) toast('Task ' + id + ' reopened — it never ran', 'ok');
         else toast(d.error || 'Reopen failed', 'err');
       }).catch(() => toast('Request failed', 'err'));
     }
@@ -36,7 +40,7 @@
       if (note === null) return;
       if (!note.trim()) { toast('A note is required', 'err'); return; }
       api(pUrl('/api/tasks/' + id + '/clear-aborted'), {note: note.trim()}).then(d => {
-        if (d.ok) { toast('Task ' + id + ': ledger entry checked', 'ok'); refreshState(); }
+        if (d.ok) toast('Task ' + id + ': ledger entry checked', 'ok');
         else toast(d.error || 'Could not clear the finding', 'err');
       }).catch(() => toast('Request failed', 'err'));
     }

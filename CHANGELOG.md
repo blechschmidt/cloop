@@ -1050,6 +1050,14 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Reopen and Keep on a task recorded done on a refusal leave their own
+  message on screen.** Both reloaded the project after the hub had saved the
+  verdict, and the reload's "Refreshed" message replaced theirs, usually
+  before it could be read. The task list already updates from the change the
+  hub sends every open page, so the reload is gone. This was also why the
+  review-gate browser test failed about half the time on a fast machine; it
+  now checks that the reopened task's row updates (Task 20490).
+
 - **An executor pool whose template names no runner image starts runners that
   work on a hub built from `main`.** The executor controller ran such a pool's
   runners from cloop's harness image at `latest`, unless the controller itself
