@@ -210,6 +210,10 @@ var publicRouteAllowlist = map[string]string{
 	"POST /api/pool-controller/runners":        poolControllerPublicReason,
 	"POST /api/pool-controller/runners/retire": poolControllerPublicReason,
 	"POST /api/pool-controller/status":         poolControllerPublicReason,
+	"/charts/cloop-executor-controller.tgz": "the executor controller's Helm chart (Task 20486), which `helm install " +
+		"<URL>` fetches with no credential the hub could accept: the chart in deploy/helm compiled into this build, " +
+		"identical on every hub of the build and holding nothing of anyone's — the hub's URL, its pin and a pool's " +
+		"credential are in the command an administrator was shown, never in the chart. GET and HEAD only",
 
 	// SCIM 2.0 provisioning (Task 20415): one justification for the service.
 	"GET /scim/v2/ServiceProviderConfig": scimPublicReason,

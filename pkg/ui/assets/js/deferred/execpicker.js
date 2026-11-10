@@ -21,11 +21,15 @@
       openOverlay('executor-picker-overlay', {dismiss: close});
       if (sel) sel.innerHTML = '<option value="">Loading…</option>';
       // Always refetch: an executor may have gone offline, or the policy may
-      // have changed, since the tab was last painted.
-      return loadExecutors().then(d => _populateExecutorPicker(d));
+      // have changed, since the tab was last painted. An administrator may
+      // bind a project to an executor pool too (Task 20486): pool routes are
+      // theirs alone, so nobody else's picker asks for them.
+      const pools = h.canGlobal('executor.manage')
+        ? api('/api/executor-pools').then(p => (p && p.pools) || [], () => []) : Promise.resolve([]);
+      return Promise.all([loadExecutors(), pools]).then(([d, p]) => _populateExecutorPicker(d, p));
     }
 
-    function _populateExecutorPicker(d) {
+    function _populateExecutorPicker(d, pools) {
       const sel = document.getElementById('epExecutor');
       if (!sel) return;
       d = d || {};
@@ -34,12 +38,21 @@
       let h = '<option value="">Registry default'
         + (d.default_id ? ' (' + esc(d.default_id) + ')' : '') + '</option>';
       execs.forEach(ex => {
+        // A pool's runner takes only what its pool hands it: binding to one
+        // is refused, so it is not offered.
+        if (ex.pool_runner) return;
         const label = (ex.name || ex.id) + ' · ' + _execKindLabel(ex.kind)
           + (ex.status ? ' · ' + ex.status : '')
           + (ex.blocked ? ' · blocked by policy' : '');
         h += '<option value="' + esc(ex.id) + '"' + (ex.blocked ? ' disabled' : '')
           + (proj.executor_id === ex.id ? ' selected' : '') + '>' + esc(label) + '</option>';
       });
+      const live = (pools || []).filter(p => !p.revoked_at || p.revoked_at.slice(0, 4) === '0001');
+      if (live.length) {
+        h += '<optgroup label="Executor pools">' + live.map(p => '<option value="' + esc(p.binding) + '"'
+          + (proj.executor_id === p.binding ? ' selected' : '') + '>' + esc(p.name + ' · pool, up to ' + p.max_runners
+          + ' runners' + (p.cordoned ? ' · cordoned' : '')) + '</option>').join('') + '</optgroup>';
+      }
       sel.innerHTML = h;
       const hint = document.getElementById('epHint');
       if (hint) {

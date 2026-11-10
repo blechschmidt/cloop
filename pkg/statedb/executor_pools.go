@@ -62,6 +62,9 @@ var (
 	ErrPoolQueueEntryNotFound  = errors.New("statedb: queued pool run not found")
 	ErrExecutorPoolAtCapacity  = errors.New("statedb: executor pool is at max_runners")
 	ErrPoolRunnerStateConflict = errors.New("statedb: executor pool runner is not in the state the change needs")
+	// ErrExecutorPoolCordoned refuses a runner mint for a pool an
+	// administrator holds (Task 20486).
+	ErrExecutorPoolCordoned = errors.New("statedb: executor pool is cordoned")
 )
 
 // PoolAtCapacityError refuses a runner mint that would take a pool past its
@@ -98,10 +101,19 @@ type ExecutorPoolRow struct {
 	UpdatedBy    string
 	RevokedAt    time.Time
 	RevokedBy    string
+	// CordonedAt, CordonedBy and CordonReason are set while an administrator
+	// holds the pool (Task 20486): its runners are handed no queued run and
+	// its controller is minted no runner, while busy runners finish.
+	CordonedAt   time.Time
+	CordonedBy   string
+	CordonReason string
 }
 
 // Revoked reports whether the pool was revoked.
 func (r ExecutorPoolRow) Revoked() bool { return !r.RevokedAt.IsZero() }
+
+// Cordoned reports whether an administrator holds the pool.
+func (r ExecutorPoolRow) Cordoned() bool { return !r.CordonedAt.IsZero() }
 
 // ExecutorPoolCredentialRow is one controller credential.
 type ExecutorPoolCredentialRow struct {
@@ -113,6 +125,11 @@ type ExecutorPoolCredentialRow struct {
 	LastUsedAt time.Time
 	RevokedAt  time.Time
 	RevokedBy  string
+	// ControllerVersion is the build its controller last named, and
+	// ControllerProtocol the pool-controller protocol it last said it speaks,
+	// 0 for none said (Task 20486).
+	ControllerVersion  string
+	ControllerProtocol int
 }
 
 // Revoked reports whether the credential was revoked.
@@ -196,9 +213,10 @@ func (r PoolQueueRow) Open() bool {
 }
 
 const executorPoolColumns = `id, name, labels_json, capabilities_json, max_runners, owner, workdir_root,
-	created_at, created_by, updated_at, updated_by, revoked_at, revoked_by`
+	created_at, created_by, updated_at, updated_by, revoked_at, revoked_by, cordoned_at, cordoned_by, cordon_reason`
 
-const poolCredentialColumns = `id, pool_id, secret_hash, created_at, created_by, last_used_at, revoked_at, revoked_by`
+const poolCredentialColumns = `id, pool_id, secret_hash, created_at, created_by, last_used_at, revoked_at, revoked_by,
+	controller_version, controller_protocol`
 
 const poolRunnerColumns = `enrollment_id, pool_id, name, executor_id, state, member, queue_id,
 	minted_at, expires_at, enrolled_at, busy_at, retired_at, retire_reason, credential_id,
@@ -231,15 +249,87 @@ func (d *DB) CreateExecutorPool(row ExecutorPoolRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, err = d.conn.Exec(`INSERT INTO executor_pools(`+executorPoolColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.Name, labels, caps, row.MaxRunners, row.Owner, row.WorkDirRoot,
 		formatOptionalTime(row.CreatedAt), row.CreatedBy, formatOptionalTime(row.UpdatedAt), row.UpdatedBy,
-		formatOptionalTime(row.RevokedAt), row.RevokedBy)
+		formatOptionalTime(row.RevokedAt), row.RevokedBy,
+		formatOptionalTime(row.CordonedAt), row.CordonedBy, row.CordonReason)
 	if err != nil {
 		if isUniqueConstraintErr(err) {
 			return fmt.Errorf("%w: %q", ErrExecutorPoolNameTaken, row.Name)
 		}
 		return fmt.Errorf("statedb: create executor pool %q: %w", row.Name, classifyDriverErr(err))
+	}
+	return nil
+}
+
+// CreateExecutorPoolWith inserts a new pool together with its access list
+// and, when cred is not nil, its first controller credential, in one
+// transaction (Task 20486): a create that fails part way leaves nothing — no
+// pool open to everyone because its access list was not written, and no name
+// taken by a pool nobody can use.
+func (d *DB) CreateExecutorPoolWith(row ExecutorPoolRow, audience []ExecutorAudienceEntry, cred *ExecutorPoolCredentialRow) error {
+	if strings.TrimSpace(row.ID) == "" || strings.TrimSpace(row.Name) == "" {
+		return errors.New("statedb: an executor pool needs an id and a name")
+	}
+	labels, err := marshalLabelMap(row.Labels)
+	if err != nil {
+		return fmt.Errorf("statedb: marshal executor pool labels: %w", err)
+	}
+	caps := strings.TrimSpace(row.Capabilities)
+	if caps == "" {
+		caps = "{}"
+	}
+	if row.CreatedAt.IsZero() {
+		row.CreatedAt = time.Now()
+	}
+	if row.UpdatedAt.IsZero() {
+		row.UpdatedAt = row.CreatedAt
+	}
+	for _, e := range audience {
+		kind := strings.ToLower(strings.TrimSpace(e.Kind))
+		if !validAudienceKinds[kind] || strings.TrimSpace(e.Value) == "" {
+			return fmt.Errorf("statedb: audience principal %q:%q is not one of user, group, role", e.Kind, e.Value)
+		}
+	}
+	if cred != nil && (strings.TrimSpace(cred.ID) == "" || strings.TrimSpace(cred.SecretHash) == "") {
+		return errors.New("statedb: an executor pool credential needs an id and a secret hash")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("statedb: create executor pool %q: %w", row.Name, classifyDriverErr(err))
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO executor_pools(`+executorPoolColumns+`)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.ID, row.Name, labels, caps, row.MaxRunners, row.Owner, row.WorkDirRoot,
+		formatOptionalTime(row.CreatedAt), row.CreatedBy, formatOptionalTime(row.UpdatedAt), row.UpdatedBy,
+		formatOptionalTime(row.RevokedAt), row.RevokedBy,
+		formatOptionalTime(row.CordonedAt), row.CordonedBy, row.CordonReason); err != nil {
+		if isUniqueConstraintErr(err) {
+			return fmt.Errorf("%w: %q", ErrExecutorPoolNameTaken, row.Name)
+		}
+		return fmt.Errorf("statedb: create executor pool %q: %w", row.Name, classifyDriverErr(err))
+	}
+	for _, e := range audience {
+		if _, err := tx.Exec(`INSERT INTO executor_pool_audience(pool_id, principal_kind, principal_value, added_at, added_by)
+			VALUES(?,?,?,?,?)
+			ON CONFLICT(pool_id, principal_kind, principal_value) DO NOTHING`,
+			row.ID, strings.ToLower(strings.TrimSpace(e.Kind)), strings.TrimSpace(e.Value),
+			formatOptionalTime(row.CreatedAt), e.AddedBy); err != nil {
+			return fmt.Errorf("statedb: admit %s %q to executor pool %q: %w", e.Kind, e.Value, row.Name, classifyDriverErr(err))
+		}
+	}
+	if cred != nil {
+		if _, err := tx.Exec(`INSERT INTO executor_pool_credentials(`+poolCredentialColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			cred.ID, row.ID, cred.SecretHash, formatOptionalTime(row.CreatedAt), cred.CreatedBy, "", "", "", "", 0); err != nil {
+			return fmt.Errorf("statedb: put executor pool credential %q: %w", cred.ID, classifyDriverErr(err))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("statedb: create executor pool %q: commit: %w", row.Name, classifyDriverErr(err))
 	}
 	return nil
 }
@@ -526,9 +616,10 @@ func (d *DB) PutExecutorPoolCredential(row ExecutorPoolCredentialRow) error {
 	if pool.Revoked() {
 		return fmt.Errorf("%w: %q", ErrExecutorPoolRevoked, row.PoolID)
 	}
-	if _, err := tx.Exec(`INSERT INTO executor_pool_credentials(`+poolCredentialColumns+`) VALUES(?,?,?,?,?,?,?,?)`,
+	if _, err := tx.Exec(`INSERT INTO executor_pool_credentials(`+poolCredentialColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.PoolID, row.SecretHash, formatOptionalTime(row.CreatedAt), row.CreatedBy,
-		formatOptionalTime(row.LastUsedAt), formatOptionalTime(row.RevokedAt), row.RevokedBy); err != nil {
+		formatOptionalTime(row.LastUsedAt), formatOptionalTime(row.RevokedAt), row.RevokedBy,
+		row.ControllerVersion, row.ControllerProtocol); err != nil {
 		return fmt.Errorf("statedb: put executor pool credential %q: %w", row.ID, classifyDriverErr(err))
 	}
 	if err := tx.Commit(); err != nil {
@@ -665,6 +756,55 @@ func (d *DB) TouchExecutorPoolCredential(id string, at time.Time) error {
 	return nil
 }
 
+// NoteExecutorPoolController records the build and the pool-controller
+// protocol the controller using credential id says it is (Task 20486), and
+// reports whether either changed. It writes only a change: the controller
+// names itself on every request.
+func (d *DB) NoteExecutorPoolController(id, version string, protocol int) (bool, error) {
+	if protocol < 0 {
+		protocol = 0
+	}
+	return d.execOne(`UPDATE executor_pool_credentials SET controller_version = ?, controller_protocol = ?
+		WHERE id = ? AND (controller_version != ? OR controller_protocol != ?)`,
+		fmt.Sprintf("note the controller of pool credential %s", id),
+		version, protocol, strings.TrimSpace(id), version, protocol)
+}
+
+// SetExecutorPoolCordon holds a live pool (cordon true) or releases it, and
+// reports whether that changed anything (Task 20486). Cordoning a cordoned
+// pool keeps its first stamp; a revoked pool is never changed
+// (ErrExecutorPoolRevoked).
+func (d *DB) SetExecutorPoolCordon(id string, cordon bool, by, reason string, at time.Time) (bool, error) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	stamp := formatOptionalTime(at)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	pool, err := getExecutorPool(d.conn, id)
+	if err != nil {
+		return false, err
+	}
+	if pool.Revoked() {
+		return false, fmt.Errorf("%w: %q", ErrExecutorPoolRevoked, id)
+	}
+	var res sql.Result
+	if cordon {
+		res, err = d.conn.Exec(`UPDATE executor_pools SET cordoned_at = ?, cordoned_by = ?, cordon_reason = ?,
+			updated_at = ?, updated_by = ? WHERE id = ? AND revoked_at = '' AND cordoned_at = ''`,
+			stamp, by, reason, stamp, by, pool.ID)
+	} else {
+		res, err = d.conn.Exec(`UPDATE executor_pools SET cordoned_at = '', cordoned_by = '', cordon_reason = '',
+			updated_at = ?, updated_by = ? WHERE id = ? AND revoked_at = '' AND cordoned_at != ''`,
+			stamp, by, pool.ID)
+	}
+	if err != nil {
+		return false, fmt.Errorf("statedb: cordon executor pool %q: %w", id, classifyDriverErr(err))
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
 // ── runners ────────────────────────────────────────────────────────────────
 
 // MintExecutorPoolRunners records runner tokens for a live pool, refusing —
@@ -695,6 +835,9 @@ func (d *DB) MintExecutorPoolRunners(poolID string, tokens []EnrollmentTokenRow,
 	}
 	if pool.Revoked() {
 		return fmt.Errorf("%w: %q", ErrExecutorPoolRevoked, poolID)
+	}
+	if pool.Cordoned() {
+		return fmt.Errorf("%w: %q", ErrExecutorPoolCordoned, poolID)
 	}
 	live, err := countLivePoolRunners(tx, poolID, now)
 	if err != nil {
@@ -1129,9 +1272,13 @@ func (d *DB) AssignPoolQueueEntryTo(id, executorID, member string, at time.Time,
 		return false, fmt.Errorf("statedb: assign queued pool run: %w", classifyDriverErr(err))
 	}
 	defer func() { _ = tx.Rollback() }()
+	// A cordoned pool's runners are handed nothing (Task 20486): checked by
+	// the UPDATE that claims the run, so a cordon cannot race the hand-off.
 	res, err := tx.Exec(`UPDATE executor_pool_queue SET state = ?, executor_id = ?, member = ?, updated_at = ?, reason = '',
 		attempts = attempts + 1
-		WHERE id = ? AND state = ?`, PoolQueueAssigned, executorID, member, stamp, id, PoolQueueWaiting)
+		WHERE id = ? AND state = ? AND NOT EXISTS (SELECT 1 FROM executor_pools p
+		  WHERE p.id = executor_pool_queue.pool_id AND p.cordoned_at != '')`,
+		PoolQueueAssigned, executorID, member, stamp, id, PoolQueueWaiting)
 	if err != nil {
 		return false, fmt.Errorf("statedb: assign queued pool run %q: %w", id, classifyDriverErr(err))
 	}
@@ -1251,6 +1398,9 @@ type PoolControllerStatusRow struct {
 	Reason       string
 	Message      string
 	ReportedAt   time.Time
+	// Storage is the controller's last count of its runners' volumes, a JSON
+	// object its writer owns; "" for none (Task 20486).
+	Storage string
 }
 
 // PutPoolControllerStatus records a controller's health report in place of
@@ -1269,11 +1419,12 @@ func (d *DB) PutPoolControllerStatus(row PoolControllerStatusRow) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if _, err := d.conn.Exec(`INSERT INTO executor_pool_controller_status(pool_id, credential_id, healthy, reason,
-		message, reported_at) VALUES(?,?,?,?,?,?)
+		message, reported_at, storage_json) VALUES(?,?,?,?,?,?,?)
 		ON CONFLICT(pool_id, credential_id) DO UPDATE SET
 		  healthy = excluded.healthy, reason = excluded.reason, message = excluded.message,
-		  reported_at = excluded.reported_at`,
-		row.PoolID, row.CredentialID, healthy, row.Reason, row.Message, formatOptionalTime(row.ReportedAt)); err != nil {
+		  reported_at = excluded.reported_at, storage_json = excluded.storage_json`,
+		row.PoolID, row.CredentialID, healthy, row.Reason, row.Message, formatOptionalTime(row.ReportedAt),
+		row.Storage); err != nil {
 		return fmt.Errorf("statedb: record pool %q's controller report: %w", row.PoolID, classifyDriverErr(err))
 	}
 	return nil
@@ -1284,7 +1435,7 @@ func (d *DB) PutPoolControllerStatus(row PoolControllerStatusRow) error {
 func (d *DB) PoolControllerStatuses(poolID string) ([]PoolControllerStatusRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	rows, err := d.conn.Query(`SELECT pool_id, credential_id, healthy, reason, message, reported_at
+	rows, err := d.conn.Query(`SELECT pool_id, credential_id, healthy, reason, message, reported_at, storage_json
 		FROM executor_pool_controller_status WHERE pool_id = ? ORDER BY reported_at DESC, credential_id`,
 		strings.TrimSpace(poolID))
 	if err != nil {
@@ -1298,7 +1449,7 @@ func (d *DB) PoolControllerStatuses(poolID string) ([]PoolControllerStatusRow, e
 			healthy int
 			at      string
 		)
-		if err := rows.Scan(&r.PoolID, &r.CredentialID, &healthy, &r.Reason, &r.Message, &at); err != nil {
+		if err := rows.Scan(&r.PoolID, &r.CredentialID, &healthy, &r.Reason, &r.Message, &at, &r.Storage); err != nil {
 			return nil, fmt.Errorf("statedb: scan a pool controller's report: %w", classifyDriverErr(err))
 		}
 		r.Healthy, r.ReportedAt = healthy != 0, parseOptionalTime(at)
@@ -1329,16 +1480,18 @@ func placeholders(n int) string {
 
 func scanExecutorPool(sc rowScanner) (ExecutorPoolRow, error) {
 	var (
-		row                         ExecutorPoolRow
-		labels                      string
-		created, updated, revokedAt string
+		row                                   ExecutorPoolRow
+		labels                                string
+		created, updated, revokedAt, cordoned string
 	)
 	if err := sc.Scan(&row.ID, &row.Name, &labels, &row.Capabilities, &row.MaxRunners, &row.Owner, &row.WorkDirRoot,
-		&created, &row.CreatedBy, &updated, &row.UpdatedBy, &revokedAt, &row.RevokedBy); err != nil {
+		&created, &row.CreatedBy, &updated, &row.UpdatedBy, &revokedAt, &row.RevokedBy,
+		&cordoned, &row.CordonedBy, &row.CordonReason); err != nil {
 		return ExecutorPoolRow{}, err
 	}
 	row.Labels = unmarshalLabelMap(labels)
 	row.CreatedAt, row.UpdatedAt, row.RevokedAt = parseOptionalTime(created), parseOptionalTime(updated), parseOptionalTime(revokedAt)
+	row.CordonedAt = parseOptionalTime(cordoned)
 	return row, nil
 }
 
@@ -1347,7 +1500,8 @@ func scanPoolCredential(sc rowScanner) (ExecutorPoolCredentialRow, error) {
 		row                    ExecutorPoolCredentialRow
 		created, used, revoked string
 	)
-	if err := sc.Scan(&row.ID, &row.PoolID, &row.SecretHash, &created, &row.CreatedBy, &used, &revoked, &row.RevokedBy); err != nil {
+	if err := sc.Scan(&row.ID, &row.PoolID, &row.SecretHash, &created, &row.CreatedBy, &used, &revoked, &row.RevokedBy,
+		&row.ControllerVersion, &row.ControllerProtocol); err != nil {
 		return ExecutorPoolCredentialRow{}, err
 	}
 	row.CreatedAt, row.LastUsedAt, row.RevokedAt = parseOptionalTime(created), parseOptionalTime(used), parseOptionalTime(revoked)

@@ -68,6 +68,12 @@ type fakeHub struct {
 	mintHolds [][]string
 	// reports are the controller's storage reports, in order.
 	reports []map[string]any
+	// cordoned answers as a hub whose pool an administrator holds (Task
+	// 20486): no demand, no room.
+	cordoned bool
+	// userAgents and protocols are what the controller named itself as.
+	userAgents map[string]bool
+	protocols  map[string]bool
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -127,13 +133,19 @@ func (h *fakeHub) snapshotLocked() executorpool.Snapshot {
 		}
 	}
 	s.Runners = s.Busy + s.Idle + s.Pending
+	s.Waiting = s.Demand
 	s.Spare = max(0, h.maxRunners-s.Runners)
 	s.Wanted = min(s.Spare, max(0, s.Demand-s.Idle-s.Pending))
+	if h.cordoned {
+		s.Cordoned, s.Demand, s.Spare, s.Wanted = true, 0, 0, 0
+		s.QueuedProjects = []executorpool.ProjectDemand{}
+	}
 	b, _ := json.Marshal(struct {
 		D, M     int
+		C        bool
 		States   []executorpool.RunnerState
 		Projects []executorpool.ProjectDemand
-	}{s.Demand, s.MaxRunners, s.RunnerStates, s.QueuedProjects})
+	}{s.Demand, s.MaxRunners, s.Cordoned, s.RunnerStates, s.QueuedProjects})
 	sum := sha256.Sum256(b)
 	s.Revision = hex.EncodeToString(sum[:8])
 	return s
@@ -141,6 +153,11 @@ func (h *fakeHub) snapshotLocked() executorpool.Snapshot {
 
 func (h *fakeHub) route(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
+	if h.userAgents == nil {
+		h.userAgents, h.protocols = map[string]bool{}, map[string]bool{}
+	}
+	h.userAgents[r.Header.Get("User-Agent")] = true
+	h.protocols[r.Header.Get(executorpool.ControllerProtocolHeader)] = true
 	down, refuse := h.down, h.refuse
 	authorized := r.Header.Get("Authorization") == "Bearer "+h.credential
 	h.mu.Unlock()
@@ -155,6 +172,8 @@ func (h *fakeHub) route(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == hubFeedPath:
 		h.handleFeed(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == hubRunnersPath && h.isCordoned():
+		writeHubJSON(w, 409, map[string]any{"error": "executor pool k8s is cordoned", "code": "executor_pool_cordoned"})
 	case r.Method == http.MethodPost && r.URL.Path == hubRunnersPath:
 		h.handleMint(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == hubRetirePath:
@@ -209,6 +228,27 @@ func (h *fakeHub) handleFeed(w http.ResponseWriter, r *http.Request) {
 		case <-wake:
 		}
 	}
+}
+
+func (h *fakeHub) isCordoned() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cordoned
+}
+
+// namedAs reports what the controller named itself as on its requests.
+func (h *fakeHub) namedAs() (userAgents, protocols []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ua := range h.userAgents {
+		userAgents = append(userAgents, ua)
+	}
+	for p := range h.protocols {
+		protocols = append(protocols, p)
+	}
+	sort.Strings(userAgents)
+	sort.Strings(protocols)
+	return userAgents, protocols
 }
 
 func (h *fakeHub) isLegacyStorage() bool {

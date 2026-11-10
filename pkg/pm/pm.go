@@ -273,6 +273,14 @@ type Task struct {
 	ExecutorID   string `json:"executor_id,omitempty"`
 	ExecutorKind string `json:"executor_kind,omitempty"`
 	Isolation    string `json:"isolation,omitempty"`
+	// ExecutorPool and ExecutorRunner name the executor pool and the runner
+	// behind ExecutorID when the task ran on a pool's runner (Task 20486): an
+	// ephemeral agent whose id says nothing to a person and which the control
+	// plane forgets once it is retired. Not stored with the task: the readers
+	// join them in from the placement the hub records in the project's
+	// database as it hands the run over.
+	ExecutorPool   string `json:"executor_pool,omitempty"`
+	ExecutorRunner string `json:"executor_runner,omitempty"`
 	// RunID names the execution this task was dispatched into (Task 20282).
 	//
 	// It is the join key between this task's audit rows and the secret-lease

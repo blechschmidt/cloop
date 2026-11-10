@@ -35,6 +35,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executorpool"
 	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
+	"github.com/blechschmidt/cloop/pkg/version"
 )
 
 // The hub's pool-controller endpoints.
@@ -139,7 +140,7 @@ func newHubClient(cfg hubConfig, creds *credentialSource, transport http.RoundTr
 		transport = t
 	}
 	return &hubClient{base: base, http: &http.Client{Transport: transport}, credential: creds.get,
-		refused: creds.refuse, userAgent: "cloop-executor-controller"}, nil
+		refused: creds.refuse, userAgent: executorpool.ControllerUserAgent(version.String())}, nil
 }
 
 // hubTLSConfig is the TLS the controller speaks to its hub: the CA bundle as
@@ -195,6 +196,9 @@ func (h *hubClient) do(ctx context.Context, method, path string, query url.Value
 	req.Header.Set("Authorization", "Bearer "+cred)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", h.userAgent)
+	// The protocol this controller speaks, which the hub keeps with the
+	// credential and compares with its own (Task 20486).
+	req.Header.Set(executorpool.ControllerProtocolHeader, strconv.Itoa(executorpool.ControllerProtocol))
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -322,13 +326,17 @@ func (h *hubClient) Retire(ctx context.Context, enrollmentIDs []string) ([]Retir
 
 // ReportStatus tells the hub what keeps the controller from starting runners,
 // or that nothing does (Task 20484), so the runs waiting in the pool's queue
-// say so.
-func (h *hubClient) ReportStatus(ctx context.Context, healthy bool, reason, message string) error {
+// say so — and, for a pool with runner volumes, how many there are and how
+// full (Task 20486), which the hub's pool list shows.
+func (h *hubClient) ReportStatus(ctx context.Context, healthy bool, reason, message string, storage *executorpool.StorageUsage) error {
 	ctx, cancel := context.WithTimeout(ctx, hubCallTimeout)
 	defer cancel()
 	body := map[string]any{"healthy": healthy}
 	if !healthy {
 		body["reason"], body["message"] = reason, message
+	}
+	if storage != nil {
+		body["storage"] = storage
 	}
 	return h.do(ctx, http.MethodPost, hubStatusPath, nil, body, nil)
 }

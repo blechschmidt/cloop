@@ -10,9 +10,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -66,6 +68,78 @@ func (s *Store) Create(spec Spec, actor string) (Pool, error) {
 	}
 	s.audit(auditaction.ActionExecutorPoolCreate, p.ID, actor, specPayload(p.Spec()))
 	return p, nil
+}
+
+// AudienceEntry names one principal for a pool's access list.
+type AudienceEntry struct {
+	Kind  string
+	Value string
+}
+
+// Created is what CreateWith made: the pool and, when asked for, its first
+// controller credential — Token is the only time its secret exists outside
+// the controller.
+type Created struct {
+	Pool       Pool
+	Token      string
+	Credential *Credential
+}
+
+// CreateWith stores a new pool with its access list and, with mint, its first
+// controller credential, all in one transaction (Task 20486): either the pool
+// exists with all of them or nothing does — never a pool open to everyone
+// because its list failed to write, nor a name taken by one nobody can use.
+func (s *Store) CreateWith(spec Spec, actor string, audience []AudienceEntry, mint bool) (Created, error) {
+	spec = spec.Normalize()
+	if err := spec.Validate(); err != nil {
+		return Created{}, err
+	}
+	entries := make([]statedb.ExecutorAudienceEntry, 0, len(audience))
+	for _, a := range audience {
+		kind, value := strings.ToLower(strings.TrimSpace(a.Kind)), strings.TrimSpace(a.Value)
+		if kind != "user" && kind != "group" && kind != "role" {
+			return Created{}, fmt.Errorf("%w: the principal kind %q is not user, group or role", ErrInvalidSpec, a.Kind)
+		}
+		if value == "" || len(value) > 320 || strings.ContainsAny(value, "\n\r\t") {
+			return Created{}, fmt.Errorf("%w: %q names no principal", ErrInvalidSpec, a.Kind+":"+a.Value)
+		}
+		entries = append(entries, statedb.ExecutorAudienceEntry{Kind: kind, Value: value, AddedBy: actor})
+	}
+	id, err := newPoolID()
+	if err != nil {
+		return Created{}, err
+	}
+	now := s.now().UTC()
+	p := Pool{ID: id, Name: spec.Name, Labels: spec.Labels, Capabilities: spec.Capabilities,
+		MaxRunners: spec.MaxRunners, Owner: spec.Owner, WorkDirRoot: spec.WorkDirRoot,
+		CreatedAt: now, CreatedBy: actor, UpdatedAt: now, UpdatedBy: actor}
+	row, err := toRow(p)
+	if err != nil {
+		return Created{}, err
+	}
+	out := Created{Pool: p}
+	var credRow *statedb.ExecutorPoolCredentialRow
+	if mint {
+		token, cid, hash, err := newCredential()
+		if err != nil {
+			return Created{}, err
+		}
+		credRow = &statedb.ExecutorPoolCredentialRow{ID: cid, PoolID: id, SecretHash: hash, CreatedAt: now, CreatedBy: actor}
+		c := credentialFrom(*credRow)
+		out.Token, out.Credential = token, &c
+	}
+	if err := s.db.CreateExecutorPoolWith(row, entries, credRow); err != nil {
+		return Created{}, err
+	}
+	s.audit(auditaction.ActionExecutorPoolCreate, p.ID, actor, specPayload(p.Spec()))
+	for _, e := range entries {
+		s.audit(auditaction.ActionExecutorPoolAudience, p.ID, actor, map[string]any{
+			"action": "add", "kind": e.Kind, "value": e.Value, "restricted": true})
+	}
+	if out.Credential != nil {
+		s.audit(auditaction.ActionExecutorPoolCredentialMint, p.ID, actor, map[string]any{"credential_id": out.Credential.ID})
+	}
+	return out, nil
 }
 
 func specPayload(sp Spec) map[string]any {
@@ -174,6 +248,67 @@ func (s *Store) Revoke(id, actor string) (statedb.ExecutorPoolRevocation, error)
 	return rev, nil
 }
 
+// Cordon holds a live pool, or releases it with cordon false (Task 20486):
+// while held, its runners are handed no queued run and its controller is told
+// no demand and minted no runner; runners already busy finish their runs. It
+// reports whether the pool's state changed, and records only a change.
+func (s *Store) Cordon(id string, cordon bool, actor, reason string) (Pool, bool, error) {
+	if len(strings.TrimSpace(reason)) > maxCordonReason {
+		return Pool{}, false, fmt.Errorf("%w: a cordon reason is at most %d characters", ErrInvalidSpec, maxCordonReason)
+	}
+	// Shown to everyone whose run waits for the pool, in its pause reason, and
+	// printed by the CLI: one line, no control characters, and nothing that
+	// looks like a credential.
+	reason = cleanReason(reason)
+	if !cordon {
+		reason = ""
+	}
+	changed, err := s.db.SetExecutorPoolCordon(id, cordon, actor, reason, s.now().UTC())
+	if err != nil {
+		return Pool{}, false, err
+	}
+	p, err := s.Get(id)
+	if err != nil {
+		return Pool{}, changed, err
+	}
+	if changed {
+		s.audit(auditaction.ActionExecutorPoolCordon, p.ID, actor, map[string]any{
+			"name": p.Name, "cordoned": cordon, "reason": reason})
+	}
+	return p, changed, nil
+}
+
+// maxCordonReason bounds a cordon's stated reason.
+const maxCordonReason = 500
+
+// cleanReason makes free text fit for other people's screens: line breaks and
+// tabs become spaces, other control characters go, and anything that looks
+// like a credential is scrubbed.
+func cleanReason(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case unicode.IsControl(r) || r == '\u2028' || r == '\u2029':
+			return -1
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(redact.Scrub(s))
+}
+
+// NoteController records the build and protocol the controller presenting
+// credential id names itself with (Task 20486). Bookkeeping: the request it
+// came with is served whatever this returns.
+func (s *Store) NoteController(credentialID, version string, protocol int) error {
+	version = strings.TrimSpace(version)
+	if len(version) > maxControllerVersion {
+		version = version[:maxControllerVersion]
+	}
+	_, err := s.db.NoteExecutorPoolController(credentialID, version, protocol)
+	return err
+}
+
 // ── audience ───────────────────────────────────────────────────────────────
 
 // Audience returns who may run work on the pool's runners; empty is anyone.
@@ -235,11 +370,20 @@ type Credential struct {
 	LastUsedAt time.Time `json:"last_used_at,omitempty"`
 	RevokedAt  time.Time `json:"revoked_at,omitempty"`
 	RevokedBy  string    `json:"revoked_by,omitempty"`
+	// ControllerVersion and ControllerProtocol are what the controller using
+	// the credential last said it is (Task 20486): its build, and the
+	// pool-controller protocol it speaks, 0 for a controller that names none.
+	ControllerVersion  string `json:"controller_version,omitempty"`
+	ControllerProtocol int    `json:"controller_protocol"`
 }
+
+// Revoked reports whether the credential was revoked.
+func (c Credential) Revoked() bool { return !c.RevokedAt.IsZero() }
 
 func credentialFrom(r statedb.ExecutorPoolCredentialRow) Credential {
 	return Credential{ID: r.ID, PoolID: r.PoolID, CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy,
-		LastUsedAt: r.LastUsedAt, RevokedAt: r.RevokedAt, RevokedBy: r.RevokedBy}
+		LastUsedAt: r.LastUsedAt, RevokedAt: r.RevokedAt, RevokedBy: r.RevokedBy,
+		ControllerVersion: r.ControllerVersion, ControllerProtocol: r.ControllerProtocol}
 }
 
 // MintCredential issues a controller credential for a live pool and returns

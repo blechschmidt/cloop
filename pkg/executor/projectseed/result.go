@@ -539,6 +539,11 @@ func fingerprint(t *pm.Task) string {
 	// differ without the task having changed. A run's attachments travel as
 	// Result.Attachments (Task 20428).
 	c.AttachmentCount = 0
+	// Joined in by whichever database loads the task from the pool placements
+	// the hub records (Task 20486): the seed carries the hub's, and a device's
+	// database has none, so a task that ever ran on a pool would read as
+	// changed after every remote run without the task having changed.
+	c.ExecutorPool, c.ExecutorRunner = "", ""
 	b, err := json.Marshal(c)
 	if err != nil {
 		// Unreachable for a pm.Task; treat as changed, which costs only bytes.

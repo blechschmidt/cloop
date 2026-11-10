@@ -924,6 +924,9 @@ type Server struct {
 	// controllers' feeds' wake-ups, and the dispatcher's kick channel. See
 	// executor_pools.go.
 	pools poolState
+	// poolDash coalesces pool changes into notices to the dashboards (Task
+	// 20486, executor_pools_dashboard.go).
+	poolDash poolDashboard
 
 	// streamJoinHook, when set, runs after a realtime stream has passed the
 	// gate and before it joins its room — the window a revocation can land
@@ -1798,6 +1801,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// And the executor pools' handle, which the agent endpoint and the
 	// controllers' feeds read through until the listener stopped.
 	s.closePools()
+	s.stopPoolDashboard()
 	// Stop the git interception proxy. A session nothing will restore is
 	// closed, so the audit trail records why it ended rather than leaving rows
 	// that simply stop; a recorded one is suspended for the process that
@@ -2175,8 +2179,14 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 func servedBeforeAuth(r *http.Request) bool {
 	return isPublicShell(r) || isPublicIcon(r) || isPublicAsset(r) || isCSPReport(r) || isCIFederationEndpoint(r) ||
 		isDeviceGrantEndpoint(r) || isSCIMEndpoint(r) || isModelRelayEndpoint(r) || isKnowledgeRunEndpoint(r) ||
-		isPoolControllerEndpoint(r)
+		isPoolControllerEndpoint(r) || isPublicChart(r)
 }
+
+// The executor controller chart (Task 20486, isPublicChart) is the first
+// kind: the chart in deploy/helm, compiled into the binary, which `helm
+// install` fetches by URL with no credential the hub could accept. It holds
+// nothing of any tenant's; the hub's URL, pin and the pool's credential are
+// in the command the administrator was shown, never in the chart.
 
 // The executor pool controller's endpoints (Task 20482,
 // isPoolControllerEndpoint) are the second kind: a controller presents the

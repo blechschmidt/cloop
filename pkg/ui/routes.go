@@ -24,6 +24,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/apierror"
 	"github.com/blechschmidt/cloop/pkg/authz"
+	"github.com/blechschmidt/cloop/pkg/kubecontroller"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -1311,6 +1312,13 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/executor-pools/{id}/audience", Handler: s.handleExecutorPoolAudience, Perm: execMgmt, Scope: scopeGlobal},
 		{Pattern: "POST /api/executor-pools/{id}/audience", Handler: s.handleExecutorPoolAudience, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
 		{Pattern: "DELETE /api/executor-pools/{id}/audience", Handler: s.handleExecutorPoolAudience, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		// Holding a pool and releasing it (Task 20486).
+		{Pattern: "POST /api/executor-pools/{id}/cordon", Handler: s.handleExecutorPoolCordon, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		{Pattern: "POST /api/executor-pools/{id}/uncordon", Handler: s.handleExecutorPoolUncordon, Perm: execMgmt, Scope: scopeGlobal, Sudo: sudoWrites},
+		// The executor controller's chart, which `helm install` fetches by
+		// URL with no credential (Task 20486): a file of this build that holds
+		// nothing of anyone's. servedBeforeAuth carries it past the hub's auth.
+		{Pattern: kubecontroller.ChartArchivePath, Handler: s.handleExecutorControllerChart, Methods: []string{"GET", "HEAD"}, Perm: public, Scope: scopeGlobal},
 		// A pool's controller: public for the reason the CI relay is — the
 		// controller presents the cloop_pool1_ credential minted for its pool,
 		// which the handlers check, and holds no hub session by design.

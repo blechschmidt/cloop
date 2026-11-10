@@ -357,7 +357,8 @@ own pool's numbers.
 `cloop_executor_pool_mint_refusals_total` counts the runner-token requests the
 hub refused, by `reason`: `max_runners` (the pool would exceed it),
 `revoked` (the pool or the controller's credential was revoked),
-`invalid_credential` or `invalid_request`. The minted and retired counters
+`cordoned` (an administrator holds the pool), `invalid_credential` or
+`invalid_request`. The minted and retired counters
 count runners in and out; a retired runner's `reason` is `run_settled`,
 `left_idle` (it went offline before it was handed a run), `idle_timeout`,
 `pool_revoked`, `credential_revoked` (the controller credential that minted it

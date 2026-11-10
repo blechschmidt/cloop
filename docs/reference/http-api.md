@@ -93,14 +93,14 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-368 endpoints, by the permission each one requires:
+372 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 69 |
+| `public` (no permission) | 71 |
 | `audit.read` | 5 |
 | `config.write` | 19 |
-| `executor.manage` | 46 |
+| `executor.manage` | 48 |
 | `executor.read` | 6 |
 | `project.read` | 66 |
 | `project.share` | 3 |
@@ -193,9 +193,11 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/executor-pools/{id}/audience` | `executor.manage` | global |
 | POST | `/api/executor-pools/{id}/audience` | `executor.manage` | global |
 | DELETE | `/api/executor-pools/{id}/audience` | `executor.manage` | global |
+| POST | `/api/executor-pools/{id}/cordon` | `executor.manage` | global |
 | POST | `/api/executor-pools/{id}/credentials` | `executor.manage` | global |
 | DELETE | `/api/executor-pools/{id}/credentials/{cid}` | `executor.manage` | global |
 | POST | `/api/executor-pools/{id}/revoke` | `executor.manage` | global |
+| POST | `/api/executor-pools/{id}/uncordon` | `executor.manage` | global |
 | GET | `/api/executors` | `executor.read` | global |
 | POST | `/api/executors/enroll` | `executor.manage` | global |
 | GET | `/api/executors/{id}` | `executor.read` | executor |
@@ -456,6 +458,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/auth/logout` | `public` | global |
 | GET | `/auth/renew` | `public` | global |
 | GET | `/auth/sign-in.js` | `public` | global |
+| GET | `/charts/cloop-executor-controller.tgz` | `public` | global |
+| HEAD | `/charts/cloop-executor-controller.tgz` | `public` | global |
 | GET | `/device` | `public` | global |
 | GET | `/favicon.ico` | `public` | global |
 | GET | `/glasses` | `public` | global |

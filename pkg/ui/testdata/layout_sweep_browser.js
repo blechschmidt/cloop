@@ -740,7 +740,10 @@ const TAB_READY = {
   'provider-calls': hasContent('#pcTbody', F.model),
   'projects': hasContent('#projList', F.project),
   'budget': `!!document.querySelector('#diskUsageBody .du-headline')`,
-  'executors': hasContent('#execList', F.deviceName),
+  // The device's card, and the executor pool's (Task 20486) with its runners,
+  // volumes and problems.
+  'executors': `${hasContent('#execList', F.deviceName)} && ${hasContent('#poolList', F.poolName)}
+    && ${hasContent('#poolList', 'stuck Pending')}`,
   'secrets': hasContent('#secSecretsBody', F.secret),
   'audit': `document.querySelectorAll('#auditBody .audit-row').length > 0`,
   'quotas': hasContent('#quotaBody', F.email),
@@ -805,6 +808,17 @@ async function onTask(fn, id) {
   const sel = `#taskListFull .task-item[data-task-id="${id}"] button[data-action="${fn}"][data-arg="${id}"]`;
   await waitFor(visible(sel), 'task #' + id + '\'s ' + fn + ' button');
   await click(sel);
+}
+
+// openPoolDialog opens the Add Kubernetes pool dialog from the Executors tab
+// and names a new pool, a new one each time: names are unique on a hub.
+let poolDialogs = 0;
+async function openPoolDialog() {
+  await openTab('executors');
+  await waitFor(visible('#poolSection [data-act="addPool"]'), 'the Add Kubernetes pool button');
+  await click('#poolSection [data-act="addPool"]');
+  await waitFor(visible('#poolName'), 'the pool form');
+  await type('#poolName', 'observability-ingest-pipeline-gpu-runners-' + (++poolDialogs));
 }
 
 const OPENERS = {
@@ -994,6 +1008,28 @@ const OPENERS = {
       await click('#enrollSubmitBtn');
     },
     ready: `${textOf('#enrollCommand')}.includes('cloop executor')`,
+  },
+  // The Add Kubernetes pool dialog (Task 20486), its form with the volume
+  // fields open and long values typed, then its result: the notice, the
+  // credential and — on a hub over HTTPS — the install commands. This hub is
+  // plain HTTP, so the result says why there are none and shows the
+  // credential, one unbroken word.
+  'pool-overlay#form': {
+    open: async () => {
+      await openPoolDialog();
+      await type('#poolLabels', 'region=eu-central-observability-ingest, gpu=a100-80gb-sxm4');
+      await type('#poolAudience', 'user:' + F.email + ', group:internal_platform_observability_ingest');
+      await click('#poolPersist');
+    },
+    ready: visible('#poolStorageClass'),
+  },
+  'pool-overlay': {
+    open: async () => {
+      await openPoolDialog();
+      await click('#poolPersist');
+      await click('#poolSubmitBtn');
+    },
+    ready: hasText('#poolResult', 'shown once'),
   },
   'forwarder-enroll-overlay': {
     // Submitted, so the dialog shows the one thing it is for: the command to

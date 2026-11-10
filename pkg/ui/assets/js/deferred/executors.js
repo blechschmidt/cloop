@@ -16,7 +16,7 @@
   'use strict';
 
   window.cloopExecutorsPanel = function (h) {
-    const {api, esc, relTime, execKind: _execKindLabel} = h;
+    const {api, apiMethod, esc, toast, relTime, execKind: _execKindLabel} = h;
 
     // The executor dialogs and admin actions are deferred/execadmin.js (Tasks
     // 20386, 20408), fetched when this tab opens. Each card button names one action
@@ -308,9 +308,13 @@
       _renderExecSweep(d && d.sweep);
 
       const execs = (d && d.executors) || [];
-      if (empty) empty.style.display = execs.length ? 'none' : 'block';
+      // A pool's runners are drawn on their pool's card (Task 20486), not as
+      // devices: they come and go with each run. The index stays the one into
+      // the full list, which every card button names.
+      if (empty) empty.style.display = execs.some(ex => !ex.pool_runner) ? 'none' : 'block';
 
       list.innerHTML = execs.map((ex, i) => {
+        if (ex.pool_runner) return '';
         const kind = _execKindLabel(ex.kind);
         let h = '<div class="exec-card' + (ex.blocked ? ' blocked' : '') + '">';
         // Everything above the action row is the drill-in target (Task 20258).
@@ -473,6 +477,9 @@
       // Each runtime's claim against what the isolation probe found (Task 20439).
       if (ea) ea.isolationChips();
       loadFleetAutoUpdate();
+      // And the pools, which every executor_update may have changed: a runner
+      // enrolling or retiring, or the hub's notice that a pool changed.
+      loadPools();
     }
 
     // ── Rolling the fleet forward (Task 20331) ──────────────────────────────────
@@ -571,6 +578,277 @@
     }
 
 
+    // ── Executor pools (Task 20486) ─────────────────────────────────────────────
+    //
+    // A pool's runners are Pods the executor controller starts on a Kubernetes
+    // cluster as the pool's queued runs need them. This section lists the pools
+    // with what the hub knows of each: its demand, its runners, its volumes, its
+    // controller's build and when that controller last made contact, and the
+    // problems hub doctor reports for it, from the same assessment. The dialog
+    // adds one in a single step: the pool, its access list and a controller
+    // credential, and the commands that install the controller with all of it
+    // filled in, shown once like an edge device's join command.
+    //
+    // Administrators only: every pool route needs executor.manage, so the
+    // section is hidden from anyone else and never fetched for them. Every
+    // change asks a session on a hub with sign-on for a recent sign-in, which
+    // the shared request path handles.
+    let pools = [], poolMeta = {}, poolSeq = 0, poolCreated = false;
+
+    function loadPools() {
+      const sec = document.getElementById('poolSection');
+      if (!sec) return;
+      if (!h.canGlobal('executor.manage')) { sec.style.display = 'none'; return; }
+      sec.style.display = '';
+      const seq = ++poolSeq;
+      api('/api/executor-pools').then(d => {
+        if (seq !== poolSeq) return; // a newer read is on its way
+        if (!d || d.error) { _renderPools(null, (d && d.error) || 'The executor pools could not be read.'); return; }
+        poolMeta = d;
+        pools = (d.pools || []).filter(p => !_poolRevoked(p));
+        _renderPools(pools, '', (d.pools || []).length - pools.length);
+      }).catch(err => {
+        if (seq === poolSeq) _renderPools(null, h.execErr(err) || 'The executor pools could not be read.');
+      });
+    }
+
+    // A zero time is how the API writes "never": 0001-01-01.
+    const _poolSet = t => !!t && t.slice(0, 4) !== '0001';
+    const _poolRevoked = p => _poolSet(p.revoked_at);
+
+    function _renderPools(list, err, revoked) {
+      const box = document.getElementById('poolList'), empty = document.getElementById('poolEmpty');
+      if (!box) return;
+      if (err) {
+        if (empty) empty.style.display = 'none';
+        box.innerHTML = '<div class="exec-warning" role="alert">' + esc(err) + '</div>';
+        return;
+      }
+      if (empty) empty.style.display = list.length ? 'none' : 'block';
+      box.innerHTML = list.map(_poolCard).join('') + (revoked
+        ? '<div class="form-hint" style="grid-column:1/-1">' + revoked + ' revoked pool' + (revoked === 1 ? ' is' : 's are')
+          + ' not shown: cloop executor pool list shows them.</div>' : '');
+    }
+
+    // _poolCard draws one pool. The dot answers "will my runs start": green
+    // when its controller made contact in the last five minutes and nothing
+    // needs a person, yellow for a warning, red when runs wait that nothing
+    // will start.
+    function _poolCard(p, i) {
+      const s = p.snapshot || {}, hl = p.health || {}, ctl = hl.controller, st = hl.storage;
+      const problems = hl.problems || [];
+      const fail = problems.some(x => x.severity === 'fail');
+      const recent = _poolSet(hl.last_contact) && Date.now() - Date.parse(hl.last_contact) < 300000;
+      const dot = fail ? 'unknown' : problems.length ? 'degraded' : recent ? 'online' : 'offline';
+      const dotTitle = fail ? 'Runs wait that nothing will start' : problems.length ? 'Needs attention'
+        : recent ? 'Its controller is in contact' : 'No recent contact from a controller';
+      let c = '<div class="exec-card' + (fail ? ' blocked' : '') + '" data-pool="' + esc(p.id) + '">';
+      c += '<div class="exec-card-head"><span class="exec-dot ' + dot + '" title="' + esc(dotTitle) + '"></span>'
+        + '<span class="exec-name">' + esc(p.name) + '</span><span class="exec-kind remote">pool</span>'
+        + (p.cordoned
+          ? '<span class="exec-state cordoned" title="Held by an administrator: no run is handed to its runners and no runner is started. Busy runners finish.">cordoned</span>'
+          : '<span class="exec-state ready" title="Its waiting runs are handed to runners as they start.">live</span>')
+        + '</div><div class="exec-id">' + esc(p.binding || 'pool:' + p.id) + '</div>';
+      const chips = Object.keys(p.labels || {}).sort().map(k => '<span class="exec-chip">' + esc(k + '=' + p.labels[k]) + '</span>')
+        .concat(((p.capabilities || {}).harnesses || []).map(x => '<span class="exec-chip pos" title="A harness its runners have">' + esc(x) + '</span>'));
+      if (ctl) {
+        chips.push('<span class="exec-chip' + (ctl.behind ? ' neg' : '') + '" title="' + esc(ctl.behind
+          ? 'Its controller speaks pool-controller protocol ' + ctl.protocol + '; this hub speaks ' + (poolMeta.hub_protocol || '?') + '. Upgrade it.'
+          : 'The build its controller named on its last request') + '">controller ' + esc(ctl.version || 'unnamed build')
+          + (ctl.behind ? ', behind' : '') + '</span>');
+      }
+      if (p.owner) chips.push('<span class="exec-chip" title="Its runners run only projects this person may read">owner: ' + esc(p.owner) + '</span>');
+      if (chips.length) c += '<div class="exec-chips">' + chips.join('') + '</div>';
+      // Its runners, one chip each, the busy first: what scaling looks like.
+      const rs = (s.runner_states || []).slice().sort((a, b) => (a.state === 'busy' ? 0 : 1) - (b.state === 'busy' ? 0 : 1));
+      if (rs.length) {
+        c += '<div class="exec-chips">' + rs.slice(0, 12).map(r => '<span class="exec-chip' + (r.state === 'busy' ? ' pos' : '')
+          + '" title="' + esc('Runner ' + r.name + ': ' + r.state + (r.project_name ? ', running ' + r.project_name : '')) + '">'
+          + esc(r.name) + ' · ' + esc(r.state === 'pending' ? 'starting' : r.state) + '</span>').join('')
+          + (rs.length > 12 ? '<span class="exec-chip">+' + (rs.length - 12) + ' more</span>' : '') + '</div>';
+      }
+      c += '<div class="exec-meta">';
+      c += '<span>Demand: ' + esc(s.waiting || 0) + ' run' + (s.waiting === 1 ? '' : 's') + ' waiting</span>';
+      c += '<span>Runners: ' + esc(s.busy || 0) + ' busy, ' + esc(s.idle || 0) + ' idle, ' + esc(s.pending || 0)
+        + ' starting, of ' + esc(p.max_runners) + '</span>';
+      if (st) {
+        c += '<span>Volumes: ' + esc(st.bound) + ' of ' + esc(st.claims) + ' bound'
+          + (st.pending ? ', ' + esc(st.pending) + ' pending' : '') + (st.in_use ? ', ' + esc(st.in_use) + ' in use' : '')
+          + (st.bytes_capacity ? ', ' + esc(h.fmtBytes(st.bytes_used)) + ' of ' + esc(h.fmtBytes(st.bytes_capacity)) + ' used' : '')
+          + '</span>';
+      }
+      c += '<span>Controller: ' + (ctl ? 'protocol ' + esc(ctl.protocol) : 'none has made contact')
+        + ' · last contact ' + (_poolSet(hl.last_contact) ? esc(relTime(new Date(hl.last_contact))) : 'never') + '</span>';
+      if (p.cordoned) {
+        c += '<span>Cordoned by ' + esc(p.cordoned_by || 'an administrator') + (_poolSet(p.cordoned_at)
+          ? ' ' + esc(relTime(new Date(p.cordoned_at))) : '') + (p.cordon_reason ? ': ' + esc(p.cordon_reason) : '') + '</span>';
+      }
+      c += '</div>';
+      problems.forEach(pr => {
+        c += '<div class="exec-' + (pr.severity === 'fail' ? 'blocked' : 'sched') + '-note">&#9888; ' + esc(pr.message)
+          + (pr.remedy ? '<br>Fix: ' + esc(pr.remedy) : '') + '</div>';
+      });
+      const b = (act, label, title, cls) => '<button class="btn' + (cls || '') + '" style="padding:3px 9px;font-size:11.5px" data-act="'
+        + act + '" data-arg="' + i + '" title="' + esc(title) + '">' + label + '</button>';
+      c += '<div class="exec-actions">' + (p.cordoned
+        ? b('uncordonPool', 'Uncordon', 'Hand its waiting runs to runners again')
+        : b('cordonPool', 'Cordon', 'Stop handing runs to its runners and starting new ones; busy runners finish'))
+        + b('revokePool', 'Revoke', 'Revoke the pool: its credentials, runners and queued runs go with it', ' danger') + '</div>';
+      return c + '</div>';
+    }
+
+    function _poolChange(i, path, body, done) {
+      const p = pools[+i];
+      if (!p) return;
+      apiMethod('POST', '/api/executor-pools/' + encodeURIComponent(p.id) + path, body).then(d => {
+        if (!d || d.error) { toast((d && d.error) || 'The pool was not changed', 'err'); return; }
+        toast(done(p, d), 'ok');
+        loadPools();
+      }).catch(err => toast(h.execErr(err) || 'The pool was not changed', 'err'));
+    }
+
+    function cordonPool(i) {
+      const p = pools[+i];
+      if (!p) return;
+      const reason = prompt('Cordon ' + p.name + '? No run is handed to its runners and no runner is started until '
+        + 'you uncordon it. Busy runners finish their runs.\n\nWhy (optional, shown to the people whose runs wait):', '');
+      if (reason === null) return;
+      _poolChange(i, '/cordon', {reason: reason.trim()}, x => 'Cordoned ' + x.name);
+    }
+
+    function uncordonPool(i) {
+      _poolChange(i, '/uncordon', {}, x => 'Uncordoned ' + x.name);
+    }
+
+    function revokePool(i) {
+      const p = pools[+i];
+      if (!p) return;
+      const busy = (p.snapshot || {}).busy || 0;
+      if (!confirm('Revoke executor pool ' + p.name + '?\n\nIts controller credentials stop working, its runners are '
+        + 'retired and the leases of their runs closed, and the runs waiting for it are cancelled'
+        + (busy ? ', including ' + busy + ' in progress' : '') + '. This cannot be undone.')) return;
+      _poolChange(i, '/revoke', {}, (x, d) => 'Revoked ' + x.name + ': ' + ((d.runners || []).length) + ' runner'
+        + ((d.runners || []).length === 1 ? '' : 's') + ' retired');
+    }
+
+    // ── The dialog ──────────────────────────────────────────────────────────────
+
+    const _pv = id => (document.getElementById(id) || {}).value || '';
+
+    function addPool() {
+      poolCreated = false;
+      document.getElementById('poolForm').style.display = '';
+      document.getElementById('poolResult').style.display = 'none';
+      _poolError('');
+      ['poolName', 'poolLabels', 'poolAudience', 'poolNamespace', 'poolStorageClass'].forEach(id => {
+        document.getElementById(id).value = '';
+      });
+      document.getElementById('poolMax').value = '4';
+      document.getElementById('poolSize').value = '20Gi';
+      document.getElementById('poolReclaim').selectedIndex = 0; // delete what the pool no longer needs
+      document.getElementById('poolPersist').checked = false;
+      poolPersist();
+      poolNameInput();
+      window.openOverlay('pool-overlay', {dismiss: closePool, focus: document.getElementById('poolName')});
+    }
+
+    function closePool() {
+      window.closeOverlay('pool-overlay');
+      // The credential leaves the page with the dialog, wherever it was shown:
+      // in the commands, or beside the reason there are none.
+      ['poolCommand', 'poolUnavailable', 'poolNotice', 'poolPin', 'poolCreatedLine'].forEach(id => {
+        document.getElementById(id).textContent = '';
+      });
+      if (poolCreated) loadPools();
+    }
+
+    function poolPersist() {
+      document.getElementById('poolPersistFields').style.display = document.getElementById('poolPersist').checked ? '' : 'none';
+    }
+
+    // The namespace the install goes to unless another is typed: one per pool.
+    function poolNameInput() {
+      const n = _pv('poolName').trim().toLowerCase();
+      document.getElementById('poolNamespace').placeholder = n ? ('cloop-' + n).slice(0, 63).replace(/-+$/, '') : 'cloop-<name>';
+    }
+
+    function _poolError(msg) {
+      const el = document.getElementById('poolError');
+      el.textContent = msg;
+      el.style.display = msg ? '' : 'none';
+    }
+
+    // _poolList reads a comma- or line-separated list; each must match re, or
+    // the entry is named in the error.
+    function _poolList(raw, re, what) {
+      const out = [];
+      raw.split(/[\n,]+/).map(x => x.trim()).filter(Boolean).forEach(x => {
+        if (!re.test(x)) throw new Error('"' + x + '" is not ' + what);
+        out.push(x);
+      });
+      return out;
+    }
+
+    function submitPool() {
+      let labels = {}, audience = [];
+      try {
+        _poolList(_pv('poolLabels'), /^[^=\s]+=[^=]*$/, 'a label as key=value').forEach(x => {
+          const k = x.slice(0, x.indexOf('=')); labels[k] = x.slice(k.length + 1);
+        });
+        audience = _poolList(_pv('poolAudience'), /^(user|group|role):\S+$/i, 'user:<email>, group:<name> or role:<role>')
+          .map(x => ({kind: x.slice(0, x.indexOf(':')).toLowerCase(), value: x.slice(x.indexOf(':') + 1)}));
+      } catch (e) { _poolError(e.message); return; }
+      const max = parseInt(_pv('poolMax'), 10);
+      if (!(max >= 1 && max <= 1000)) { _poolError('Max runners must be between 1 and 1000.'); return; }
+      const body = {name: _pv('poolName').trim(), max_runners: max, labels, audience, credential: true,
+        kubernetes: {namespace: _pv('poolNamespace').trim()}};
+      if (document.getElementById('poolPersist').checked) {
+        body.kubernetes.persistence = {enabled: true, size: _pv('poolSize').trim(),
+          storage_class: _pv('poolStorageClass').trim(), reclaim_policy: _pv('poolReclaim')};
+      }
+      _poolError('');
+      const btn = document.getElementById('poolSubmitBtn');
+      btn.disabled = true;
+      api('/api/executor-pools', body).then(d => {
+        btn.disabled = false;
+        if (!d || d.error || !d.pool) { _poolError((d && d.error) || 'The pool was not created.'); return; }
+        poolCreated = true;
+        _poolResult(d);
+        loadPools();
+      }).catch(err => {
+        btn.disabled = false;
+        _poolError(h.execErr(err) || 'The pool was not created.');
+      });
+    }
+
+    function _poolResult(d) {
+      const ins = d.install || {};
+      document.getElementById('poolForm').style.display = 'none';
+      document.getElementById('poolResult').style.display = '';
+      document.getElementById('poolNotice').textContent = d.notice || '';
+      document.getElementById('poolCreatedLine').textContent = 'Created ' + d.pool.name + ' (' + d.pool.binding
+        + '). Bind a project to it from the project’s executor picker.';
+      document.getElementById('poolCommand').textContent = ins.command || '';
+      document.getElementById('poolCommandGroup').style.display = ins.command ? '' : 'none';
+      const un = document.getElementById('poolUnavailable');
+      un.textContent = ins.unavailable ? ins.unavailable + (d.token ? ' The credential, shown once: ' + d.token : '') : '';
+      un.style.display = ins.unavailable ? '' : 'none';
+      document.getElementById('poolNotes').innerHTML = (ins.notes || []).map(n => '<li>' + esc(n) + '</li>').join('');
+      document.getElementById('poolPin').textContent = ins.pin ? 'The controller pins this hub’s key: ' + ins.pin : '';
+      const focus = document.getElementById(ins.command ? 'poolCopyBtn' : 'poolDoneBtn');
+      if (focus) focus.focus();
+    }
+
+    function copyPoolCommand() {
+      const text = document.getElementById('poolCommand').textContent || '';
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => toast('Install commands copied', 'ok'),
+          () => toast('Copy failed: select the text yourself', 'err'));
+      } else {
+        toast('No clipboard here: select the text yourself', 'err');
+      }
+    }
+
     // Every visit reads the fleet afresh: loadExecutors is the bundle's, since the
     // Overview's executor card needs the same payload, and draws this list through
     // render(). The Forwarders section below is execadmin's, which the bundle
@@ -580,7 +858,8 @@
       return h.panel('execadmin').then(p => { ea = p; p.isolationChips(); p.loadForwarders(); }, () => {});
     }
 
-    return h.mount({open, render, fleetBar: _renderAutoUpdateBar, detail: fwd('openExecutorDetail'), sandbox: fwd('openExecutorSandbox'), labels: fwd('openExecutorLabels'), virtual: fwd('openExecutorVirtual'), firewall: fwd('openExecutorFirewall'), limits: fwd('openExecutorLimits'), audience: fwd('openExecutorAudience'), upgrade: fwd('upgradeExecutor'), revoke: fwd('revokeExecutor'), cordon: fwd('cordonExecutor'), uncordon: fwd('uncordonExecutor'), drain: fwd('drainExecutor'), editFleet: () => h.panelAct('execadmin', 'editFleetAutoUpdate')}, 'executors', `
+    return h.mount({open, render, loadPools, addPool, closePool, poolPersist, poolNameInput, submitPool, copyPoolCommand,
+      cordonPool, uncordonPool, revokePool, fleetBar: _renderAutoUpdateBar, detail: fwd('openExecutorDetail'), sandbox: fwd('openExecutorSandbox'), labels: fwd('openExecutorLabels'), virtual: fwd('openExecutorVirtual'), firewall: fwd('openExecutorFirewall'), limits: fwd('openExecutorLimits'), audience: fwd('openExecutorAudience'), upgrade: fwd('upgradeExecutor'), revoke: fwd('revokeExecutor'), cordon: fwd('cordonExecutor'), uncordon: fwd('uncordonExecutor'), drain: fwd('drainExecutor'), editFleet: () => h.panelAct('execadmin', 'editFleetAutoUpdate')}, 'executors', `
     <div class="section">
       <div class="section-title" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
         Executors
@@ -630,6 +909,21 @@
       <div id="execList" class="exec-grid"></div>
     </div>
 
+    <div class="section" id="poolSection" style="display:none">
+      <div class="section-title" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
+        Executor pools
+        <span style="font-size:11px;font-weight:400;color:var(--muted)">global &mdash; runners a Kubernetes cluster starts on demand</span>
+        <button class="btn" style="padding:4px 10px;font-size:12px;margin-left:auto" data-act="loadPools" title="Refresh the pool list">&#8635; Refresh</button>
+        <button class="btn primary" style="padding:4px 10px;font-size:12px" data-act="addPool" title="Create a pool and get the commands that install its controller">+ Add Kubernetes pool</button>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin-top:4px;margin-bottom:12px">
+        A project bound to a pool queues its runs there. The executor controller on your cluster starts a runner Pod
+        for each waiting run, up to the pool&#39;s maximum, and each runner takes one run and exits.
+      </p>
+      <div id="poolEmpty" class="form-hint" style="display:none;margin-bottom:12px">No executor pools yet. Add one to run projects on a Kubernetes cluster.</div>
+      <div id="poolList" class="exec-grid"></div>
+    </div>
+
     <div class="section">
       <div class="section-title" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">
         Device forwarders
@@ -645,6 +939,95 @@
       <div id="fwdList" class="exec-grid"></div>
       <div id="fwdExposeResult" style="margin-top:10px"></div>
     </div>
+    `, `
+      <div id="pool-overlay" data-overlay="flex" data-dismiss="closePool" aria-labelledby="poolTitle" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;align-items:center;justify-content:center">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;width:640px;max-width:95vw;max-height:90vh;overflow:auto">
+          <h2 id="poolTitle" style="font-size:15px;font-weight:600;margin-bottom:6px">Add a Kubernetes executor pool</h2>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5">
+            This creates the pool and a credential for its controller, then shows the commands that install the
+            controller on your cluster with this hub&#39;s address and the credential filled in. The controller dials
+            <em>out</em> to this hub, so the cluster needs no inbound access.
+          </p>
+          <div id="poolForm">
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="poolName">Name</label>
+                <input class="form-input" id="poolName" placeholder="e.g. gpu" maxlength="63" autocomplete="off" spellcheck="false" data-input="poolNameInput" data-enter="submitPool">
+                <div class="form-hint">Lowercase letters, digits and dashes.</div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="poolMax">Max runners</label>
+                <input class="form-input" id="poolMax" type="number" min="1" max="1000" value="4" data-enter="submitPool">
+                <div class="form-hint">The most Pods it runs at once.</div>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="poolLabels">Labels (optional)</label>
+              <input class="form-input" id="poolLabels" placeholder="region=eu, gpu=true" spellcheck="false" data-enter="submitPool">
+              <div class="form-hint">Its runners enroll with these: what a grant to <code>label:gpu=true</code> reaches.</div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="poolAudience">Who may run work on it (optional)</label>
+              <input class="form-input" id="poolAudience" placeholder="group:ml-team, user:alice@example.com" spellcheck="false" data-enter="submitPool">
+              <div class="form-hint">Users, groups or roles. Leave it empty to let every project bound to the pool run there.</div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="poolNamespace">Kubernetes namespace (optional)</label>
+              <input class="form-input" id="poolNamespace" placeholder="cloop-&lt;name&gt;" spellcheck="false" data-enter="submitPool">
+              <div class="form-hint">One controller per namespace. The commands create it and hold it to the restricted Pod Security profile.</div>
+            </div>
+            <div class="form-group">
+              <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;cursor:pointer">
+                <input type="checkbox" id="poolPersist" data-change="poolPersist" style="margin-top:3px">
+                <span>Keep a volume per project, so a project&#39;s next run starts with its workspace and caches
+                  <span class="form-hint" style="display:block">A volume that held one project&#39;s data is wiped before another project&#39;s run gets it.</span></span>
+              </label>
+            </div>
+            <div id="poolPersistFields" style="display:none">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label" for="poolSize">Volume size</label>
+                  <input class="form-input" id="poolSize" value="20Gi" spellcheck="false" data-enter="submitPool">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="poolStorageClass">Storage class (optional)</label>
+                  <input class="form-input" id="poolStorageClass" placeholder="the cluster&#39;s default" spellcheck="false" data-enter="submitPool">
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="poolReclaim">Volumes the pool no longer needs</label>
+                <select class="form-input form-select" id="poolReclaim">
+                  <option value="Delete">Delete them</option>
+                  <option value="Retain">Keep them, with the record of whose data they hold</option>
+                </select>
+              </div>
+            </div>
+            <div id="poolError" role="alert" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+            <div class="modal-footer">
+              <button class="btn" data-act="closePool">Cancel</button>
+              <button class="btn primary" id="poolSubmitBtn" data-act="submitPool">Create pool</button>
+            </div>
+          </div>
+          <div id="poolResult" style="display:none">
+            <div class="exec-banner warn" style="margin-bottom:12px">
+              <span class="exec-banner-icon">&#9888;</span>
+              <span id="poolNotice"></span>
+            </div>
+            <p id="poolCreatedLine" style="font-size:12.5px;margin-bottom:10px"></p>
+            <div class="form-group" id="poolCommandGroup">
+              <label class="form-label" for="poolCommand">Run these where kubectl and helm reach the cluster</label>
+              <pre class="exec-token" id="poolCommand" tabindex="0" style="white-space:pre-wrap;margin:0;max-height:40vh;overflow:auto"></pre>
+            </div>
+            <div class="exec-banner warn" id="poolUnavailable" style="display:none;margin-bottom:12px;overflow-wrap:anywhere"></div>
+            <ul id="poolNotes" style="font-size:11.5px;color:var(--muted);margin:0 0 10px 18px;line-height:1.5"></ul>
+            <div id="poolPin" style="font-size:11.5px;color:var(--muted);margin-bottom:12px;overflow-wrap:anywhere"></div>
+            <div class="modal-footer">
+              <button class="btn" id="poolCopyBtn" data-act="copyPoolCommand">Copy commands</button>
+              <button class="btn primary" id="poolDoneBtn" data-act="closePool">Done</button>
+            </div>
+          </div>
+        </div>
+      </div>
     `);
   };
 })();

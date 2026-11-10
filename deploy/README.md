@@ -744,7 +744,18 @@ An executor pool's runners can be Pods: `cloop executor controller` watches
 ExecutorPool objects in its namespace, starts a runner Pod for each queued run
 the pool can take, and retires idle runners when the demand falls. The chart
 in [`helm/cloop-executor-controller/`](helm/cloop-executor-controller/)
-installs it. Give it a namespace of its own, separate from the hub's:
+installs it.
+
+The quickest way to install it is to let the hub write the commands. The
+Executors tab's **+ Add Kubernetes pool**, or
+`cloop executor pool create <name> --max-runners N`, creates the pool, its
+access list and its controller credential, and prints the commands below with
+the hub's URL, its certificate pin and the credential filled in. They install
+the hub's own copy of this chart, which it serves at
+`/charts/cloop-executor-controller.tgz`, so the controller is the hub's build
+and no checkout is needed. The credential is shown once.
+
+By hand, give it a namespace of its own, separate from the hub's:
 
 ```bash
 kubectl create namespace cloop-runners

@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 255 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 256 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 222 |
+| `control-plane` | the hub's own state.db | 223 |
 | `project` | the project's .cloop/state.db | 29 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-255 actions in 53 families. Every action is listed: this section is the whole
+256 actions in 53 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (11) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -375,6 +375,7 @@ Payload keys:
 | --- | --- | --- | --- | --- |
 | `executor_pool.audience` | `executor_pool` | control-plane | beta | An administrator admits a principal to a pool's access list, or withdraws one. |
 | `executor_pool.controller_status` | `executor_pool` | control-plane | beta | A pool's controller reports that something keeps it from starting runners — a runner volume stuck Pending, a full one — or that it no longer does. |
+| `executor_pool.cordon` | `executor_pool` | control-plane | beta | An administrator cordons a pool — its runners are handed no queued run and its controller is minted no runner, while busy runners finish — or uncordons it. |
 | `executor_pool.create` | `executor_pool` | control-plane | beta | An administrator creates an executor pool. |
 | `executor_pool.credential_mint` | `executor_pool` | control-plane | beta | An administrator mints a controller credential for a pool. |
 | `executor_pool.credential_revoke` | `executor_pool` | control-plane | beta | An administrator revokes one of a pool's controller credentials. |
@@ -389,6 +390,7 @@ Payload keys:
 
 - `executor_pool.audience` — `pool_id`, `action`, `kind`, `value`, `restricted`
 - `executor_pool.controller_status` — `pool_id`, `healthy`, `reason`, `message`
+- `executor_pool.cordon` — `pool_id`, `name`, `cordoned`, `reason`
 - `executor_pool.create` — `pool_id`, `name`, `labels`, `capabilities`, `max_runners`, `owner`, `workdir_root`
 - `executor_pool.credential_mint` — `pool_id`, `credential_id`
 - `executor_pool.credential_revoke` — `pool_id`, `credential_id`
@@ -400,6 +402,7 @@ Payload keys:
 - `executor_pool.update` — `pool_id`, `name`, `changed`, `labels`, `capabilities`, `max_runners`, `owner`, `workdir_root`
 
 - `executor_pool.controller_status` — Recorded when the report changes, not every time the controller repeats it. The runs waiting in the pool's queue say the same while the report is under ten minutes old.
+- `executor_pool.cordon` — Recorded only when the pool's state changes: cordoning a cordoned pool records nothing.
 - `executor_pool.credential_mint` — The credential itself is shown once to the administrator and never recorded; the row names its public ID.
 - `executor_pool.revoke` — `runners` lists the executor IDs whose credentials were revoked; each is also recorded as executor_pool.runner_retire when its hub member ends its connection.
 - `executor_pool.run_queue` — `action` is queued, assigned, dispatched, cancelled or failed.

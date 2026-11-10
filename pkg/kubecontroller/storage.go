@@ -1107,7 +1107,9 @@ type storageReports struct {
 type storageReportState struct {
 	healthy     bool
 	reason, msg string
-	at          time.Time
+	// usage is the volume count last sent (Task 20486), nil for none.
+	usage *executorpool.StorageUsage
+	at    time.Time
 	// unsupported is a hub that answered 404 — older than the report, or an
 	// ingress mid-rollout — asked again after storageReportRefresh.
 	unsupported bool
@@ -1129,7 +1131,7 @@ func newStorageReports() *storageReports {
 // did, or trouble was last reported longer ago than storageReportRefresh. It
 // returns when to try again after a report that did not get through, 0 when
 // nothing needs trying.
-func (c *Controller) reportStorage(ctx context.Context, key string, f *feed, reason, msg string, now time.Time) time.Duration {
+func (c *Controller) reportStorage(ctx context.Context, key string, f *feed, reason, msg string, usage *executorpool.StorageUsage, now time.Time) time.Duration {
 	healthy := reason == ""
 	c.reports.mu.Lock()
 	last, seen := c.reports.last[key]
@@ -1144,6 +1146,10 @@ func (c *Controller) reportStorage(ctx context.Context, key string, f *feed, rea
 		due = true
 	case last.healthy != healthy || last.reason != reason || last.msg != msg:
 		due = true
+	case !sameUsage(last.usage, usage):
+		// The volumes changed: the hub's pool list shows how many there are
+		// and how full (Task 20486).
+		due = true
 	case !healthy && now.Sub(last.at) >= storageReportRefresh:
 		due = true
 	}
@@ -1151,7 +1157,7 @@ func (c *Controller) reportStorage(ctx context.Context, key string, f *feed, rea
 	if !due {
 		return 0
 	}
-	err := f.client.ReportStatus(ctx, healthy, reason, trimMessage(msg))
+	err := f.client.ReportStatus(ctx, healthy, reason, trimMessage(msg), usage)
 	var he *HubError
 	c.reports.mu.Lock()
 	defer c.reports.mu.Unlock()
@@ -1165,8 +1171,26 @@ func (c *Controller) reportStorage(ctx context.Context, key string, f *feed, rea
 		c.logf("tell the hub about %s's storage: %v", key, err)
 		return feedBackoffBase * 5
 	}
-	c.reports.last[key] = storageReportState{healthy: healthy, reason: reason, msg: msg, at: now}
+	c.reports.last[key] = storageReportState{healthy: healthy, reason: reason, msg: msg, usage: usage, at: now}
 	return 0
+}
+
+// sameUsage reports whether two volume counts say the same.
+func sameUsage(a, b *executorpool.StorageUsage) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// storageUsage is what the hub is told of a pool's volumes: nil for a pool
+// that keeps none.
+func storageUsage(s *StorageStatus) *executorpool.StorageUsage {
+	if s == nil {
+		return nil
+	}
+	return &executorpool.StorageUsage{Claims: s.Claims, Bound: s.Bound, Pending: s.Pending, InUse: s.InUse,
+		Full: s.Full, Retained: s.Retained, BytesUsed: s.BytesUsed, BytesCapacity: s.BytesCapacity}
 }
 
 // forget drops what was reported for a pool that is gone.

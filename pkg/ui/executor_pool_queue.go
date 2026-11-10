@@ -185,6 +185,14 @@ func poolRunRequirements(workDir string) (executor.Requirements, error) {
 // queuedReason says why a queued run waits, for its project's readers.
 func queuedReason(pool executorpool.Pool, snap executorpool.Snapshot) string {
 	switch {
+	case pool.Cordoned():
+		// Held by an administrator (Task 20486): nothing will start it until
+		// the pool is uncordoned, whatever its runners are doing.
+		why := ""
+		if pool.CordonReason != "" {
+			why = ": " + pool.CordonReason
+		}
+		return fmt.Sprintf("waiting for pool capacity: executor pool %s is cordoned by an administrator%s", pool.Name, why)
 	case snap.Idle > 0:
 		return fmt.Sprintf("waiting for pool capacity: handing it to an idle runner of executor pool %s", pool.Name)
 	case snap.Pending > 0 && snap.Pending >= snap.Demand+1:
@@ -299,6 +307,10 @@ func (s *Server) startQueuedPoolRun(q statedb.PoolQueueRow, ex executor.Executor
 		return
 	}
 
+	// The tasks this run starts record the runner's id as their executor; the
+	// project keeps which pool and runner that is (Task 20486).
+	s.recordPoolPlacement(store, workDir, q.PoolID, ex.ID())
+
 	// Acting for the person who started it, as recorded when it was queued:
 	// on their grants, and refused rather than run on anyone else's.
 	acct := s.accountForStarter(workDir, q.Starter)
@@ -366,6 +378,37 @@ func (s *Server) startQueuedPoolRun(q statedb.PoolQueueRow, ex executor.Executor
 		return
 	}
 	go s.consumeRunOutput(workDir, started, handle.ID, lines, slot.giveBack)
+}
+
+// recordPoolPlacement writes into the project's own database which pool and
+// which of its runners executorID is (Task 20486, statedb
+// executor_pool_placements.go): every task the run starts records the runner's
+// id as its executor, and the task readers name the pool and the runner from
+// this row long after the control plane has pruned the retired runner.
+// Bookkeeping: a run whose placement could not be written runs all the same,
+// and its tasks show the runner's id.
+func (s *Server) recordPoolPlacement(store *executorpool.Store, workDir, poolID, executorID string) {
+	if !hasProjectDB(workDir) {
+		return
+	}
+	pool, err := store.Get(poolID)
+	if err != nil {
+		return
+	}
+	runner, err := store.RunnerByExecutor(executorID)
+	if err != nil {
+		return
+	}
+	db, err := statedb.Open(state.DBPath(workDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ui: record the pool placement of %s's run: %v\n", workDir, err)
+		return
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.RecordPoolPlacement(statedb.PoolPlacementRow{ExecutorID: executorID, PoolID: pool.ID,
+		PoolName: pool.Name, RunnerName: runner.Name}); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: record the pool placement of %s's run: %v\n", workDir, err)
+	}
 }
 
 // poolRunFault reports whether a queued run's start failed for a reason that

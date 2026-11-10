@@ -144,6 +144,9 @@ func (s *Server) authenticatePoolController(w http.ResponseWriter, r *http.Reque
 		unauthorized(reason, err)
 		return nil, executorpool.Pool{}, executorpool.Credential{}, "", false
 	}
+	// What the controller says it is: its build and the protocol it speaks,
+	// which the pool list and hub doctor compare with this hub's (Task 20486).
+	s.noteControllerIdentity(store, r, cred)
 	return store, pool, cred, token, true
 }
 
@@ -368,6 +371,16 @@ func (s *Server) handlePoolControllerRunners(w http.ResponseWriter, r *http.Requ
 	case errors.Is(err, executorpool.ErrRevoked):
 		hubmetrics.ExecutorPoolMintRefusals.Inc(hubmetrics.ExecutorPoolRefusalRevoked)
 		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized", "code": "pool_credential_revoked"})
+		return
+	case errors.Is(err, executorpool.ErrCordoned):
+		// Held by an administrator (Task 20486). A 409, which a controller
+		// reads as no room: it starts nothing and asks again when its feed
+		// changes, which the uncordon makes it.
+		hubmetrics.ExecutorPoolMintRefusals.Inc(hubmetrics.ExecutorPoolRefusalCordoned)
+		writeJSONStatus(w, http.StatusConflict, map[string]any{
+			"error": fmt.Sprintf("executor pool %s is cordoned: it starts no runner until it is uncordoned", pool.Name),
+			"code":  "executor_pool_cordoned",
+		})
 		return
 	case errors.Is(err, executorpool.ErrInvalidSpec):
 		hubmetrics.ExecutorPoolMintRefusals.Inc(hubmetrics.ExecutorPoolRefusalInvalidRequest)

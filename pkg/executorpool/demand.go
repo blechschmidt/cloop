@@ -253,6 +253,14 @@ type Snapshot struct {
 	Name       string `json:"name"`
 	Revoked    bool   `json:"revoked"`
 	MaxRunners int    `json:"max_runners"`
+	// Cordoned says an administrator holds the pool (Task 20486): Demand,
+	// Wanted and Spare are then zero, and Waiting says how many runs wait for
+	// it all the same. A controller keeps busy runners and starts none.
+	Cordoned bool `json:"cordoned,omitempty"`
+	// Waiting counts the queued runs the pool could take even while it is
+	// cordoned, for the people looking at it; Demand is what its controller
+	// should meet.
+	Waiting int `json:"waiting"`
 	// Demand is how many queued runs this pool could take.
 	Demand int `json:"demand"`
 	// Busy runners hold a run; Idle ones enrolled and wait for one; Pending
@@ -376,12 +384,20 @@ func ComputeSnapshot(pool Pool, runners []statedb.ExecutorPoolRunnerRow, queue [
 		snap.RunnerStates = append(snap.RunnerStates, rs)
 	}
 	snap.Runners = snap.Busy + snap.Idle + snap.Pending
-	if !snap.Revoked {
-		snap.Spare = max(0, pool.MaxRunners-snap.Runners)
-		snap.Wanted = min(snap.Spare, max(0, snap.Demand-snap.Idle-snap.Pending))
-	} else {
+	snap.Waiting = snap.Demand
+	switch {
+	case snap.Revoked:
+		snap.Demand, snap.Waiting = 0, 0
+		snap.QueuedProjects = []ProjectDemand{}
+	case pool.Cordoned():
+		// Held: the controller is told of no demand and no room, so it starts
+		// nothing and lets idle runners go; the runs still wait.
+		snap.Cordoned = true
 		snap.Demand = 0
 		snap.QueuedProjects = []ProjectDemand{}
+	default:
+		snap.Spare = max(0, pool.MaxRunners-snap.Runners)
+		snap.Wanted = min(snap.Spare, max(0, snap.Demand-snap.Idle-snap.Pending))
 	}
 	snap.Revision = snap.revision(pool)
 	return snap, verdicts
@@ -399,8 +415,8 @@ func (s Snapshot) revision(pool Pool) string {
 	for _, d := range s.QueuedProjects {
 		states.WriteString(d.Tenant + "+" + fmt.Sprint(d.Queued) + ";")
 	}
-	key := fmt.Sprintf("%s|%t|%d|%d|%d|%d|%d|%d|%s|%s", s.PoolID, s.Revoked, s.MaxRunners, s.Demand, s.Busy, s.Idle,
-		s.Pending, s.Wanted, spec, states.String())
+	key := fmt.Sprintf("%s|%t|%t|%d|%d|%d|%d|%d|%d|%d|%s|%s", s.PoolID, s.Revoked, s.Cordoned, s.MaxRunners, s.Demand,
+		s.Waiting, s.Busy, s.Idle, s.Pending, s.Wanted, spec, states.String())
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:8])
 }

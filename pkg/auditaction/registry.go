@@ -994,6 +994,16 @@ var registry = []Entry{
 		Note: "Recorded when the report changes, not every time the controller repeats it. The runs waiting in the " +
 			"pool's queue say the same while the report is under ten minutes old.",
 	},
+	{
+		Action:    ActionExecutorPoolCordon,
+		Home:      HomeControlPlane,
+		Entity:    "executor_pool",
+		Trigger:   "An administrator cordons a pool — its runners are handed no queued run and its controller is minted no runner, while busy runners finish — or uncordons it.",
+		Payload:   []string{"pool_id", "name", "cordoned", "reason"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "Recorded only when the pool's state changes: cordoning a cordoned pool records nothing.",
+	},
 
 	// ── workspace ──────────────────────────────────────────────────────────
 	{

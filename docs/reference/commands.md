@@ -2427,6 +2427,48 @@ error names it, and the others were still removed.
 
 ---
 
+## Executor pools
+
+An executor pool is a set of runners that the executor controller starts on a
+Kubernetes cluster as the pool's queued runs need them. These commands are the
+Executors tab's pool section, made from a terminal: each is one of the hub's own
+calls (`/api/executor-pools`), made with the session `cloop login` stored or
+`--token`, and needs `executor.manage`. On a hub with single sign-on, every
+change also needs a recent sign-in; run `cloop login` again when asked.
+
+### `cloop executor pool`
+
+```text
+cloop executor pool create <name> --max-runners N [--label k=v]... [--audience user:<email>|group:<name>|role:<role>]...
+    [--harness <name>]... [--owner <email>] [--namespace <ns>] [--release <name>] [--min-runners N]
+    [--persistence [--size 20Gi] [--storage-class <class>] [--reclaim-policy Delete|Retain]]
+cloop executor pool list
+cloop executor pool show <pool>
+cloop executor pool update <pool> --max-runners N [--namespace <ns>] [--release <name>]
+cloop executor pool cordon <pool> [--reason <text>]
+cloop executor pool uncordon <pool>
+cloop executor pool rotate-credential <pool> [--finish [--force]] [--namespace <ns>] [--release <name>]
+cloop executor pool revoke <pool> [--yes]
+```
+
+All take `--hub`, `--token` and `--json`. A pool is named by its name or its id.
+
+| Command | What it does |
+| --- | --- |
+| `create` | Creates the pool, admits the `--audience` principals to its access list and mints its first controller credential, in one request. It prints the credential once, inside the commands that install the controller: a namespace held to the restricted Pod Security profile, a Secret holding the credential, and `helm install` of this hub's own copy of the chart (`/charts/cloop-executor-controller.tgz`) with the hub's URL and pin filled in. A hub served over plain HTTP prints the credential and says why there is no command. |
+| `list` | Every live pool: the runs waiting, its busy, idle and starting runners against its maximum, its volumes, the build and protocol its controller named and when it last made contact, and how many problems the hub finds. The problems follow the table. |
+| `show` | One pool in full: its runners, its queue, its controller credentials with their last use, and each problem with how to fix it. For a controller behind this hub it prints the `helm upgrade` that moves a default install forward. |
+| `update` | Changes how many runners the pool may have at once on the hub, keeping the rest of its definition. The controller stops at the lower of this and its ExecutorPool's `spec.maxRunners`, so the command also prints the `helm upgrade` that changes the cluster side of a default install. |
+| `cordon` / `uncordon` | A cordoned pool's runners are handed no queued run and its controller is told no demand, so it starts nothing and lets idle runners go; busy runners finish. The runs waiting for it say why. |
+| `rotate-credential` | Mints a new controller credential and prints the command that puts it in the controller's Secret; the controller reads the Secret again within five minutes. `--finish` then revokes every older credential, but only once the newest has been used more recently than any older one, and while no busy runner was started with one of them (`--force` skips both checks). Revoking a credential retires the runners it started. |
+| `revoke` | Revokes the pool: its controller credentials, unredeemed runner tokens and runners go with it, the leases of their runs are closed, and the runs waiting for it are cancelled. Asks first unless `--yes`. |
+
+The problems `list` and `show` report are the ones `cloop hub doctor` reports
+under `executors.pools`: runs waiting with no controller in contact, runs waiting
+for ten minutes while every runner the pool may have is busy, volumes stuck
+Pending, runs waiting with room for runners that the controller does not start,
+and a controller that speaks an older pool-controller protocol than the hub.
+
 ## Device forwarders
 
 A device forwarder carries one on-premises USB device or network segment to the

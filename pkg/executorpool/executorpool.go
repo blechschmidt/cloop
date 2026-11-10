@@ -81,6 +81,9 @@ var (
 	ErrCredentialInvalid = errors.New("executorpool: invalid pool credential")
 	// ErrCredentialRevoked: a controller credential that was revoked.
 	ErrCredentialRevoked = errors.New("executorpool: pool credential revoked")
+	// ErrCordoned: a runner mint for a pool an administrator holds (Task
+	// 20486).
+	ErrCordoned = statedb.ErrExecutorPoolCordoned
 )
 
 // namePattern is what a pool's name may be: what a Kubernetes object may be
@@ -218,10 +221,20 @@ type Pool struct {
 	UpdatedBy    string            `json:"updated_by,omitempty"`
 	RevokedAt    time.Time         `json:"revoked_at,omitempty"`
 	RevokedBy    string            `json:"revoked_by,omitempty"`
+	// CordonedAt, CordonedBy and CordonReason are set while an administrator
+	// holds the pool (Task 20486): its runners are handed no queued run, its
+	// controller is told no demand and minted no runner, and runners already
+	// busy finish their runs.
+	CordonedAt   time.Time `json:"cordoned_at,omitzero"`
+	CordonedBy   string    `json:"cordoned_by,omitempty"`
+	CordonReason string    `json:"cordon_reason,omitempty"`
 }
 
 // Revoked reports whether the pool was revoked.
 func (p Pool) Revoked() bool { return !p.RevokedAt.IsZero() }
+
+// Cordoned reports whether an administrator holds the pool.
+func (p Pool) Cordoned() bool { return !p.CordonedAt.IsZero() }
 
 // Binding is the project binding value that names this pool.
 func (p Pool) Binding() string { return executor.PoolBinding(p.ID) }
@@ -238,7 +251,8 @@ func (p Pool) Spec() Spec {
 func fromRow(r statedb.ExecutorPoolRow) Pool {
 	p := Pool{ID: r.ID, Name: r.Name, Labels: r.Labels, MaxRunners: r.MaxRunners, Owner: r.Owner,
 		WorkDirRoot: r.WorkDirRoot, CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy, UpdatedAt: r.UpdatedAt,
-		UpdatedBy: r.UpdatedBy, RevokedAt: r.RevokedAt, RevokedBy: r.RevokedBy}
+		UpdatedBy: r.UpdatedBy, RevokedAt: r.RevokedAt, RevokedBy: r.RevokedBy, CordonedAt: r.CordonedAt,
+		CordonedBy: r.CordonedBy, CordonReason: r.CordonReason}
 	if strings.TrimSpace(r.Capabilities) != "" {
 		_ = json.Unmarshal([]byte(r.Capabilities), &p.Capabilities)
 	}
@@ -254,7 +268,7 @@ func toRow(p Pool) (statedb.ExecutorPoolRow, error) {
 	return statedb.ExecutorPoolRow{ID: p.ID, Name: p.Name, Labels: p.Labels, Capabilities: string(caps),
 		MaxRunners: p.MaxRunners, Owner: p.Owner, WorkDirRoot: p.WorkDirRoot, CreatedAt: p.CreatedAt,
 		CreatedBy: p.CreatedBy, UpdatedAt: p.UpdatedAt, UpdatedBy: p.UpdatedBy, RevokedAt: p.RevokedAt,
-		RevokedBy: p.RevokedBy}, nil
+		RevokedBy: p.RevokedBy, CordonedAt: p.CordonedAt, CordonedBy: p.CordonedBy, CordonReason: p.CordonReason}, nil
 }
 
 // b64 renders random bytes without padding, so IDs and secrets are one

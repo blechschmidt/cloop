@@ -317,9 +317,12 @@ var runFields = []string{
 // ChainInput is rebuilt from the chained predecessor's output at dispatch,
 // Quarantine is read from task_quarantine, which no save writes (Task 20391),
 // Stop is never stored at all — it rides one save into its task.finish
-// row (Task 20405) — and AttachmentCount is counted from task_attachments,
-// which no save writes (Task 20428).
-var derivedFields = []string{"ID", "RunID", "ChainInput", "Quarantine", "Stop", "AttachmentCount"}
+// row (Task 20405) — AttachmentCount is counted from task_attachments,
+// which no save writes (Task 20428), and ExecutorPool and ExecutorRunner are
+// joined in from executor_pool_placements, which only the hub's hand-over to
+// a pool runner writes (Task 20486).
+var derivedFields = []string{"ID", "RunID", "ChainInput", "Quarantine", "Stop", "AttachmentCount",
+	"ExecutorPool", "ExecutorRunner"}
 
 // TestEveryTaskFieldIsClassified: a new pm.Task field has to be put on one
 // side on purpose. Left off both lists, it would be written back from a

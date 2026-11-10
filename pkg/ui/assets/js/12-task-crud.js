@@ -283,15 +283,16 @@ function _tdOnHost(t) {
 // _tdExecutorChip renders where a task ran, or nothing when that was never
 // recorded. An unattributed task says so rather than defaulting to a
 // reassuring value.
+// A pool's runner (Task 20486) is named by its pool and its own name: its
+// executor id is an ephemeral agent's, which says nothing to anyone.
 function _tdExecutorChip(t) {
   if (!t || (!t.executor_id && !t.executor_kind)) return '';
-  const onHost = _tdOnHost(t);
-  const label = t.executor_id || t.executor_kind;
+  const onHost = _tdOnHost(t), pool = t.executor_pool;
   const title = onHost
     ? 'This task ran as a process on the hub host, sharing its filesystem and network — no sandbox boundary.'
     : 'Executor this task was placed on when it started.';
   return '<span class="td-chip'+(onHost ? ' host' : '')+'" title="'+esc(title)+'">'+
-         (onHost ? '⚠ Host' : 'Executor')+'<strong>'+esc(label)+'</strong></span>';
+         (onHost ? '⚠ Host' : pool ? 'Pool' : 'Executor')+'<strong>'+esc(pool ? pool+' / '+t.executor_runner : t.executor_id || t.executor_kind)+'</strong></span>';
 }
 
 function _tdVerdictChip(v) {

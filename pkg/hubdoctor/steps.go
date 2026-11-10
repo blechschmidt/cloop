@@ -123,6 +123,10 @@ func steps(dir string, cfg *config.Config, opts Options, wal walSample, rep *Rep
 		{"executors.isolation", "Executor isolation evidence", func(_ context.Context, add addFn) {
 			checkIsolationEvidence(dir, add)
 		}},
+		// Whether each executor pool's runs can be started: its controllers'
+		// contact, capacity, runner volumes and protocol (Task 20486). Reads
+		// the pool tables only.
+		{"executors.pools", "Executor pools", func(_ context.Context, add addFn) { checkExecutorPools(dir, add) }},
 		// After the executor step too: `cloop hub doctor` verifies through the
 		// drivers it reconciled. cloop's own images against the workflow that
 		// publishes them, and whether cosign is here to check them (Task

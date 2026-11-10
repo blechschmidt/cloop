@@ -306,7 +306,14 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 			"the hub at %s does not record what a runner's volume holds; every runner starts on a wiped volume "+
 				"until it is upgraded", pool.Spec.HubURL))
 	}
-	in := demandInput{minRunners: pool.Spec.MinRunners, maxRunners: maxRunners, busy: st.busy, waiting: waiting,
+	minRunners := pool.Spec.MinRunners
+	if snap != nil && snap.Cordoned {
+		// The hub's pool is cordoned (Task 20486): no idle target, and no
+		// demand on the feed, so busy runners finish and idle ones are retired
+		// after scaleDownDelay; nothing is started until it is uncordoned.
+		minRunners = 0
+	}
+	in := demandInput{minRunners: minRunners, maxRunners: maxRunners, busy: st.busy, waiting: waiting,
 		demand: st.queued}
 	if affinity {
 		in.queued = snap.QueuedProjects
@@ -415,7 +422,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 				reason, msg = ReasonStorageUnavailable, blockedMsg
 			}
 		}
-		res.sooner(c.reportStorage(ctx, key, f, reason, msg, now))
+		res.sooner(c.reportStorage(ctx, key, f, reason, msg, storageUsage(st.storage), now))
 		if reason != "" {
 			res.sooner(storageReportRefresh)
 		}

@@ -135,6 +135,8 @@ func (s *Server) poolChanged(poolID string) {
 	if n := s.clusterNode(); n != nil && poolID != "" {
 		n.Publish(busTopicPool, poolID, poolBusNotice{})
 	}
+	// And the dashboards watching it scale, on every member (Task 20486).
+	s.notePoolDashboard(poolID)
 }
 
 // poolChangedLocal wakes this member's feeds and dispatcher for poolID.

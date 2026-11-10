@@ -21,8 +21,10 @@ import (
 // json:"-" and stored nowhere: the hub sets it for the one save that records
 // a stopped execution (Task 20405). AttachmentCount is counted by the
 // database that loads the task: a device's counts only what its own run
-// attached (Task 20428).
-var seedDerived = []string{"ChainInput", "Stop", "AttachmentCount"}
+// attached (Task 20428). ExecutorPool and ExecutorRunner are joined in by the
+// database that loads the task from the pool placements the hub records as
+// it hands a run to a pool's runner (Task 20486); a device records none.
+var seedDerived = []string{"ChainInput", "Stop", "AttachmentCount", "ExecutorPool", "ExecutorRunner"}
 
 // TestSeedCarriesEveryTaskField: a task arrives on the device as the hub holds
 // it, every field — an assignment, a sprint, a branch, a retry budget — and

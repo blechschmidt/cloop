@@ -681,3 +681,21 @@ func TestTokenTotalsNeitherOverflowNorWrap(t *testing.T) {
 		t.Errorf("addBounded(-10, 4) = %d, want -6", got)
 	}
 }
+
+// A task that ran on a pool's runner carries its pool and runner from the hub
+// (Task 20486), joined in from placements a device's database does not have:
+// reading it back there without them is no change, and the run does not
+// report the task.
+func TestAPoolPlacementIsNotAChange(t *testing.T) {
+	seeded := &pm.Task{ID: 1, Title: "trained", Status: pm.TaskDone, ExecutorID: "agent-1",
+		ExecutorPool: "gpu", ExecutorRunner: "gpu-x1y2"}
+	readBack := &pm.Task{ID: 1, Title: "trained", Status: pm.TaskDone, ExecutorID: "agent-1"}
+	same := func(s string) string { return s }
+	if got := diffTasks(&pm.Plan{Tasks: []*pm.Task{seeded}}, &pm.Plan{Tasks: []*pm.Task{readBack}}, same); len(got) != 0 {
+		t.Fatalf("a task that only lost its pool placement was reported changed: %+v", got)
+	}
+	readBack.Status = pm.TaskFailed
+	if got := diffTasks(&pm.Plan{Tasks: []*pm.Task{seeded}}, &pm.Plan{Tasks: []*pm.Task{readBack}}, same); len(got) != 1 {
+		t.Fatalf("a real change was not reported: %+v", got)
+	}
+}

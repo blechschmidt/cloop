@@ -220,6 +220,32 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A Kubernetes executor pool is added in one step, and the dashboard shows
+  it scale.** The Executors tab's new **+ Add Kubernetes pool** dialog, and
+  the new `cloop executor pool create`, create the pool, its access list and a
+  controller credential in one request (`POST /api/executor-pools` with
+  `"credential": true`), and show the credential once, inside the commands that
+  install the controller: a namespace held to the restricted Pod Security
+  profile, a Secret holding the credential, and `helm install` of the hub's own
+  copy of the chart, which it now serves at
+  `/charts/cloop-executor-controller.tgz`, with the hub's URL, its pin and the
+  image tag of its build filled in. Each pool card shows the runs waiting, its
+  busy, idle and starting runners and their names, its volumes, the build its
+  controller names and when it last made contact, and lets an administrator
+  cordon the pool (its runners are handed no run and its controller starts none
+  while busy ones finish; new `POST /api/executor-pools/{id}/cordon` and
+  `/uncordon`, audited as `executor_pool.cordon`) or revoke it. A project's
+  executor picker offers pools, and a task run on a pool's runner names the
+  pool and the runner in its details. The controller now names its build and
+  the pool-controller protocol it speaks on every request and reports its
+  volume counts. `cloop hub doctor` and the Hub health panel report a pool with
+  runs waiting and no controller in contact, one stuck at its `max_runners`,
+  volumes stuck Pending and a controller behind the hub's protocol
+  (`executors.pools`), and one whose runs wait with room the controller does
+  not use. The CLI adds `cloop executor pool list`, `show`, `update`,
+  `cordon`, `uncordon`, `revoke` and a two-step `rotate-credential`, all with
+  `--json` (Task 20486).
+
 - **A Helm chart installs the executor controller with a Role that holds only
   what it calls.** `deploy/helm/cloop-executor-controller` ships the
   ExecutorPool CRD in `crds/` and runs `cloop executor controller` as two

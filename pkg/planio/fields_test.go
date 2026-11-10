@@ -36,6 +36,8 @@ var notInterchanged = map[string]string{
 	"ExecutorID":       "where the exporting hub ran the task",
 	"ExecutorKind":     "where the exporting hub ran the task",
 	"Isolation":        "where the exporting hub ran the task",
+	"ExecutorPool":     "the exporting hub's executor pool its run was handed to (Task 20486)",
+	"ExecutorRunner":   "the exporting hub's pool runner its run was handed to (Task 20486)",
 	"RunID":            "an execution of the exporting hub",
 	"Background":       "a record of the exporting project's run",
 	"Abort":            "a record of the exporting project's run",

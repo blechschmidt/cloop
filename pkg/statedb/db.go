@@ -1066,16 +1066,20 @@ var taskColumns = []string{
 	"kind",
 }
 
-// taskSelect reads every task column, then the task's run id, quarantine and
-// attachment count. None is a plan_tasks column: the run id lives in
-// task_runs, which SaveState's lifecycle diff maintains (Task 20282), the
-// quarantine in task_quarantine, which only a failover and an explicit reset
-// write (Task 20391, task_quarantine.go), and the count is of the task's rows
-// in task_attachments (Task 20428, task_attachments.go).
+// taskSelect reads every task column, then the task's run id, quarantine,
+// attachment count and pool placement. None is a plan_tasks column: the run
+// id lives in task_runs, which SaveState's lifecycle diff maintains (Task
+// 20282), the quarantine in task_quarantine, which only a failover and an
+// explicit reset write (Task 20391, task_quarantine.go), the count is of the
+// task's rows in task_attachments (Task 20428, task_attachments.go), and the
+// placement names the pool and runner behind the task's executor id, which the
+// hub records as it hands a run to a pool's runner (Task 20486,
+// executor_pool_placements.go).
 var taskSelect = `SELECT ` + strings.Join(taskColumns, ", ") + `,
 		COALESCE((SELECT run_id FROM task_runs WHERE task_runs.task_id = plan_tasks.id), ''),
 		` + quarantineSelect + `,
-		` + attachmentCountSelect + `
+		` + attachmentCountSelect + `,
+		` + placementSelect + `
 	FROM plan_tasks`
 
 // upsertTaskSQL writes every column of taskColumns, updating all but the id
@@ -1138,7 +1142,7 @@ type taskScanner struct {
 	lists                                       taskListColumns
 	bgJSON, abortJSON, reviewJSON               string
 	reqCheckJSON, quarantineJSON                string
-	citationsJSON                               string
+	citationsJSON, placement                    string
 	startedAt, completedAt, deadline, nextRunAt sql.NullString
 	reqApproval, approved, pinned               int
 	dest                                        []any
@@ -1166,7 +1170,7 @@ func newTaskScanner() *taskScanner {
 		&sc.reqCheckJSON,
 		&sc.citationsJSON,
 		&sc.kind,
-		&t.RunID, &sc.quarantineJSON, &t.AttachmentCount,
+		&t.RunID, &sc.quarantineJSON, &t.AttachmentCount, &sc.placement,
 	}
 	return sc
 }
@@ -1190,6 +1194,7 @@ func (sc *taskScanner) scan(rows rowScanner) (*pm.Task, error) {
 	}
 	t.Background = decodeBackground(sc.bgJSON)
 	t.Quarantine = decodeQuarantine(sc.quarantineJSON)
+	t.ExecutorPool, t.ExecutorRunner = splitPlacement(sc.placement)
 	t.Abort = decodeAbort(sc.abortJSON)
 	t.Review = decodeReview(sc.reviewJSON)
 	t.RequirementsCheck = decodeRequirementsCheck(sc.reqCheckJSON)

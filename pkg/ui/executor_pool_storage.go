@@ -143,6 +143,9 @@ type poolStatusRequest struct {
 	Reason string `json:"reason,omitempty"`
 	// Message says it in a sentence.
 	Message string `json:"message,omitempty"`
+	// Storage is the controller's count of the pool's runner volumes (Task
+	// 20486), for the dashboard; absent for a pool without them.
+	Storage *executorpool.StorageUsage `json:"storage,omitempty"`
 }
 
 // handlePoolControllerStatus serves POST /api/pool-controller/status.
@@ -169,6 +172,10 @@ func (s *Server) handlePoolControllerStatus(w http.ResponseWriter, r *http.Reque
 	if req.Healthy {
 		reason, message = "", ""
 	}
+	if req.Storage != nil && !req.Storage.Valid() {
+		jsonErr(w, "storage holds counts no controller could make", http.StatusBadRequest)
+		return
+	}
 	prev, _ := store.DB().PoolControllerStatuses(pool.ID)
 	for _, p := range prev {
 		if p.CredentialID == cred.ID && time.Since(p.ReportedAt) < poolReportMinInterval {
@@ -178,20 +185,25 @@ func (s *Server) handlePoolControllerStatus(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	row := statedb.PoolControllerStatusRow{PoolID: pool.ID, CredentialID: cred.ID, Healthy: req.Healthy,
-		Reason: reason, Message: message, ReportedAt: time.Now()}
+		Reason: reason, Message: message, ReportedAt: time.Now(), Storage: executorpool.EncodeStorage(req.Storage)}
 	if err := store.DB().PutPoolControllerStatus(row); err != nil {
 		writePoolErr(w, err)
 		return
 	}
-	changed := true
+	changed, storageChanged := true, true
 	for _, p := range prev {
 		if p.CredentialID == cred.ID {
 			changed = p.Healthy != row.Healthy || p.Reason != row.Reason || p.Message != row.Message
+			storageChanged = p.Storage != row.Storage
 		}
 	}
 	if changed {
 		store.AuditControllerStatus(pool.ID, cred.ID, row.Healthy, row.Reason, row.Message)
 		s.refreshQueuedReasons(store, pool)
+	}
+	if changed || storageChanged {
+		// The pool list shows both (Task 20486).
+		s.notePoolDashboard(pool.ID)
 	}
 	jsonOK(w, map[string]any{"ok": true, "pool_id": pool.ID, "healthy": row.Healthy})
 }
@@ -238,6 +250,9 @@ func (s *Server) poolControllerTrouble(store *executorpool.Store, poolID string)
 // queuedReasonFor is queuedReason with what the pool's controller reports.
 func (s *Server) queuedReasonFor(store *executorpool.Store, pool executorpool.Pool, snap executorpool.Snapshot) string {
 	reason := queuedReason(pool, snap)
+	if pool.Cordoned() {
+		return reason // the cordon is what keeps it waiting, whatever the controller says
+	}
 	if trouble, ok := s.poolControllerTrouble(store, pool.ID); ok {
 		reason = fmt.Sprintf("waiting for pool capacity: executor pool %s's controller cannot start runners: %s",
 			pool.Name, trouble)

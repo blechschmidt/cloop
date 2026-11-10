@@ -29,6 +29,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -45,6 +46,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/executorpool"
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/hubdoctor"
 	"github.com/blechschmidt/cloop/pkg/kb"
@@ -142,6 +144,8 @@ type layoutFixture struct {
 	Assistant        []map[string]string `json:"assistant"`
 	DraftTitle       string              `json:"draftTitle"`
 	Source           string              `json:"source"`
+	// PoolName is the executor pool the Executors tab lists (Task 20486).
+	PoolName string `json:"poolName"`
 }
 
 // The fixture's long content. Unbroken on purpose: CSS offers a line break at
@@ -425,6 +429,7 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		"source": "dashboard", "session": "ls0000000000000000",
 		"events": []map[string]any{{"kind": "error", "seq": 1, "message": s.URL, "view": s.TaskTitle}}}))
 	fileLayoutRequest(t, primary, s)
+	seedLayoutPool(t, ts, s)
 
 	return ts, srv, layoutFixture{
 		Project: s.Project, HiddenProject: s.HiddenProject, Goal: goal, Instructions: instructions,
@@ -435,11 +440,63 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		Transcript: layoutLong("also cover the case where", s.Device, "drops off mid-dispatch, see",
 			s.URL), TranscriptMarker: s.Device,
 		PromptMarker: s.PromptMarker, ReplayOutput: s.ReplayOutput, DraftTitle: s.DraftTitle, Source: s.Source,
+		PoolName: layoutPool,
 		Assistant: []map[string]string{
 			{"role": "user", "content": layoutLong("what blocks", s.TaskTitle+"?")},
 			{"role": "assistant", "content": layoutLong("Nothing — it finished; the test is at", s.URL)},
 		},
 	}
+}
+
+// layoutPool is the executor pool's name: as long as a pool's name may be,
+// and only what one may hold.
+const layoutPool = "observability-ingest-pipeline-gpu-a100-rack42-edge-runners-eu"
+
+// seedLayoutPool creates an executor pool the way the dialog does (Task
+// 20486), with labels and a cordon reason carrying the fixture's content, and
+// has its controller name an old build, ask for runners and report volumes
+// stuck Pending — so its card shows its runners, its volumes and two problems.
+func seedLayoutPool(t *testing.T, ts *httptest.Server, s sweepStrings) {
+	t.Helper()
+	call := func(method, path, bearer, protocol string, body any) map[string]any {
+		t.Helper()
+		req, err := http.NewRequest(method, ts.URL+path, strings.NewReader(jsonBody(t, body)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+			req.Header.Set("User-Agent", "cloop-executor-controller/dev+g4f8b3c2a1d9e.dirty")
+			req.Header.Set(executorpool.ControllerProtocolHeader, protocol)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 300 {
+			t.Fatalf("%s %s = %d: %s", method, path, resp.StatusCode, raw)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(raw, &out)
+		return out
+	}
+	created := call(http.MethodPost, "/api/executor-pools", "", "", map[string]any{
+		"name": layoutPool, "max_runners": 6, "credential": true,
+		"labels":       map[string]string{"region": "eu-central-observability-ingest", "gpu": "a100-80gb-sxm4"},
+		"capabilities": map[string]any{"harnesses": []string{"claude", "git"}},
+		"audience":     []map[string]string{{"kind": "user", "value": s.Email}},
+	})
+	id := created["pool"].(map[string]any)["id"].(string)
+	token := created["token"].(string)
+	call(http.MethodPost, poolRunnersPath, token, "3", map[string]any{"count": 3})
+	call(http.MethodPost, poolStatusPath, token, "3", map[string]any{"healthy": false, "reason": "StoragePending",
+		"message": layoutLong("claim", layoutPool+"-storage-0", "is Pending: storage class", s.TaskTitle, "not found"),
+		"storage": map[string]any{"claims": 3, "bound": 2, "pending": 1, "in_use": 2, "bytes_used": 12 << 30,
+			"bytes_capacity": 120 << 30}})
+	call(http.MethodPost, "/api/executor-pools/"+id+"/cordon", "", "", map[string]any{"reason": s.TaskTitle})
 }
 
 // seedLayoutForwarder enrolls a device forwarder with a long name and binds it

@@ -279,12 +279,19 @@ says so and exits non-zero.`,
 // holds no session for, and never instead of one made for the hub — so a
 // token exported for one hub does not travel to another named with --hub.
 func remoteClient() (*hubclient.Client, error) {
+	return hubClientFor(remoteHub, remoteToken)
+}
+
+// hubClientFor is remoteClient for the given --hub and --token values, for
+// the commands outside `cloop remote` that act on a hub the same way (`cloop
+// executor pool`, Task 20486).
+func hubClientFor(hubFlag, tokenFlag string) (*hubclient.Client, error) {
 	envHub := strings.TrimSpace(os.Getenv("CLOOP_HUB_URL"))
-	hubURL := strings.TrimSpace(remoteHub)
+	hubURL := strings.TrimSpace(hubFlag)
 	if hubURL == "" {
 		hubURL = envHub
 	}
-	if token := strings.TrimSpace(remoteToken); token != "" {
+	if token := strings.TrimSpace(tokenFlag); token != "" {
 		if hubURL == "" {
 			return nil, errors.New("--token needs --hub (or CLOOP_HUB_URL) to say which hub it is for")
 		}

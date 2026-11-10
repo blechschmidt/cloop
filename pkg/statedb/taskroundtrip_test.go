@@ -35,6 +35,9 @@ var notPlanTaskColumns = map[string]string{
 		"deleted only by the explicit reset that releases it (Task 20391); the readers join it in, and " +
 		"neither SaveState nor UpsertTask writes it, so a run saving a copy loaded before the mark can " +
 		"neither erase it nor write one back (TestQuarantineSurvivesAStaleSave)",
+	"ExecutorPool": "derived: the readers join executor_pool_placements by executor_id, a row the hub writes as " +
+		"it hands a run to a pool's runner (Task 20486); a save cannot write it (TestPoolPlacementNamesTheTasksRunner)",
+	"ExecutorRunner": "derived: joined with ExecutorPool from executor_pool_placements (Task 20486)",
 	"AttachmentCount": "derived: the readers count the task's rows in task_attachments, which only an attach " +
 		"and a delete write (Task 20428); a save from a copy loaded before a run attached a file can neither " +
 		"erase the file nor store a count (TestAttachmentCountIsReadNotSaved)",

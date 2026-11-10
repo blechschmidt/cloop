@@ -73,6 +73,11 @@ type executorView struct {
 	Status   string `json:"status"`
 	Endpoint string `json:"endpoint,omitempty"`
 
+	// PoolRunner names the executor pool this executor is a runner of (Task
+	// 20486): an ephemeral agent the pool's controller started, which takes
+	// only the run its pool hands it. The panel draws it under its pool.
+	PoolRunner *executorPoolRunnerView `json:"pool_runner,omitempty"`
+
 	// ConnectedVia names the hub process holding this edge agent's socket,
 	// when it is not the one answering (Task 20354). The device is online;
 	// its live details — running handles, a health probe — are that
@@ -889,6 +894,7 @@ func (s *Server) handleExecutorsList(w http.ResponseWriter, r *http.Request) {
 	resp.Executors = applySandboxModes(resp.Executors, db)
 	resp.Executors = applyVirtualExecutors(resp.Executors, db)
 	resp.Executors = s.applyAudience(r, resp.Executors, db)
+	resp.Executors = s.applyPoolRunners(resp.Executors)
 	jsonOK(w, resp)
 }
 

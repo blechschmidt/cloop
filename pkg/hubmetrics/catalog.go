@@ -173,7 +173,7 @@ var (
 	// reason is one of the ExecutorPoolRefusal* values.
 	ExecutorPoolMintRefusals = Default.MustRegister(Definition{
 		Name:   "cloop_executor_pool_mint_refusals_total",
-		Help:   "Runner-token requests from executor pool controllers that were refused, by reason: max_runners (the pool would exceed it), revoked (the pool or the credential was revoked), invalid_credential, invalid_request.",
+		Help:   "Runner-token requests from executor pool controllers that were refused, by reason: max_runners (the pool would exceed it), revoked (the pool or the credential was revoked), cordoned (an administrator holds the pool), invalid_credential, invalid_request.",
 		Type:   TypeCounter,
 		Labels: []string{"reason"},
 	})
@@ -202,6 +202,7 @@ const (
 const (
 	ExecutorPoolRefusalMaxRunners        = "max_runners"
 	ExecutorPoolRefusalRevoked           = "revoked"
+	ExecutorPoolRefusalCordoned          = "cordoned"
 	ExecutorPoolRefusalInvalidCredential = "invalid_credential"
 	ExecutorPoolRefusalInvalidRequest    = "invalid_request"
 )

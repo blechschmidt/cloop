@@ -286,6 +286,10 @@ const (
 	// what keeps it from starting runners, or that nothing does any more
 	// (Task 20484): a runner volume stuck Pending, a full one.
 	ActionExecutorPoolControllerStatus Action = "executor_pool.controller_status"
+	// ActionExecutorPoolCordon records an administrator holding a pool or
+	// releasing it (Task 20486): while held, its runners are handed no run and
+	// its controller is minted no runner.
+	ActionExecutorPoolCordon Action = "executor_pool.cordon"
 
 	// ── forwarder ──────────────────────────────────────────────────────────
 
