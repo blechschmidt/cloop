@@ -159,7 +159,11 @@ func TestServer_Run_WithoutALeaseIsUnfenced(t *testing.T) {
 	t.Parallel()
 
 	port := pickFreePort(t)
-	srv := New(t.TempDir(), port, "")
+	// A migrated control plane: in an empty directory the hub's watchers
+	// create and migrate one in its first second, and a shutdown in that
+	// window waits on the migration — under -race on a busy runner, past
+	// the bound below.
+	srv := New(statedbtest.Dir(t), port, "")
 	if srv.Lease != nil {
 		t.Fatal("New attached a lease; fencing belongs to `cloop ui`, not the constructor")
 	}
