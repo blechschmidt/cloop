@@ -16,8 +16,13 @@ cloop.exe
 *.out
 coverage.out
 
-# Deployment artifacts are not inputs to the image.
+# Deployment artifacts are not inputs to the image...
 deploy/
+# ...except the executor controller's chart, which deploy/helm compiles into the
+# binary so a hub can serve it to `helm install` (Task 20486).
+!deploy/helm/helm.go
+!deploy/helm/cloop-executor-controller
+!deploy/helm/cloop-executor-controller/**
 docker-compose.yml
 Dockerfile
 *.md
