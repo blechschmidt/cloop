@@ -2599,6 +2599,16 @@ that `cloop executor list` still shows the expected backends and that
 `executors.allow_host_process` is still `false`. After every upgrade, check
 that a configuration merge hasn't turned host execution back on.
 
+Executor pools' controllers come after the hub. The upgraded hub serves its
+new build's chart at `/charts/cloop-executor-controller.tgz`; apply the
+ExecutorPool CustomResourceDefinition from that build, which Helm never
+upgrades, then `helm upgrade` each controller's release with the hub's chart
+and image tag. `cloop executor pool show <pool>` prints the command for a
+controller that is behind the hub, and hub doctor warns
+`executors.pools.protocol` until it is upgraded. See
+[Upgrading](../guides/kubernetes-executor-controller.md#upgrading) in the
+executor controller guide.
+
 ### Rehearsing a rolling upgrade
 
 You upgrade a [hub cluster](../architecture/hub-cluster.md#operating-it) by

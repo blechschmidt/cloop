@@ -2434,14 +2434,16 @@ Kubernetes cluster as the pool's queued runs need them. These commands are the
 Executors tab's pool section, made from a terminal: each is one of the hub's own
 calls (`/api/executor-pools`), made with the session `cloop login` stored or
 `--token`, and needs `executor.manage`. On a hub with single sign-on, every
-change also needs a recent sign-in; run `cloop login` again when asked.
+change also needs a recent sign-in; run `cloop login` again when asked. The
+[Kubernetes executor controller guide](../guides/kubernetes-executor-controller.md)
+walks through the whole flow.
 
 ### `cloop executor pool`
 
 ```text
 cloop executor pool create <name> --max-runners N [--label k=v]... [--audience user:<email>|group:<name>|role:<role>]...
-    [--harness <name>]... [--owner <email>] [--namespace <ns>] [--release <name>] [--min-runners N]
-    [--persistence [--size 20Gi] [--storage-class <class>] [--reclaim-policy Delete|Retain]]
+    [--harness <name>]... [--owner <email>] [--workdir-root <dir>] [--namespace <ns>] [--release <name>]
+    [--min-runners N] [--persistence [--size 20Gi] [--storage-class <class>] [--reclaim-policy Delete|Retain]]
 cloop executor pool list
 cloop executor pool show <pool>
 cloop executor pool update <pool> --max-runners N [--namespace <ns>] [--release <name>]
@@ -2468,6 +2470,42 @@ under `executors.pools`: runs waiting with no controller in contact, runs waitin
 for ten minutes while every runner the pool may have is busy, volumes stuck
 Pending, runs waiting with room for runners that the controller does not start,
 and a controller that speaks an older pool-controller protocol than the hub.
+
+### `cloop executor controller`
+
+```text
+cloop executor controller [--namespace <ns> | --all-namespaces] [--kubeconfig <file> [--context <name>]]
+    [--leader-elect=false] [--leader-election-namespace <ns>] [--leader-election-name <name>]
+    [--resync 5m] [--workers 2] [--health-addr :8081]
+    [--image-provenance warn|required] [--require-image-digest]
+cloop executor controller crd
+cloop executor controller rbac
+```
+
+The executor controller, which keeps the runners of the ExecutorPools in its
+namespace as Pods. You normally install it with its Helm chart, which sets
+these flags from its values; see
+[the guide](../guides/kubernetes-executor-controller.md). In a Pod it
+authenticates as its ServiceAccount, and outside one `--kubeconfig` names the
+cluster.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--namespace` | its own: the Pod's namespace, or outside a Pod the kubeconfig context's namespace, else `default` | the namespace whose ExecutorPools it serves |
+| `--all-namespaces` | `false` | serve ExecutorPools in every namespace, which needs a ClusterRole |
+| `--kubeconfig` | none: in a Pod, its ServiceAccount | the cluster to reach from outside a Pod |
+| `--context` | the kubeconfig's current context | which context of `--kubeconfig` to use |
+| `--leader-elect` | `true` | hold a Lease so that only one replica starts and stops runners; turn it off only with exactly one replica |
+| `--leader-election-namespace`, `--leader-election-name` | its own namespace, as for `--namespace`; `cloop-executor-controller` | where the Lease is |
+| `--resync` | `5m` | relist everything and reconcile every pool this often; at least `30s` |
+| `--workers` | `2` | how many pools are reconciled at once |
+| `--health-addr` | `:8081` | where `/healthz` and `/readyz` are served; empty for none |
+| `--image-provenance` | `warn` | `required` refuses a runner image of cloop's own whose signature cannot be checked |
+| `--require-image-digest` | `false` | refuse a pool whose runner image is named by tag, unless it is one of cloop's own, which the controller resolves to a digest and verifies |
+
+`crd` prints the ExecutorPool CustomResourceDefinition, and `rbac` prints the
+Role rules the controller's ServiceAccount needs, which are exactly what the
+chart's Role holds.
 
 ## Device forwarders
 

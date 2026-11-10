@@ -245,8 +245,9 @@ func helmValue(v string) string {
 // silently replace an existing release's values.
 //
 // The objects are applied server-side: a client-side `kubectl apply` keeps
-// the whole object in its last-applied-configuration annotation, which
-// `kubectl describe secret` prints — the credential with it. The namespace's
+// the whole object in its last-applied-configuration annotation, so the
+// credential would sit in the Secret's metadata as well, where `kubectl get
+// -o yaml` and anything that reads annotations shows it. The namespace's
 // Pod Security label is part of its manifest, so a namespace another manager
 // labelled otherwise is refused as a conflict rather than overwritten.
 func (p InstallPlan) Script(credential string) string {

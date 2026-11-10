@@ -306,7 +306,8 @@ For Kubernetes there is a Helm chart at `deploy/helm/cloop-hub`. Its default
 `image.repository` is `ghcr.io/blechschmidt/cloop`, and `image.tag` defaults to
 the chart's `appVersion`. A second chart, `deploy/helm/cloop-executor-controller`,
 runs the executor controller that keeps an executor pool's runners as Pods,
-from the same image. `.github/workflows/publish-images.yml` publishes both
+from the same image; see the
+[Kubernetes executor controller guide](../guides/kubernetes-executor-controller.md). `.github/workflows/publish-images.yml` publishes both
 images to GHCR for every release tag, with `:edge` following `main`, and signs
 every digest it pushes with keyless signing. To check an image yourself, run
 `cloop hub verify-image ghcr.io/blechschmidt/cloop:<tag>`. A hub also checks

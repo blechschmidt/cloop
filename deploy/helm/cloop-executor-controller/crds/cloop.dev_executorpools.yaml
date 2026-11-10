@@ -107,8 +107,9 @@ spec:
                 hubCABundle:
                   type: string
                   description: >-
-                    PEM certificates of the CAs the hub's certificate chains to;
-                    when set, the only trust extended to the hub.
+                    PEM certificates of the CAs the hub's certificate chains to:
+                    when set, the only trust the controller extends to the hub,
+                    and trust its runners add to the system store.
                   maxLength: 65536
                   x-kubernetes-validations:
                     - rule: "self.contains('-----BEGIN CERTIFICATE-----')"

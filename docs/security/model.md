@@ -33,15 +33,18 @@ flowchart LR
     A["Remote agent<br/><i>edge device</i>"]
     C["Container runtime<br/><i>local daemon socket</i>"]
     K["Kubernetes API<br/><i>remote cluster</i>"]
+    P["Executor controller<br/><i>a pool's cluster</i>"]
     W["Workload<br/><i>hostile by assumption</i>"]
 
     B ---|"① TLS 1.2+ · OIDC / bearer<br/>session cookie · WS origin<br/>RBAC deny-by-default"| H
     H ---|"② single-use enrollment token<br/>→ credential · SPKI pin<br/>agent dials OUT"| A
     H ---|"③ local socket (unauthenticated)<br/>hardening is in the argv"| C
     H ---|"④ brokered kubeconfig<br/>or projected SA token"| K
+    H ---|"pool credential · runner tokens<br/>controller dials OUT"| P
     A --> W
     C --> W
     K --> W
+    P --> W
 
     %% Tints, not opaque fills, and no text colour: see
     %% tests/docs/diagram_contrast_test.go.
@@ -284,6 +287,51 @@ between them, which clients can also reach:
 
 [Hub members](threat-model.md#cross-cutting-hub-members) in the threat model
 lists the remaining risks.
+
+### Executor pools and their controller
+
+An [executor pool](../architecture/executors.md#executor-pools) is a set of
+runners that a controller in a Kubernetes cluster starts as runs queue for the
+pool ([guide](../guides/kubernetes-executor-controller.md)). It is not a
+numbered boundary of its own. To the hub, the controller and its runners are
+parties that dial in, like the agents of boundary ②, and the hub never calls
+the cluster's API server, so boundary ④ does not apply.
+
+| Party | Authenticates with | Kept on the hub as | May |
+| --- | --- | --- | --- |
+| Controller | the pool credential, `cloop_pool1_<id>.<secret>` | a SHA-256 | read its own pool's demand feed, ask for runners within `max_runners`, ask for idle runners to be retired, and report trouble starting runners |
+| Runner, enrolling | a runner token, `clrt1.…`: single use, ten minutes at most | a hash | enroll once, as an ephemeral executor of that pool |
+| Runner, enrolled | a runner credential, `clrc1.…`, held in memory | a hash | take the one run the hub hands it |
+
+What this arrangement guarantees, with the tests in
+[the guarantee table](#executor-pools--the-package-suites):
+
+- **A compromised controller or cluster runs only what is assigned to its
+  pool.** The hub picks each runner's run from the pool's own queue, by the
+  pool's access list, its owner and the scheduler's matching rules, and starts
+  it for the person who queued it, on their grants. Nothing is bound,
+  defaulted, placed or failed over to a runner by name, and a runner takes one
+  run.
+- **It cannot mint runners beyond the pool's `max_runners`.** The hub counts
+  unexpired runner tokens and live runners in the same transaction that mints
+  new ones.
+- **No credential cloop hands a run is written to a runner volume.** Homes,
+  leased files and git credentials live on a memory-backed `emptyDir`, and the
+  agent refuses to start with them inside the workspace root on the volume. The
+  runner's own token and configuration are in a Secret its Pod owns, and its
+  credential is in memory. What a run itself writes into its checkout or
+  caches is the project's content and stays there.
+- **Revocation reaches every runner.** Revoking a pool or one of its
+  credentials retires the runners and revokes the leases of their runs on every
+  hub member. The hub reaches nothing in the cluster, so a revoked pool's
+  volumes stay on the customer's cluster until its operator deletes them, and
+  under `reclaimPolicy: Retain` they outlive the ExecutorPool too.
+
+Whoever operates the cluster can read and change the runs the pool is handed,
+as the operator of an enrolled device can; [What is not
+mitigated](#what-is-not-mitigated) lists it.
+[Executor pools](threat-model.md#cross-cutting-executor-pools) in the threat
+model goes through each threat.
 
 ### The kernel underneath the sandbox
 
@@ -711,6 +759,22 @@ this: the independent setup steps in `container.Start` run concurrently (about
 71 ms off a dispatch with the egress filter on), the sandbox image is pulled at
 hub startup instead of during the first task, and a fetched workspace is
 shallow by default. None of them makes a sandbox live longer or see more.
+
+**Executor pools keep this rule.** A pool can start runners ahead of demand
+(`minRunners`), but a runner that waits has run nothing: it takes one run and
+is retired, and its Pod goes with it
+(`TestEphemeralTakesOneRunThenRetiresItselfAndWipes`). What a pool can keep
+between runs is a runner volume, and that is the per-project reuse the list
+above allows. A volume is handed back unwiped only to a runner holding the same
+project, which the hub hands only that project's runs and which refuses any
+other itself; every other runner gets a fresh or emptied volume; and no home,
+leased file or credential that cloop hands a run is written to it.
+[Runner volumes](../architecture/executors.md#runner-volumes) gives the reuse
+window and what is reset, the threat model lists
+[what remains](threat-model.md#cross-cutting-executor-pools), and the checks
+are listed in [the guarantee table](#executor-pools--the-package-suites). They
+are in the package suites and in `tests/kubecontroller`, not yet in
+`tests/security`.
 
 ---
 
@@ -5451,6 +5515,27 @@ connectors it ships.
 | An edit at the source reaches the index through an incremental sync that lists only what changed, updated in place, and the next task's prompt includes it | `pkg/knowledge/confluence` and `pkg/knowledge/jira: TestIncrementalCursor`; `tests/e2e: TestE2EKnowledgeSourcesReachOnlyTheirProjectsRuns` |
 | A known residual risk, pinned by a test: the ACL hints a connector reports are stored but not enforced, and a binding decides who reads | `pkg/knowledge: TestACLHintsDoNotDecideWhoReads` |
 
+### Executor pools — the package suites
+
+An executor pool's controller starts runners in a cluster that the hub never
+connects to, and the hub hands each runner one queued run. These tests hold a
+compromised controller or cluster to the runs assigned to its pool and to its
+`max_runners`, and keep every credential off its volumes. The real-cluster row
+runs on kind in CI's `kube-controller` job.
+
+| Guarantee | Test |
+| --- | --- |
+| The pool-controller routes refuse a request with no credential, an unknown or malformed one, a wrong secret, an enrollment token or a credential in the query string, and a revoked credential or one of a revoked pool fails to authenticate | `pkg/ui: TestPoolControllerRefusesAnythingButItsCredential`; `pkg/executorpool: TestCredentialAuthentication`, `TestRevokingAPoolRefusesEverything` |
+| However many requests mint at once, a pool never has more unexpired runner tokens and live runners than its `max_runners`, and a cordoned or revoked pool mints none | `pkg/executorpool: TestConcurrentMintsHoldMaxRunners`, `TestMintRunnersRefusesPastMaxRunners`, `TestACordonedPoolIsToldNoDemandAndMintsNothing`, `TestRevokingAPoolRefusesEverything`; `pkg/ui: TestPoolControllerMintsWithinMaxRunners` |
+| A runner token enrolls once, within ten minutes, and only while its pool and the credential that minted it are live; an agent the pools cannot vouch for is never adopted as a permanent device | `pkg/executorpool: TestRunnerTokensAreSingleUseAndExpire`; `pkg/executor/remote: TestRunnerTokenTTLIsBounded`, `TestRunnerTokensAreRefusedUnlessTheirPoolAdmitsThem`, `TestRunnerReconnectsFailClosed` |
+| A runner is handed only runs queued for its pool that the pool's access list, owner and runner capabilities admit. Nothing binds, defaults or dispatches to a runner by name, a busy runner is never assigned a second run, and a runner refuses a second start | `pkg/executorpool: TestDemandIsWhatThePoolMaySee`, `TestSnapshotCountsRunnersAndWanted`; `pkg/ui: TestARunnerIsNeverBoundByName`, `TestPoolBindingRefusesAPoolThatCannotRunTheProject`; `pkg/executor/remote: TestEphemeralExecutorTakesOneWorkload`; `pkg/executor/agent: TestEphemeralTakesOneRunThenRetiresItselfAndWipes` |
+| A controller scales down only through the hub, which never retires a busy runner | `pkg/ui: TestTheControllerRetiresIdleAndPendingRunnersButNeverABusyOne`; `pkg/kubecontroller: TestScaleDownRetiresIdleRunnersThroughTheHubAndNeverABusyOne` |
+| Revoking a pool or one of its credentials retires the runners it minted and revokes every lease their runs hold, on record, including leases a hub member that has since stopped recorded | `pkg/ui: TestRevokingAPoolOrItsCredentialRevokesItsRunnersLeases`; `pkg/executorpool: TestRevokingACredentialTakesBackWhatItMinted` |
+| No credential cloop hands a run is written to a runner volume: homes, leased files and git credentials stay on a bounded memory-backed `emptyDir`, and the runner's configuration is in a Secret its Pod owns | `pkg/executor/agent: TestStorageRootsRefuseALayoutThatPutsACredentialOnTheVolume`; `pkg/kubecontroller: TestPersistentRunnersEachGetAVolumeOfTheirOwn`, `TestTheRunnerSecretCarriesTheBundleAndIsOwnedByThePod` |
+| A volume is handed back unwiped only to a runner holding the same project, which takes only that project's runs; every other runner gets a fresh or emptied volume, and one Pod at a time mounts it | `pkg/executorpool: TestARunnerHoldingAProjectIsHandedOnlyThatProjectsRuns`; `pkg/executor/agent: TestARunnerHoldingAProjectsVolumeTakesOnlyThatProjectsRun`; `pkg/kubecontroller: TestAVolumeIsWipedBeforeAnotherProjectUsesIt`, `TestTwoControllersNeverMountOneVolumeTwice` |
+| A runner Pod meets the restricted Pod Security Standard whatever its template says, mounts no API token unless its pool names an account and asks for one, and never runs as the controller's own account; the chart's Role is exactly what the controller calls | `pkg/kubecontroller: TestARunnerPodMeetsTheRestrictedProfileWhateverItsTemplate`, `TestATokenIsMountedOnlyWhenThePoolAsksForItByName`, `TestAPoolTheControllersPolicyRefusesIsInvalid`, `TestHelmChartRoleIsExactlyWhatTheControllerCalls` |
+| End to end, on a real cluster with the controller the chart installs: a reused and an expired runner token are refused, revoking the controller's credential kills the run in progress and stops the controller starting runners, and no volume the pool kept holds a credential the test made or saw, or a value with the prefix of a cloop runner, pool, agent, API or session credential | `tests/kubecontroller: TestExecutorPoolOnARealCluster` |
+
 ### When a check fails
 
 Read a failure as a statement about the system, not about the test. Three of
@@ -6067,6 +6152,20 @@ the agent's environment, and an agent running as a local process can write the
 project's database directly. A gate is a stop for review. If you don't trust
 an agent, run it on an isolating executor, where the hub's copy of the plan is
 out of its reach.
+
+**The cluster behind an executor pool sees the runs it is handed.** The hub
+holds a compromised controller or cluster to the runs queued for its pool and
+to its `max_runners` (`TestDemandIsWhatThePoolMaySee`,
+`TestConcurrentMintsHoldMaxRunners`), but whoever controls the runner Pods can
+read and change those runs: their source, their plan, what they are leased
+and the result they send back. Bind a project to a pool only on a cluster you
+would enroll as a device for that project.
+
+**Revoking an executor pool leaves its volumes in the cluster.** The hub
+reaches nothing in the cluster. A revoked pool's runner volumes keep the
+checkouts, git objects and caches of the projects that ran there until someone
+with access to the namespace deletes them, and under `reclaimPolicy: Retain`
+they outlive the ExecutorPool itself (`TestReclaimPolicyRetain`).
 
 ---
 

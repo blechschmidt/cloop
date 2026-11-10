@@ -129,8 +129,9 @@ pool:
   # sha256:<base64> SPKI pins of the hub's TLS key, comma-separated to stage a
   # rotation (`cloop hub pin` prints the hub's).
   hubCAPin: ""
-  # PEM certificates of the CAs the hub's certificate chains to; when set, the
-  # only trust the controller and the runners extend to the hub.
+  # PEM certificates of the CAs the hub's certificate chains to. When set, the
+  # controller trusts these and nothing else for the hub; runners trust them in
+  # addition to the system store, and hubCAPin holds both to the hub's key.
   hubCABundle: ""
 
   # The pool's controller credential, cloop_pool1_<id>.<secret>. One of:
@@ -157,8 +158,9 @@ pool:
   # What runner Pods are made of. The controller decides their security
   # contexts, read-only root and token mounting; this shapes the rest.
   template:
-    # Empty is cloop's signed harness image for the controller's release,
-    # resolved to the digest its registry serves and verified.
+    # Empty is cloop's signed harness image at the controller's own tag (its
+    # release, or edge for a build of main), resolved to the digest its
+    # registry serves and verified.
     image: ""
     imagePullPolicy: ""
     # Secrets in the release namespace: [{name: …}].

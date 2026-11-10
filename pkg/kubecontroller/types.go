@@ -63,8 +63,9 @@ type ExecutorPoolSpec struct {
 	HubCAPin string `json:"hubCAPin,omitempty"`
 	// HubCABundle is the PEM of the certificate authorities the hub's
 	// certificate chains to, when the system store does not know them — a
-	// private CA. When set it is the only trust the controller and its
-	// runners extend to the hub.
+	// private CA. When set it is the only trust the controller extends to the
+	// hub; its runners take it as --ca-file, in addition to the system store,
+	// and HubCAPin is what holds them to the hub's key.
 	HubCABundle string `json:"hubCABundle,omitempty"`
 	// PoolCredentialSecretRef names the Secret, in the pool's namespace,
 	// holding the pool's controller credential (cloop_pool1_…).

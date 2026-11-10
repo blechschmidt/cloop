@@ -20,6 +20,7 @@ suite in [how the architecture is kept true](#how-the-architecture-is-kept-true)
 - [Inside the hub](#inside-the-hub)
 - [What is kept, and where](#what-is-kept-and-where)
 - [A run, end to end](#a-run-end-to-end)
+- [Executor pools](#executor-pools)
 - [Security architecture](#security-architecture)
   - [Design rules](#design-rules)
   - [Trust boundaries](#trust-boundaries)
@@ -86,6 +87,7 @@ flowchart TB
         ctr["container driver<br/>docker or podman"]
         agent["cloop executor agent<br/>an enrolled device"]
         kube["kubernetes driver<br/>one Pod per run"]
+        pool["executor controller<br/>runner Pods on demand"]
     end
     forwarder["cloop-forward<br/>a USB device or interface"]
 
@@ -100,9 +102,11 @@ flowchart TB
     hub --> kube
     hub ---|"dials out"| agent
     hub ---|"dials out"| forwarder
+    hub ---|"dials out"| pool
     ctr --> sandbox
     agent --> sandbox
     kube --> sandbox
+    pool --> sandbox
     sandbox -->|"session tokens only"| hub
 
     %% Tints, not opaque fills, and no text colour:
@@ -118,9 +122,11 @@ Three facts shape the rest of this page:
   browser session can be a stolen cookie, an enrolled device can be
   compromised, and a workload is treated as hostile, because it runs code the
   hub didn't write, chosen by a model.
-- **Devices and forwarders dial out.** The hub never opens a connection to an
-  edge device. An agent behind NAT keeps one outbound WebSocket open and
-  receives its work over it.
+- **Devices, forwarders and executor controllers dial out.** The hub never
+  opens a connection to an edge device or into a cluster that an executor
+  controller serves. An agent behind NAT keeps one outbound WebSocket open and
+  receives its work over it, and a controller asks the hub for its pool's
+  demand the same way.
 - **Where a guard is on, sandboxes talk to the hub instead of the services.**
   With the git proxy and the Kubernetes monitor on (`cloop hub bootstrap` turns
   on both), a sandbox's git and Kubernetes requests go to listeners on the hub.
@@ -140,6 +146,8 @@ Three facts shape the rest of this page:
 | Run | `cloop run` | in a sandbox on an executor, or on a checkout | one project's plan, and the harness it starts | `pkg/orchestrator` |
 | Harness | `claude`, `copilot` | as a child of the run | session tokens the hub minted for the run; where no guard is on, the credential itself (by default its Claude or Copilot sign-in) | `pkg/provider/claudecode`, `pkg/provider/copilot` |
 | Device agent | `cloop executor agent` | an enrolled device, as a hardened service | its agent credential and, if it was enrolled with one, the hub's SPKI pin | `pkg/executor/agent` |
+| Executor controller | `cloop executor controller` | a Kubernetes cluster, installed by its Helm chart | its pool's controller credential, read from a Secret, and a Role in its own namespace | `pkg/kubecontroller`, `deploy/helm` |
+| Pool runner | `cloop executor agent --ephemeral` | a Pod the controller starts for one run | a single-use runner token, then a runner credential in memory | `pkg/executor/agent` |
 | Upgrade helper | `cloop-executor-upgrade.service` | the same device | no credential; it runs as root to verify and install the signed builds the agent asks for | `pkg/executor/install` |
 | Device forwarder | `cloop-forward` | a machine wired to hardware | a forwarder credential and, if it was enrolled with one, the hub's pin | `cmd/cloop-forward`, `pkg/deviceforward` |
 | Terminal client | `cloop login`, `cloop remote` | a developer's machine | a terminal session approved from the browser | `pkg/hubclient` |
@@ -231,8 +239,8 @@ running on its own is always the leader.
 | Device side | the agent's credential, `agent.json` in its state directory (mode 0600), and the hub's pin if it was enrolled with one | the hub can revoke the credential, and then sends `bye` so the agent stops reconnecting |
 
 No database holds the plaintext of a credential the hub *issues*: session
-cookies, API tokens, enrollment tokens, agent credentials and proxy session
-tokens. The hub stores a hash instead (SHA-256, or a salted HMAC-SHA256 for API
+cookies, API tokens, enrollment tokens, agent credentials, executor pool
+credentials, runner tokens and proxy session tokens. The hub stores a hash instead (SHA-256, or a salted HMAC-SHA256 for API
 tokens, glasses links and SCIM credentials) and compares it in constant time. A
 hash is enough to check a token that someone presents, and it can't be turned
 back into the token.
@@ -324,6 +332,61 @@ where each driver differs.
 
 ---
 
+## Executor pools
+
+An executor pool lets a Kubernetes cluster run the hub's work when the hub
+cannot reach the cluster and holds no credential for it. The cluster runs
+`cloop executor controller`, which starts runners as runs queue for the pool.
+Three parties take part, each with a credential of its own:
+
+```mermaid
+flowchart TB
+    hub["Hub<br/>the queue, max_runners,<br/>credential hashes"]
+    ctl["executor controller<br/>a Role in one namespace"]
+    api["Kubernetes API server"]
+    runner["Runner Pod<br/>cloop executor agent<br/>--ephemeral"]
+
+    ctl -->|"pool credential:<br/>feed, mint, retire"| hub
+    ctl -->|"its ServiceAccount:<br/>Pods, Secrets, PVCs"| api
+    api -->|"starts"| runner
+    runner -->|"runner token once,<br/>then its credential"| hub
+
+    %% Tints, not opaque fills, and no text colour:
+    %% see tests/docs/diagram_contrast_test.go.
+    style hub fill:#4674d126,stroke:#4674d1,stroke-width:2px
+    style ctl fill:#4c9a2a26,stroke:#4c9a2a
+    style runner fill:#cc339926,stroke:#c39
+```
+
+- **The pool credential** (`cloop_pool1_…`) belongs to the controller. The hub
+  keeps its hash and accepts it only on the four pool-controller routes, for
+  its own pool. With it the controller reads the pool's **demand feed**: how
+  many queued runs the pool may take, split by a digest of each run's project,
+  and the state of each of its runners. It reads no project and starts no run.
+- **Just-in-time enrollment.** For each runner it needs, the controller starts
+  a Pod and asks the hub for a single-use runner token (`clrt1.…`, good for ten
+  minutes at most), which the hub counts against the pool's `max_runners` in
+  the transaction that mints it. The controller writes the token to a Secret
+  the Pod owns. The runner redeems it for a runner credential (`clrc1.…`) that
+  it keeps in memory, and enrolls as an ephemeral executor.
+- **One run per runner.** The hub picks the run: the oldest queued run the
+  pool may see by its access list, its owner and the scheduler's matching
+  rules. It starts the run on behalf of the person who queued it, with that
+  person's grants. When the run is settled, the hub retires the runner and the
+  controller deletes its Pod. The controller scales down only by asking the
+  hub, which retires an idle runner only while it is still idle and never a
+  busy one.
+- **Revoking** a pool, or one of its credentials, retires its runners, refuses
+  its runner tokens and revokes every lease their runs hold, on every hub
+  member. The hub reaches nothing in the cluster, so the pool's volumes stay
+  there until the cluster's operator deletes them.
+
+[Executors: executor pools](executors.md#executor-pools) has the details, and
+the [Kubernetes executor controller guide](../guides/kubernetes-executor-controller.md)
+covers installing and running the controller.
+
+---
+
 ## Security architecture
 
 ### Design rules
@@ -400,6 +463,7 @@ The table lists those four and the boundaries that cut across them:
 | ④ Hub ↔ Kubernetes | a cluster's API server | the brokered kubeconfig or projected ServiceAccount token | run other workloads beside the Pod, and let a workload reach other services in the cluster | [④ Hub ↔ Kubernetes cluster](../security/threat-model.md#④-hub--kubernetes-cluster) |
 | Sandbox ↔ guards | every workload | session tokens minted per run and per guard | hold the token, misuse it within its scope, and try to exfiltrate data through it | [credential guards](#credential-guards) |
 | Hub ↔ hub | other members of a cluster | an HMAC over each forwarded request, keyed by a secret in the shared database | nothing a member couldn't already do, since anyone who can read the key can also rewrite the database the hub trusts; the owning member still re-checks the original caller | [hub members](../security/threat-model.md#cross-cutting-hub-members) |
+| Hub ↔ executor controller | a controller in a cluster the hub need not reach, and the runner Pods it starts | a pool credential, kept as a hash; each runner a single-use runner token, then a credential of its own kept in memory | ask for runners up to the pool's `max_runners`, see what the runs handed to its runners bring with them, and tamper with those runs, as a compromised device could | [executor pools](../security/threat-model.md#cross-cutting-executor-pools) |
 | Hub ↔ forwarder | on-prem machines wired to hardware | a forwarder enrollment token, exchanged for a credential; pins the hub like an agent does | be compromised | [device forwarder](../security/threat-model.md#cross-cutting-on-prem-hardware-through-a-device-forwarder) |
 | Hub ↔ services | IdP, GitHub, model API, knowledge sources, KMS, SIEM | TLS to the service, and the service's own signing keys where it signs | answer slowly or not at all, or return text that tries to instruct an agent | [knowledge sources](../security/threat-model.md#cross-cutting-knowledge-sources), [SCIM](../security/threat-model.md#cross-cutting-scim-provisioning) |
 
@@ -438,10 +502,11 @@ flowchart LR
     identity -.-> trail
 ```
 
-The health probes skip every layer after panic recovery. An edge agent or a
-forwarder that connects with its own credential, and a member's signed call to
-the cluster's internal endpoints, skip session authentication and the route
-gate, because each of them authenticates itself.
+The health probes skip every layer after panic recovery. An edge agent, a
+pool runner or a forwarder that connects with its own credential, an executor
+controller presenting its pool credential, and a member's signed call to the
+cluster's internal endpoints skip session authentication and the route gate,
+because each of them authenticates itself.
 
 **Who a caller can be.**
 
@@ -456,6 +521,8 @@ gate, because each of them authenticates itself.
 | SCIM credential | `cloop_scim_…` | an admin, for the IdP's provisioning client (`pkg/provision`) | a salted HMAC | revocation; rotated with an overlap |
 | Agent enrollment, credential | `clet1.…`, then `clac1.…` | `cloop executor enroll`, then the first connection | hashes | single use; revocation |
 | Forwarder enrollment, credential | `clft1…`, then `clfc1…` | `cloop forward enroll`, then the first connection | hashes | single use; revocation |
+| Executor pool credential | `cloop_pool1_<id>.<secret>` | an admin, when a pool is created or its credential rotated (`pkg/executorpool`) | a SHA-256 | revocation of the credential or of its pool |
+| Runner token, credential | `clrt1.…`, then `clrc1.…` | the hub, at a pool controller's request, then the runner's first connection | hashes | single use within ten minutes; the runner's retirement |
 
 **What a caller may do.** The roles, from least to most privileged, are
 `none`, `viewer`, `operator`, `maintainer` and `admin`. With RBAC in force, an
@@ -642,8 +709,12 @@ by the executor that runs the sandbox, with no listener anywhere.
 workload, within ceilings an operator sets per executor and per project. Disk
 use is sampled and held to its limit (`pkg/executor/internal/diskwatch`). A
 container or Kubernetes executor creates a new container or Pod for every
-workload and removes it when the workload ends. There is no warm pool, because
-a reused sandbox would carry whatever the previous tenant left in it.
+workload and removes it when the workload ends. An executor pool's runner takes
+one run and is retired, and the idle runners a pool keeps ready have run
+nothing yet. No sandbox is reused, because a reused sandbox would carry
+whatever the previous tenant left in it. The one thing a pool can carry from
+run to run is a runner volume, and only between runs of the same project
+([runner volumes](executors.md#runner-volumes)).
 
 **The agent's own privileges.** An agent that installs firewalls needs
 `CAP_NET_ADMIN`. cloop clears ambient and inheritable capabilities at startup
@@ -739,7 +810,7 @@ out without them, which is audited as
   pins can be staged for a rotation. A device enrolled with no pin, behind a
   proxy that terminates TLS, verifies against the system store. Plaintext
   `ws://` to a host other than loopback is refused unless explicitly allowed.
-- **The agent protocol is versioned.** The hub speaks versions 1 to 26 and
+- **The agent protocol is versioned.** The hub speaks versions 1 to 28 and
   stamps each frame with the version the session negotiated. The hub won't
   place a run on a device that is too old for what the run needs, such as a
   `revoke` frame for revocable material. The run is refused at placement with

@@ -200,6 +200,12 @@ Seven pages, best read in order. They are also listed on the
   network. Per-project repository access, a firewall that allows the Internet
   but blocks private addresses, a gVisor sandbox that only sees one mounted
   directory, and passing a serial port, GPU or TUN device into it.
+- **[Kubernetes executor controller](guides/kubernetes-executor-controller.md)**:
+  running tasks in Pods on a Kubernetes cluster that the hub never connects
+  to. Choosing between an executor pool and the hub's own Kubernetes executor,
+  installing the controller with its Helm chart, keeping a volume per project
+  between runs, scaling, upgrading, and what a pool's conditions and hub
+  doctor's findings mean when runs do not start.
 - **[Virtual executors](guides/virtual-executors.md)**: several sandboxes on one
   enrolled machine, each with its own container engine and runtime, its own
   firewall rules, and its own USB devices (a hardware security module or a

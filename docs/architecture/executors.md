@@ -17,6 +17,7 @@ isolate.
 - [Supervision, health and failover](#supervision-health-and-failover)
 - [End to end](#end-to-end)
 - [Remote agent enrollment](#remote-agent-enrollment)
+- [Executor pools](#executor-pools)
 
 ---
 
@@ -3905,14 +3906,32 @@ checks once more: `install --upgrade` refuses a staged binary that speaks an
 older protocol than the installed one (see the table above), or that does not
 report the version its signed manifest names.
 
-## Executor pools (Task 20482)
+## Executor pools
 
 An executor pool is a set of runners that a controller outside the hub starts
 on demand, each of which takes one run and is retired. It is modelled on
 GitHub's Actions Runner Controller scale sets, and the division of work is the
 same: the hub knows what is waiting and who may run it, the controller knows
 how to start a machine. `pkg/executorpool` decides; `pkg/statedb` stores; the
-hub's routes and queue are in `pkg/ui/executor_pool*.go`.
+hub's routes and queue are in `pkg/ui/executor_pool*.go`. cloop ships one
+controller, for Kubernetes, and the
+[Kubernetes executor controller guide](../guides/kubernetes-executor-controller.md)
+covers installing and running it.
+
+Three credentials meet in a pool, each with a narrow use, and the hub keeps
+every one of them only as a hash:
+
+| Credential | Held by | Lives | Good for |
+| --- | --- | --- | --- |
+| Pool credential, `cloop_pool1_<id>.<secret>` | the controller, in a Secret in its namespace | until revoked | the four pool-controller routes, for its own pool |
+| Runner token, `clrt1.…` | one runner, in a Secret its Pod owns | single use, ten minutes at most | enrolling once as one runner of that pool |
+| Runner credential, `clrc1.…` | that runner, in memory | until the runner is retired | reconnecting as that runner |
+
+All three are in the shared registry of
+[credential patterns](../reference/credential-patterns.md), so they are
+scrubbed wherever a credential is.
+
+### Queueing a run
 
 A project is bound to a pool rather than to a runner, because a runner does not
 exist until a run asks for one: the binding's value is `pool:<id>`, stored where
@@ -3927,71 +3946,181 @@ as a model call, is refused with `waiting_for_pool_capacity`: a runner takes one
 run, and a helper call that took it would leave the queued run waiting for
 another.
 
-The controller authenticates with a pool credential, `cloop_pool1_<id>.<secret>`,
-which the hub keeps as a SHA-256. It reads the pool's demand feed,
-`GET /api/pool-controller/feed`, as a WebSocket or a long-poll
-(`?after=<revision>&wait=<seconds>`): how many queued runs the pool could take,
-and how many of its runners are busy, idle and pending. It asks for runners
-with `POST /api/pool-controller/runners` and `{"count": N}`, and gets one
-configuration per runner: a single-use runner token (`clrt1.…`, bound to the
-pool, valid for ten minutes at most) and the hub's agent URL and certificate
-pin. The count against `max_runners`, which takes in every unexpired token and
-every runner not yet retired, is made in the same transaction as the inserts,
-so two controllers or two hub members minting at once cannot both pass it.
+### The pool credential
+
+The controller authenticates with a pool credential,
+`cloop_pool1_<id>.<secret>`. An administrator mints it on the hub, which shows
+it once and keeps its SHA-256, compared in constant time. A pool can have
+several live credentials at once, which is how a rotation overlaps: the new one
+is minted and put into the controller's Secret, and the older ones are revoked
+once the new one is in use.
+
+The hub accepts a pool credential on the pool-controller routes only, and
+there only for its own pool. With it the controller reads the pool's demand
+feed, asks for runners, asks for idle runners to be retired, and reports
+trouble starting them (`POST /api/pool-controller/status`). It reads no
+project, starts no run, and has no say in which run a runner is handed. No
+credential, an unknown or malformed one, a wrong secret or another kind of
+token gets `401`, and a credential in the query string is not read
+(`TestPoolControllerRefusesAnythingButItsCredential`). So does a revoked
+credential, or one whose pool was revoked (`TestRevokingAPoolRefusesEverything`).
+
+On every request the controller names its build in its User-Agent and the
+pool-controller protocol it speaks in `X-Cloop-Pool-Controller-Protocol`. The
+hub records both on the credential, with when it was last used, and hub
+doctor's `executors.pools.contact` and `executors.pools.protocol` findings read
+them. Revoking a credential retires the runners it minted, as revoking the
+pool does (see [Revoking a pool](#revoking-a-pool)).
+
+### Just-in-time enrollment
+
+No runner credential exists before a run needs a runner. The controller asks
+for runners with `POST /api/pool-controller/runners` and `{"count": N}`, and
+gets one configuration per runner: a single-use runner token (`clrt1.…`, bound
+to the pool and to the credential that minted it, valid for ten minutes at
+most) and the hub's agent URL and certificate pin. The count against
+`max_runners`, which takes in every unexpired token and every runner not yet
+retired, is made in the same transaction as the inserts, so requests minting
+at once cannot both pass it (`TestConcurrentMintsHoldMaxRunners`). The
+transaction is in the shared database, so the same holds for two controllers,
+or two hub members, minting together. A request the hub refuses, because the
+pool is at its `max_runners`, cordoned or revoked, is counted in
+`cloop_executor_pool_mint_refusals_total`; a granted one is recorded as
+[`executor_pool.token_mint`](../reference/audit-events.md#executor_pool).
 
 A runner is an agent like any other on the wire. It redeems its runner token
 on the agent endpoint, where the hub asks the pools whether the token's pool
 and the controller credential that minted it are still live before claiming
-the token, and enrolls as an **ephemeral** executor. Its credential has a
-prefix of its own (`clrc1.`), which a hub build that predates pools refuses
-rather than adopting the runner as a permanent device, and a hub that cannot
-tell whether an agent is a runner refuses it. From protocol v28 the runner is
-told it is ephemeral in the welcome, keeps its credential in memory, and exits
-with success when the hub sends it a bye marked `retired`.
-The hub member holding the runner's connection hands it the oldest queued run
-the pool may see (`AssignPoolQueueEntry` moves the run to `assigned` and the
-runner to `busy` in one transaction) and starts it the way an automatic resume
-starts a run: acting for the person who queued it, on their grants. The remote
-executor refuses a second start on an ephemeral runner whatever asks for it;
-neither placement nor a failover ever picks one, and a runner is never a
-project's binding, the registry's default, or a virtual executor's parent. A
-start that fails for a reason that is the run's own (no harness credential, a
-starter the hub cannot act for) fails the run; any other failure retires the
-runner and queues the run again, at most three runners in turn. A hand-over
-whose member died, or that has not started within 20 minutes, is taken back by
-the leader. When the run is settled the
-runner is retired: its credential revoked, its connection ended, its
-executors, health and isolation-evidence rows removed. A runner that goes
-offline before it is handed a run is retired at once, one that idles for 15
-minutes is retired by the leader, and one lost with its run is retired when the
-failover settles the run. None of them is reported as a failed device.
+the token, and enrolls as an **ephemeral** executor
+([`executor_pool.runner_enroll`](../reference/audit-events.md#executor_pool)).
+A token is redeemed once: a second redemption, or one after the token lapsed,
+is refused. The runner's credential has a prefix of its own (`clrc1.`), which
+a hub build that predates pools refuses rather than adopting the runner as a
+permanent device, and a hub that cannot tell whether an agent is a runner
+refuses it. From protocol v28 the runner is told it is ephemeral in the
+welcome, keeps its credential in memory, and exits with success when the hub
+sends it a bye marked `retired`.
+
+### The demand feed
+
+The controller reads its pool's demand feed, `GET /api/pool-controller/feed`,
+as a WebSocket or a long-poll (`?after=<revision>&wait=<seconds>`). Each answer
+is a snapshot of the pool:
+
+- `demand`, how many queued runs the pool may take by the rule in
+  [Which runs a pool sees](#which-runs-a-pool-sees), and `queued_projects`, the
+  same runs split by project, the oldest first;
+- `busy`, `idle` and `pending` runners, `spare` (how many more `max_runners`
+  allows) and `wanted` (how many the controller should start now);
+- `runner_states`: each live runner of the pool by its token's enrollment ID,
+  with its state (`pending`, `idle` or `busy`), the credential that minted it,
+  the project whose data its storage holds, and the project of the run it was
+  handed;
+- `cordoned`, and `waiting`, which counts the waiting runs even while the pool
+  is cordoned and its `demand` is zero;
+- a `revision` that changes whenever anything above does.
+
+A long-poll answers as soon as the revision moves past `after`, or after
+`wait` seconds. The controller acts only on an answer at most two long-poll
+waits old, so a hub that stops answering stops it starting or retiring
+anything.
+
+Every hub member serves the feed from the shared database. A change on one
+member (a run queued, a runner enrolled or retired, the pool revoked) wakes
+that member's feeds and dispatcher and is published on the cluster bus, so a
+feed on another member is answered within a bus poll. Each feed also re-reads
+the pool and its credential every 15 seconds, and ends when either is revoked
+(`TestPoolFeedOverWebSocketEndsWhenRevoked`).
+
+### Which runs a pool sees
 
 What a pool learns about the queue is the part with a security argument.
 `executorpool.Visible` counts a queued run towards a pool, and lets a runner be
 handed it, only while the project is still bound to the pool, the pool's access
 list has the fingerprint it had when the run was admitted, the pool's owner
 (when it has one) may read the project, and the pool's runners meet the run's
-requirements by `executor.MatchCandidate`, the scheduler's own rules. A run
-that can never become visible leaves the queue and its project says why.
+requirements by `executor.MatchCandidate`, the scheduler's own rules
+(`TestDemandIsWhatThePoolMaySee`). A run that can never become visible leaves
+the queue and its project says why. Of the queue, the feed shows the
+controller counts and the digests of the waiting runs' projects; it names a
+project, and its owner, only once one of the pool's runners was handed that
+project's run, so the controller can label the runner's volume. Which run a
+runner takes is the hub's decision alone.
 
-Every hub member serves the feed from the shared database. A change on one
-member (a run queued, a runner enrolled or retired, the pool revoked) wakes
-that member's feeds and dispatcher and is published on the cluster bus, so a
-feed on another member is answered within a bus poll; each feed also re-reads
-the pool and its credential every 15 seconds. Revoking a pool revokes its
-credentials, its unredeemed runner tokens and its live runners' credentials,
-cancels its queue (giving back each run's slot) in one transaction, and
-revokes every lease the runners hold before their connections end: each lease
-the control plane records as issued to one of them, whichever hub member issued
-it. Each is revoked the way the Leases panel revokes one: the revocation is
-recorded first, so a holder no member can reach stays bound by it, then the
-hub's own copy goes, then every holder on every hub member, which is told to
-kill the workload, with `lease.revoke_sent` and the holders' answers in the
-audit trail (`TestRevokingAPoolOrItsCredentialRevokesItsRunnersLeases`). The
-leases are revoked side by side, each with a time budget of its own. Revoking one
+### A runner's life
+
+```mermaid
+flowchart TB
+    queued["A run is queued<br/>for the pool"]
+    pending["pending<br/>token minted,<br/>Pod starting"]
+    idle["idle<br/>enrolled,<br/>no run yet"]
+    busy["busy<br/>running its<br/>one run"]
+    retired["retired<br/>credential revoked,<br/>Pod deleted"]
+
+    queued -->|"controller reads<br/>the demand feed"| pending
+    pending -->|"redeems its token"| idle
+    idle -->|"hub hands it a run"| busy
+    busy -->|"run settled"| retired
+    idle -->|"scaled down<br/>or idle too long"| retired
+    pending -.->|"token lapses<br/>unredeemed"| retired
+
+    %% Tints, not opaque fills, and no text colour:
+    %% see tests/docs/diagram_contrast_test.go.
+    style queued fill:#cc339926,stroke:#c39
+    style pending fill:#4674d126,stroke:#4674d1
+    style idle fill:#4674d126,stroke:#4674d1
+    style busy fill:#4674d126,stroke:#4674d1,stroke-width:2px
+    style retired fill:#88888826,stroke:#888
+```
+
+The hub member holding the runner's connection hands it the oldest queued run
+the pool may see (`AssignPoolQueueEntry` moves the run to `assigned` and the
+runner to `busy` in one transaction) and starts it the way an automatic resume
+starts a run: acting for the person who queued it, on their grants. A busy
+runner is never assigned a second run (`TestSnapshotCountsRunnersAndWanted`),
+and the remote executor refuses a second start on an ephemeral runner whatever
+asks for it (`TestEphemeralExecutorTakesOneWorkload`). A runner is never a
+project's binding or the registry's default, and a project bound to one by
+name resolves to nothing (`TestARunnerIsNeverBoundByName`); neither placement
+nor a failover picks one, and none is a virtual executor's parent. A start that fails for a reason that is the
+run's own (no harness credential, a starter the hub cannot act for) fails the
+run; any other failure retires the runner and queues the run again, at most
+three runners in turn. A hand-over whose member died, or that has not started
+within 20 minutes, is taken back by the leader.
+
+When the run is settled the runner is retired: its credential revoked, its
+connection ended, its executors, health and isolation-evidence rows removed
+([`executor_pool.runner_retire`](../reference/audit-events.md#executor_pool)).
+A runner that goes offline before it is handed a run is retired after 30
+seconds, or at once if it said goodbye; one that idles for 15 minutes is
+retired by the leader; and one lost with its run is retired when the failover
+settles the run. None of them is reported as a
+failed device. `cloop_executor_pool_runners_retired_total` counts retirements
+by reason.
+
+### Revoking a pool
+
+Revoking a pool revokes its credentials, its unredeemed runner tokens and its
+live runners' credentials, cancels its queue (giving back each run's slot) in
+one transaction, and revokes every lease the runners hold before their
+connections end: each lease the control plane records as issued to one of
+them, whichever hub member issued it, a member that has stopped included
+(`TestRevokingAPoolOrItsCredentialRevokesItsRunnersLeases`). Each is revoked
+the way the Leases panel revokes one: the revocation is recorded first, so a
+holder no member can reach stays bound by it, then the hub's own copy goes,
+then every holder on every hub member, which is told to kill the workload,
+with `lease.revoke_sent` and the holders' answers in the audit trail. The leases are
+revoked side by side, each with a time budget of its own. Revoking one
 controller credential does the same for what that credential minted: a
 credential that leaked does not leave behind the runners it started or tokens
-that still redeem.
+that still redeem (`TestRevokingACredentialTakesBackWhatItMinted`).
+
+The hub reaches nothing in the cluster. A revoked pool's controller is refused
+from then on and starts no runner, and the runners whose credentials were
+revoked exit, after which the controller deletes their Pods. The pool's
+volumes, and the projects' data on them, stay in the cluster until someone
+deletes them there; see
+[Removing a pool](../guides/kubernetes-executor-controller.md#removing-a-pool).
 
 ### The Kubernetes executor controller
 
@@ -4028,6 +4157,48 @@ Write access to ExecutorPool objects amounts to creating Pods in the
 namespace: the template chooses the image, the ServiceAccount and Secrets to
 read from, so grant it as you would Pod creation. The one Secret a template may
 not name is the one holding the pool's controller credential.
+
+The controller reports what it makes of each pool in the object's status: the
+desired, busy, idle and pending runners, the queued runs, the image it starts
+runners from (by digest when it resolved one), and three conditions. `Invalid`
+names every rule the spec breaks, including this controller's own refusals: a
+runner image named by tag under `--require-image-digest`, and a runner that
+would run as the controller's own ServiceAccount, whose authority reads the
+pool's credential (`TestAPoolTheControllersPolicyRefusesIsInvalid`).
+`Degraded` and `Ready` carry the reason the controller cannot serve the pool,
+such as `HubUnavailable`, `HubRefused`, `ImageUnresolved` or a storage reason,
+and every refusal is also recorded as an Event on the object. The hub keeps its
+own judgement of each pool, from its queue, its runners and what its
+controllers last said (`executorpool.Assess`); the Executors tab,
+`cloop executor pool list` and hub doctor's `executors.pools` checks all call
+that one function. The
+[guide's troubleshooting section](../guides/kubernetes-executor-controller.md#troubleshooting)
+lists each reason and finding with what to do about it.
+
+A runner Pod is built by one pure function, `buildRunnerPod`, which applies
+the restricted Pod Security Standard whatever the template says: a non-root UID
+and GID, no capabilities, no privilege escalation, `seccompProfile:
+RuntimeDefault`, a read-only root filesystem, no host namespaces or paths, no
+service links, `restartPolicy: Never`, and no ServiceAccount token unless the
+template asks for one by naming an account other than `default`
+(`TestARunnerPodMeetsTheRestrictedProfileWhateverItsTemplate`,
+`TestATokenIsMountedOnlyWhenThePoolAsksForItByName`). The run executes inside
+the runner container, so the Pod is its sandbox, and the template's
+RuntimeClass decides whether that sandbox has a kernel of its own.
+
+The Helm chart, `deploy/helm/cloop-executor-controller`, is what every hub
+serves at `/charts/cloop-executor-controller.tgz` from its own build. It
+installs two leader-electing replicas with one Role in the release namespace,
+holding exactly the rules `cloop executor controller rbac` prints: the chart's
+test renders the Role and compares it with the controller's own table of API
+calls in both directions, and with a fixed ceiling
+(`TestHelmChartRoleIsExactlyWhatTheControllerCalls`,
+`TestHelmChartRoleGrantsNoVerbBeyondItsCeiling`). Runners get a ServiceAccount
+of their own that is bound to nothing and mounts no token
+(`TestHelmChartRunnersGetAnAccountOfTheirOwnThatMountsNoToken`). The Role can
+list every Secret in its namespace, because the controller collects its
+runners' Secrets and Kubernetes cannot scope a list to a label, so the
+controller needs a namespace of its own.
 
 With `--ephemeral` the agent keeps the runner's side of this itself. It
 enrolls with a runner token and nothing else, never reads or writes a stored
@@ -4094,10 +4265,13 @@ A volume never carries one project's data into another project's run:
   (`cloop executor runner-storage`) empties before the runner starts. That
   covers a volume that last held another project's data and one whose last
   runner never reported its project.
-- Credentials are never written to a volume. Payload homes, with the harness's
-  login and transcripts, leased credential files and git credentials live on a
-  memory-backed `emptyDir`, and the agent refuses a layout that would put any
-  of them on the volume.
+- No credential cloop hands a run is written to a volume. Payload homes, with
+  the harness's login and transcripts, leased credential files and git
+  credentials live on a memory-backed `emptyDir`
+  (`TestPersistentRunnersEachGetAVolumeOfTheirOwn`), and the agent refuses to
+  start with its homes or lease directory inside the workspace root it keeps
+  on the volume. What a run writes into its own checkout or caches is the
+  project's content and stays with them.
 
 A runner does not trust a checkout it finds on its volume. It runs no hooks
 and no file-system monitor from it and rewrites its git configuration to the
@@ -4141,4 +4315,6 @@ on an emptied volume.
 - [Threat model](../security/threat-model.md): STRIDE per boundary
 - [Secret and egress grants](../guides/secrets.md): what a sandbox is given
 - [Kata Containers](../guides/kata.md): installing and verifying a VM sandbox
+- [Kubernetes executor controller](../guides/kubernetes-executor-controller.md):
+  installing and running an executor pool on a cluster
 - [Operator runbook](../operations/runbook.md): backup, rotation, upgrade
