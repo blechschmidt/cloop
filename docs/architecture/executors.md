@@ -3980,11 +3980,18 @@ that member's feeds and dispatcher and is published on the cluster bus, so a
 feed on another member is answered within a bus poll; each feed also re-reads
 the pool and its credential every 15 seconds. Revoking a pool revokes its
 credentials, its unredeemed runner tokens and its live runners' credentials,
-cancels its queue (giving back each run's slot) in one transaction, and takes
-back the runners' leases through the revocation push before their connections
-end. Revoking one controller credential does the same for what that credential
-minted: a credential that leaked does not leave behind the runners it started
-or tokens that still redeem.
+cancels its queue (giving back each run's slot) in one transaction, and
+revokes every lease the runners hold before their connections end: each lease
+the control plane records as issued to one of them, whichever hub member issued
+it. Each is revoked the way the Leases panel revokes one: the revocation is
+recorded first, so a holder no member can reach stays bound by it, then the
+hub's own copy goes, then every holder on every hub member, which is told to
+kill the workload, with `lease.revoke_sent` and the holders' answers in the
+audit trail (`TestRevokingAPoolOrItsCredentialRevokesItsRunnersLeases`). The
+leases are revoked side by side, each with a time budget of its own. Revoking one
+controller credential does the same for what that credential minted: a
+credential that leaked does not leave behind the runners it started or tokens
+that still redeem.
 
 ### The Kubernetes executor controller
 

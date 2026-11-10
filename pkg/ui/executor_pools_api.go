@@ -320,7 +320,7 @@ func (s *Server) handleExecutorPoolCredentialRevoke(w http.ResponseWriter, r *ht
 	}
 	// What the credential minted goes with it: a leaked credential must not
 	// leave behind the runners it started.
-	s.takeBackRunners(p.ID, rev.Runners, "the controller credential that minted it was revoked")
+	s.takeBackRunners(p.ID, rev.Runners, "the controller credential that minted it was revoked", s.auditActor(r))
 	s.broadcastAuditAppend("executor_pool.credential_revoke")
 	s.poolChanged(p.ID)
 	runners := make([]string, 0, len(rev.Runners))

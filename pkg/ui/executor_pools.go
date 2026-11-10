@@ -547,7 +547,7 @@ func (s *Server) retireLostPoolRunner(executorID string) {
 // back its concurrency slot and is settled.
 func (s *Server) finishPoolRevocation(rev statedb.ExecutorPoolRevocation, actor string) {
 	reason := "executor pool " + rev.Pool.Name + " was revoked"
-	s.takeBackRunners(rev.Pool.ID, rev.Runners, reason)
+	s.takeBackRunners(rev.Pool.ID, rev.Runners, reason, actor)
 	for _, q := range rev.Cancelled {
 		s.settleClosedPoolRun(q, "cancelled", reason, actor)
 	}
@@ -556,23 +556,20 @@ func (s *Server) finishPoolRevocation(rev statedb.ExecutorPoolRevocation, actor 
 
 // takeBackRunners ends runners whose credentials were just revoked — with
 // their pool, or with the controller credential that minted them: the leases
-// they hold go back through the revocation push while their connections are
-// still up, so the material is scrubbed and the workload killed on the device
-// rather than merely abandoned; then their connections end, on this member
-// and, through the bus, on whichever member holds them; then their fleet
-// records go.
-func (s *Server) takeBackRunners(poolID string, runners []statedb.ExecutorPoolRunnerRow, reason string) {
+// they hold are revoked while their connections are still up, so the material
+// is scrubbed and the workload killed on the device rather than merely
+// abandoned; then their connections end, on this member and, through the bus,
+// on whichever member holds them; then their fleet records go.
+func (s *Server) takeBackRunners(poolID string, runners []statedb.ExecutorPoolRunnerRow, reason, actor string) {
 	ids := make([]string, 0, len(runners))
 	for _, r := range runners {
 		if r.ExecutorID != "" {
 			ids = append(ids, r.ExecutorID)
 		}
 	}
+	s.revokeRunnerLeases(ids, reason, actor)
 	store, _ := s.poolStore()
 	for _, id := range ids {
-		if hub := activeRemoteHub(); hub != nil {
-			hub.RevokeExecutorLeases(context.Background(), id, reason, remote.RevokeKill)
-		}
 		s.retireRunnerHere(id, reason)
 		if store != nil {
 			store.AuditRunnerRetired(poolID, id, reason)
@@ -583,6 +580,86 @@ func (s *Server) takeBackRunners(poolID string, runners []statedb.ExecutorPoolRu
 	if n := s.clusterNode(); n != nil && len(ids) > 0 {
 		n.Publish(busTopicPool, poolID, poolBusNotice{Retire: ids, Reason: reason})
 	}
+}
+
+// runnerLeaseIDs lists the leases the runners executorIDs hold: every lease
+// the control plane records as issued to one of them, whichever member issued
+// it and whether or not that member is still alive, and besides those the
+// ones this member holds for them or their connections here carry.
+func (s *Server) runnerLeaseIDs(executorIDs []string) []string {
+	want := map[string]bool{}
+	for _, id := range executorIDs {
+		want[id] = true
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(id string) {
+		if id = strings.TrimSpace(id); id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, id := range executorIDs {
+		for _, l := range recordedLeasesOf(id) {
+			add(l)
+		}
+	}
+	for _, sl := range liveLeases.snapshot() {
+		if sl != nil && sl.lease != nil && want[sl.lease.ExecutorID] {
+			add(sl.lease.ID)
+		}
+	}
+	if hub := activeRemoteHub(); hub != nil {
+		for _, id := range executorIDs {
+			if ex, ok := hub.Executor(id); ok {
+				for _, l := range ex.Leases() {
+					add(l)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// runnerLeaseRevocations bounds how many of a revoked pool's leases are
+// revoked at once.
+const runnerLeaseRevocations = 8
+
+// revokeRunnerLeases revokes every lease the runners executorIDs hold, each
+// the way the Leases panel revokes one: recorded first, so a holder that no
+// member can reach is bound by the revocation when it is found and the
+// member adopting a dead member's run does not take the lease over; then the
+// hub's own copy, then every holder on every member, told to kill the
+// workload; then the outcome concluded on the record, an unreached holder as
+// pending. lease.revoke_sent and the holders' answers are in the audit trail.
+// Each lease has a budget of its own and they are revoked side by side, so a
+// runner that never answers holds up no other lease.
+//
+// Until Task 20487 a revoked pool or controller credential pushed a revocation
+// only to runners connected to the member that handled the request, kept the
+// hub's copy renewing until the run ended, and recorded none of it.
+func (s *Server) revokeRunnerLeases(executorIDs []string, reason, actor string) {
+	if len(executorIDs) == 0 {
+		return
+	}
+	slots := make(chan struct{}, runnerLeaseRevocations)
+	var wg sync.WaitGroup
+	for _, id := range s.runnerLeaseIDs(executorIDs) {
+		wg.Add(1)
+		slots <- struct{}{}
+		go func(leaseID string) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			defer recoverGoroutine("revoke a revoked runner's lease " + leaseID)
+			ctx, cancel := context.WithTimeout(context.Background(), revokeFanoutTimeout)
+			defer cancel()
+			rec := s.recordLeaseRevocation(leaseID, "", remote.RevokeKill, reason, actor)
+			out := s.revokeLeaseEverywhere(ctx, leaseID, "", reason, remote.RevokeKill, actor)
+			s.concludeRevocation(rec, &out)
+			s.broadcastSecretsUpdate("lease_revoked", leaseID)
+		}(id)
+	}
+	wg.Wait()
 }
 
 // ── the dispatcher ─────────────────────────────────────────────────────────

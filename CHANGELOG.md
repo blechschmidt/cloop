@@ -12,6 +12,27 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **Revoking an executor pool, or the controller credential that minted its
+  runners, now revokes the leases those runners hold everywhere, and the
+  audit trail records it.** The revocation was pushed only to runners
+  connected to the hub member that handled the request, the hub kept its own
+  copy of each lease and went on renewing it until the run ended, and nothing
+  was written to the audit trail, so it could not show that a revoked
+  runner's credentials were ever taken back. Each lease a revoked runner
+  holds, found in the control plane's record whichever hub member issued it,
+  is now revoked the way the Leases panel revokes one: the revocation is
+  recorded first, so a holder no member can reach stays bound by it, then the
+  hub's copy goes and every holder on every hub member is told to kill the
+  workload, with `lease.revoke_sent` and the holders' answers in the audit
+  trail. Each lease has a time budget of its own, so one runner that never
+  answers cannot hold up the others. Found by the new end-to-end suite
+  `tests/kubecontroller`, which runs an executor pool on a real cluster with
+  the controller from its Helm chart: it scales from zero and back, keeps a
+  project's runner volume for its next run and wipes it for any other,
+  refuses replayed and expired runner tokens, survives the controller's
+  leader and runners being killed mid-run, and leaves no credential on any
+  volume. CI runs it in the `kube-controller` job (Task 20487).
+
 - **A checkout a device keeps between runs no longer runs its own hooks
   while the agent fetches into it.** Workspace provisioning ran git in a kept
   checkout with the repository's own hooks and filesystem monitor in force,
