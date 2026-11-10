@@ -369,12 +369,12 @@ func MarshalExample(r *Recipe) ([]byte, error) {
 func ExampleRecipe() *Recipe {
 	return &Recipe{
 		Name:         "example-recipe",
-		Description:  "Example recipe: lint, health-check, then run PM mode",
+		Description:  "Example recipe: lint, health-check, then run the plan",
 		Version:      "1.0.0",
 		Author:       "your-name",
 		GoalTemplate: `Deliver: {{.Goal}}`,
 		FlowYAML: `name: example-pipeline
-description: Lint, health-check, then run in PM mode
+description: Lint, health-check, then run the plan
 steps:
   - name: lint
     command: lint

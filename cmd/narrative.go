@@ -54,7 +54,7 @@ Examples:
 			return fmt.Errorf("no project initialized — run 'cloop init' first")
 		}
 		if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' first")
+			return fmt.Errorf("no task plan found — run 'cloop run' first")
 		}
 
 		cfg, err := config.Load(workdir)

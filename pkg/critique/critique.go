@@ -38,7 +38,7 @@ type CritiqueReport struct {
 // model may be empty (the provider will use its default).
 func Critique(ctx context.Context, p provider.Provider, model string, plan *pm.Plan, goal string) (*CritiqueReport, error) {
 	if plan == nil || len(plan.Tasks) == 0 {
-		return nil, fmt.Errorf("no plan loaded — run 'cloop run --pm --plan-only' to create one")
+		return nil, fmt.Errorf("no plan loaded — run 'cloop run --plan-only' to create one")
 	}
 
 	prompt := buildPrompt(plan, goal)

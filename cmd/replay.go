@@ -16,8 +16,8 @@ import (
 
 var replayCmd = &cobra.Command{
 	Use:   "replay [task-id]",
-	Short: "Stream stored PM step outputs from the replay log",
-	Long: `Stream all recorded PM step outputs from .cloop/replay.jsonl.
+	Short: "Stream stored step outputs from the replay log",
+	Long: `Stream all recorded step outputs from .cloop/replay.jsonl.
 
 Optionally filter by a specific task ID. By default output is displayed with
 realistic timing based on the original timestamps (configurable via --speed).
@@ -53,7 +53,7 @@ Examples:
 			if taskID > 0 {
 				fmt.Printf("No replay entries found for task %d.\n", taskID)
 			} else {
-				fmt.Println("No replay entries found. Run 'cloop run --pm' to generate a log.")
+				fmt.Println("No replay entries found. Run 'cloop run' to generate a log.")
 			}
 			return nil
 		}

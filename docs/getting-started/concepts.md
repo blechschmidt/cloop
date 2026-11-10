@@ -5,10 +5,11 @@ numbered list of tasks and worked through it. This page explains the rules
 behind that loop, so that when a run stops, skips a task or adds work you
 didn't ask for, you know why.
 
-Every piece of work cloop does is a task in a plan, and every plan is stored in
-the project's database. Early versions had a "PM mode" that you switched on
-with `--pm`. That flag no longer exists, because the task loop is now the only
-way cloop works.
+cloop is a Software Factory: you give it a goal, a task list or a
+specification, and it turns that into a plan of tasks that coding agents carry
+out one at a time while cloop checks each result. Every piece of work cloop
+does is a task in that plan, and every plan is stored in the project's
+database.
 
 - [The loop at a glance](#the-loop-at-a-glance)
 - [The goal and the plan](#the-goal-and-the-plan)

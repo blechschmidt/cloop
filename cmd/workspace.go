@@ -326,7 +326,7 @@ Extra flags after -- are forwarded to each 'cloop run' invocation.
 Examples:
   cloop workspace run-all
   cloop workspace run-all --parallel
-  cloop workspace run-all -- --pm --plan-only`,
+  cloop workspace run-all -- --plan-only`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workspaces, err := workspace.List()
 		if err != nil {

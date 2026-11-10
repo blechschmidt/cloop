@@ -23,7 +23,7 @@ var alertCmd = &cobra.Command{
 	Long: `Manage and evaluate threshold-based alert rules for cloop plan metrics.
 
 Rules are persisted in .cloop/alerts.yaml and are evaluated automatically after
-each task completes during 'cloop run --pm'. You can also run them manually
+each task completes during 'cloop run'. You can also run them manually
 at any time with 'cloop alert check'.
 
 Supported metrics:

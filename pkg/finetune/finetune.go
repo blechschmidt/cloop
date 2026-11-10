@@ -86,7 +86,7 @@ type anthropicPair struct {
 // and writes them as JSONL to cfg.OutputPath. It returns a summary.
 func Export(ctx context.Context, plan *pm.Plan, goal, instructions string, cfg ExportConfig) (*ExportResult, error) {
 	if plan == nil || len(plan.Tasks) == 0 {
-		return nil, fmt.Errorf("no plan found — run 'cloop run --pm' first")
+		return nil, fmt.Errorf("no plan found — run 'cloop run' first")
 	}
 
 	// Collect done tasks.

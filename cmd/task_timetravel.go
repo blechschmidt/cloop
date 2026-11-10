@@ -27,7 +27,7 @@ Navigation:
   G / $        jump to last checkpoint
   q / Esc      quit
 
-Checkpoints are written automatically during 'cloop run --pm' execution.
+Checkpoints are written automatically during 'cloop run' execution.
 Use 'cloop task checkpoint-diff <id>' for a non-interactive summary.
 
 Examples:

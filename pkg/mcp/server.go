@@ -255,12 +255,12 @@ func (s *Server) handleToolsList(req *Request) {
 		},
 		{
 			Name:        "get_plan",
-			Description: "Return the current PM-mode task plan as JSON, including all tasks with their status, priority, and dependencies.",
+			Description: "Return the current task plan as JSON, including all tasks with their status, priority, and dependencies.",
 			InputSchema: jsonSchema(map[string]any{}),
 		},
 		{
 			Name:        "add_task",
-			Description: "Append a new task to the current PM-mode plan.",
+			Description: "Append a new task to the current plan.",
 			InputSchema: jsonSchema(map[string]any{
 				"title":       propString("Task title (short, imperative)"),
 				"description": propString("Detailed description of what the task should accomplish"),
@@ -449,7 +449,7 @@ func (s *Server) toolGetPlan() (ToolResult, error) {
 		return ToolResult{}, fmt.Errorf("failed to load state: %w", err)
 	}
 	if st.Plan == nil {
-		return textResult(`{"error":"no plan found — run cloop in PM mode first"}`), nil
+		return textResult(`{"error":"no plan found — run 'cloop run' first"}`), nil
 	}
 	text, err := json.MarshalIndent(st.Plan, "", "  ")
 	if err != nil {

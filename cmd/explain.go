@@ -56,7 +56,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm --plan-only' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run --plan-only' to create one")
 		}
 
 		cfg, err := config.Load(workdir)
@@ -135,7 +135,7 @@ Examples:
 
 		if explainConfirm {
 			reader := bufio.NewReader(os.Stdin)
-			fmt.Printf("Proceed with 'cloop run --pm'? [y/N] ")
+			fmt.Printf("Proceed with 'cloop run'? [y/N] ")
 			line, _ := reader.ReadString('\n')
 			line = strings.TrimSpace(strings.ToLower(line))
 			if line != "y" && line != "yes" {
@@ -146,7 +146,7 @@ Examples:
 			return runCmd.RunE(runCmd, []string{})
 		}
 
-		dimColor.Printf("Run 'cloop run --pm' to execute the plan.\n")
+		dimColor.Printf("Run 'cloop run' to execute the plan.\n")
 		return nil
 	},
 }
@@ -155,6 +155,6 @@ func init() {
 	explainCmd.Flags().StringVar(&explainProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
 	explainCmd.Flags().StringVar(&explainModel, "model", "", "Model override for the AI provider")
 	explainCmd.Flags().StringVar(&explainTimeout, "timeout", "3m", "Timeout for the AI call (e.g. 2m, 90s)")
-	explainCmd.Flags().BoolVar(&explainConfirm, "confirm", false, "Prompt for approval and hand off to 'cloop run --pm' if approved")
+	explainCmd.Flags().BoolVar(&explainConfirm, "confirm", false, "Prompt for approval and hand off to 'cloop run' if approved")
 	rootCmd.AddCommand(explainCmd)
 }

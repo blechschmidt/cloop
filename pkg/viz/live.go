@@ -87,7 +87,7 @@ func loadStateCmd(workDir string) tea.Cmd {
 			return liveStateMsg{err: err}
 		}
 		if !s.PMMode || s.Plan == nil {
-			return liveStateMsg{err: fmt.Errorf("no active plan — run 'cloop run --pm' first")}
+			return liveStateMsg{err: fmt.Errorf("no active plan — run 'cloop run' first")}
 		}
 		return liveStateMsg{plan: s.Plan}
 	}

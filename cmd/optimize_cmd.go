@@ -54,7 +54,7 @@ Examples:
 			return fmt.Errorf("no project goal — run 'cloop init' first")
 		}
 		if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no tasks in plan — run 'cloop run --pm --plan-only' to decompose first")
+			return fmt.Errorf("no tasks in plan — run 'cloop run --plan-only' to decompose first")
 		}
 
 		cfg, err := config.Load(workdir)
@@ -261,7 +261,7 @@ Examples:
 			fmt.Printf("  [P%d] #%d %s\n", t.Priority, t.ID, t.Title)
 		}
 		fmt.Println()
-		dimColor.Printf("  Run 'cloop run --pm' to execute the optimized plan.\n\n")
+		dimColor.Printf("  Run 'cloop run' to execute the optimized plan.\n\n")
 
 		return nil
 	},

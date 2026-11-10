@@ -111,7 +111,7 @@ run, then a project, then its tasks), see
 
 ## Projects
 
-![The Projects tab: fleet-wide counters for projects, active runs, total, done and failed tasks and total steps, then one row per registered project with its goal, status pill, progress bar, task count, last activity, provider and model, plus Run / PM / Hide / Delete buttons.](../screenshots/01-projects-overview.png)
+![The Projects tab: fleet-wide counters for projects, active runs, total, done and failed tasks and total steps, then one row per registered project with its goal, status pill, progress bar, task count, last activity, provider and model, plus Run / Hide / Delete buttons.](../screenshots/01-projects-overview.png)
 
 The Projects tab shows counters for projects, active runs, total, done and
 failed tasks, and total steps, then one row per project. Each row has the goal,
@@ -119,16 +119,15 @@ a live status pill, a progress bar, `done/total` tasks, when the project was
 last active, and its provider and model. Click a row to open the project.
 
 **Adding one.** **+ New Project** asks for a directory and a goal, with optional
-Provider, Model and Effort pickers, a **PM mode** checkbox and **Start run
-immediately**. The collapsed **Access (optional)** section can also pick the
-executor the project runs on and attach credential grants. If the executor or
-any grant is refused, the whole creation is rolled back, so nothing is left
-half set up. In a directory that isn't a cloop project yet, the Overview tab
-shows an *Initialize a project* panel that does the same for the working
-directory.
+Provider, Model and Effort pickers and a **Start run immediately** checkbox.
+The collapsed **Access (optional)** section can also pick the executor the
+project runs on and attach credential grants. If the executor or any grant is
+refused, the whole creation is rolled back, so nothing is left half set up.
+In a directory that isn't a cloop project yet, the Overview tab shows an
+*Initialize a project* panel that does the same for the working directory.
 
-**Running one.** Each row has **Run** and **PM** buttons, and **Stop** while a
-run is going, so you can manage several projects from the list.
+**Running one.** Each row has a **Run** button, and **Stop** while a run is
+going, so you can manage several projects from the list.
 
 **Hiding and deleting.** **Hide** removes a project from *your* dashboard only.
 It keeps running, other users still see it, and **Settings → Hidden Projects**

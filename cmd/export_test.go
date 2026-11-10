@@ -156,8 +156,8 @@ func TestBuildReport_PMMode(t *testing.T) {
 	s := baseState()
 	s.PMMode = true
 	report := buildReport(s)
-	if !strings.Contains(report, "product manager") {
-		t.Error("report should mention product manager mode")
+	if !strings.Contains(report, "**Mode:** Software Factory") {
+		t.Error("report should say cloop runs as a Software Factory")
 	}
 }
 

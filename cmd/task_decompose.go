@@ -89,7 +89,7 @@ Examples:
 			return fail(err)
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fail(fmt.Errorf("no task plan found — run 'cloop run --pm' to create one"))
+			return fail(fmt.Errorf("no task plan found — run 'cloop run' to create one"))
 		}
 
 		taskID, err := strconv.Atoi(args[0])

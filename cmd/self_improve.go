@@ -40,7 +40,7 @@ It collects:
   - The cloop source tree (when --source-dir is set or auto-detected)
 
 The AI returns a ranked list of improvement suggestions with file:line citations.
-Use --inject to automatically add the suggestions as PM tasks for execution.
+Use --inject to automatically add the suggestions as tasks for execution.
 
 Examples:
   cloop self-improve
@@ -283,10 +283,10 @@ Examples:
 				return fmt.Errorf("saving state: %w", err)
 			}
 
-			greenColor.Printf("  Injected %d suggestion(s) as PM tasks.\n", added)
-			dimColor.Printf("  Run 'cloop run --pm' to execute them.\n\n")
+			greenColor.Printf("  Injected %d suggestion(s) as tasks.\n", added)
+			dimColor.Printf("  Run 'cloop run' to execute them.\n\n")
 		} else {
-			dimColor.Printf("  Use --inject to add these as PM tasks.\n\n")
+			dimColor.Printf("  Use --inject to add these as tasks.\n\n")
 		}
 
 		return nil
@@ -377,7 +377,7 @@ func selfImproveWrapText(s string, width int) []string {
 func init() {
 	selfImproveCmd.Flags().StringVar(&selfImproveProvider, "provider", "", "Provider to use (claudecode, anthropic, openai, ollama)")
 	selfImproveCmd.Flags().StringVar(&selfImproveModel, "model", "", "Model to use")
-	selfImproveCmd.Flags().BoolVar(&selfImproveInject, "inject", false, "Inject suggestions as PM tasks for execution")
+	selfImproveCmd.Flags().BoolVar(&selfImproveInject, "inject", false, "Inject suggestions as tasks for execution")
 	selfImproveCmd.Flags().BoolVar(&selfImproveDryRun, "dry-run", false, "Show prompt preview without calling AI")
 	selfImproveCmd.Flags().StringVar(&selfImproveSourceDir, "source-dir", "", "Path to cloop source directory for deeper analysis")
 	rootCmd.AddCommand(selfImproveCmd)

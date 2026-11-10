@@ -210,7 +210,7 @@ Examples:
 		}
 
 		successColor.Printf("Plan applied: %d tasks written to .cloop/state.json\n", len(plan.Tasks))
-		dimColor.Println("Run 'cloop run --pm' to start executing.")
+		dimColor.Println("Run 'cloop run' to start executing.")
 		return nil
 	},
 }

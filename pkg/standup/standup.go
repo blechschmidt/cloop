@@ -193,7 +193,7 @@ func BuildPrompt(goal string, r *Report, windowHours int) string {
 	b.WriteString("Write a concise daily standup report with EXACTLY these four sections.\n")
 	b.WriteString("Each section should be 1-3 bullet points. Be specific, not generic.\n\n")
 	b.WriteString("**Yesterday:**\n[What was accomplished in the reporting window]\n\n")
-	b.WriteString("**Today:**\n[What the AI PM will focus on next — specific tasks]\n\n")
+	b.WriteString("**Today:**\n[What will be worked on next — specific tasks]\n\n")
 	b.WriteString("**Blockers:**\n[Any impediments, failed tasks, or risks — or 'None' if clear]\n\n")
 	b.WriteString("**Forecast:**\n[One sentence on delivery timeline and confidence]\n")
 

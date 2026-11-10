@@ -177,7 +177,7 @@ func Pull(workDir string, client *gh.Client, plan *pm.Plan, mapping *Mapping, la
 
 		if plan == nil {
 			// Cannot add tasks without a plan; caller must initialize one first.
-			return nil, fmt.Errorf("no PM plan found — run 'cloop init --pm' first")
+			return nil, fmt.Errorf("no task plan found — run 'cloop run' first to create one")
 		}
 		plan.Tasks = append(plan.Tasks, newTask)
 		mapping.Link(newTask.ID, issue.Number)
@@ -200,7 +200,7 @@ type PushResult struct {
 // The mapping is mutated in place; callers must save state and mapping.
 func Push(workDir string, client *gh.Client, plan *pm.Plan, mapping *Mapping, defaultLabels []string, dryRun, closeDone, addComment bool) (*PushResult, error) {
 	if plan == nil || len(plan.Tasks) == 0 {
-		return nil, fmt.Errorf("no PM tasks found")
+		return nil, fmt.Errorf("no tasks found")
 	}
 
 	result := &PushResult{}

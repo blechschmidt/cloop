@@ -144,7 +144,8 @@ type ProjectState struct {
 	// support it (currently claudecode via the claude CLI --effort flag).
 	Effort string `json:"effort,omitempty"`
 
-	// Product manager mode
+	// PMMode is always true: every project plans its tasks from the goal.
+	// The name and the pm_mode key stay for the databases that store them.
 	PMMode     bool                   `json:"pm_mode,omitempty"`
 	Plan       *pm.Plan               `json:"plan,omitempty"`
 	Milestones []*milestone.Milestone `json:"milestones,omitempty"`

@@ -853,7 +853,7 @@ func (s *Server) handlePatchTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ps.PMMode || ps.Plan == nil {
-		apierror.Write(w, apierror.CodeConflict, "PM mode not active")
+		apierror.Write(w, apierror.CodeConflict, "no task plan")
 		return
 	}
 
@@ -1414,7 +1414,7 @@ func buildOpenAPISpec(port int, hasAuth bool) map[string]any {
 					},
 					"400": map[string]any{"description": "Bad request"},
 					"404": map[string]any{"description": "Task not found"},
-					"409": map[string]any{"description": "PM mode not active"},
+					"409": map[string]any{"description": "no task plan"},
 				},
 			},
 		},
@@ -1557,7 +1557,7 @@ func buildOpenAPISpec(port int, hasAuth bool) map[string]any {
 		"openapi": "3.0.3",
 		"info": map[string]any{
 			"title":       "cloop REST API",
-			"description": "REST API for cloop — the AI product manager. Enables CI/CD integration, external dashboards, and scripting without the TUI or Web UI.",
+			"description": "REST API for cloop, the Software Factory. Enables CI/CD integration, external dashboards, and scripting without the TUI or Web UI.",
 			"version":     "1.0.0",
 			"contact": map[string]any{
 				"name": "cloop",

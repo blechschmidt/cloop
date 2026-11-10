@@ -56,7 +56,7 @@ var uiCmd = &cobra.Command{
 	Long: `Start a web server that serves a real-time dashboard on port 8080.
 
 The dashboard shows the project goal, status, step history with outputs,
-task list (PM mode), live progress via SSE, and run/stop controls.
+task list, live progress via SSE, and run/stop controls.
 
   cloop ui                            # single-project mode (cwd)
   cloop ui --port 9090                # use a custom port

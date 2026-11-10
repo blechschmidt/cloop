@@ -275,7 +275,7 @@ function renderProjects(projects, stats) {
         <div class="proj-actions" data-action="">
           ${p.running
             ? '<button class="btn danger" data-action="projectStop" data-arg="'+idx+'" title="Stop">&#9632; Stop</button>'
-            : '<button class="btn success" data-action="projectRun" data-arg="'+idx+'" title="Run">&#9654; Run</button><button class="btn primary" data-action="projectRun" data-arg="'+idx+'" data-arg-pm="true" title="Run PM">&#9654; PM</button>'
+            : '<button class="btn success" data-action="projectRun" data-arg="'+idx+'" title="Run">&#9654; Run</button>'
           }
           <button class="btn" data-action="projectHide" data-arg="${idx}" data-arg-name="${esc(p.name)}" title="Hide from your dashboard (restore under Settings)">Hide</button>
           <button class="btn danger" data-action="projectDelete" data-arg="${idx}" data-arg-name="${esc(p.name)}" data-arg-path="${esc(p.path || '')}" title="Remove project">&#10005; Delete</button>
@@ -293,11 +293,11 @@ function relTime(date) {
   return Math.floor(diff/86400000) + 'd ago';
 }
 
-act('projectRun', function(idx, pm) {
+act('projectRun', function(idx) {
   // No client poll — the server pushes 'projects' + 'run_state' WS events
   // immediately after the run starts so the card and Run/Stop button
   // refresh on their own (Task 20126).
-  api('/api/projects/' + idx + '/run', {method:'POST', body: JSON.stringify({pm})})
+  api('/api/projects/' + idx + '/run', {})
     // Report what the server actually did. This used to toast "Run started"
     // for any response that parsed, which now includes the 409 refusing a
     // second harness on an already-running project (Task 20253) — claiming
@@ -307,7 +307,7 @@ act('projectRun', function(idx, pm) {
       else if (!harnessRefused(d, idx)) toast((d && d.error) || 'Failed to start run', 'err');
     })
     .catch(() => toast('Failed to start run', 'err'));
-}, el => [+el.dataset.arg, el.dataset.argPm === 'true']);
+}, el => [+el.dataset.arg]);
 
 act('projectStop', function(idx) {
   // No client poll — the server pushes 'projects' + 'run_state' WS events
@@ -1255,7 +1255,6 @@ act('openNewProjectModal', function() {
   _npUpdateModels();
   const npEff = document.getElementById('npEffort');
   if (npEff) npEff.value = '';
-  document.getElementById('npPMMode').checked = false;
   document.getElementById('npAutoRun').checked = false;
   document.getElementById('npError').style.display = 'none';
   // Access starts collapsed and empty on every open, then fills itself from
@@ -1275,7 +1274,6 @@ act('submitNewProject', function() {
   const provider = document.getElementById('npProvider').value;
   const model    = document.getElementById('npModel').value.trim();
   const effort   = (document.getElementById('npEffort') || {}).value || '';
-  const pmMode   = document.getElementById('npPMMode').checked;
   const autoRun  = document.getElementById('npAutoRun').checked;
   const errEl    = document.getElementById('npError');
   if (!dir)  { errEl.textContent = 'Directory is required'; errEl.style.display = ''; return; }
@@ -1285,7 +1283,7 @@ act('submitNewProject', function() {
   // did and takes the server's unchanged path.
   const collected = _npCollectAccess();
   if (collected.error) { errEl.textContent = collected.error; errEl.style.display = ''; return; }
-  const body = {dir, goal, provider, model, effort, pmMode, autoRun};
+  const body = {dir, goal, provider, model, effort, autoRun};
   Object.keys(collected.access).forEach(k => { body[k] = collected.access[k]; });
   errEl.style.display = 'none';
   api('/api/projects/new', body).then(d => {

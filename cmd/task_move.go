@@ -77,7 +77,7 @@ Examples:
 			return err
 		}
 		if !srcState.PMMode || srcState.Plan == nil || len(srcState.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		// Resolve destination directory.
@@ -95,7 +95,7 @@ Examples:
 			return fmt.Errorf("no cloop project found at %s (run 'cloop init' there first)", dstDir)
 		}
 		if !dstState.PMMode || dstState.Plan == nil {
-			return fmt.Errorf("destination project at %s has no PM plan — run 'cloop run --pm' there first", dstDir)
+			return fmt.Errorf("destination project at %s has no task plan — run 'cloop run' there first", dstDir)
 		}
 
 		// Find the task for preview.

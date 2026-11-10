@@ -111,7 +111,7 @@ your answers, it produces a list of tasks in priority order. cloop saves the
 plan before running any of it:
 
 ```
-🧠 cloop PM — AI Product Manager Mode
+🏭 cloop Software Factory
    Provider: claudecode
    Goal: Add a health check endpoint to the HTTP server
 
@@ -159,7 +159,7 @@ $ cloop status
 Goal:     Add a health check endpoint to the HTTP server
 Status:   initialized
 Provider: claudecode (default)
-Mode:     product manager
+Mode:     Software Factory
 Tasks:    0/3 tasks complete
           [ ] Task 1: Add a /healthz handler returning 200 and a JSON body
           [ ] Task 2: Write a table-driven test for the /healthz handler

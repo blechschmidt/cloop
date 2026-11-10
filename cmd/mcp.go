@@ -28,7 +28,7 @@ This lets Claude Desktop, Cursor, and other MCP clients directly control and
 query cloop through the following tools:
 
   get_status     Return current orchestrator state (goal, status, step counts)
-  get_plan       Return the current PM-mode task plan as JSON
+  get_plan       Return the current task plan as JSON
   add_task       Append a new task to the plan
   complete_task  Mark a task as done with an optional result
   run_task       Execute a one-shot AI prompt and return the response

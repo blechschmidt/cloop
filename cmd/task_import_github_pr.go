@@ -237,7 +237,7 @@ func runTaskImportGitHubPR(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	bold.Printf("Imported %d task(s) from GitHub PRs.\n", imported)
-	dim.Println("Run 'cloop run --pm' to execute the imported tasks.")
+	dim.Println("Run 'cloop run' to execute the imported tasks.")
 	return nil
 }
 

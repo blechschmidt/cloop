@@ -33,7 +33,7 @@ const sessionMetaFile = "session.json"
 type Kind string
 
 const (
-	KindTask     Kind = "task"     // PM task execution
+	KindTask     Kind = "task"     // task execution
 	KindHeal     Kind = "heal"     // auto-heal retry attempt
 	KindEvolve   Kind = "evolve"   // evolve discovery cycle
 	KindExternal Kind = "external" // externally-added task merged in

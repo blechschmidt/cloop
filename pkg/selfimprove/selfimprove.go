@@ -85,7 +85,7 @@ func BuildPrompt(t *Telemetry, sourceDir string) string {
 	var b strings.Builder
 
 	b.WriteString("You are a senior Go engineer doing a performance and quality audit of the cloop CLI tool.\n")
-	b.WriteString("cloop is an autonomous AI product manager CLI written in Go. It decomposes project goals\n")
+	b.WriteString("cloop is a Software Factory written in Go, a CLI and web hub. It decomposes project goals\n")
 	b.WriteString("into tasks, executes them via AI providers (Anthropic Claude, OpenAI, Ollama, Claude Code),\n")
 	b.WriteString("tracks state, and closes a feedback loop to improve results.\n\n")
 

@@ -279,7 +279,7 @@ Examples:
 			if sErr != nil {
 				warnColor.Printf("Could not load state for --fix: %v\n", sErr)
 			} else if !s3.PMMode {
-				warnColor.Printf("--fix requires PM mode (run 'cloop init --pm' or 'cloop run --pm' first)\n")
+				warnColor.Printf("--fix requires a task plan (run 'cloop run' first)\n")
 			} else {
 				fixDesc := testrun.FixPrompt(fw, diagReport.Diagnoses, diagReport.AISummary)
 				headerColor.Printf("Creating remediation task...\n")

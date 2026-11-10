@@ -106,7 +106,7 @@ func runDiffPlan(workdir string, args []string) error {
 		return fmt.Errorf("listing snapshots: %w", err)
 	}
 	if len(metas) == 0 {
-		return fmt.Errorf("no plan snapshots found — run 'cloop run --pm' to create a plan")
+		return fmt.Errorf("no plan snapshots found — run 'cloop run' to create a plan")
 	}
 	if len(metas) < 2 && len(args) < 2 {
 		return fmt.Errorf("need at least 2 snapshots for a diff (have %d)", len(metas))

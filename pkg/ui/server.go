@@ -5541,6 +5541,8 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
+	// A "pmMode" field from older dashboards is ignored: state.Init plans
+	// every project's tasks (Task 20491).
 	var req struct {
 		Goal         string `json:"goal"`
 		Provider     string `json:"provider"`
@@ -5548,7 +5550,6 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		Effort       string `json:"effort"`
 		Instructions string `json:"instructions"`
 		MaxSteps     int    `json:"maxSteps"`
-		PMMode       bool   `json:"pmMode"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -5579,9 +5580,6 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Provider != "" {
 		ps.Provider = req.Provider
-	}
-	if req.PMMode {
-		ps.PMMode = true
 	}
 	if err := ps.SaveDirect(); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)

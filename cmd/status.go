@@ -77,7 +77,7 @@ var statusCmd = &cobra.Command{
 		printRunBuild(s, workdir)
 
 		if s.PMMode {
-			fmt.Printf("Mode:     product manager\n")
+			fmt.Printf("Mode:     Software Factory\n")
 			// Done means committed (Task 20370), shown once it has been set.
 			if s.CommitPolicy != nil {
 				if s.CommitPolicy.Active() {

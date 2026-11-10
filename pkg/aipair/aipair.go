@@ -65,7 +65,7 @@ type Session struct {
 // If taskID is 0 the first pending/in-progress task is used.
 func New(s *state.ProjectState, prov provider.Provider, model, workDir string, taskID int) (*Session, error) {
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-		return nil, fmt.Errorf("no task plan found — run 'cloop run --pm' first")
+		return nil, fmt.Errorf("no task plan found — run 'cloop run' first")
 	}
 
 	sess := &Session{

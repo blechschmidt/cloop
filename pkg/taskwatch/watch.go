@@ -165,7 +165,7 @@ func findTask(workDir string, taskID int) (*pm.Task, error) {
 		return nil, fmt.Errorf("load state: %w", err)
 	}
 	if !s.PMMode || s.Plan == nil {
-		return nil, fmt.Errorf("no task plan found (run cloop run --pm first)")
+		return nil, fmt.Errorf("no task plan found (run cloop run first)")
 	}
 	for _, t := range s.Plan.Tasks {
 		if t.ID == taskID {

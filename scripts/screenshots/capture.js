@@ -185,7 +185,6 @@ const SHOTS = [
               'Ship an idempotent payment capture API with end-to-end audit coverage';
             document.getElementById('npProvider').value = 'claudecode';
             document.getElementById('npProvider').dispatchEvent(new Event('change'));
-            document.getElementById('npPMMode').checked = true;
             document.getElementById('npAccessSection').open = true;
             document.activeElement && document.activeElement.blur()`,
     settle: `getComputedStyle(document.getElementById('new-project-overlay')).display !== 'none' &&

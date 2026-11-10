@@ -18,7 +18,7 @@ import (
 func BuildPrompt(question string, s *state.ProjectState, mem *memory.Memory, recentSteps int) string {
 	var b strings.Builder
 
-	b.WriteString("You are an AI product manager assistant with full knowledge of this project.\n")
+	b.WriteString("You are the assistant built into cloop, a Software Factory, with full knowledge of this project.\n")
 	b.WriteString("Answer the user's question accurately, concisely, and helpfully.\n\n")
 
 	b.WriteString("## PROJECT STATE\n")

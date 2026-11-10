@@ -29,7 +29,7 @@ var (
 var taskTDDCmd = &cobra.Command{
 	Use:   "tdd <task-id>",
 	Short: "AI-generated acceptance criteria and post-execution test verification",
-	Long: `Two-phase TDD workflow for PM tasks:
+	Long: `Two-phase TDD workflow for tasks:
 
   --generate  (before task execution)
     Ask the AI to write concrete acceptance criteria and a runnable bash test
@@ -62,7 +62,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		taskID, err := strconv.Atoi(args[0])

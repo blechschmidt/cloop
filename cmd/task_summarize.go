@@ -59,7 +59,7 @@ Examples:
 			return fmt.Errorf("loading state: %w", err)
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' first")
+			return fmt.Errorf("no task plan found — run 'cloop run' first")
 		}
 
 		cfg, err := config.Load(workdir)

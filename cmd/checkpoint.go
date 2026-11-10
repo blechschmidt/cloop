@@ -188,7 +188,7 @@ var checkpointClearCmd = &cobra.Command{
 	Use:   "clear",
 	Short: "Discard the auto-generated mid-execution checkpoint",
 	Long: `Remove the .cloop/checkpoint.json file that cloop writes automatically
-before each task starts in PM mode. Use this if you want to discard stale
+before each task starts. Use this if you want to discard stale
 checkpoint state without running 'cloop run' (which prompts you interactively).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()

@@ -60,7 +60,7 @@ Examples:
 		}
 		if len(entries) == 0 {
 			fmt.Printf("No checkpoint history found for task %d.\n", taskID)
-			fmt.Printf("Checkpoints are saved automatically during 'cloop run --pm' execution.\n")
+			fmt.Printf("Checkpoints are saved automatically during 'cloop run' execution.\n")
 			return nil
 		}
 

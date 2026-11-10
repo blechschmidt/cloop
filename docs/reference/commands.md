@@ -79,9 +79,8 @@ cloop init --model claude-opus-4-6 --instructions "Use Go, no external deps" "Bu
 cloop init "Build a full REST API"
 ```
 
-> Every project runs in Product Manager mode: cloop splits the goal into a task
-> plan you can see, and works through it. The old free-form feedback loop
-> (`--pm`/non-PM) has been removed, so all changes go through the task pipeline
+> Every project runs the same way: cloop splits the goal into a task plan you
+> can see, and works through it, so all changes go through the task pipeline
 > and can be audited in the UI.
 
 | Flag | Default | Description |
@@ -580,11 +579,12 @@ merged.
 
 ---
 
-## Product Manager Mode
+## Planning and running tasks
 
-cloop splits the goal into a structured task plan, then works on the tasks one
-at a time. This is the only mode, so there is no `--pm` flag to turn it on. The
-flag was removed along with the old free-form loop.
+As a Software Factory, cloop splits the goal into a structured task plan, then
+works on the tasks one at a time. Every run works this way. Older scripts may
+pass `--pm`, which used to switch this on; cloop accepts it, ignores it and
+prints a line saying it is deprecated.
 
 ```bash
 # Initialize
@@ -727,7 +727,7 @@ Have the AI build a prioritized product backlog from your codebase. It lists the
 cloop backlog                          # analyze current project
 cloop backlog --format md              # markdown output
 cloop backlog --format md -o backlog.md
-cloop backlog --as-tasks               # add top items to PM plan
+cloop backlog --as-tasks               # add top items to the task plan
 cloop backlog --max-items 10           # limit to top 10 items
 cloop backlog --provider anthropic
 ```
@@ -850,7 +850,7 @@ cloop review                           # review all uncommitted changes
 cloop review --staged                  # review only staged changes
 cloop review --last                    # review the last commit
 cloop review HEAD~3..HEAD              # review a range of commits
-cloop review --task 3                  # include PM task context in review
+cloop review --task 3                  # include task context in review
 cloop review --format md               # markdown output
 cloop review --format md -o review.md  # save markdown to file
 cloop review --quick                   # diff stats only, no AI call
@@ -922,7 +922,7 @@ cloop ask --provider anthropic "Are there any risks in the current plan?"
 
 ### `cloop chat`
 
-Chat with an AI product manager. Ask questions, get suggestions, or have it update your task plan.
+Chat with the assistant built into cloop about your project. Ask questions, get suggestions, or have it update your task plan.
 
 ```bash
 cloop chat
@@ -958,7 +958,7 @@ Send the same prompt to several AI providers at once, and compare response quali
 cloop compare "What is the best way to structure a Go project?"
 cloop compare --providers anthropic,openai "Explain REST vs GraphQL"
 cloop compare --judge "Write a haiku about software"
-cloop compare --task 3           # use a PM task's prompt
+cloop compare --task 3           # use a task's prompt
 cloop compare --format md -o results.md "Design a caching strategy"
 cloop compare --full "Summarize microservices best practices"
 ```

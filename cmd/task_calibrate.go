@@ -35,7 +35,7 @@ for all pending tasks.
 With --apply the command:
   - Writes the suggested new EstimatedMinutes to each pending task in state
   - Persists the overall calibration factor to .cloop/config.yaml so that
-    future 'cloop run --pm' decompositions automatically scale AI estimates
+    future 'cloop run' decompositions automatically scale AI estimates
 
 Without --apply the output is read-only (dry run).
 
@@ -52,7 +52,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		// Build provider (optional when --no-ai)
@@ -143,7 +143,7 @@ Examples:
 		hasDat := len(report.ByRole) > 0 && report.ByRole[0].TaskCount > 0
 		if !hasDat {
 			dimColor.Println("  No completed tasks with both estimated and actual durations found.")
-			dimColor.Println("  Run tasks in PM mode to accumulate calibration data.")
+			dimColor.Println("  Run tasks with 'cloop run' to accumulate calibration data.")
 			fmt.Println()
 		} else {
 			// Header row
@@ -250,7 +250,7 @@ Examples:
 			return fmt.Errorf("saving config: %w", err)
 		}
 		successColor.Printf("Calibration factor %.2fx stored in .cloop/config.yaml\n", report.OverallFactor)
-		dimColor.Println("  Future 'cloop run --pm' decompositions will automatically scale AI estimates.")
+		dimColor.Println("  Future 'cloop run' decompositions will automatically scale AI estimates.")
 
 		return nil
 	},

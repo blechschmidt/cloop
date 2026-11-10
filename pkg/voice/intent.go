@@ -70,7 +70,7 @@ type intentJSON struct {
 }
 
 // systemPrompt describes the available actions to the AI.
-const systemPrompt = `You are a voice command parser for cloop, an AI product manager CLI.
+const systemPrompt = `You are a voice command parser for cloop, a Software Factory CLI.
 
 Given a transcribed voice command, extract the user's intent and return ONLY valid JSON
 matching this schema (no markdown fences, no prose):

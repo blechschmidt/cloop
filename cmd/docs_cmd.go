@@ -236,8 +236,8 @@ var docsUpdateCmd = &cobra.Command{
 // docsWatchCmd polls for task completions and re-runs docs update after each one.
 var docsWatchCmd = &cobra.Command{
 	Use:   "watch",
-	Short: "Re-run docs update after each completed task (polls PM state)",
-	Long: `Watch PM mode state and automatically refresh documentation after each
+	Short: "Re-run docs update after each completed task (polls the task plan)",
+	Long: `Watch the task plan and automatically refresh documentation after each
 task completes. Polls the cloop state every 10 seconds.
 
 Press Ctrl+C to stop.`,

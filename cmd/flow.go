@@ -55,7 +55,6 @@ Example flow file:
       on_failure: continue
     - name: run tasks
       command: run
-      args: [--pm]
       if: test -f .cloop/state.db
       on_failure: abort`,
 	Args: cobra.ExactArgs(1),

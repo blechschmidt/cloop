@@ -44,7 +44,7 @@ Examples:
   cloop review --staged              # review only staged changes
   cloop review --last                # review the last commit
   cloop review HEAD~3..HEAD          # review a range of commits
-  cloop review --task 3              # include PM task context in review
+  cloop review --task 3              # include task context in review
   cloop review --format md           # markdown output
   cloop review --format md -o review.md  # save markdown to file
   cloop review --quick               # diff stats only, no AI call
@@ -405,7 +405,7 @@ func init() {
 	reviewCmd.Flags().StringVar(&reviewFormat, "format", "terminal", "Output format: terminal (default) or md")
 	reviewCmd.Flags().StringVarP(&reviewOutput, "output", "o", "", "Write output to file (for --format md)")
 	reviewCmd.Flags().StringVar(&reviewTimeout, "timeout", "", "Review timeout (e.g. 60s, 2m)")
-	reviewCmd.Flags().IntVar(&reviewTaskID, "task", 0, "Include PM task context in review (task ID)")
+	reviewCmd.Flags().IntVar(&reviewTaskID, "task", 0, "Include task context in review (task ID)")
 	reviewCmd.Flags().BoolVar(&reviewQuick, "quick", false, "Show diff stats only, no AI call")
 	rootCmd.AddCommand(reviewCmd)
 }

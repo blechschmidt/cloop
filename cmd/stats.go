@@ -21,7 +21,7 @@ var statsCmd = &cobra.Command{
 	Short: "Show session statistics",
 	Long: `Show aggregated statistics for the current cloop session.
 
-Includes step timing, token usage, and task completion breakdown (in PM mode).`,
+Includes step timing, token usage, and task completion breakdown.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
 		s, err := state.Load(workdir)
@@ -185,7 +185,7 @@ func printEstimatesTable(s *state.ProjectState) {
 	dimColor := color.New(color.Faint)
 
 	if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-		dimColor.Println("No PM task plan found. Run cloop in PM mode first.")
+		dimColor.Println("No task plan found. Run 'cloop run' first.")
 		return
 	}
 
@@ -251,6 +251,6 @@ func printEstimatesTable(s *state.ProjectState) {
 }
 
 func init() {
-	statsCmd.Flags().BoolVar(&statsEstimates, "estimates", false, "Show estimated vs actual time table for PM tasks")
+	statsCmd.Flags().BoolVar(&statsEstimates, "estimates", false, "Show estimated vs actual time table for tasks")
 	rootCmd.AddCommand(statsCmd)
 }

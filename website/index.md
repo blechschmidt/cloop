@@ -1,6 +1,6 @@
 # cloop
 
-**cloop builds software for you with AI coding agents.**
+**cloop is a Software Factory: it builds software for you with AI coding agents.**
 
 You tell cloop what you want: a one-line goal, a list of tasks, or a written
 specification. cloop splits the work into tasks and hands them, one after

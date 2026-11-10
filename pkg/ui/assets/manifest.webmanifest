@@ -2,7 +2,7 @@
   "id": "/",
   "name": "cloop dashboard",
   "short_name": "cloop",
-  "description": "Autonomous AI product manager and execution hub.",
+  "description": "cloop, the Software Factory: AI coding agents build software from a goal, a task list or a specification.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

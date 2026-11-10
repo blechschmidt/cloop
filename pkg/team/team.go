@@ -18,7 +18,7 @@ func Assign(workDir string, taskID int, user string) error {
 		return err
 	}
 	if !s.PMMode || s.Plan == nil {
-		return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 	}
 	t := s.Plan.TaskByID(taskID)
 	if t == nil {

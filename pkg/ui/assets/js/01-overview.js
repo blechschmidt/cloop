@@ -349,7 +349,7 @@ function render(s) {
   renderReviewGateCard(s);
   renderFeaturePanels();
   if (typeof updateCCLimitsVisibility === 'function') updateCCLimitsVisibility(s.provider || 'claudecode');
-  document.getElementById('statMode').textContent     = 'Product Manager';
+  document.getElementById('statMode').textContent     = 'Software Factory';
   document.getElementById('statCreated').textContent  = fmtDate(s.created_at);
   document.getElementById('statUpdated').textContent  = fmtDate(s.updated_at);
 

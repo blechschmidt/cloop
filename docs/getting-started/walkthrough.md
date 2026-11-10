@@ -45,7 +45,7 @@ hub then listens on every interface.
 
 ## 1. The fleet view
 
-![The Projects tab: counters for projects, active runs, total, done and failed tasks and total steps, then one row per project with its goal, status, progress bar, task count, last activity, provider and model, and Run / PM / Hide / Delete buttons.](../screenshots/01-projects-overview.png)
+![The Projects tab: counters for projects, active runs, total, done and failed tasks and total steps, then one row per project with its goal, status, progress bar, task count, last activity, provider and model, and Run / Hide / Delete buttons.](../screenshots/01-projects-overview.png)
 
 **Projects** is the hub's front page, and the only tab that shows the whole hub
 at once. Counters run across the top. Below them is one row per registered
@@ -135,7 +135,7 @@ including the hardened systemd unit and certificate pinning.
 
 ## 4. Create a project
 
-![The New Project dialog, filled in: a directory, a goal, provider, model and effort pickers, PM mode and Start run immediately checkboxes, and an expanded Access section containing an executor picker and a Grants list reading "No grants — the project starts able to reach nothing".](../screenshots/07-new-project.png)
+![The New Project dialog, filled in: a directory, a goal, provider, model and effort pickers, a Start run immediately checkbox, and an expanded Access section containing an executor picker and a Grants list reading "No grants — the project starts able to reach nothing".](../screenshots/07-new-project.png)
 
 **+ New Project** on the Projects tab needs a directory and a goal. Everything
 else in the dialog is optional.
@@ -199,12 +199,15 @@ empty allowlist is rejected as a mistake instead of being read as
 
 ## 5. The project's control panel
 
-![A project's Overview tab: the goal with an Edit button and an idle badge, the instructions and constraints card, a row of stat cards (Steps, Provider, Executor, Mode, Tokens, Created, Updated), and the Active Options row of run-flag badges with numeric controls for Max Parallel, Step Timeout and Task Timeout.](../screenshots/02-project-overview.png)
+![A project's Overview tab: the goal with an Edit button and an idle badge, the instructions and constraints card, the stat cards (Steps; Provider; Executor, pinned to container; Claude Credential, a red "missing" badge with "none granted"; Review Gate, off; Mode, Software Factory; Tokens; Created; Updated), the Active Options badges with numeric controls for Max Parallel, Step Timeout and Task Timeout, and a Features section noting that features need the project to be the top of a git repository.](../screenshots/02-project-overview.png)
 
 Click a project to open its **Overview**. From top to bottom it shows the goal,
 instructions, stats, options, controls, live output and event history.
 
-Two of the stat cards are also buttons. **Provider** opens a provider and model
+Four of the stat cards are also buttons. **Claude credential** opens the grant
+dialog described in the previous section, and **Review gate** sets up a
+[reviewer model](../guides/review-gate.md) that checks each task's changes
+before they are pushed or merged. **Provider** opens a provider and model
 picker. Your choice is saved on the project and used by every run until you
 change it. **Executor** opens the dialog this walkthrough is about:
 

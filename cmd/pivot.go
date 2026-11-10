@@ -53,7 +53,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm --plan-only' to create one first")
+			return fmt.Errorf("no task plan found — run 'cloop run --plan-only' to create one first")
 		}
 
 		cfg, err := config.Load(workdir)
@@ -184,7 +184,7 @@ Examples:
 
 		fmt.Println(sep)
 		fmt.Println()
-		dimColor.Printf("Run 'cloop run --pm' to execute the updated plan.\n")
+		dimColor.Printf("Run 'cloop run' to execute the updated plan.\n")
 		return nil
 	},
 }

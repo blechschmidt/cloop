@@ -75,7 +75,7 @@ var memoryShowCmd = &cobra.Command{
 		workdir, _ := os.Getwd()
 		content := learning.LoadMemory(workdir)
 		if content == "" {
-			fmt.Println("No narrative memory yet. Run cloop in PM mode to start accumulating knowledge.")
+			fmt.Println("No narrative memory yet. Run 'cloop run' to start accumulating knowledge.")
 			return nil
 		}
 		color.New(color.FgCyan, color.Bold).Println("Project Memory (.cloop/memory.md)")

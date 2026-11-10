@@ -104,7 +104,7 @@ func SaveMemory(workDir, summary string) error {
 	var b strings.Builder
 	if len(existing) == 0 {
 		b.WriteString("# cloop Project Memory\n\n")
-		b.WriteString("This file contains accumulated learnings from past PM runs.\n")
+		b.WriteString("This file contains accumulated learnings from past runs.\n")
 		b.WriteString("It is automatically updated after each run and injected into future task prompts.\n\n")
 	} else {
 		b.Write(existing)
@@ -151,7 +151,7 @@ func FormatForPrompt(workDir string) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("## PROJECT MEMORY (learnings from previous PM runs)\n")
+	b.WriteString("## PROJECT MEMORY (learnings from previous runs)\n")
 	b.WriteString("Use this accumulated knowledge to avoid repeating mistakes and build on past work:\n\n")
 	b.WriteString(mem)
 	b.WriteString("\n\n---\n\n")
@@ -161,7 +161,7 @@ func FormatForPrompt(workDir string) string {
 // buildDistillPrompt constructs the AI prompt for plan distillation.
 func buildDistillPrompt(plan *pm.Plan) string {
 	var b strings.Builder
-	b.WriteString("You are reviewing a completed AI product-manager run. Distill the key learnings.\n\n")
+	b.WriteString("You are reviewing a completed cloop run. Distill the key learnings.\n\n")
 	b.WriteString(fmt.Sprintf("## GOAL\n%s\n\n", plan.Goal))
 	b.WriteString("## TASK OUTCOMES\n")
 

@@ -58,8 +58,8 @@ Examples:
   # CI/CD usage
   curl http://localhost:8081/status
   curl -H "Authorization: Bearer $TOKEN" http://localhost:8081/plan
-  curl -X POST http://localhost:8081/run/start -d '{"pm":true}'
-  curl -X PATCH http://localhost:8081/tasks/3 -d '{"status":"done"}'
+  curl -X POST -H 'Content-Type: application/json' http://localhost:8081/run/start -d '{"plan_only":true}'
+  curl -X PATCH -H 'Content-Type: application/json' http://localhost:8081/tasks/3 -d '{"status":"done"}'
 
 TLS: pass --tls-cert/--tls-key, or configure ui.tls in .cloop/config.yaml
 (the same block cloop ui uses). The bearer token is sent on every request and

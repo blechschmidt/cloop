@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	cloopGoal  = "Evolve cloop into a groundbreaking AI product manager"
+	cloopGoal  = "Evolve cloop into a groundbreaking Software Factory"
 	sysmonGoal = "Evolve sysmon into the best server monitoring dashboard"
 )
 
@@ -1345,12 +1345,18 @@ func TestInit(t *testing.T) {
 		"goal":     "Build a test project",
 		"provider": "claudecode",
 		"maxSteps": 10,
+		// Sent by dashboards before Task 20491 and still by an open tab of
+		// one: read and ignored, since every project plans its tasks.
+		"pmMode": false,
 	})
 	if body["ok"] != true {
 		t.Errorf("expected ok=true, got %v", body)
 	}
 	if body["goal"] != "Build a test project" {
 		t.Errorf("unexpected goal: %v", body["goal"])
+	}
+	if ps := loadStateOrFail(t, dir); !ps.PMMode {
+		t.Error("a project initialized with pmMode false does not plan its tasks")
 	}
 }
 

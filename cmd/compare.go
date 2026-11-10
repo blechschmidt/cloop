@@ -41,7 +41,7 @@ Examples:
   cloop compare "What is the best way to structure a Go project?"
   cloop compare --providers anthropic,openai "Explain REST vs GraphQL"
   cloop compare --judge "Write a haiku about software"
-  cloop compare --task 3           # use a PM task's prompt
+  cloop compare --task 3           # use a task's prompt
   cloop compare --format md -o results.md "Design a caching strategy"
   cloop compare --full "Summarize microservices best practices"`,
 	RunE: runCompare,
@@ -52,7 +52,7 @@ func init() {
 	compareCmd.Flags().StringVar(&cmpModel, "model", "", "Model override (applies to all providers)")
 	compareCmd.Flags().BoolVar(&cmpJudge, "judge", false, "Use an AI judge to score each response (0–10)")
 	compareCmd.Flags().StringVar(&cmpJudgeProv, "judge-provider", "", "Provider to use as judge (default: first successful provider)")
-	compareCmd.Flags().IntVar(&cmpTask, "task", 0, "Use prompt from PM task #N instead of a literal prompt")
+	compareCmd.Flags().IntVar(&cmpTask, "task", 0, "Use prompt from task #N instead of a literal prompt")
 	compareCmd.Flags().StringVar(&cmpFormat, "format", "table", "Output format: table, md")
 	compareCmd.Flags().StringVar(&cmpOutput, "output", "", "Save output to file (shorthand: -o)")
 	compareCmd.Flags().StringVarP(&cmpOutput, "out", "o", "", "")
@@ -116,7 +116,7 @@ func runCompare(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("no project found — run 'cloop init' first: %w", err)
 		}
 		if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no PM task plan found")
+			return fmt.Errorf("no task plan found")
 		}
 		var found bool
 		for _, t := range s.Plan.Tasks {

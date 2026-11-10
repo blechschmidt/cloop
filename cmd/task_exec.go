@@ -56,7 +56,7 @@ Use '--' to separate cloop flags from the command and its own flags:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		var taskTitle, taskStatus string

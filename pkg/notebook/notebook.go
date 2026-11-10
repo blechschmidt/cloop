@@ -253,7 +253,7 @@ func retroSummary(plan *pm.Plan) string {
 		sb.WriteString(fmt.Sprintf("**%d task(s) failed** — review failure diagnoses and consider retrying or splitting those tasks.\n\n", failed))
 	}
 	if pending > 0 {
-		sb.WriteString(fmt.Sprintf("**%d task(s) remain pending** — run `cloop run --pm` to continue execution.\n\n", pending))
+		sb.WriteString(fmt.Sprintf("**%d task(s) remain pending** — run `cloop run` to continue execution.\n\n", pending))
 	}
 
 	return strings.TrimSpace(sb.String())

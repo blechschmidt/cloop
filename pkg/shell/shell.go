@@ -209,7 +209,7 @@ func (sh *Shell) buildPrompt(userMsg string) string {
 	var b strings.Builder
 
 	// System context: who we are.
-	b.WriteString("You are an AI product manager assistant embedded in cloop, a project management CLI.\n")
+	b.WriteString("You are an AI assistant embedded in cloop, a Software Factory CLI that plans and runs a project's tasks.\n")
 	b.WriteString("You help users manage their project plan through natural conversation.\n\n")
 
 	// Current plan state.
@@ -231,7 +231,7 @@ func (sh *Shell) buildPrompt(userMsg string) string {
 			b.WriteString(fmt.Sprintf("  %s #%d (P%d) %s\n", sym, t.ID, t.Priority, t.Title))
 		}
 	} else {
-		b.WriteString("No PM task plan loaded (run `cloop run --pm` to create one).\n")
+		b.WriteString("No task plan loaded (run `cloop run` to create one).\n")
 	}
 	b.WriteString("\n")
 
@@ -260,7 +260,7 @@ func (sh *Shell) buildPrompt(userMsg string) string {
 // runTask executes a specific task by ID using the provider.
 func (sh *Shell) runTask(ctx context.Context, taskID int, out io.Writer) error {
 	if sh.State.Plan == nil {
-		return fmt.Errorf("no plan loaded — run `cloop run --pm` first")
+		return fmt.Errorf("no plan loaded — run `cloop run` first")
 	}
 
 	var task *pm.Task
@@ -434,7 +434,7 @@ func (sh *Shell) printStatus(out io.Writer) {
 		fmt.Fprintf(out, "  %d done, %d failed, %d remaining\n",
 			done, failed, len(s.Plan.Tasks)-done-failed)
 	} else {
-		fmt.Fprintln(out, "No PM task plan. Run `cloop run --pm` to create one.")
+		fmt.Fprintln(out, "No task plan. Run `cloop run` to create one.")
 	}
 	fmt.Fprintln(out)
 }

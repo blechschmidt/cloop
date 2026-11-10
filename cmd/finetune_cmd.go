@@ -33,7 +33,7 @@ var finetuneCmd = &cobra.Command{
 var finetuneExportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export completed task I/O pairs as JSONL",
-	Long: `Export completed PM task execution pairs as JSONL for LLM fine-tuning.
+	Long: `Export completed task execution pairs as JSONL for LLM fine-tuning.
 
 Each exported record pairs the reconstructed execution prompt with the full AI
 output for a completed task. Records can be filtered by quality score and
@@ -57,7 +57,7 @@ Examples:
 			return fmt.Errorf("loading state: %w", err)
 		}
 		if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no plan found — run 'cloop run --pm' first")
+			return fmt.Errorf("no plan found — run 'cloop run' first")
 		}
 
 		// Validate format.

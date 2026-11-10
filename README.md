@@ -3,12 +3,12 @@
 [![CI](https://github.com/blechschmidt/cloop/actions/workflows/ci.yml/badge.svg)](https://github.com/blechschmidt/cloop/actions/workflows/ci.yml)
 [![Docs](https://github.com/blechschmidt/cloop/actions/workflows/docs.yml/badge.svg)](https://blechschmidt.github.io/cloop/)
 
-cloop builds software for you with AI coding agents. You tell it what you want:
-a one-line goal, a list of tasks, or a written specification. cloop splits the
-work into tasks and hands them, one after another, to a coding agent such as
-Claude Code, which writes the code in your repository and runs your tests.
-cloop keeps track of every task and its outcome, retries what fails, and keeps
-going until the job is done.
+cloop is a Software Factory: it builds software for you with AI coding agents.
+You tell it what you want: a one-line goal, a list of tasks, or a written
+specification. cloop splits the work into tasks and hands them, one after
+another, to a coding agent such as Claude Code, which writes the code in your
+repository and runs your tests. cloop keeps track of every task and its
+outcome, retries what fails, and keeps going until the job is done.
 
 You can read the task list before anything runs, change it while cloop is
 working, and look up afterwards what was done for each task.

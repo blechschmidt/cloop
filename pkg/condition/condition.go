@@ -119,7 +119,7 @@ func evalAI(ctx context.Context, task *pm.Task, plan *pm.Plan, p provider.Provid
 // buildAIPrompt constructs the yes/no question prompt for an AI condition.
 func buildAIPrompt(task *pm.Task, plan *pm.Plan) string {
 	var b strings.Builder
-	b.WriteString("You are evaluating a pre-execution condition for a task in an AI project management system.\n\n")
+	b.WriteString("You are evaluating a pre-execution condition for a task in cloop, a Software Factory.\n\n")
 
 	if plan != nil {
 		b.WriteString(fmt.Sprintf("## PROJECT GOAL\n%s\n\n", plan.Goal))

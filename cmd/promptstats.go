@@ -34,7 +34,7 @@ Examples:
 			return fmt.Errorf("loading prompt stats: %w", err)
 		}
 		if len(records) == 0 {
-			fmt.Println("No prompt stats recorded yet. Run 'cloop run --pm' to generate data.")
+			fmt.Println("No prompt stats recorded yet. Run 'cloop run' to generate data.")
 			return nil
 		}
 

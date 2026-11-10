@@ -339,7 +339,7 @@ Examples:
 			return fmt.Errorf("loading state: %w", err)
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm --plan-only' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run --plan-only' to create one")
 		}
 
 		provName := simulateProvider

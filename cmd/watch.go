@@ -121,7 +121,7 @@ func runFileWatchMode(workdir string) error {
 				dim.Printf("[watch] cloop run exited: %v\n", err)
 			}
 		} else if len(evt.ResetTaskIDs) > 0 {
-			dim.Printf("[watch] run 'cloop run --pm' to re-execute, or use --auto-run\n")
+			dim.Printf("[watch] run 'cloop run' to re-execute, or use --auto-run\n")
 		}
 	}
 
@@ -289,6 +289,6 @@ func init() {
 	watchCmd.Flags().StringVar(&watchIntervalStr, "interval", "2s", "Status-poll refresh interval (e.g. 1s, 5s, 10s)")
 	watchCmd.Flags().StringArrayVar(&watchGlobs, "glob", nil, "File glob pattern to watch (repeatable; enables file-watch mode)")
 	watchCmd.Flags().StringVar(&watchDebounceStr, "debounce", "2s", "Debounce duration after last file change before triggering (e.g. 500ms, 5s)")
-	watchCmd.Flags().BoolVar(&watchAutoRun, "auto-run", false, "Automatically run 'cloop run --pm' after each triggered re-evaluation")
+	watchCmd.Flags().BoolVar(&watchAutoRun, "auto-run", false, "Automatically run 'cloop run' after each triggered re-evaluation")
 	rootCmd.AddCommand(watchCmd)
 }

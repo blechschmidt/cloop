@@ -37,7 +37,7 @@ var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Persistent background daemon: autonomous plan execution without a terminal",
 	Long: `cloop daemon runs as a persistent background process that autonomously
-executes PM tasks, watches file triggers, and fires scheduled plan
+executes tasks, watches file triggers, and fires scheduled plan
 re-evaluations without requiring an active terminal session.
 
 PID is stored in .cloop/daemon.pid; log output goes to .cloop/daemon.log.
@@ -580,9 +580,9 @@ func runDaemonCycle(ctx context.Context, workdir string, s *daemon.State, cfg *c
 
 	if !projectState.PMMode || projectState.Plan == nil {
 		s.Status = "idle"
-		s.LastError = "not in PM mode — run 'cloop run --pm' first to create a plan"
+		s.LastError = "no task plan yet — run 'cloop run' first to create one"
 		_ = s.Save(workdir)
-		logf("No PM plan found, idle")
+		logf("No task plan found, idle")
 		return
 	}
 

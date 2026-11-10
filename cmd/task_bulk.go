@@ -151,7 +151,7 @@ func bulkStatusFn(newStatus pm.TaskStatus, verb string) func(*cobra.Command, []s
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		ids, err := parseIDList(args)
@@ -249,7 +249,7 @@ Example:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		ids, err := parseIDList(args)
@@ -314,7 +314,7 @@ Example:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		ids, err := parseIDList(args)
@@ -361,7 +361,7 @@ Example:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		ids, err := parseIDList(args)

@@ -279,9 +279,9 @@ func (sess *Session) buildPrompt(userMsg string) string {
 	b.WriteString("\n\n")
 
 	b.WriteString("## INSTRUCTIONS\n\n")
-	b.WriteString("You are an expert AI product manager assistant. Respond helpfully and concisely to the user's message.\n")
+	b.WriteString("You are the assistant built into cloop, a Software Factory. Respond helpfully and concisely to the user's message.\n")
 	b.WriteString("You have full knowledge of this project's state, tasks, and history.\n\n")
-	b.WriteString("To take PM actions, emit directives on their own lines using this format:\n")
+	b.WriteString("To act on the plan, emit directives on their own lines using this format:\n")
 	b.WriteString("  ACTION:TASK_DONE:3         (mark task #3 as done)\n")
 	b.WriteString("  ACTION:TASK_FAIL:5         (mark task #5 as failed)\n")
 	b.WriteString("  ACTION:TASK_SKIP:2         (mark task #2 as skipped)\n")

@@ -1926,7 +1926,7 @@ in the repository to explain it.
 
 ### What data leaves the machine
 
-When you run cloop in any mode that uses a model (PM, suggest, explain and so
+Whenever cloop uses a model (to run tasks, or for `suggest`, `explain` and so
 on), it sends only the following to your configured provider:
 
 | Data sent | When |

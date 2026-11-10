@@ -328,7 +328,7 @@ func Generate(ctx context.Context, p provider.Provider, s *state.ProjectState, m
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
 		return &InsightReport{
 			Metrics:     m,
-			AIAnalysis:  "No task plan found. Run `cloop run --pm --plan-only` to generate a plan first.",
+			AIAnalysis:  "No task plan found. Run `cloop run --plan-only` to generate a plan first.",
 			GeneratedAt: time.Now(),
 		}, nil
 	}

@@ -97,7 +97,7 @@ type Config struct {
 	DryRun      bool
 	PMMode      bool
 	PlanOnly    bool // only decompose tasks, don't execute them
-	RetryFailed bool // retry failed tasks in PM mode
+	RetryFailed bool // retry failed tasks
 	Replan      bool // force re-decompose goal (wipes existing plan, keeps history)
 
 	// MaxFailures is the number of consecutive task failures before PM mode stops (0 = default 3).
@@ -1429,7 +1429,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 	pmColor := color.New(color.FgMagenta, color.Bold)
 
 	if !o.log.IsJSON() && fresh {
-		header.Printf("\n🧠 cloop PM — AI Product Manager Mode\n")
+		header.Printf("\n🏭 cloop Software Factory\n")
 		fmt.Printf("   Provider: %s\n", o.provider.Name())
 		fmt.Printf("   Goal: %s\n", s.Goal)
 		fmt.Println()
@@ -4067,7 +4067,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 	stepColor := color.New(color.FgYellow, color.Bold)
 
 	if fresh {
-		header.Printf("\n🧠 cloop PM — AI Product Manager Mode (parallel)\n")
+		header.Printf("\n🏭 cloop Software Factory (parallel)\n")
 		fmt.Printf("   Provider: %s\n", o.provider.Name())
 		fmt.Printf("   Goal: %s\n", s.Goal)
 		fmt.Println()

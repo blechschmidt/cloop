@@ -33,7 +33,7 @@ confirmation step (skip with --yes).
 
 Examples:
   cloop do "show me the current task list"
-  cloop do "start a PM run with anthropic"
+  cloop do "start a run with anthropic"
   cloop do "pivot the plan to focus on GraphQL"
   cloop do --yes "list all providers and test them"
   cloop do "generate a changelog"`,

@@ -52,7 +52,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -117,7 +117,7 @@ var taskLinkListCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -173,7 +173,7 @@ var taskLinkRmCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		taskID, err := strconv.Atoi(args[0])

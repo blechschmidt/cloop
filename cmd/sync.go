@@ -37,8 +37,8 @@ var (
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Sync PM tasks with external services or git remotes",
-	Long: `Synchronize cloop PM tasks with external services or git remotes.
+	Short: "Sync tasks with external services or git remotes",
+	Long: `Synchronize cloop tasks with external services or git remotes.
 
 Subcommands:
   push      Commit and push .cloop state to a git remote branch
@@ -51,8 +51,8 @@ Subcommands:
 
 var syncGitHubCmd = &cobra.Command{
 	Use:   "github",
-	Short: "Two-way sync between PM tasks and GitHub Issues",
-	Long: `Synchronize cloop PM tasks with GitHub Issues.
+	Short: "Two-way sync between tasks and GitHub Issues",
+	Long: `Synchronize cloop tasks with GitHub Issues.
 
 By default (no --push / --pull flags), both directions are executed:
   1. Pull: import open issues as pending tasks (skips already-linked issues).
@@ -164,7 +164,7 @@ func runSyncGitHub(cmd *cobra.Command, args []string) error {
 		bold.Println("── Push (cloop → GitHub) ──")
 
 		if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			dim.Println("  No PM tasks to push.")
+			dim.Println("  No tasks to push.")
 		} else {
 			defaultLabels := cfg.GitHub.Labels
 			if len(defaultLabels) == 0 {

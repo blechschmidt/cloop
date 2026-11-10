@@ -47,7 +47,7 @@ Examples:
 		}
 
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no active plan — run 'cloop run --pm' first")
+			return fmt.Errorf("no active plan — run 'cloop run' first")
 		}
 
 		var output string

@@ -47,7 +47,7 @@ var contextShowCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm --plan-only' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run --plan-only' to create one")
 		}
 
 		task, err := resolveTask(s, args)
@@ -115,7 +115,7 @@ var contextEditCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm --plan-only' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run --plan-only' to create one")
 		}
 
 		task, err := resolveTask(s, args)

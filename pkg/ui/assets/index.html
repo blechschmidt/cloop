@@ -321,10 +321,6 @@
             <label class="form-label">Instructions / constraints (optional)</label>
             <textarea class="form-textarea" id="initInstructions" placeholder="e.g. Use Go, no external dependencies..."></textarea>
           </div>
-          <label class="adv-label" style="margin-bottom:12px">
-            <input type="checkbox" id="initPMMode"> Start in PM mode (decompose goal into tasks)
-          </label>
-          <br>
           <button class="btn primary" data-action="submitInit">Initialize Project</button>
         </div>
       </div>
@@ -519,7 +515,7 @@
             </div>
           </div>
           <p style="font-size:12px;color:var(--muted);margin:10px 2px 0">
-            All run options (PM, Evolve, Innovate, Skip Clarify, Parallel, Plan Only, Retry Failed, Dry Run) are toggled by clicking their badges in <strong>Active Options</strong> above. Provider and model are set by clicking the <strong>Provider</strong> stat card.
+            All run options (Evolve, Innovate, Skip Clarify, Parallel, Plan Only, Retry Failed, Dry Run) are toggled by clicking their badges in <strong>Active Options</strong> above. Provider and model are set by clicking the <strong>Provider</strong> stat card.
           </p>
         </div>
 
@@ -835,7 +831,6 @@
       <div class="form-group"></div>
     </div>
     <div class="adv-grid" style="margin-bottom:12px">
-      <label class="adv-label"><input type="checkbox" id="npPMMode"> PM mode</label>
       <label class="adv-label"><input type="checkbox" id="npAutoRun"> Start run immediately</label>
     </div>
 
@@ -916,7 +911,7 @@
     </div>
     <p id="pmEffortHint" style="display:none;font-size:11px;color:var(--muted);margin-top:-6px;margin-bottom:6px">Effort applies to the claudecode and copilot providers only.</p>
     <p style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:8px">
-      Saved on the project. Used by all subsequent runs (Run, Run PM, Run with options) until changed.
+      Saved on the project. Used by all subsequent runs (Run, Run with options) until changed.
     </p>
     <div id="pmError" style="display:none;color:var(--red);font-size:12px;margin-bottom:8px"></div>
     <div class="modal-footer">

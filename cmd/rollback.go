@@ -40,7 +40,7 @@ func runRollbackList(workdir string) error {
 		return fmt.Errorf("list snapshots: %w", err)
 	}
 	if len(metas) == 0 {
-		fmt.Println("No plan snapshots found. Snapshots are saved automatically during PM-mode runs.")
+		fmt.Println("No plan snapshots found. Snapshots are saved automatically during runs.")
 		return nil
 	}
 

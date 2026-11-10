@@ -77,7 +77,7 @@ Examples:
 			return fail(err)
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fail(fmt.Errorf("no task plan found — run 'cloop run --pm' to create one"))
+			return fail(fmt.Errorf("no task plan found — run 'cloop run' to create one"))
 		}
 
 		cfg, err := config.Load(workdir)

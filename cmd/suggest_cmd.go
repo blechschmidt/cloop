@@ -38,7 +38,7 @@ var suggestCmd = &cobra.Command{
 	Use:   "suggest",
 	Short: "AI brainstorms feature ideas, or plans a request; accept/reject interactively to add as tasks",
 	Long: `Suggest generates N AI-brainstormed feature ideas tailored to your project.
-Each idea is presented interactively — accept it to add it as a PM task,
+Each idea is presented interactively — accept it to add it as a task,
 or reject it to skip.
 
 The AI considers your project goal, codebase structure, recent activity,
@@ -338,7 +338,7 @@ Examples:
 		}
 
 		fmt.Println(sep)
-		goodColor.Printf("  Added %d %s(s) as PM tasks. Run 'cloop run --pm' to execute them.\n\n", len(added), noun)
+		goodColor.Printf("  Added %d %s(s) as tasks. Run 'cloop run' to execute them.\n\n", len(added), noun)
 
 		// Show what was added
 		for _, t := range added {

@@ -60,7 +60,7 @@ func resolveGitHub(cfg *config.Config) (*gh.Client, error) {
 var githubCmd = &cobra.Command{
 	Use:   "github",
 	Short: "Sync tasks with GitHub Issues and pull requests",
-	Long: `Integrate cloop PM tasks with GitHub Issues and pull requests.
+	Long: `Integrate cloop tasks with GitHub Issues and pull requests.
 
 Pull open issues into your task plan, push tasks back as issues, and
 monitor PR CI status — all from the command line.
@@ -83,13 +83,13 @@ Examples:
 
 var githubSyncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Import GitHub issues as PM tasks",
-	Long: `Fetch open issues from GitHub and create PM tasks for those not yet linked.
+	Short: "Import GitHub issues as tasks",
+	Long: `Fetch open issues from GitHub and create tasks for those not yet linked.
 
 Existing tasks that are already linked to a GitHub issue are skipped.
 Use --force to update linked tasks' titles and descriptions from GitHub.
 
-Requires PM mode to be initialized (cloop init --pm or cloop run --pm).`,
+Requires an initialized project (cloop init).`,
 	RunE: runGitHubSync,
 }
 
@@ -225,7 +225,7 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	}
 	bold.Printf("Sync complete: %s\n", strings.Join(parts, ", "))
 	if imported > 0 {
-		dim.Println("Run 'cloop run --pm' to execute the imported tasks.")
+		dim.Println("Run 'cloop run' to execute the imported tasks.")
 	}
 	return nil
 }
@@ -234,8 +234,8 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 
 var githubPushCmd = &cobra.Command{
 	Use:   "push",
-	Short: "Create GitHub issues for unlinked PM tasks",
-	Long: `For each PM task that doesn't have a linked GitHub issue, create one.
+	Short: "Create GitHub issues for unlinked tasks",
+	Long: `For each task that doesn't have a linked GitHub issue, create one.
 
 With --done, also close issues linked to tasks that are done or skipped,
 adding a completion comment with the task result.
@@ -258,7 +258,7 @@ func runGitHubPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-		return fmt.Errorf("no PM tasks found — run 'cloop init --pm' or 'cloop run --pm' first")
+		return fmt.Errorf("no tasks found — run 'cloop run' first to create a plan")
 	}
 
 	client, err := resolveGitHub(cfg)
@@ -497,7 +497,7 @@ func runGitHubPRs(cmd *cobra.Command, args []string) error {
 
 var githubLinkCmd = &cobra.Command{
 	Use:   "link <task-id> <issue-number>",
-	Short: "Link a PM task to a GitHub issue",
+	Short: "Link a task to a GitHub issue",
 	Args:  cobra.ExactArgs(2),
 	RunE:  runGitHubLink,
 }
@@ -509,7 +509,7 @@ func runGitHubLink(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if s.Plan == nil {
-		return fmt.Errorf("no PM plan — run 'cloop run --pm' first")
+		return fmt.Errorf("no task plan — run 'cloop run' first")
 	}
 
 	taskID := 0
@@ -546,7 +546,7 @@ func runGitHubLink(cmd *cobra.Command, args []string) error {
 
 var githubUnlinkCmd = &cobra.Command{
 	Use:   "unlink <task-id>",
-	Short: "Remove a PM task's GitHub issue link",
+	Short: "Remove a task's GitHub issue link",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runGitHubUnlink,
 }
@@ -558,7 +558,7 @@ func runGitHubUnlink(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if s.Plan == nil {
-		return fmt.Errorf("no PM plan — run 'cloop run --pm' first")
+		return fmt.Errorf("no task plan — run 'cloop run' first")
 	}
 
 	taskID := 0
@@ -632,7 +632,7 @@ func runGitHubStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	if s.Plan == nil || len(s.Plan.Tasks) == 0 {
-		dim.Println("No PM plan tasks.")
+		dim.Println("No tasks in the plan.")
 		return nil
 	}
 

@@ -68,8 +68,8 @@ var (
 
 var taskCmd = &cobra.Command{
 	Use:   "task",
-	Short: "Manage PM mode tasks",
-	Long: `Manage tasks in product manager mode.
+	Short: "Manage the project's tasks",
+	Long: `Manage the tasks in the project's plan.
 
 Subcommands:
   list          Show all tasks
@@ -113,7 +113,7 @@ var taskListCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 		if taskListJSON {
 			tasks := s.Plan.Tasks
@@ -186,7 +186,7 @@ var taskRemoveCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -231,7 +231,7 @@ var taskShowCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -345,7 +345,7 @@ var taskEditCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -452,7 +452,7 @@ var taskNextCmd = &cobra.Command{
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 		task := s.Plan.NextTask()
 		if task == nil {
@@ -495,7 +495,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -547,7 +547,7 @@ Example:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -615,7 +615,7 @@ Example:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -667,7 +667,7 @@ func setTaskStatus(idStr string, status pm.TaskStatus) error {
 		return err
 	}
 	if !s.PMMode || s.Plan == nil {
-		return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+		return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 	}
 
 	id, err := strconv.Atoi(idStr)
@@ -1077,7 +1077,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		taskID, err := strconv.Atoi(args[0])
@@ -1252,7 +1252,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		// Build provider
@@ -1441,7 +1441,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		taskID, err := strconv.Atoi(args[0])
@@ -1645,7 +1645,7 @@ Example:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -1701,7 +1701,7 @@ Example:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])
@@ -1747,7 +1747,7 @@ Example:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		id, err := strconv.Atoi(args[0])

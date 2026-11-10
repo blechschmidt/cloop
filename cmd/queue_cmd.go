@@ -20,11 +20,11 @@ var (
 
 var queueCmd = &cobra.Command{
 	Use:   "queue",
-	Short: "Show the central work queue (every PM task, heal retry, evolve cycle, external merge)",
+	Short: "Show the central work queue (every task, heal retry, evolve cycle, external merge)",
 	Long: `Display recent entries from the central work queue.
 
 Every unit of work cloop performs is recorded here:
-  - PM task executions (kind=task)
+  - Task executions (kind=task)
   - Auto-heal retries  (kind=heal)
   - Evolve discovery cycles (kind=evolve)
   - Externally-added tasks merged in (kind=external)

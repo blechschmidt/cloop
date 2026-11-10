@@ -39,7 +39,7 @@ Examples:
 		dimColor := color.New(color.Faint)
 
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			dimColor.Println("No task plan found. Run 'cloop run --pm' to create one.")
+			dimColor.Println("No task plan found. Run 'cloop run' to create one.")
 			return nil
 		}
 

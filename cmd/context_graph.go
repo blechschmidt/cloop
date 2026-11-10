@@ -54,7 +54,7 @@ func runContextGraph(_ *cobra.Command, _ []string) error {
 	}
 
 	if len(g.Nodes) == 0 {
-		fmt.Fprintln(os.Stderr, "No graph data found. Run 'cloop run --pm' to create a plan, or use 'cloop kb add' to add knowledge base entries.")
+		fmt.Fprintln(os.Stderr, "No graph data found. Run 'cloop run' to create a plan, or use 'cloop kb add' to add knowledge base entries.")
 		return nil
 	}
 

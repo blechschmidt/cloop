@@ -16,10 +16,10 @@ site_name: cloop
 site_url: https://blechschmidt.github.io/cloop/
 site_author: cloop contributors
 site_description: >-
-  cloop builds software with AI coding agents: it turns a goal, a task list or a
-  specification into tasks, has an agent such as Claude Code carry out each one,
-  and checks the results. For a team it runs as a hub with single sign-on,
-  isolated executors and brokered credentials.
+  cloop is a Software Factory: it builds software with AI coding agents, turning
+  a goal, a task list or a specification into tasks, having an agent such as
+  Claude Code carry out each one, and checking the results. For a team it runs
+  as a hub with single sign-on, isolated executors and brokered credentials.
 copyright: Copyright &copy; 2026 cloop contributors — MIT licensed
 
 repo_url: https://github.com/blechschmidt/cloop

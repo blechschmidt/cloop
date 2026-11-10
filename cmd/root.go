@@ -26,8 +26,8 @@ var globalWorkspace string
 
 var rootCmd = &cobra.Command{
 	Use:   "cloop",
-	Short: "Build software from a goal, a task list or a specification with AI coding agents",
-	Long: `cloop builds software with AI coding agents.
+	Short: "A Software Factory: build software from a goal, a task list or a specification with AI coding agents",
+	Long: `cloop is a Software Factory: it builds software with AI coding agents.
 
 Give it a goal, a list of tasks or a specification. cloop splits the work into
 tasks and has a coding agent carry them out one by one in your repository:

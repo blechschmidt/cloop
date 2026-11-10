@@ -1293,6 +1293,22 @@ schema and the hub's HTTP API may change in any release.
 
 ### Changed
 
+- **cloop calls itself a Software Factory wherever it says what it is.** The
+  documentation, the help of `cloop chat` and `cloop task`, the run banner, the
+  dashboard's Mode card and install description, `cloop serve`'s API
+  description and the HTML summary report called cloop an AI product manager,
+  and help and error text talked about "PM mode" in over a hundred places. The
+  README, the documentation site and `cloop --help` now introduce cloop as a
+  Software Factory. The run banner reads `🏭 cloop Software Factory`;
+  `cloop status`, `cloop export` and the dashboard's Mode card say
+  `Software Factory`; and help and error messages tell you to run `cloop run`
+  without naming a mode. The dashboard loses three controls that changed
+  nothing, because every run plans its tasks: the ▶ PM button on each
+  project, which started the same run as ▶ Run, and the *PM mode* checkboxes
+  in the New Project and Initialize dialogs. The setup wizard no longer asks
+  whether to turn on Product Manager mode. The prompts that cast the model as
+  a product manager while it plans are unchanged (Task 20491).
+
 - **A role held hub-wide no longer reaches a project somebody else created.**
   Before, a project shared with a hub-wide operator at `viewer` left them an
   operator there, and only `oidc.admin_emails` could see other people's

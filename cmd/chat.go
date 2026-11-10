@@ -28,8 +28,8 @@ var (
 
 var chatCmd = &cobra.Command{
 	Use:   "chat",
-	Short: "Interactive conversational AI product manager",
-	Long: `Start an interactive chat session with your AI product manager.
+	Short: "Talk to the Software Factory about your project",
+	Long: `Start an interactive chat session about your project.
 
 The AI has full knowledge of your project: goals, tasks, milestones, recent
 activity, and project memory. Ask questions, get suggestions, or let the AI
@@ -335,7 +335,7 @@ func filterActionLines(text string) string {
 func printChatHelp(dim *color.Color) {
 	fmt.Println("Available commands:")
 	fmt.Println("  /status     Current project status")
-	fmt.Println("  /tasks      List all PM tasks")
+	fmt.Println("  /tasks      List all tasks")
 	fmt.Println("  /clear      Clear conversation history")
 	fmt.Println("  /save       Save transcript to .cloop/chat-<timestamp>.txt")
 	fmt.Println("  /help       Show this help")
@@ -373,7 +373,7 @@ func printChatStatus(s *state.ProjectState, dim, success, fail *color.Color) {
 
 func printChatTasks(s *state.ProjectState, success, fail, dim *color.Color) {
 	if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-		dim.Printf("No tasks defined. Run 'cloop run --pm' to start PM mode.\n\n")
+		dim.Printf("No tasks defined. Run 'cloop run' to plan them.\n\n")
 		return
 	}
 

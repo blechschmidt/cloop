@@ -20,7 +20,6 @@ type Result struct {
 	Model        string
 	MaxSteps     int
 	MaxParallel  int
-	PMMode       bool
 	Instructions string
 }
 
@@ -160,20 +159,8 @@ func Run() (*Result, error) {
 			}
 		}
 	}
-	fmt.Println()
-	fmt.Println("  Enable Product Manager mode (AI decomposes goal into tasks)? [Y/n]:")
-	fmt.Print(bold("  > "))
-	if scanner.Scan() {
-		ans := strings.TrimSpace(strings.ToLower(scanner.Text()))
-		res.PMMode = ans == "" || ans == "y" || ans == "yes"
-	}
 	printConfirm("Max Steps", strconv.Itoa(res.MaxSteps))
 	printConfirm("Max Parallel", strconv.Itoa(res.MaxParallel))
-	if res.PMMode {
-		printConfirm("PM Mode", "enabled")
-	} else {
-		printConfirm("PM Mode", "disabled")
-	}
 
 	// ── Step 6: Confirm ──────────────────────────────────────────────────────
 	printStep(6, 6, "Confirm & Write Config")
@@ -189,7 +176,6 @@ func Run() (*Result, error) {
 	}
 	fmt.Printf("    %-14s %d\n", "Max Steps:", res.MaxSteps)
 	fmt.Printf("    %-14s %d\n", "Max Parallel:", res.MaxParallel)
-	fmt.Printf("    %-14s %v\n", "PM Mode:", res.PMMode)
 	fmt.Println()
 	fmt.Print("  Proceed? [Y/n]: ")
 	if scanner.Scan() {

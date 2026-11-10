@@ -57,7 +57,7 @@ Use --apply to actually persist the mutation to the plan (with confirmation).`,
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		cfg, err := config.Load(workdir)

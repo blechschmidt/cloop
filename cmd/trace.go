@@ -30,7 +30,7 @@ var (
 var traceCmd = &cobra.Command{
 	Use:   "trace",
 	Short: "Map recent git commits to plan tasks",
-	Long: `Walk recent git commits and correlate each commit with a PM task.
+	Long: `Walk recent git commits and correlate each commit with a task.
 
 A commit whose subject names its task — "(Task 12)", "(Tasks 12, 13)" or
 "cloop(task-12): …" — is linked to it with high confidence without asking a

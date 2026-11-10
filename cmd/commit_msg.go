@@ -29,11 +29,11 @@ var commitMsgCmd = &cobra.Command{
 	Use:   "commit-msg",
 	Short: "AI-generated conventional commit message from staged changes and task context",
 	Long: `Generate a Conventional Commits message from staged git changes and the
-active PM task.
+active task.
 
 cloop commit-msg reads:
   - git diff --cached  (staged changes)
-  - the in_progress task from .cloop/state.json (if PM mode is active)
+  - the in_progress task from .cloop/state.json (if there is one)
 
 It sends both to the AI provider and prints a ready-to-use commit message
 following the Conventional Commits spec (type(scope): description + body).

@@ -36,7 +36,7 @@ var prCmd = &cobra.Command{
 	Short: "AI-generated pull request title and description",
 	Long: `Generate a pull request title and markdown body using AI.
 
-cloop pr inspects completed PM tasks, git log, and git diff since a base
+cloop pr inspects completed tasks, git log, and git diff since a base
 branch/SHA, then asks the configured provider to write a well-structured
 PR description covering summary, motivation, changes, and testing notes.
 

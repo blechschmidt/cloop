@@ -55,7 +55,7 @@ func Analyze(workDir string, baselineVersion int) (*Report, error) {
 		return nil, fmt.Errorf("listing snapshots: %w", err)
 	}
 	if len(metas) == 0 {
-		return nil, fmt.Errorf("no plan snapshots found — run 'cloop run --pm' first")
+		return nil, fmt.Errorf("no plan snapshots found — run 'cloop run' first")
 	}
 
 	// Resolve baseline snapshot.

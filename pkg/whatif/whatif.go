@@ -228,7 +228,7 @@ func BuildNarrativePrompt(report *Report) string {
 //  5. Generate AI narrative (streamed via streamFn).
 func Run(ctx context.Context, prov provider.Provider, opts provider.Options, s *state.ProjectState, scenario string, streamFn func(string)) (*Report, error) {
 	if s.Plan == nil {
-		return nil, fmt.Errorf("whatif: no task plan found — run 'cloop run --pm' to create one")
+		return nil, fmt.Errorf("whatif: no task plan found — run 'cloop run' to create one")
 	}
 
 	// 1. Clone original plan so the mutation is isolated.

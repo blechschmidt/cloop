@@ -26,7 +26,7 @@ type PlanMessage struct {
 // annotations. A nil state, or one without a plan, says so.
 func PlanSystemPrompt(ps *state.ProjectState) string {
 	var b strings.Builder
-	b.WriteString("You are a plan-aware AI assistant for the cloop AI product manager.\n")
+	b.WriteString("You are a plan-aware AI assistant for cloop, a Software Factory.\n")
 	b.WriteString("You help the user understand, analyse, and improve their project plan.\n")
 	b.WriteString("Be concise, practical, and reference specific task IDs when relevant.\n\n")
 

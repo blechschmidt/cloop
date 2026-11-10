@@ -44,7 +44,7 @@ Examples:
   cloop backlog                          # analyze current project
   cloop backlog --format md              # markdown output
   cloop backlog --format md -o backlog.md
-  cloop backlog --as-tasks               # add top items to PM plan
+  cloop backlog --as-tasks               # add top items to the task plan
   cloop backlog --provider anthropic`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		workdir, _ := os.Getwd()
@@ -240,7 +240,7 @@ func printBacklogTerminal(goal string, a *backlog.Analysis) {
 	}
 
 	fmt.Println()
-	dimColor.Printf("  Use --as-tasks to add these items to your PM plan.\n")
+	dimColor.Printf("  Use --as-tasks to add these items to your task plan.\n")
 	dimColor.Printf("  Use --format md to export as markdown.\n\n")
 }
 
@@ -282,7 +282,7 @@ func injectBacklogAsTasks(workdir string, s *state.ProjectState, a *backlog.Anal
 	}
 
 	successColor := color.New(color.FgGreen, color.Bold)
-	successColor.Printf("  Added %d backlog item(s) to PM plan. Run 'cloop run --pm' to execute.\n\n", added)
+	successColor.Printf("  Added %d backlog item(s) to the task plan. Run 'cloop run' to execute.\n\n", added)
 	return nil
 }
 
@@ -390,7 +390,7 @@ func init() {
 	backlogCmd.Flags().StringVar(&backlogModel, "model", "", "Model to use for analysis")
 	backlogCmd.Flags().StringVar(&backlogFormat, "format", "terminal", "Output format: terminal | md")
 	backlogCmd.Flags().StringVarP(&backlogOutput, "output", "o", "", "Write output to file (for --format md)")
-	backlogCmd.Flags().BoolVar(&backlogAsTasks, "as-tasks", false, "Add backlog items to the PM task plan")
+	backlogCmd.Flags().BoolVar(&backlogAsTasks, "as-tasks", false, "Add backlog items to the task plan")
 	backlogCmd.Flags().IntVar(&backlogMaxItems, "max-items", 0, "Maximum number of items to show/add (0 = all)")
 	rootCmd.AddCommand(backlogCmd)
 }

@@ -15,7 +15,7 @@ var routerCmd = &cobra.Command{
 	Use:   "router",
 	Short: "Configure role-based provider routing for multi-agent execution",
 	Long: `Router maps task roles to specific AI providers.
-In PM mode, each task is routed to the best-suited provider based on its role.
+Each task is routed to the best-suited provider based on its role.
 
 Examples:
   cloop router set backend anthropic      # use Claude for backend tasks

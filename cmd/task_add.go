@@ -60,7 +60,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode {
-			return fmt.Errorf("not in PM mode — run 'cloop init --pm' or 'cloop run --pm' first")
+			return fmt.Errorf("no task plan yet — run 'cloop run' first to create one")
 		}
 		if s.Plan == nil {
 			s.Plan = pm.NewPlan(s.Goal)

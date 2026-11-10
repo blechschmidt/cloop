@@ -43,7 +43,7 @@ var planHistoryCmd = &cobra.Command{
 		}
 		if len(metas) == 0 {
 			fmt.Println("No plan snapshots found.")
-			fmt.Println("Snapshots are created automatically when the plan changes in PM mode.")
+			fmt.Println("Snapshots are created automatically when the plan changes.")
 			return nil
 		}
 
@@ -92,7 +92,7 @@ plain-English narrative explaining what the changes mean for the project directi
 			return fmt.Errorf("listing snapshots: %w", err)
 		}
 		if len(metas) == 0 {
-			return fmt.Errorf("no plan snapshots found — run 'cloop run --pm' to create a plan")
+			return fmt.Errorf("no plan snapshots found — run 'cloop run' to create a plan")
 		}
 		if len(metas) < 2 && len(args) < 2 {
 			return fmt.Errorf("need at least 2 snapshots for a diff (have %d)", len(metas))

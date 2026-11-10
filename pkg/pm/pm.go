@@ -1,6 +1,6 @@
-// Package pm implements the AI product manager mode.
-// In PM mode, the goal is first decomposed into concrete tasks,
-// then each task is executed and verified one at a time.
+// Package pm holds cloop's task plan: the Task and Plan types, and the prompts
+// that decompose a project goal into concrete tasks, which are then executed
+// and verified one at a time.
 package pm
 
 import (

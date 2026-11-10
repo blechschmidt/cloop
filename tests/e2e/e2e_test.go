@@ -92,7 +92,7 @@ func TestE2EInitPMMode(t *testing.T) {
 
 	// Status should reflect PM mode.
 	statusOut := mustRun(t, dir, "status")
-	assertContains(t, statusOut, "product manager")
+	assertContains(t, statusOut, "Software Factory")
 }
 
 func TestE2EInitRequiresGoal(t *testing.T) {

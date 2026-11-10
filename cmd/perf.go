@@ -55,7 +55,7 @@ Examples:
 
 		if len(records) == 0 {
 			fmt.Println("No prompt variant data recorded yet.")
-			fmt.Println("Run 'cloop run --pm' to generate A/B testing data.")
+			fmt.Println("Run 'cloop run' to generate A/B testing data.")
 			fmt.Println()
 			fmt.Println("Registered variants (no outcomes yet):")
 			for _, role := range rolesToShow {

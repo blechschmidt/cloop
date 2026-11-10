@@ -96,7 +96,6 @@ act('submitInit', function() {
     effort:       (document.getElementById('initEffort') || {}).value || '',
     maxSteps:     parseInt(document.getElementById('initMaxSteps').value)||0,
     instructions: document.getElementById('initInstructions').value.trim(),
-    pmMode:       document.getElementById('initPMMode').checked,
   }).then(d => {
     if (d.ok) { toast('Project initialized!', 'ok'); refreshState(); }
     else toast(d.error||'Init failed', 'err');

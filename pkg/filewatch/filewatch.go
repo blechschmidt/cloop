@@ -239,7 +239,7 @@ func applyReEvaluation(workDir string, changedFiles []string) (ChangeEvent, erro
 	}
 
 	if !s.PMMode || s.Plan == nil {
-		evt.Context = fmt.Sprintf("files changed: %s (no active PM plan — run with --pm to enable)", strings.Join(changedFiles, ", "))
+		evt.Context = fmt.Sprintf("files changed: %s (no task plan yet — run 'cloop run' to create one)", strings.Join(changedFiles, ", "))
 		return evt, nil
 	}
 

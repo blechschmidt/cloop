@@ -1,6 +1,6 @@
 // ── Activity tab (per-task work log) ─────────────────────────────────────────
 //
-// The queue surfaces every unit of work cloop performs (PM tasks, heal retries,
+// The queue surfaces every unit of work cloop performs (tasks, heal retries,
 // evolve discoveries, external merges). The view is read-only: rows are written
 // by the orchestrator and exposed via /api/queue. Fetched on the tab's first
 // open since Task 20456, markup included; it was 07-queue.js.
@@ -16,7 +16,7 @@
 
     function _queueKindBadge(kind) {
       const map = {
-        task:     { label: 'PM task',  cls: 'running' },
+        task:     { label: 'Task',     cls: 'running' },
         heal:     { label: 'Heal',     cls: 'paused' },
         evolve:   { label: 'Evolve',   cls: 'evolving' },
         external: { label: 'External', cls: 'unknown' },
@@ -138,7 +138,7 @@
       <span class="spacer"></span>
       <select id="queueFilterKind" class="filter-select" data-change="load" aria-label="Filter by kind">
         <option value="">All kinds</option>
-        <option value="task">PM task</option>
+        <option value="task">Task</option>
         <option value="heal">Auto-heal</option>
         <option value="evolve">Evolve</option>
         <option value="external">External</option>

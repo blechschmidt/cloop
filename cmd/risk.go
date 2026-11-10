@@ -54,7 +54,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil || len(s.Plan.Tasks) == 0 {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm --plan-only' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run --plan-only' to create one")
 		}
 
 		cfg, err := config.Load(workdir)
@@ -179,10 +179,10 @@ func printRiskReports(reports []*risk.RiskReport) {
 			"\n⚠  %d task(s) have CRITICAL findings. Review carefully before running.\n",
 			criticalCount,
 		)
-		color.New(color.FgRed).Printf("   Use 'cloop run --pm --risk-check' to automatically block on CRITICAL findings.\n")
+		color.New(color.FgRed).Printf("   Use 'cloop run --risk-check' to automatically block on CRITICAL findings.\n")
 		color.New(color.FgRed).Printf("   Add '--force' to override CRITICAL blocks if you accept the risk.\n\n")
 	} else {
-		dimColor.Printf("\nRun 'cloop run --pm' to execute the plan.\n\n")
+		dimColor.Printf("\nRun 'cloop run' to execute the plan.\n\n")
 	}
 }
 

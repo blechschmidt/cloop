@@ -38,7 +38,7 @@ Examples:
 			return err
 		}
 		if !s.PMMode || s.Plan == nil {
-			return fmt.Errorf("no task plan found — run 'cloop run --pm' to create one")
+			return fmt.Errorf("no task plan found — run 'cloop run' to create one")
 		}
 
 		// Parse and validate all IDs.
@@ -121,7 +121,7 @@ Examples:
 		}
 		fmt.Println()
 		dimColor.Printf("The orchestrator will pipe each task's output into the next task's prompt.\n")
-		dimColor.Printf("Run 'cloop run --pm' to execute the pipeline.\n")
+		dimColor.Printf("Run 'cloop run' to execute the pipeline.\n")
 
 		return nil
 	},

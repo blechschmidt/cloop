@@ -37,9 +37,9 @@ var (
 
 var agentCmd = &cobra.Command{
 	Use:   "agent",
-	Short: "Autonomous background agent: execute PM tasks without supervision",
+	Short: "Autonomous background agent: execute tasks without supervision",
 	Long: `cloop agent runs as a background daemon, autonomously executing pending
-PM tasks at a regular interval. It picks up where you left off, works
+tasks at a regular interval. It picks up where you left off, works
 through the task queue, and notifies you via webhook when done.
 
 Start the agent:
@@ -462,9 +462,9 @@ func runAgentCycle(ctx context.Context, workdir string, s *agent.State, logf fun
 
 	if !projectState.PMMode || projectState.Plan == nil {
 		s.Status = "idle"
-		s.LastError = "not in PM mode — run 'cloop run --pm' first to create a plan"
+		s.LastError = "no task plan yet — run 'cloop run' first to create one"
 		s.Save(workdir)
-		logf("No PM plan found, idle")
+		logf("No task plan found, idle")
 		return
 	}
 

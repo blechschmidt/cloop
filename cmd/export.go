@@ -88,7 +88,7 @@ func buildReport(s *state.ProjectState) string {
 	}
 
 	if s.PMMode {
-		b.WriteString("**Mode:** product manager\n")
+		b.WriteString("**Mode:** Software Factory\n")
 	}
 
 	b.WriteString(fmt.Sprintf("**Created:** %s\n", s.CreatedAt.Format("2006-01-02 15:04:05")))

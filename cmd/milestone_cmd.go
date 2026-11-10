@@ -33,8 +33,8 @@ var (
 
 var milestoneCmd = &cobra.Command{
 	Use:   "milestone",
-	Short: "Sprint and release planning for PM mode",
-	Long: `Organize PM tasks into milestones (sprints or releases).
+	Short: "Sprint and release planning",
+	Long: `Organize tasks into milestones (sprints or releases).
 
 Milestones group related tasks, track completion progress, and provide
 AI-powered velocity forecasting toward deadlines.
@@ -295,7 +295,7 @@ var milestoneAssignCmd = &cobra.Command{
 var milestonePlanCmd = &cobra.Command{
 	Use:   "plan",
 	Short: "AI-generated milestone plan from current task list",
-	Long: `Let the AI organize your current PM task plan into logical milestones.
+	Long: `Let the AI organize your current task plan into logical milestones.
 
 The AI groups tasks by dependency, priority, and theme into named sprints or
 release milestones, with suggested deadlines and rationale.
