@@ -406,27 +406,13 @@ function updateScopeHint(name) {
 // estimateCost returns estimated USD cost or null if the model is unknown.
 // Returns 0 for local (ollama) providers. Prices are per 1M tokens.
 // ── Provider → Model mapping for dropdowns ──
+// The Claude lineup both Claude providers offer: provider.ClaudeModels
+// (pkg/provider/claudemodels.go) in the same order, which a pkg/ui test
+// checks. Each label is its ID spelled out: fable-5-2 is "Claude Fable 5.2".
+const claudeModels = 'fable-5-2 fable-5-1 fable-5 opus-5-5 opus-5 opus-4-8 opus-4-7 opus-4-6 opus-4-5 sonnet-5-5 sonnet-5 sonnet-4-6 sonnet-4-5 haiku-5-5 haiku-4-5'
+  .split(' ').map(id => ({value: 'claude-' + id, label: 'Claude ' + id[0].toUpperCase() + id.slice(1).replace('-', ' ').split('-').join('.')}));
 const providerModels = {
-  claudecode: [
-    {value: '', label: '(default — claude-sonnet-4-6)'},
-    {value: 'claude-fable-5', label: 'Claude Fable 5'},
-    // The API gates Opus 5.5 on the harness build, not just on account access:
-    // an older CLI is refused with "Claude Code <ver> does not support this
-    // model; version 2.1.280 or newer is required". That is a 400 on every
-    // task, so the floor is named here — at the point of choice — rather than
-    // discovered one failed run at a time. The Anthropic API entry below
-    // carries no such note: the floor is the local binary, not the model.
-    {value: 'claude-opus-5-5', label: 'Claude Opus 5.5 (needs Claude Code 2.1.280+)'},
-    {value: 'claude-opus-5', label: 'Claude Opus 5'},
-    {value: 'claude-opus-4-8', label: 'Claude Opus 4.8'},
-    {value: 'claude-opus-4-7', label: 'Claude Opus 4.7'},
-    {value: 'claude-opus-4-6', label: 'Claude Opus 4.6'},
-    {value: 'claude-opus-4-5', label: 'Claude Opus 4.5'},
-    {value: 'claude-sonnet-5', label: 'Claude Sonnet 5'},
-    {value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6'},
-    {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
-    {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
-  ],
+  claudecode: [{value: '', label: '(default — claude-sonnet-4-6)'}, ...claudeModels],
   // GitHub Copilot (Task 20447). Its catalog depends on the plan — `copilot`,
   // then /model, lists what yours offers — so these are a start, and a model
   // saved on the project that is not among them is kept (populatePMModelDropdown).
@@ -439,20 +425,7 @@ const providerModels = {
     {value: 'gpt-5.4', label: 'GPT-5.4'},
     {value: 'gpt-5-mini', label: 'GPT-5 mini'},
   ],
-  anthropic: [
-    {value: '', label: '(default — claude-opus-4-6)'},
-    {value: 'claude-fable-5', label: 'Claude Fable 5'},
-    {value: 'claude-opus-5-5', label: 'Claude Opus 5.5'},
-    {value: 'claude-opus-5', label: 'Claude Opus 5'},
-    {value: 'claude-opus-4-8', label: 'Claude Opus 4.8'},
-    {value: 'claude-opus-4-7', label: 'Claude Opus 4.7'},
-    {value: 'claude-opus-4-6', label: 'Claude Opus 4.6'},
-    {value: 'claude-opus-4-5', label: 'Claude Opus 4.5'},
-    {value: 'claude-sonnet-5', label: 'Claude Sonnet 5'},
-    {value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6'},
-    {value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5'},
-    {value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5'},
-  ],
+  anthropic: [{value: '', label: '(default — claude-opus-4-6)'}, ...claudeModels],
   openai: [
     {value: '', label: '(default — gpt-4o)'},
     {value: 'gpt-4o', label: 'GPT-4o'},
@@ -739,38 +712,46 @@ function estimateCost(provider, model, inputTok, outputTok) {
   const p = (provider || '').toLowerCase();
   if (p === 'ollama') return 0;
   const m = (model || '').toLowerCase();
-  // Pricing table: [inputPerM, outputPerM] in USD
+  // Pricing table: [inputPerM, outputPerM] in USD. The Claude rows are
+  // pkg/cost's prices, and a pkg/ui test fails when they differ or when a
+  // model in claudeModels has no row. (Haiku 5.5 costs five times as much
+  // per request over 100k prompt tokens; token totals cannot tell, so this
+  // estimate uses its standard price, as pkg/cost's Estimate does.)
   const prices = {
-    'claude-fable-5':             [10.00, 50.00],
-    'claude-opus-5-5':            [5.00,  25.00],
-    'claude-opus-5':              [5.00,  25.00],
-    'claude-sonnet-5':            [3.00,  15.00],
-    'claude-opus-4-8':            [5.00,  25.00],
-    'claude-opus-4-7':            [5.00,  25.00],
-    'claude-opus-4-6':            [15.00, 75.00],
-    'claude-opus-4-5':            [15.00, 75.00],
-    'claude-sonnet-4-6':          [3.00,  15.00],
-    'claude-sonnet-4-5':          [3.00,  15.00],
-    'claude-haiku-4-5':           [0.80,  4.00],
-    'claude-3-opus-20240229':     [15.00, 75.00],
-    'claude-3-5-sonnet-20241022': [3.00,  15.00],
-    'claude-3-5-haiku-20241022':  [0.80,  4.00],
-    'claude-3-haiku-20240307':    [0.25,  1.25],
-    'gpt-4o':                     [2.50,  10.00],
-    'gpt-4o-mini':                [0.15,  0.60],
-    'gpt-4-turbo':                [10.00, 30.00],
-    'gpt-4':                      [30.00, 60.00],
-    'gpt-3.5-turbo':              [0.50,  1.50],
-    'o1':                         [15.00, 60.00],
-    'o1-mini':                    [3.00,  12.00],
-    'o3-mini':                    [1.10,  4.40],
-    'gemini-1.5-pro':             [1.25,  5.00],
-    'gemini-1.5-flash':           [0.075, 0.30],
-    'llama3':                     [0,     0],
-    'llama3.1':                   [0,     0],
-    'llama3.2':                   [0,     0],
-    'mistral':                    [0,     0],
-    'mixtral':                    [0,     0],
+    'claude-fable-5-2': [8, 40],
+    'claude-fable-5-1': [10, 50],
+    'claude-fable-5': [10, 50],
+    'claude-opus-5-5': [4, 20],
+    'claude-opus-5': [5, 25],
+    'claude-opus-4-8': [5, 25],
+    'claude-opus-4-7': [5, 25],
+    'claude-opus-4-6': [5, 25],
+    'claude-opus-4-5': [5, 25],
+    'claude-sonnet-5-5': [2, 10],
+    'claude-sonnet-5': [2, 10],
+    'claude-sonnet-4-6': [3, 15],
+    'claude-sonnet-4-5': [3, 15],
+    'claude-haiku-5-5': [0.1, 0.5],
+    'claude-haiku-4-5': [1, 5],
+    'claude-3-opus-20240229': [15, 75],
+    'claude-3-5-sonnet-20241022': [3, 15],
+    'claude-3-5-haiku-20241022': [0.8, 4],
+    'claude-3-haiku-20240307': [0.25, 1.25],
+    'gpt-4o': [2.5, 10],
+    'gpt-4o-mini': [0.15, 0.6],
+    'gpt-4-turbo': [10, 30],
+    'gpt-4': [30, 60],
+    'gpt-3.5-turbo': [0.5, 1.5],
+    'o1': [15, 60],
+    'o1-mini': [3, 12],
+    'o3-mini': [1.1, 4.4],
+    'gemini-1.5-pro': [1.25, 5],
+    'gemini-1.5-flash': [0.075, 0.3],
+    'llama3': [0, 0],
+    'llama3.1': [0, 0],
+    'llama3.2': [0, 0],
+    'mistral': [0, 0],
+    'mixtral': [0, 0],
   };
   // Exact match
   if (prices[m]) {

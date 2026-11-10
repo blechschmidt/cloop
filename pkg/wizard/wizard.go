@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/provider"
 )
 
 // Result holds the values collected by the wizard.
@@ -107,11 +109,11 @@ func Run() (*Result, error) {
 	printStep(4, 6, "Model")
 	defaultModels := map[string][]string{
 		// Entries are stored verbatim as the model ID below, so they carry no
-		// annotation — the Opus 5.5 harness-build floor that the dashboard's
-		// picker spells out cannot be repeated here without becoming part of
-		// the ID.
-		"claudecode": {"(provider default)", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
-		"anthropic":  {"claude-sonnet-4-6", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-haiku-4-5-20251001"},
+		// annotation. Both Claude providers offer the whole lineup in
+		// provider.ClaudeModels; the anthropic list keeps claude-sonnet-4-6
+		// first because the first entry is the one Enter picks.
+		"claudecode": append([]string{"(provider default)"}, provider.ClaudeModelIDs()...),
+		"anthropic":  moveFirst("claude-sonnet-4-6", provider.ClaudeModelIDs()),
 		"openai":     {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1"},
 		"ollama":     {"llama3.2", "mistral", "qwen2.5", "deepseek-r1"},
 		"mock":       {"(provider default)"},
@@ -299,4 +301,17 @@ func chooseFromListWithCustom(scanner *bufio.Scanner, items []string, defaultIdx
 		}
 	}
 	return items[defaultIdx]
+}
+
+// moveFirst returns list with first moved to its front, or added there when
+// list does not contain it.
+func moveFirst(first string, list []string) []string {
+	out := make([]string, 0, len(list)+1)
+	out = append(out, first)
+	for _, m := range list {
+		if m != first {
+			out = append(out, m)
+		}
+	}
+	return out
 }

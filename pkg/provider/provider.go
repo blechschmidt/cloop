@@ -38,12 +38,16 @@ type Options struct {
 	FrequencyPenalty *float64
 
 	// ExtendedThinking enables reasoning/thinking mode.
-	// For Anthropic: sends the "thinking" block with budget_tokens=ThinkingBudget.
+	// For Anthropic: sends a "thinking" block, {type: "adaptive"} for the
+	// models from the 4.6 generation on and budget_tokens=ThinkingBudget for
+	// older ones.
 	// For OpenAI o1/o3/o4-mini: sets reasoning_effort based on ThinkingBudget.
 	ExtendedThinking bool
 
 	// ThinkingBudget is the token budget for reasoning/thinking content.
-	// Anthropic: budget_tokens for the thinking block (default 8000).
+	// Anthropic: budget_tokens for the thinking block (default 8000) on models
+	// older than the 4.6 generation. Later models refuse a budget, so it is not
+	// sent to them.
 	// OpenAI: maps to reasoning_effort ("low"/<4000, "medium"/<12000, "high"/>=12000).
 	ThinkingBudget int
 

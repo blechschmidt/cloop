@@ -429,6 +429,12 @@ import (
 // only what reaches them: two tab buttons and a panel, three <meta>s, the
 // knowledge_source case and its SSE name, the details' citations hook and a
 // palette entry. 239 B: 114,482 B after. The ceiling stays: 318 B of slack.
+//
+// Task 20489 found the set at exactly 114,800 B and added four Claude models
+// to the pickers and their prices to the cost card's table. It paid for them
+// by building both Claude pickers from one list of IDs, with each label spelled
+// out from its ID, and by writing the price table without column padding:
+// 114,728 B after. The ceiling stays: 72 B of slack.
 const eagerWireBudgetBytes = 114_800
 
 // eagerAsset is one member of the first-paint set.

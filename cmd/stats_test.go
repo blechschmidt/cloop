@@ -114,6 +114,24 @@ func TestEstimateCost_claudeSonnet(t *testing.T) {
 	}
 }
 
+// cloop stats prices with pkg/cost, so every model the pickers offer has the
+// price the budget caps use instead of a second table that drifts.
+func TestEstimateCost_newestClaudeModels(t *testing.T) {
+	for model, want := range map[string]float64{
+		"claude-fable-5-2":  8 + 40,
+		"claude-opus-5-5":   4 + 20,
+		"claude-sonnet-5-5": 2 + 10,
+		"claude-haiku-5-5":  0.10 + 0.50,
+		"claude-opus-4-6":   5 + 25,
+	} {
+		s := &state.ProjectState{Model: model, TotalInputTokens: 1_000_000, TotalOutputTokens: 1_000_000}
+		got, ok := estimateCost(s)
+		if !ok || got < want-0.001 || got > want+0.001 {
+			t.Errorf("estimateCost(%s, 1M, 1M) = %v, %v; want %v", model, got, ok, want)
+		}
+	}
+}
+
 func TestPrintStats_noSteps(t *testing.T) {
 	// printStats should not panic when there are no steps
 	s := &state.ProjectState{

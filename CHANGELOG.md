@@ -220,6 +220,16 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **The model pickers offer every Claude model Anthropic serves, Claude Fable
+  5.2 among them.** The dashboard's model pickers (new project, the Overview's
+  provider card, the review gate) and `cloop init --interactive` list the
+  fifteen models Anthropic's Models API returns: Claude Fable 5.2, 5.1 and 5,
+  Opus 5.5, 5, 4.8, 4.7, 4.6 and 4.5, Sonnet 5.5, 5, 4.6 and 4.5, and Haiku 5.5
+  and 4.5. Fable 5.2, Fable 5.1, Sonnet 5.5 and Haiku 5.5 were missing, and
+  Opus 5.5 no longer carries a note about the Claude Code version it needs.
+  The list is kept once in Go (`provider.ClaudeModels`), and a test fails when
+  the dashboard's copy or its prices differ from it (Task 20489).
+
 - **A Kubernetes executor pool is added in one step, and the dashboard shows
   it scale.** The Executors tab's new **+ Add Kubernetes pool** dialog, and
   the new `cloop executor pool create`, create the pool, its access list and a
@@ -1007,6 +1017,31 @@ schema and the hub's HTTP API may change in any release.
   what every other command prints (Task 20452).
 
 ### Fixed
+
+- **Spend caps and cost estimates use Anthropic's current price for every
+  Claude model.** The model relay enforces `daily_cost_usd` from cloop's price
+  table, and the table had no price for Claude Haiku 5.5, so relayed Haiku 5.5
+  calls counted as free. It priced Claude Fable 5.2 as Fable 5 ($10 and $50
+  per million input and output tokens instead of $8 and $40), Opus 5.5 at $5
+  and $25 instead of $4 and $20, and Sonnet 5 at $3 and $15 instead of $2 and
+  $10. It also charged every cache read a tenth of the input price, four times
+  the real rate on Fable 5.1 and 5.2 and twice on Opus 5.5 and Sonnet 5.5.
+  Most of an agent's input is cache reads, so a relayed run on those models
+  reached its cap far too early. Every Claude model now has its own price,
+  cache reads use each model's own rate, and Haiku 5.5's higher price for a
+  prompt over 100,000 tokens is applied to each request that has one. The
+  Overview's cost card and `cloop stats` kept their own copies of the prices,
+  which showed Opus 4.5 and 4.6 at three times their price; both now use the
+  same prices (Task 20489).
+
+- **The `anthropic` provider no longer sends the newest Claude models requests
+  they refuse.** With `--think` it sent a thinking budget
+  (`budget_tokens`), which every model from Claude Opus 4.7 on, Fable 5.2
+  included, answers with a 400. It now asks those models and the 4.6 models
+  for adaptive thinking. A `temperature` or `top_p` set with `cloop tune` or in
+  `.cloop/config.yaml` is no longer sent to the models that refuse sampling
+  parameters (every Fable model, Opus 4.7 and later, Sonnet 5 and later, and
+  Haiku 5.5), where it failed every call the same way (Task 20489).
 
 - **A helper subcommand's reply is no longer cut short on a busy hub.** The
   dashboard runs `cloop … --json` subcommands on a project's executor to read

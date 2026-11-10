@@ -91,7 +91,10 @@ Some provider settings have no `cloop config set` key, so you edit them in
 `.cloop/config.yaml` directly:
 
 - the inference parameters: `temperature`, `top_p`, `max_tokens`, and
-  `frequency_penalty` for OpenAI
+  `frequency_penalty` for OpenAI. The `anthropic` provider leaves out
+  `temperature` and `top_p` for the Claude models that refuse them: every Fable
+  model, Claude Opus 4.7 and later, Claude Sonnet 5 and later, and Claude
+  Haiku 5.5.
 - the Claude Code subscription caps: `claudecode.max_weekly_pct`,
   `max_five_hour_pct`, `max_weekly_opus_pct` and `max_weekly_sonnet_pct`. You
   can also edit these in the dashboard. A run stopped by a cap resumes by itself
@@ -172,6 +175,15 @@ The provider's own default is `claude-opus-4-6` for `anthropic`, `gpt-4o` for
 no model is set, cloop passes no `--model` to the CLI, and the CLI uses its own
 default.
 
+For `claudecode` and `anthropic`, the dashboard's model pickers and
+`cloop init --interactive` offer every Claude model Anthropic serves: Claude
+Fable 5.2, 5.1 and 5, Claude Opus 5.5, 5, 4.8, 4.7, 4.6 and 4.5, Claude Sonnet
+5.5, 5, 4.6 and 4.5, and Claude Haiku 5.5 and 4.5. Their IDs follow one
+pattern, for example `claude-fable-5-2`, `claude-opus-5-5` and
+`claude-haiku-4-5`. Any other model ID works too: pass it with `--model` or
+`cloop config set`, or type it in the wizard. Claude Mythos is not offered
+because Anthropic serves it only to organizations in its verification programs.
+
 cloop only reads the per-provider key of the provider in use. Setting
 `openai.model` changes nothing while the project runs on `anthropic`, so you can
 keep all of them configured at once.
@@ -200,6 +212,12 @@ The other backends ignore this setting. OpenAI's o-series models do get a
 `reasoning_effort`, but cloop derives it from its extended-thinking budget, not
 from `--effort`, and only for models whose name begins with `o1`, `o3` or
 `o4-mini`.
+
+With `--think`, the `anthropic` provider asks Claude Opus 4.6, Claude Sonnet 4.6
+and every later Claude model for adaptive thinking, where the model decides how
+much to think. Only older models accept a fixed budget, so `--think-budget` is
+sent to them alone. The Fable models and Claude Opus 5.5 think on every call,
+with or without `--think`.
 
 ---
 

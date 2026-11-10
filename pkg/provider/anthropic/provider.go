@@ -52,9 +52,12 @@ type message struct {
 	Content string `json:"content"`
 }
 
+// thinkingConfig is the request's thinking block: {type: "adaptive"} for the
+// models from the 4.6 generation on, {type: "enabled", budget_tokens: N} for
+// older ones.
 type thinkingConfig struct {
 	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 type requestBody struct {
@@ -149,14 +152,23 @@ func (p *Provider) Complete(ctx context.Context, prompt string, opts provider.Op
 	if opts.SystemPrompt != "" {
 		body.System = opts.SystemPrompt
 	}
-	// Extended thinking: omit temperature/top_p (incompatible with thinking mode).
+	// Extended thinking: omit temperature/top_p (incompatible with thinking
+	// mode). The request shape follows the model's generation (models.go):
+	// a budget_tokens block or a sampling parameter sent to a model that
+	// refuses it fails every call with a 400. Without --think, the Fable
+	// models and Claude Opus 5.5 still think, at the API's default effort:
+	// thinking cannot be turned off on them.
 	if opts.ExtendedThinking {
-		budget := opts.ThinkingBudget
-		if budget <= 0 {
-			budget = 8000
+		if adaptiveThinking(model) {
+			body.Thinking = &thinkingConfig{Type: "adaptive"}
+		} else {
+			budget := opts.ThinkingBudget
+			if budget <= 0 {
+				budget = 8000
+			}
+			body.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: budget}
 		}
-		body.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: budget}
-	} else {
+	} else if acceptsSampling(model) {
 		body.Temperature = opts.Temperature
 		body.TopP = opts.TopP
 	}

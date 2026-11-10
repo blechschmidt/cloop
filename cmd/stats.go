@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/fatih/color"
@@ -164,44 +166,15 @@ func computeStepDurations(steps []state.StepResult) (total, min, max time.Durati
 
 // estimateCost returns a rough dollar cost estimate based on provider and model.
 // Returns (cost, true) if we can estimate, (0, false) if unknown.
+//
+// The prices are pkg/cost's. This command used to keep a table of its own,
+// which drifted from it: it once left the Claude 5 family unpriced, and it
+// still showed Opus 4.5 and 4.6 at three times their price.
 func estimateCost(s *state.ProjectState) (float64, bool) {
-	// Cost per million tokens (input, output) in USD.
-	// Values approximate as of 2025.
-	//
-	// Matching below is exact with no prefix fallback, so a model missing from
-	// this map yields no estimate at all rather than an approximate one —
-	// which is how the entire Claude 5 family read as uncosted here.
-	type pricing struct{ inPer1M, outPer1M float64 }
-	prices := map[string]pricing{
-		"claude-fable-5":          {10.0, 50.0},
-		"claude-opus-5-5":         {5.0, 25.0},
-		"claude-opus-5":           {5.0, 25.0},
-		"claude-sonnet-5":         {3.0, 15.0},
-		"claude-opus-4-8":         {5.0, 25.0},
-		"claude-opus-4-7":         {5.0, 25.0},
-		"claude-opus-4-6":         {15.0, 75.0},
-		"claude-sonnet-4-6":       {3.0, 15.0},
-		"claude-haiku-4-5":        {0.8, 4.0},
-		"claude-opus-4-5":         {15.0, 75.0},
-		"claude-fable":            {10.0, 50.0},
-		"claude-sonnet-3-7":       {3.0, 15.0},
-		"claude-3-haiku-20240307": {0.25, 1.25},
-		"gpt-4o":                  {2.5, 10.0},
-		"gpt-4o-mini":             {0.15, 0.6},
-		"gpt-4-turbo":             {10.0, 30.0},
-	}
-
-	model := s.Model
-	if model == "" {
+	if strings.TrimSpace(s.Model) == "" {
 		return 0, false
 	}
-	p, ok := prices[model]
-	if !ok {
-		return 0, false
-	}
-	cost := float64(s.TotalInputTokens)/1e6*p.inPer1M +
-		float64(s.TotalOutputTokens)/1e6*p.outPer1M
-	return cost, true
+	return cost.Estimate(s.Model, s.TotalInputTokens, s.TotalOutputTokens)
 }
 
 // printEstimatesTable prints a table comparing AI-estimated vs actual task durations.
