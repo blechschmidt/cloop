@@ -1039,6 +1039,20 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **An executor pool whose template names no runner image starts runners that
+  work on a hub built from `main`.** The executor controller ran such a pool's
+  runners from cloop's harness image at `latest`, unless the controller itself
+  was a release. `latest` moves only on a release, so a controller from the
+  `edge` image, which is what a hub built from `main` installs, started its
+  runners from v0.0.7, whose agent has no `--ephemeral`, and every runner
+  exited at once. The default runner image now has the controller's own tag:
+  its release's for a release, and `edge` for any other build. It is resolved
+  to a digest and verified as before. Found while writing the new guide to the
+  executor controller, `docs/guides/kubernetes-executor-controller.md`, which
+  covers choosing between a pool and the hub's own Kubernetes executor,
+  installing the chart, volumes per project, scaling, upgrades and
+  troubleshooting by condition and hub doctor finding (Task 20488).
+
 - **Spend caps and cost estimates use Anthropic's current price for every
   Claude model.** The model relay enforces `daily_cost_usd` from cloop's price
   table, and the table had no price for Claude Haiku 5.5, so relayed Haiku 5.5

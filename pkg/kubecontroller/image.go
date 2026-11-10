@@ -3,7 +3,7 @@ package kubecontroller
 // image.go decides what image a pool's runners start from.
 //
 // A template that names none gets cloop's own harness image — the tag of this
-// build's release, or latest for a build that is not one — resolved at its
+// build's release, or edge for a build that is not one — resolved at its
 // registry to the digest it serves, and that digest's signature checked
 // against the workflow that publishes cloop's images (imagepolicy's own-image
 // check, the hub's for the same images). The Pod names the digest, so what a
@@ -38,14 +38,21 @@ var (
 )
 
 // DefaultRunnerImage is the image a template with none runs: cloop's harness
-// image at this build's release tag, or latest for a build that is not a
-// release.
-func DefaultRunnerImage() string {
-	repo := defaultRunnerRepo()
-	if v := version.String(); version.IsRelease(v) {
-		return repo + ":" + strings.TrimPrefix(v, "v")
-	}
-	return repo + ":latest"
+// image at the tag ControllerImageTag gives this build, which is its release's
+// tag for a release and edge, the harness image CI publishes from main, for
+// any other build.
+//
+// Never latest. latest moves only on a release, and a controller built from
+// main starts its runners with flags of main's agent: the newest release's
+// agent can be older than that, and the release before executor pools has no
+// --ephemeral at all, so a runner started from it exits at once.
+func DefaultRunnerImage() string { return defaultRunnerImageFor(version.String()) }
+
+// defaultRunnerImageFor is DefaultRunnerImage for a controller of build
+// version v.
+func defaultRunnerImageFor(v string) string {
+	tag, _ := ControllerImageTag(v)
+	return defaultRunnerRepo() + ":" + tag
 }
 
 // imageChooser resolves and verifies runner images, with a cache.
