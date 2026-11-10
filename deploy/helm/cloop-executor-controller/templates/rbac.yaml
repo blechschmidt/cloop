@@ -1,0 +1,100 @@
+{{- if .Values.rbac.create }}
+# The controller's whole authority: one Role, in the namespace whose
+# ExecutorPools it serves, which is also where its runners and its Lease live.
+# A Role and never a ClusterRole: the namespace is the blast radius, and no
+# rule here reaches a Secret, a Pod or a volume anywhere else.
+#
+# The rules are RequiredRules() in pkg/kubecontroller/rbac.go, the calls the
+# controller makes and nothing more, and two checks hold this Role to them in
+# both directions — nothing it calls missing, nothing it does not call granted:
+# a Go test that renders this chart with `helm template`
+# (pkg/kubecontroller/helm_test.go), and `kubectl auth can-i` against the
+# release CI installs on its kind cluster. Widening a rule fails both.
+#
+#   executorpools          list watch    the pools it serves (its informer)
+#   executorpools/status   update        what it reports on each pool; never
+#                                        the spec, which is the operator's
+#   pods                   create        start a runner
+#   pods                   delete        retire one, collect a finished one
+#   pods                   list watch    its runners (by label)
+#   pods                   get           confirm with the API server, not the
+#                                        cache, that a runner's Pod is gone
+#                                        before deleting the Secret it left or
+#                                        releasing the volume it claimed
+#   secrets                create delete a runner's configuration, owned by its
+#                                        Pod; collected with it
+#   secrets                list watch    those Secrets, to find ones a Pod left
+#   secrets                get           the pool's credential, by name; and
+#                                        that a runner's Secret is gone before
+#                                        collecting the Pod it was made for
+#   persistentvolumeclaims create delete runner volumes (spec.persistence)
+#   persistentvolumeclaims list watch    the pool's volumes (by label)
+#   persistentvolumeclaims patch         claim and release a volume: a merge
+#                                        patch of its metadata, guarded by the
+#                                        version it read (a release the binder
+#                                        raced is retried unguarded at once) —
+#                                        never its spec
+#   events                 create        what happened to a pool, on the pool
+#   leases                 get create update  leader election
+#
+# What is missing on purpose: no update or patch on Pods or Secrets, so a
+# running runner and its configuration are never rewritten; no pods/exec,
+# pods/attach or pods/log, nothing that reaches inside a runner; no create,
+# update or delete on executorpools, so the controller never changes what an
+# operator asked for; no deletecollection anywhere.
+#
+# The Secret rules are wider than the controller's use of them: Kubernetes
+# cannot scope list or watch to a label, so they read every Secret in this
+# namespace. That is why the controller belongs in a namespace of its own,
+# holding its pools' credentials and its runners' Secrets and nothing else
+# (values.yaml says so too).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cloop-executor-controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-executor-controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["cloop.dev"]
+    resources: ["executorpools"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["cloop.dev"]
+    resources: ["executorpools/status"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+  {{- if .Values.leaderElection.enabled }}
+  # Only with leader election: a single replica without it holds no Lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cloop-executor-controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-executor-controller.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cloop-executor-controller.fullname" . }}
+subjects:
+  # The controller's account alone. The runner account is bound to nothing.
+  - kind: ServiceAccount
+    name: {{ include "cloop-executor-controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

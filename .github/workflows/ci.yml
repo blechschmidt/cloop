@@ -2606,6 +2606,40 @@ jobs:
             --set kms.transit.address=https://vault.example.com:8200 --set kms.transit.key=cloop \
             --set kms.transit.tokenSecret.name=vault-token
 
+      - name: helm lint the executor controller chart
+        # deploy/helm/cloop-executor-controller (Task 20485). Its conditional
+        # templates are the pool, the credential Secret it can write, the
+        # runner NetworkPolicy, the budget for more than one replica and the
+        # Lease rule: the defaults, one replica without leader election,
+        # everything on, and a pool on a Secret of the operator's. --strict
+        # fails a warning too. The render's refusals are asserted in Go, with
+        # their reasons (TestHelmChartRefusesWhatItShould, below).
+        run: |
+          set -euo pipefail
+          c=deploy/helm/cloop-executor-controller
+          helm lint --strict "$c"
+          helm lint --strict "$c" --set replicaCount=1 --set leaderElection.enabled=false
+          helm lint --strict "$c" \
+            --set pool.create=true --set pool.hubURL=https://hub.example.com \
+            --set pool.credential.value=cloop_pool1_lint.lint \
+            --set pool.template.automountServiceAccountToken=true \
+            --set pool.persistence.enabled=true \
+            --set networkPolicy.enabled=true --set 'networkPolicy.hub.cidrs[0]=10.96.0.0/12' \
+            --set requireDigest=true --set "image.digest=sha256:$(printf '%064d' 0)"
+          helm lint --strict "$c" \
+            --set pool.create=true --set pool.hubURL=https://hub.example.com \
+            --set pool.credential.existingSecret=pool-credential
+          # Every image it names is the release's own pinned one, and the
+          # controller is told to hold pools to it too.
+          out=$(helm template ctl "$c" --set requireDigest=true --set "image.digest=sha256:$(printf '%064d' 0)")
+          grep -qF "image: \"ghcr.io/blechschmidt/cloop@sha256:$(printf '%064d' 0)\"" <<<"$out" || {
+            echo "::error::requireDigest did not pin the controller's image"; exit 1; }
+          grep -qF -- '- --require-image-digest' <<<"$out" || {
+            echo "::error::requireDigest did not start the controller with --require-image-digest"; exit 1; }
+          if helm template ctl "$c" --set requireDigest=true >/dev/null 2>&1; then
+            echo "::error::requireDigest rendered a controller image named by tag"; exit 1
+          fi
+
       - name: The monitors render what the hub and the Pods need
         # Rendering is not the same as rendering right. Each of these is read
         # by something that fails far from the values file when it is wrong:
@@ -2998,6 +3032,220 @@ jobs:
           go test ./pkg/kms/ -count=1 -v -run '^TestHelmChartRendersAKMSTheHubAccepts$' 2>&1 | tee /tmp/kms-chart.log
           grep -qE '^--- PASS: TestHelmChartRendersAKMSTheHubAccepts \(' /tmp/kms-chart.log || {
             echo "::error::TestHelmChartRendersAKMSTheHubAccepts did not pass — it was skipped"; exit 1; }
+
+      - name: The executor controller chart is what the controller needs
+        # pkg/kubecontroller/helm_test.go renders the chart with `helm
+        # template` and holds it to the controller: the Role is exactly
+        # RequiredRules in both directions and within a fixed ceiling, with
+        # nothing cluster-wide; crds/ is the CRD the controller embeds; the
+        # Deployment runs two restricted, leader-electing replicas probed on
+        # the controller's health endpoint; runners get an account of their
+        # own that mounts no token, and the pool the chart creates passes the
+        # controller's own validation; requireDigest pins every image; the
+        # NetworkPolicy leaves runners the hub and DNS; values reach the objects
+        # as given; and the render refuses what it should, for the reason it
+        # should. CLOOP_REQUIRE_HELM turns a skip into a failure, and every
+        # PASS line is asserted.
+        env:
+          CLOOP_REQUIRE_HELM: "1"
+        run: |
+          set -euo pipefail
+          go test ./pkg/kubecontroller/ -count=1 -v -run '^TestHelmChart' 2>&1 | tee /tmp/controller-chart.log
+          for t in TestHelmChartRoleIsExactlyWhatTheControllerCalls TestHelmChartRoleGrantsNoVerbBeyondItsCeiling \
+                   TestHelmChartShipsTheControllersCRD TestHelmChartDeploymentRunsTwoRestrictedLeaderElectingReplicas \
+                   TestHelmChartRunnersGetAnAccountOfTheirOwnThatMountsNoToken \
+                   TestHelmChartRequireDigestPinsEveryImageItNames TestHelmChartNetworkPolicyLeavesRunnersTheHubAndDNS \
+                   TestHelmChartRendersValuesAsTheyWereGiven TestHelmChartRefusesWhatItShould; do
+            grep -qE "^--- PASS: $t \(" /tmp/controller-chart.log || {
+              echo "::error::$t did not pass — it was skipped or is gone"; exit 1; }
+          done
+
+      - name: Install the executor controller chart and wait for both replicas
+        # The chart on a real API server, in a namespace that enforces the
+        # restricted Pod Security profile, from the image this job built
+        # (`cloop executor controller` is a subcommand of it). --wait returns
+        # once both replicas are ready, which they are only after every list
+        # and watch their informers need has succeeded under the chart's Role;
+        # then one of them must hold the Lease. Helm installs the CRD from
+        # crds/, so the server-side dry run after it checks a pool, a
+        # NetworkPolicy and pinned images against the real schema and its CEL
+        # rules.
+        run: |
+          set -euo pipefail
+          kubectl create namespace cloop-runners
+          kubectl label namespace cloop-runners \
+            pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest
+          helm install ctl deploy/helm/cloop-executor-controller --namespace cloop-runners \
+            --set image.repository=cloop-hub --set image.tag=ci --set image.pullPolicy=Never \
+            --wait --timeout 5m
+          holder=""
+          for _ in $(seq 1 30); do
+            holder=$(kubectl -n cloop-runners get lease cloop-executor-controller \
+              -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
+            [ -n "$holder" ] && break
+            sleep 2
+          done
+          [ -n "$holder" ] || { echo "::error::no replica holds the Lease"; exit 1; }
+          echo "the Lease is held by $holder"
+          # Captured first: grep -q exiting at its match would SIGPIPE a
+          # kubectl still writing, which pipefail reports as a failure.
+          logs=$(kubectl -n cloop-runners logs deploy/ctl-cloop-executor-controller)
+          grep -qF 'runs as ServiceAccount cloop-runners/ctl-cloop-executor-controller' <<<"$logs" || {
+            echo "::error::the controller did not learn its own ServiceAccount from its token"; exit 1; }
+          # Another release name, so the dry run creates rather than patches.
+          helm template dry deploy/helm/cloop-executor-controller --namespace cloop-runners \
+            --set pool.create=true --set pool.hubURL=https://hub.example.com \
+            --set pool.credential.value=cloop_pool1_ci.ci \
+            --set pool.template.automountServiceAccountToken=true --set pool.persistence.enabled=true \
+            --set networkPolicy.enabled=true --set 'networkPolicy.hub.cidrs[0]=10.96.0.0/12' \
+            --set requireDigest=true --set "image.digest=sha256:$(printf '%064d' 0)" \
+            | kubectl apply --dry-run=server -f -
+
+      - name: Assert the executor controller's Role grants exactly what it calls
+        # As for the hub's executor Role above: every verb on every resource
+        # the controller touches is decided against the API server's own
+        # authorizer. What RequiredRules in pkg/kubecontroller/rbac.go lists
+        # is granted, every other verb is denied, nothing reaches inside a
+        # runner, nothing is granted outside the release namespace or across
+        # the cluster, and the runners' own account holds nothing.
+        run: |
+          set -euo pipefail
+          NS=cloop-runners
+          SA=system:serviceaccount:$NS:ctl-cloop-executor-controller
+          RUNNER=system:serviceaccount:$NS:ctl-cloop-executor-controller-runner
+          # Impersonating an account that does not exist is also answered
+          # "no": both must exist for the denials below to mean anything.
+          kubectl -n "$NS" get serviceaccount ctl-cloop-executor-controller ctl-cloop-executor-controller-runner
+          # can-i exits 1 on "no": read the word, ignore the status. A
+          # subresource goes through --subresource (see the hub's check).
+          can() { # as verb resource namespace [subresource]
+            if [ -n "${5:-}" ]; then
+              kubectl auth can-i "$2" "$3" -n "$4" --subresource "$5" --as "$1" 2>/dev/null || true
+            else
+              kubectl auth can-i "$2" "$3" -n "$4" --as "$1" 2>/dev/null || true
+            fi
+          }
+          what() { echo "$2 $3${5:+/$5} in $4"; }
+          grants() {
+            [ "$(can "$@")" = yes ] || { echo "::error::$1 cannot $(what "$@"), which the controller calls"; exit 1; }
+            echo "  grants: $(what "$@")"
+          }
+          denies() {
+            [ "$(can "$@")" = no ] || { echo "::error::too wide: $1 can $(what "$@")"; exit 1; }
+            echo "  denies: $(what "$@")"
+          }
+          # exactly AS RESOURCE SUBRESOURCE VERB...: those verbs granted in
+          # $NS, every other verb denied.
+          exactly() {
+            as=$1 r=$2 sub=$3
+            shift 3
+            for v in get list watch create update patch delete deletecollection; do
+              case " $* " in
+                *" $v "*) grants "$as" "$v" "$r" "$NS" "$sub" ;;
+                *)        denies "$as" "$v" "$r" "$NS" "$sub" ;;
+              esac
+            done
+          }
+          exactly "$SA" executorpools.cloop.dev    ""     list watch
+          exactly "$SA" executorpools.cloop.dev    status update
+          exactly "$SA" pods                       ""     get list watch create delete
+          exactly "$SA" secrets                    ""     get list watch create delete
+          exactly "$SA" persistentvolumeclaims     ""     list watch create patch delete
+          exactly "$SA" events                     ""     create
+          exactly "$SA" events.events.k8s.io       ""
+          exactly "$SA" leases.coordination.k8s.io ""     get create update
+          for sub in exec attach portforward log ephemeralcontainers; do
+            denies "$SA" create pods "$NS" "$sub"
+            denies "$SA" get    pods "$NS" "$sub"
+          done
+          for r in configmaps serviceaccounts services deployments.apps networkpolicies.networking.k8s.io \
+                   roles.rbac.authorization.k8s.io rolebindings.rbac.authorization.k8s.io; do
+            denies "$SA" create "$r" "$NS"
+            denies "$SA" get    "$r" "$NS"
+          done
+          denies "$SA" create serviceaccounts "$NS" token
+          # Nowhere else: the hub's namespace above all.
+          for ns in cloop cloop-workloads default kube-system; do
+            for v in get list create; do
+              denies "$SA" "$v" secrets "$ns"
+              denies "$SA" "$v" pods "$ns"
+            done
+          done
+          cluster() { kubectl auth can-i "$@" --as "$SA" 2>/dev/null || true; }
+          [ "$(cluster list secrets --all-namespaces)" = no ] || {
+            echo "::error::the controller can list Secrets in every namespace"; exit 1; }
+          echo "  denies: list secrets in every namespace"
+          for r in nodes namespaces persistentvolumes clusterroles.rbac.authorization.k8s.io \
+                   customresourcedefinitions.apiextensions.k8s.io; do
+            [ "$(cluster get "$r")" = no ] || { echo "::error::the controller can get cluster-scoped $r"; exit 1; }
+            echo "  denies: get $r (cluster-scoped)"
+          done
+          for r in pods secrets persistentvolumeclaims executorpools.cloop.dev leases.coordination.k8s.io; do
+            for v in get list create; do
+              denies "$RUNNER" "$v" "$r" "$NS"
+            done
+          done
+
+      - name: A pool from the chart's values is served, and the controller refuses what it should
+        # The leader serves the ExecutorPool the chart creates: it reads the
+        # credential Secret the chart wrote, fails to reach the hub this pool
+        # names (nothing answers at hub.invalid) and says so in the pool's
+        # status and an Event — status update and Event create through the
+        # chart's Role. The CRD refuses a token for an account other than one
+        # named for the runners, and the controller marks Invalid a pool
+        # whose runners would run as its own account.
+        run: |
+          set -euo pipefail
+          NS=cloop-runners
+          helm upgrade ctl deploy/helm/cloop-executor-controller --namespace "$NS" --reuse-values \
+            --set pool.create=true --set pool.hubURL=https://hub.invalid \
+            --set pool.credential.value=cloop_pool1_ci.ci \
+            --set "pool.template.image=registry.example.com/runner@sha256:$(printf '%064d' 0)" \
+            --set networkPolicy.enabled=true --set 'networkPolicy.hub.cidrs[0]=10.96.0.0/12' \
+            --wait --timeout 5m
+          pool=ctl-cloop-executor-controller
+          got=""
+          for _ in $(seq 1 30); do
+            got=$(kubectl -n "$NS" get executorpool "$pool" \
+              -o jsonpath='{.status.observedGeneration}/{.status.conditions[?(@.type=="Degraded")].reason}' 2>/dev/null || true)
+            [ "$got" = "1/HubUnavailable" ] && break
+            sleep 2
+          done
+          [ "$got" = "1/HubUnavailable" ] || {
+            echo "::error::the pool's status is '$got', want observedGeneration 1 and Degraded HubUnavailable"
+            kubectl -n "$NS" get executorpool "$pool" -o yaml; exit 1; }
+          reasons=$(kubectl -n "$NS" get events \
+            --field-selector "involvedObject.kind=ExecutorPool,involvedObject.name=$pool" -o jsonpath='{.items[*].reason}')
+          grep -qw HubUnavailable <<<"$reasons" || { echo "::error::no HubUnavailable Event on the pool: $reasons"; exit 1; }
+          echo "the leader wrote the pool's status and an Event"
+          xpool() { # name template
+            printf 'apiVersion: cloop.dev/v1alpha1\nkind: ExecutorPool\nmetadata: {name: %s, namespace: %s}\nspec:\n  hubURL: https://hub.invalid\n  poolCredentialSecretRef: {name: %s-pool-credential}\n  maxRunners: 1\n  template: %s\n' \
+              "$1" "$NS" "$pool" "$2"
+          }
+          for tmpl in '{automountServiceAccountToken: true}' \
+                      '{automountServiceAccountToken: true, serviceAccountName: default}'; do
+            status=0
+            xpool tok "$tmpl" | kubectl apply -f - > /tmp/tok.log 2>&1 || status=$?
+            cat /tmp/tok.log
+            [ "$status" != 0 ] && grep -q 'automountServiceAccountToken needs a serviceAccountName other than default' /tmp/tok.log || {
+              echo "::error::the CRD accepted a token for $tmpl"; exit 1; }
+          done
+          xpool own '{serviceAccountName: ctl-cloop-executor-controller}' | kubectl apply -f -
+          got=""
+          for _ in $(seq 1 30); do
+            got=$(kubectl -n "$NS" get executorpool own \
+              -o jsonpath='{.status.conditions[?(@.type=="Invalid")].status}|{.status.conditions[?(@.type=="Invalid")].message}' 2>/dev/null || true)
+            case "$got" in True\|*"controller's own ServiceAccount"*) break ;; esac
+            sleep 2
+          done
+          case "$got" in
+            True\|*"controller's own ServiceAccount"*) echo "refused: runners as the controller's own account" ;;
+            *) echo "::error::a pool naming the controller's account is not Invalid: '$got'"; exit 1 ;;
+          esac
+          [ -z "$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=cloop-runner -o name)" ] || {
+            echo "::error::runner Pods were started for these pools"; exit 1; }
+          helm uninstall ctl --namespace "$NS" --wait --timeout 2m
+          kubectl delete executorpool own --namespace "$NS" --ignore-not-found --wait=false
 
       - name: Prepare the Kubernetes end-to-end test
         # What both runs of tests/kube below take: the cluster's kubeconfig, and

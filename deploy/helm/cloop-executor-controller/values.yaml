@@ -1,0 +1,305 @@
+# Default values for cloop-executor-controller.
+#
+# The executor controller (`cloop executor controller`) keeps a cloop hub's
+# executor pools' runners as Pods. It watches ExecutorPool objects in this
+# release's namespace, keeps each pool's demand feed on the hub open, starts a
+# runner Pod for each queued run the pool can take, and retires idle runners
+# when the demand falls. Each runner enrolls with the hub, takes one run and
+# exits.
+#
+# The chart installs it with the least authority that works: one Role in the
+# release namespace, holding the verbs the controller calls and nothing more,
+# and nothing cluster-wide.
+#
+# Install it in a namespace of its own: not the hub's, and not one holding
+# anything else. Two reasons:
+#
+#   - The Role can list and read every Secret in its namespace, because the
+#     controller lists its runners' Secrets to collect the ones their Pods left
+#     behind, and Kubernetes cannot scope a list to a label. Whatever else is
+#     kept in the namespace, the controller can read.
+#   - Anyone who can write ExecutorPools here can have the controller start
+#     Pods and present a Secret of this namespace, as a pool credential, to a
+#     hub URL of their choosing. Grant ExecutorPool write access the way you
+#     grant Pod create, which it amounts to.
+
+image:
+  # cloop's own image: the controller is a subcommand of the cloop binary, so
+  # release signing and the edge channel cover it as they cover the hub.
+  repository: ghcr.io/blechschmidt/cloop
+  tag: ""            # defaults to .Chart.AppVersion
+  # A content digest, sha256:<64 hex>. When set the Pods name the image as
+  # repository@digest, and the tag above is left out of the reference.
+  digest: ""
+  pullPolicy: IfNotPresent
+  # Secrets in the release namespace, in the standard form: [{name: …}].
+  pullSecrets: []
+
+# Refuse to render unless every image the chart names is pinned by digest: the
+# controller's (image.digest, or a tag of the form tag@sha256:…) and the
+# runners' image of the pool created from values (pool.template.image). The
+# runners' image may also be left empty, or name one of cloop's own images by
+# tag: the controller resolves those to a digest at the registry and verifies
+# their signature before any runner uses them, and the runner Pods carry the
+# digest. The controller is also started with --require-image-digest, so a
+# pool created by other means that names any other runner image by tag shows
+# Invalid and starts nothing.
+#
+# Off by default, as sandbox.imagePolicy.requireDigest is in the cloop-hub
+# chart: an image loaded into nodes from a tarball (kind load, k3s ctr import)
+# has no registry digest to name.
+requireDigest: false
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Two replicas, one of which leads: a Lease elects the replica that scales,
+# and the other keeps its caches warm to take over within a lease duration.
+# More than one replica needs leader election (the chart refuses otherwise):
+# two leaders would both start runners for the same demand.
+replicaCount: 2
+
+leaderElection:
+  enabled: true
+  # The Lease in the release namespace. One name per namespace on purpose:
+  # every controller serving this namespace's pools has to contend for the
+  # same Lease, or two would scale the same pools. Install one release per
+  # namespace all the same: a controller refuses runners that would run as its
+  # own ServiceAccount, and knows no other release's.
+  leaseName: cloop-executor-controller
+
+controller:
+  # Relist everything and reconcile every pool this often (at least 30s).
+  resync: 5m
+  # Pools reconciled at once.
+  workers: 2
+  # Where /healthz and /readyz are served in the Pod. /readyz answers once the
+  # controller's caches have synced, which takes every list and watch the Role
+  # grants: a missing rule shows as a Pod that never becomes ready.
+  healthPort: 8081
+  # What happens to a runner image of cloop's own whose signature could not
+  # be checked (no Sigstore reachable from the controller, say): "warn" runs
+  # it with a warning on the pool, "required" refuses it. A signature that is
+  # present and wrong is refused either way.
+  imageProvenance: warn
+  # Further flags for `cloop executor controller`.
+  extraArgs: []
+
+# The controller's own ServiceAccount, the one the Role is bound to.
+serviceAccount:
+  create: true
+  # Empty derives <fullname>.
+  name: ""
+  annotations: {}
+
+# The ServiceAccount runner Pods run as, distinct from the controller's and
+# bound to nothing: a runner runs model-authored code, so it gets no API
+# credential by default. The account is created with
+# automountServiceAccountToken: false, and the controller states the Pod's
+# own setting on every runner — false unless the pool asks for a token
+# (pool.template.automountServiceAccountToken). The controller refuses a pool
+# whose runners would run as the controller's own account.
+runnerServiceAccount:
+  create: true
+  # Empty derives <fullname>-runner.
+  name: ""
+  # For workload identity, say: those webhooks project their own tokens and
+  # need no Kubernetes API token in the runner.
+  annotations: {}
+
+# Install the Role and RoleBinding. Turn this off only if your platform manages
+# RBAC separately; the controller still needs the same rules, which
+# `cloop executor controller rbac` prints.
+rbac:
+  create: true
+
+# ── The pool ────────────────────────────────────────────────────────────────
+# An ExecutorPool created from these values. Off by default: a pool is tied to
+# one pool on one hub, and its credential has to be minted there first (the
+# hub's POST /api/executor-pools/<id>/credentials, or the dashboard). Pools can
+# also be created with kubectl; the controller serves every ExecutorPool in
+# this namespace either way.
+pool:
+  create: false
+  # Empty derives <fullname>.
+  name: ""
+
+  # The hub's https base URL, the one runners enroll with.
+  hubURL: ""
+  # sha256:<base64> SPKI pins of the hub's TLS key, comma-separated to stage a
+  # rotation (`cloop hub pin` prints the hub's).
+  hubCAPin: ""
+  # PEM certificates of the CAs the hub's certificate chains to; when set, the
+  # only trust the controller and the runners extend to the hub.
+  hubCABundle: ""
+
+  # The pool's controller credential, cloop_pool1_<id>.<secret>. One of:
+  credential:
+    # A Secret you created in the release namespace (the production path):
+    #   kubectl create secret generic cloop-pool-credential \
+    #     --from-literal=credential='cloop_pool1_…'
+    existingSecret: ""
+    # The Secret's key.
+    key: credential
+    # Or the credential itself, which the chart writes to a Secret named
+    # <fullname>-pool-credential. For evaluation: the value lands in your
+    # values file and in the release's stored manifest.
+    value: ""
+
+  # Runners kept started beyond the demand, and the most this pool starts.
+  minRunners: 0
+  maxRunners: 4
+  # How long a runner must idle before it is retired to scale down.
+  scaleDownDelay: 5m
+  # Labels put on every runner Pod and its Secret.
+  runnerLabels: {}
+
+  # What runner Pods are made of. The controller decides their security
+  # contexts, read-only root and token mounting; this shapes the rest.
+  template:
+    # Empty is cloop's signed harness image for the controller's release,
+    # resolved to the digest its registry serves and verified.
+    image: ""
+    imagePullPolicy: ""
+    # Secrets in the release namespace: [{name: …}].
+    imagePullSecrets: []
+    # A RuntimeClass, such as gvisor or kata.
+    runtimeClassName: ""
+    # requests and limits for cpu, memory and ephemeral-storage.
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    # Mount the runner ServiceAccount's API token in the runners. Leave it off
+    # unless the runs need the Kubernetes API, and then bind that account to
+    # exactly what they need: with it on, model-authored code holds the
+    # account's authority.
+    automountServiceAccountToken: false
+    # Variables set on the runners from Secrets, by reference only:
+    #   - name: HTTPS_PROXY
+    #     secretKeyRef: {name: runner-proxy, key: url}
+    env: []
+
+  # PersistentVolumeClaims that outlive runners: a project's workspace and
+  # caches, kept for its next run on a volume no other project's run is given
+  # unwiped. Every key is the ExecutorPool's spec.persistence.
+  persistence:
+    enabled: false
+    storageClassName: ""
+    size: 20Gi
+    accessModes: [ReadWriteOnce]
+    mounts: [workspace, gitCache, toolCache]
+    reclaimPolicy: Delete
+    # Empty takes maxRunners.
+    maxClaims: null
+    minFree: 1Gi
+
+# ── Runner network ──────────────────────────────────────────────────────────
+# A NetworkPolicy that limits what runner Pods in this namespace can reach to
+# the hub and DNS, and refuses every connection to them. A run then has two
+# ways out, both through the hub: its git proxy for repositories and its egress
+# proxy for whatever an egress grant allows. Nothing else is reachable.
+#
+# Enforced by the cluster's CNI, not by cloop: Calico, Cilium, Antrea and most
+# managed CNIs implement NetworkPolicy; flannel and kindnet do not, and there
+# the policy is accepted and has no effect. Some that do still let a Pod reach
+# its node's own addresses, which is where the API server answers on many
+# clusters; a runner holds no API token unless its pool asks for one.
+#
+# It selects every runner the controller starts in this namespace, from any
+# pool. The ports are the hub Pods' container ports, not a Service's: policy
+# is applied after a Service address is translated to a Pod's.
+networkPolicy:
+  enabled: false
+  hub:
+    # A hub in this cluster: select its Pods. A namespaceSelector alone admits
+    # every Pod in the matching namespaces; with a podSelector beside it, only
+    # those Pods. A podSelector alone selects Pods in this namespace.
+    #   namespaceSelector:
+    #     matchLabels: {kubernetes.io/metadata.name: cloop}
+    #   podSelector:
+    #     matchLabels: {app.kubernetes.io/name: cloop-hub, app.kubernetes.io/instance: cloop}
+    namespaceSelector: {}
+    podSelector: {}
+    # A hub outside the cluster, or reached at an address no selector covers
+    # (an ingress controller's, a load balancer's): its CIDRs.
+    cidrs: []
+    # The hub's API and agent endpoint (8080 in the cloop-hub chart) and its
+    # git proxy (8443). Add the egress proxy's port (executors.egress.
+    # listen_addr) when runs use egress grants, and the kube guard's (8444)
+    # when they use Kubernetes grants.
+    ports: [8080, 8443]
+  dns:
+    # UDP and TCP 53 to the cluster's DNS, by namespace: without it a runner
+    # cannot resolve the hub's name.
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    # Narrow to the DNS Pods, such as {matchLabels: {k8s-app: kube-dns}}.
+    podSelector: {}
+    # Resolvers outside that namespace, such as NodeLocal DNSCache's
+    # 169.254.20.10/32.
+    cidrs: []
+    # The port the DNS Pods themselves listen on, opened for UDP and TCP: 53,
+    # or 5353 for OpenShift's (namespace openshift-dns). A policy is matched
+    # after the Service's port 53 is translated to the Pod's.
+    ports: [53]
+
+# ── The controller's Pods ───────────────────────────────────────────────────
+# These meet the "restricted" Pod Security Standard. The image runs as 65532
+# and needs none of what they remove.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  # cosign runs beside the controller when it verifies a runner image.
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Liveness asks only whether the process answers. Readiness asks whether its
+# caches have synced, and is true on the leader and the standby alike.
+livenessProbe:
+  httpGet: {path: /healthz, port: health}
+  initialDelaySeconds: 5
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet: {path: /readyz, port: health}
+  initialDelaySeconds: 2
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# A PodDisruptionBudget of one unavailable replica, rendered when there is
+# more than one: a node drain then never takes both replicas at once.
+podDisruptionBudget:
+  enabled: true
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+# Empty spreads the replicas over nodes where it can (a preferred
+# podAntiAffinity on kubernetes.io/hostname).
+affinity: {}
+priorityClassName: ""
+terminationGracePeriodSeconds: 30
+
+extraEnv: []

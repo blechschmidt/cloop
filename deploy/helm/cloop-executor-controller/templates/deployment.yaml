@@ -1,0 +1,135 @@
+{{- include "cloop-executor-controller.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloop-executor-controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-executor-controller.labels" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.replicaCount }}
+  strategy:
+    {{- if .Values.leaderElection.enabled }}
+    # A replacement starts before a replica stops. Only the leader scales; the
+    # other keeps its caches warm and takes the Lease over when the leader
+    # goes, so a rollout never leaves the pools without a controller for
+    # longer than a lease duration.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- else }}
+    # Without leader election every running replica scales: a surge Pod would
+    # start runners beside the one it replaces. The old Pod stops first.
+    type: Recreate
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cloop-executor-controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cloop-executor-controller.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- include "cloop-executor-controller.stringMap" . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- include "cloop-executor-controller.stringMap" . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "cloop-executor-controller.serviceAccountName" . }}
+      # The controller talks to the API server as its ServiceAccount, so its
+      # Pods ask for the token here; the account itself says false.
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ toString . | toJson }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: controller
+          image: {{ include "cloop-executor-controller.image" . | quote }}
+          imagePullPolicy: {{ toString .Values.image.pullPolicy | toJson }}
+          args:
+            - executor
+            - controller
+            # The release namespace, explicitly: the Role is there and
+            # nowhere else, so that is the only namespace it can serve.
+            - {{ printf "--namespace=%s" .Release.Namespace | toJson }}
+            - {{ printf "--leader-elect=%t" (eq (toString .Values.leaderElection.enabled) "true") | toJson }}
+            {{- if .Values.leaderElection.enabled }}
+            - {{ printf "--leader-election-namespace=%s" .Release.Namespace | toJson }}
+            - {{ printf "--leader-election-name=%s" (toString .Values.leaderElection.leaseName) | toJson }}
+            {{- end }}
+            - {{ printf "--health-addr=:%d" (int .Values.controller.healthPort) | toJson }}
+            - {{ printf "--resync=%s" (toString .Values.controller.resync) | toJson }}
+            - {{ printf "--workers=%d" (int .Values.controller.workers) | toJson }}
+            - {{ printf "--image-provenance=%s" (toString .Values.controller.imageProvenance) | toJson }}
+            {{- if .Values.requireDigest }}
+            - --require-image-digest
+            {{- end }}
+            {{- range .Values.controller.extraArgs }}
+            - {{ toString . | toJson }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: health
+              containerPort: {{ int .Values.controller.healthPort }}
+              protocol: TCP
+          env:
+            # The root filesystem is read-only. cosign, which verifies the
+            # signature of cloop's own runner image, keeps Sigstore's trusted
+            # root under TUF_ROOT and reads $HOME: both on the /tmp emptyDir,
+            # a few kilobytes fetched again after a restart.
+            - name: HOME
+              value: /tmp
+            - name: TUF_ROOT
+              value: /tmp/sigstore
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- if .Values.affinity }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+        {{- else }}
+        # Spread the replicas over nodes where the scheduler can, so losing a
+        # node does not take the standby with the leader.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "cloop-executor-controller.selectorLabels" . | nindent 20 }}
+        {{- end }}

@@ -15,9 +15,10 @@ package kubecontroller
 //     ALL, seccompProfile: RuntimeDefault;
 //   - readOnlyRootFilesystem, with emptyDir volumes for the runner's state and
 //     /tmp;
-//   - automountServiceAccountToken: false even with a serviceAccountName — a
-//     runner runs model-authored code, and an API credential is nothing it
-//     was given; workload identity webhooks project their own tokens;
+//   - automountServiceAccountToken: false even with a serviceAccountName,
+//     unless the template asks for the token by name (Task 20485) — a runner
+//     runs model-authored code, and an API credential is nothing it was
+//     given; workload identity webhooks project their own tokens;
 //   - no host namespaces, no host paths, enableServiceLinks: false;
 //   - restartPolicy: Never: a runner takes one run, and a restarted one would
 //     try to redeem a spent token.
@@ -297,9 +298,12 @@ func buildRunnerPod(pool *ExecutorPool, name, image string, st *runnerStorage) *
 				UID: pool.Metadata.UID, Controller: &ctrl}},
 		},
 		Spec: PodSpec{
-			RestartPolicy:                 "Never",
-			ServiceAccountName:            strings.TrimSpace(t.ServiceAccountName),
-			AutomountServiceAccountToken:  ptr(false),
+			RestartPolicy:      "Never",
+			ServiceAccountName: strings.TrimSpace(t.ServiceAccountName),
+			// Always stated, so the ServiceAccount's own setting never
+			// decides: false unless the pool asked for the token, which
+			// Validate allows only beside a named, non-default account.
+			AutomountServiceAccountToken:  ptr(t.AutomountServiceAccountToken),
 			EnableServiceLinks:            ptr(false),
 			RuntimeClassName:              runtimeClass,
 			NodeSelector:                  copyMap(t.NodeSelector),

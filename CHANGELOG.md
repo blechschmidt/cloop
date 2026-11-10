@@ -220,6 +220,28 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A Helm chart installs the executor controller with a Role that holds only
+  what it calls.** `deploy/helm/cloop-executor-controller` ships the
+  ExecutorPool CRD in `crds/` and runs `cloop executor controller` as two
+  replicas that elect a leader through a Lease, under the restricted Pod
+  Security profile, with liveness and readiness probes on the controller's
+  `/healthz` and `/readyz`. Its one Role, in the release namespace, grants
+  exactly the rules `cloop executor controller rbac` prints (Pods, Secrets and
+  PersistentVolumeClaims, Events, the Lease, ExecutorPools and their status),
+  and nothing in the chart is cluster-wide. Runners get a ServiceAccount of
+  their own, bound to nothing, that mounts no token. The chart takes the pool's
+  controller credential as the name of a Secret or as a value it writes to one,
+  can create an ExecutorPool from values, pins every image it names by digest
+  under `requireDigest`, and can add a NetworkPolicy that lets runners reach
+  only the hub and DNS, so the hub's git proxy and egress proxy are their only
+  way out. An ExecutorPool's new `template.automountServiceAccountToken` gives
+  runners their account's token only when the pool asks for it, and only for a
+  named account other than `default`. The controller now refuses a pool whose
+  runners would run as the controller's own ServiceAccount, and, started with
+  the new `--require-image-digest`, one that names a runner image other than
+  cloop's own by tag. CI lints and renders the chart, installs it on kind and
+  checks its Role verb by verb with `kubectl auth can-i` (Task 20485).
+
 - **Executor pool runners can keep a persistent volume per project.** An
   ExecutorPool's new `spec.persistence` (`enabled`, `storageClassName`,
   `size`, `accessModes`, `mounts` of `workspace`, `gitCache` and `toolCache`,

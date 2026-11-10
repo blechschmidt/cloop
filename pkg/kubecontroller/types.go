@@ -177,8 +177,16 @@ type RunnerTemplate struct {
 	// API server validates it when the Pod is created.
 	Affinity json.RawMessage `json:"affinity,omitempty"`
 	// ServiceAccountName runs the Pod as that ServiceAccount — for workload
-	// identity, say. Its token is never mounted.
+	// identity, say. Its token is not mounted unless
+	// AutomountServiceAccountToken asks for it; never the controller's own
+	// account (Options.ServiceAccount).
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+	// AutomountServiceAccountToken mounts ServiceAccountName's API token in
+	// the runner (Task 20485). Off unless set: a runner runs model-authored
+	// code, and an API credential is nothing it needs to take a run. A pool
+	// that sets it must name a ServiceAccount other than the namespace's
+	// default, whose authority is then the runner's.
+	AutomountServiceAccountToken bool `json:"automountServiceAccountToken,omitempty"`
 	// Env sets variables on the runner from Secrets, by reference only: the
 	// controller never reads them, and they appear nowhere but in the Secret.
 	Env []SecretEnvVar `json:"env,omitempty"`

@@ -216,6 +216,15 @@ func (t RunnerTemplate) validate(v *validator) {
 	}
 	v.dnsName(f+".runtimeClassName", t.RuntimeClassName, false)
 	v.dnsName(f+".serviceAccountName", t.ServiceAccountName, false)
+	// CRD: the rule on template. A token is the named account's authority,
+	// handed to model-authored code: it must be an account named for the
+	// runners, never whatever the namespace's default has been granted.
+	if t.AutomountServiceAccountToken {
+		if sa := strings.TrimSpace(t.ServiceAccountName); sa == "" || sa == "default" {
+			v.add(f+".automountServiceAccountToken", "needs a serviceAccountName other than default: "+
+				"a runner given an API token runs as an account named for it")
+		}
+	}
 	v.resources(f+".resources.requests", t.Resources.Requests)
 	v.resources(f+".resources.limits", t.Resources.Limits)
 	v.labels(f+".nodeSelector", t.NodeSelector, false)

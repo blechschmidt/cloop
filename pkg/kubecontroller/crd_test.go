@@ -187,6 +187,7 @@ func TestTheCRDStatesTheRulesValidateRepeats(t *testing.T) {
 		{"scaleDownDelay", "duration(self) <= duration('24h')"},
 		{"runnerLabels", "!k.startsWith('cloop.dev/')"},
 		{"hubCABundle", "BEGIN CERTIFICATE"},
+		{"template", "self.serviceAccountName != 'default'"},
 	} {
 		s := spec
 		if want.where != "spec" {

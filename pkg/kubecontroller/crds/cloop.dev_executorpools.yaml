@@ -162,6 +162,9 @@ spec:
                 template:
                   type: object
                   description: What the runner Pods are made of.
+                  x-kubernetes-validations:
+                    - rule: "!has(self.automountServiceAccountToken) || !self.automountServiceAccountToken || (has(self.serviceAccountName) && self.serviceAccountName != 'default')"
+                      message: automountServiceAccountToken needs a serviceAccountName other than default
                   properties:
                     image:
                       type: string
@@ -275,8 +278,16 @@ spec:
                           x-kubernetes-preserve-unknown-fields: true
                     serviceAccountName:
                       type: string
+                      description: >-
+                        The ServiceAccount runner Pods run as; never the
+                        controller's own.
                       maxLength: 253
                       pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                    automountServiceAccountToken:
+                      type: boolean
+                      description: >-
+                        Mount serviceAccountName's API token in the runners.
+                        Off unless set: a runner runs model-authored code.
                     env:
                       type: array
                       description: Variables set on the runner from Secrets, by reference.

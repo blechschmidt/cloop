@@ -192,7 +192,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 	}
 	live := c.collect(ctx, pool, views, deleted, holding, now, &res)
 
-	if problems := pool.Spec.Validate(); len(problems) > 0 {
+	if problems := c.problems(pool); len(problems) > 0 {
 		if feeds != nil {
 			feeds.stop(key)
 		}

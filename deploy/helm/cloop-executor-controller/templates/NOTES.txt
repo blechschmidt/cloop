@@ -1,0 +1,42 @@
+The cloop executor controller is installed in namespace {{ .Release.Namespace }}: {{ int .Values.replicaCount }} replica(s){{ if .Values.leaderElection.enabled }}, electing a leader through the Lease {{ .Values.leaderElection.leaseName }}{{ end }}.
+
+Watch it come up (Ready once its caches have synced):
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "cloop-executor-controller.fullname" . }}
+{{- if .Values.leaderElection.enabled }}
+  kubectl -n {{ .Release.Namespace }} get lease {{ .Values.leaderElection.leaseName }} -o jsonpath='{.spec.holderIdentity}{"\n"}'
+{{- end }}
+
+{{- if .Values.pool.create }}
+
+The ExecutorPool {{ include "cloop-executor-controller.poolName" . }} asks {{ .Values.pool.hubURL }} for runners. Its status says what the hub and the controller make of it:
+
+  kubectl -n {{ .Release.Namespace }} get executorpools
+  kubectl -n {{ .Release.Namespace }} describe executorpool {{ include "cloop-executor-controller.poolName" . }}
+{{- else }}
+
+No ExecutorPool was created (pool.create=false). Mint a controller credential for a pool on the hub, keep it in a Secret here, and create the pool:
+
+  kubectl -n {{ .Release.Namespace }} create secret generic cloop-pool-credential --from-literal=credential='cloop_pool1_…'
+  helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reuse-values \
+    --set pool.create=true --set pool.hubURL=https://cloop.example.com \
+    --set pool.credential.existingSecret=cloop-pool-credential
+
+or write an ExecutorPool yourself (`cloop executor controller crd` documents the fields); the controller serves every one in this namespace. Name {{ include "cloop-executor-controller.runnerServiceAccountName" . }} as its template.serviceAccountName so its runners run as the account made for them.
+{{- end }}
+
+{{- if not .Values.networkPolicy.enabled }}
+
+Runner egress is not restricted by this release (networkPolicy.enabled=false): a runner can reach whatever the cluster's network reaches. Enable it to leave the hub — its git proxy and egress proxy — as the only way out.
+{{- end }}
+
+{{- if not .Values.requireDigest }}
+
+Images are named by tag (requireDigest=false). Pin the controller with image.digest and set requireDigest=true so every image this release names is an exact artifact.
+{{- end }}
+
+The ExecutorPool CRD came from this chart's crds/ directory on install. Helm never upgrades it: when a release changes it, apply it before upgrading the chart:
+
+  kubectl apply -f crds/   (from the chart), or: cloop executor controller crd | kubectl apply -f -
+
+Keep this namespace for the controller alone: its Role reads every Secret here, and whoever can write ExecutorPools here can have it start Pods.

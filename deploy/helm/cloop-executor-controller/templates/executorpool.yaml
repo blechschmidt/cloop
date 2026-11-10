@@ -1,0 +1,96 @@
+{{- if .Values.pool.create }}
+{{- $p := .Values.pool }}
+{{- $t := default dict $p.template }}
+{{- $persist := default dict $p.persistence }}
+# The pool, from values. The CRD comes from crds/, which Helm applies before
+# any template, so this object can be created in the same install.
+apiVersion: cloop.dev/v1alpha1
+kind: ExecutorPool
+metadata:
+  name: {{ include "cloop-executor-controller.poolName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-executor-controller.labels" . | nindent 4 }}
+spec:
+  hubURL: {{ toString $p.hubURL | toJson }}
+  {{- with $p.hubCAPin }}
+  hubCAPin: {{ toString . | toJson }}
+  {{- end }}
+  {{- with $p.hubCABundle }}
+  hubCABundle: {{ toString . | toJson }}
+  {{- end }}
+  poolCredentialSecretRef:
+    name: {{ include "cloop-executor-controller.credentialSecretName" . }}
+    key: {{ include "cloop-executor-controller.credentialKey" . | toJson }}
+  minRunners: {{ int (default 0 $p.minRunners) }}
+  maxRunners: {{ int $p.maxRunners }}
+  scaleDownDelay: {{ include "cloop-executor-controller.scaleDownDelay" . | toJson }}
+  {{- with $p.runnerLabels }}
+  runnerLabels:
+    {{- include "cloop-executor-controller.stringMap" . | nindent 4 }}
+  {{- end }}
+  template:
+    # Runners run as their own account, bound to no Role, and get its token
+    # only when automountServiceAccountToken below asks for it.
+    serviceAccountName: {{ include "cloop-executor-controller.runnerServiceAccountName" . }}
+    automountServiceAccountToken: {{ eq (toString $t.automountServiceAccountToken) "true" }}
+    {{- with $t.image }}
+    image: {{ toString . | toJson }}
+    {{- end }}
+    {{- with $t.imagePullPolicy }}
+    imagePullPolicy: {{ toString . | toJson }}
+    {{- end }}
+    {{- with $t.imagePullSecrets }}
+    imagePullSecrets:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $t.runtimeClassName }}
+    runtimeClassName: {{ toString . | toJson }}
+    {{- end }}
+    {{- with $t.resources }}
+    resources:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $t.nodeSelector }}
+    nodeSelector:
+      {{- include "cloop-executor-controller.stringMap" . | nindent 6 }}
+    {{- end }}
+    {{- with $t.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $t.affinity }}
+    affinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $t.env }}
+    env:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- if $persist.enabled }}
+  persistence:
+    enabled: true
+    {{- with $persist.storageClassName }}
+    storageClassName: {{ toString . | toJson }}
+    {{- end }}
+    size: {{ toString $persist.size | toJson }}
+    {{- with $persist.accessModes }}
+    accessModes:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $persist.mounts }}
+    mounts:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $persist.reclaimPolicy }}
+    reclaimPolicy: {{ toString . | toJson }}
+    {{- end }}
+    {{- /* Set or not, never left out for being 0: `with` would drop a 0. */}}
+    {{- if not (kindIs "invalid" $persist.maxClaims) }}
+    maxClaims: {{ int $persist.maxClaims }}
+    {{- end }}
+    {{- if not (kindIs "invalid" $persist.minFree) }}
+    minFree: {{ toString $persist.minFree | toJson }}
+    {{- end }}
+  {{- end }}
+{{- end }}

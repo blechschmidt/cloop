@@ -51,6 +51,15 @@ type Options struct {
 	// ImageProvenanceRequired refuses a runner image of cloop's own whose
 	// signature could not be verified, instead of warning.
 	ImageProvenanceRequired bool
+	// RequireImageDigest makes a pool whose template names its runner image
+	// by tag Invalid (Task 20485): a named image must be
+	// repository@sha256:…; an empty one is cloop's harness image, which runs
+	// by the digest the controller resolved and verified either way.
+	RequireImageDigest bool
+	// ServiceAccount is the account the controller itself runs as, when it
+	// is known — in a Pod, read from its token: a pool whose runners would
+	// run as it is Invalid (Task 20485). nil checks nothing.
+	ServiceAccount *ServiceAccountRef
 	// Logf receives operational messages; nil logs to stderr.
 	Logf func(format string, args ...any)
 

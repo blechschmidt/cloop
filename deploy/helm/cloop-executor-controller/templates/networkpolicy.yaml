@@ -1,0 +1,62 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $hub := .Values.networkPolicy.hub }}
+{{- $dns := .Values.networkPolicy.dns }}
+{{- $hubTo := list }}
+{{- $hubPeer := dict }}
+{{- with $hub.namespaceSelector }}{{- $_ := set $hubPeer "namespaceSelector" . }}{{- end }}
+{{- with $hub.podSelector }}{{- $_ := set $hubPeer "podSelector" . }}{{- end }}
+{{- if $hubPeer }}{{- $hubTo = append $hubTo $hubPeer }}{{- end }}
+{{- range $hub.cidrs }}{{- $hubTo = append $hubTo (dict "ipBlock" (dict "cidr" (toString .))) }}{{- end }}
+{{- $hubPorts := list }}
+{{- range $hub.ports }}{{- $hubPorts = append $hubPorts (dict "protocol" "TCP" "port" (int .)) }}{{- end }}
+{{- $dnsTo := list }}
+{{- $dnsPeer := dict }}
+{{- with $dns.namespaceSelector }}{{- $_ := set $dnsPeer "namespaceSelector" . }}{{- end }}
+{{- with $dns.podSelector }}{{- $_ := set $dnsPeer "podSelector" . }}{{- end }}
+{{- if $dnsPeer }}{{- $dnsTo = append $dnsTo $dnsPeer }}{{- end }}
+{{- range $dns.cidrs }}{{- $dnsTo = append $dnsTo (dict "ipBlock" (dict "cidr" (toString .))) }}{{- end }}
+{{- $dnsPorts := list }}
+{{- range include "cloop-executor-controller.dnsPorts" . | fromJsonArray }}
+{{- $dnsPorts = append $dnsPorts (dict "protocol" "UDP" "port" (int .)) }}
+{{- $dnsPorts = append $dnsPorts (dict "protocol" "TCP" "port" (int .)) }}
+{{- end }}
+# What runner Pods may reach: the hub and DNS. A run's repositories come
+# through the hub's git proxy and anything else it may fetch through the hub's
+# egress proxy, both of which are ports of the hub below; every other address
+# is refused. Nothing may connect to a runner: a runner dials the hub, never
+# the other way round.
+#
+# It selects every runner the controller starts in this namespace, whichever
+# pool it belongs to, by the two labels the controller puts on each and lets no
+# pool set (runnerLabels may not use them). Enforced by the CNI; one without
+# NetworkPolicy support accepts the object and enforces nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cloop-executor-controller.fullname" . }}-runners
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-executor-controller.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloop-runner
+      app.kubernetes.io/managed-by: cloop-executor-controller
+  policyTypes:
+    - Ingress
+    - Egress
+  # Ingress is listed with no rule: no connection to a runner is allowed.
+  egress:
+    # The hub: its API and agent endpoint, its git proxy, and whichever of its
+    # egress proxy and kube guard networkPolicy.hub.ports names.
+    - to:
+        {{- toYaml $hubTo | nindent 8 }}
+      ports:
+        {{- toYaml $hubPorts | nindent 8 }}
+    # Name resolution, so a runner can find the hub: UDP and TCP to the DNS
+    # Pods' own port (53, or 5353 on OpenShift).
+    - to:
+        {{- toYaml $dnsTo | nindent 8 }}
+      ports:
+        {{- toYaml $dnsPorts | nindent 8 }}
+{{- end }}

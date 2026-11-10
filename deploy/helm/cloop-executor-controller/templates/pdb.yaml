@@ -1,0 +1,16 @@
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+# A drain takes at most one replica at a time, so the standby is there to take
+# the Lease over when the leader goes.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cloop-executor-controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloop-executor-controller.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "cloop-executor-controller.selectorLabels" . | nindent 6 }}
+{{- end }}

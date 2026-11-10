@@ -1,0 +1,32 @@
+apiVersion: v2
+name: cloop-executor-controller
+description: cloop executor controller — keeps a hub's executor pools' runners as Pods
+type: application
+
+# Chart version tracks the chart's own shape. appVersion follows the cloop
+# release the default image tag points at, as in the cloop-hub chart beside
+# this one.
+version: 0.1.0
+appVersion: "dev"
+
+# The ExecutorPool CRD's validation rules use CEL functions (isURL, url(),
+# duration()) that Kubernetes 1.27 introduced.
+kubeVersion: ">=1.27.0-0"
+
+home: https://github.com/blechschmidt/cloop
+sources:
+  - https://github.com/blechschmidt/cloop
+keywords:
+  - cloop
+  - executor
+  - controller
+  - runners
+
+annotations:
+  # Helm installs what crds/ holds on the first install and never again: an
+  # upgrade of this chart does not upgrade the CRD. Apply it yourself when it
+  # changes, before upgrading the release:
+  #   kubectl apply -f deploy/helm/cloop-executor-controller/crds/
+  # or, from a cloop binary of the same release:
+  #   cloop executor controller crd | kubectl apply -f -
+  cloop.dev/crds: "applied on install only; upgrade them with kubectl apply -f crds/"

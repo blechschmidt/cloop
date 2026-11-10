@@ -79,6 +79,7 @@ func runExecutorController(cmd *cobra.Command, _ []string) error {
 	workers, _ := cmd.Flags().GetInt("workers")
 	healthAddr, _ := cmd.Flags().GetString("health-addr")
 	provenance, _ := cmd.Flags().GetString("image-provenance")
+	requireDigest, _ := cmd.Flags().GetBool("require-image-digest")
 
 	required := false
 	switch strings.ToLower(strings.TrimSpace(provenance)) {
@@ -96,6 +97,19 @@ func runExecutorController(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// The account the controller runs as, so no pool's runners run as it
+	// (Task 20485): read from the token it authenticates with, which in a Pod
+	// is its ServiceAccount's.
+	var self *kubecontroller.ServiceAccountRef
+	tok := rest.BearerToken
+	if token != nil {
+		if t, err := token(); err == nil {
+			tok = t
+		}
+	}
+	if sa, ok := kubecontroller.ServiceAccountFromToken(tok); ok {
+		self = &sa
+	}
 	if allNamespaces {
 		namespace = ""
 	} else if strings.TrimSpace(namespace) == "" {
@@ -106,7 +120,8 @@ func runExecutorController(cmd *cobra.Command, _ []string) error {
 			fmt.Sprintf(format, args...))
 	}
 	opts := kubecontroller.Options{REST: rest, Token: token, Namespace: namespace, Resync: resync, Workers: workers,
-		HealthAddr: healthAddr, ImageProvenanceRequired: required, Logf: logf}
+		HealthAddr: healthAddr, ImageProvenanceRequired: required, RequireImageDigest: requireDigest,
+		ServiceAccount: self, Logf: logf}
 	if leaderElect {
 		if strings.TrimSpace(leNamespace) == "" {
 			leNamespace = homeNamespace
@@ -127,6 +142,12 @@ func runExecutorController(cmd *cobra.Command, _ []string) error {
 		logf("leader election: Lease %s/%s as %s", leNamespace, leName, opts.LeaderElection.Identity)
 	} else {
 		logf("leader election is off: run exactly one replica")
+	}
+	if self != nil {
+		logf("runs as ServiceAccount %s, which no runner may run as", self)
+	}
+	if requireDigest {
+		logf("runner images must be pinned by digest")
 	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
@@ -217,6 +238,8 @@ func init() {
 	f.String("health-addr", ":8081", "serve /healthz and /readyz on this address (\"\" for none)")
 	f.String("image-provenance", "warn",
 		"warn or required: whether a runner image of cloop's own whose signature cannot be verified still runs")
+	f.Bool("require-image-digest", false,
+		"refuse a pool whose template names its runner image by tag rather than repository@sha256:…")
 
 	executorControllerCmd.AddCommand(executorControllerCRDCmd)
 	executorControllerCmd.AddCommand(executorControllerRBACCmd)

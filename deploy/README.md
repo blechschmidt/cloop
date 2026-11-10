@@ -8,6 +8,7 @@ endpoint that remote executor agents connect to. You can run one with:
 | Container image | [`../Dockerfile`](../Dockerfile) | Any container runtime |
 | Evaluation stack | [`../docker-compose.yml`](../docker-compose.yml) | Trying SSO + RBAC + TLS in one command |
 | Helm chart | [`helm/cloop-hub/`](helm/cloop-hub/) | Kubernetes, including in-cluster execution |
+| Executor controller chart | [`helm/cloop-executor-controller/`](helm/cloop-executor-controller/) | Executor pools whose runners are Pods in a cluster |
 | Bootstrap command | `cloop hub bootstrap` | Bare metal, systemd, or generating any of the above |
 | Entra ID SSO module | [`terraform/azure-entra-id/`](terraform/azure-entra-id/README.md) | Provisioning the identity side on Microsoft Entra ID |
 
@@ -737,6 +738,83 @@ ingress-nginx v1+ ignores Ingresses without a class unless started with
 
 ---
 
+## Kubernetes: the executor controller chart
+
+An executor pool's runners can be Pods: `cloop executor controller` watches
+ExecutorPool objects in its namespace, starts a runner Pod for each queued run
+the pool can take, and retires idle runners when the demand falls. The chart
+in [`helm/cloop-executor-controller/`](helm/cloop-executor-controller/)
+installs it. Give it a namespace of its own, separate from the hub's:
+
+```bash
+kubectl create namespace cloop-runners
+kubectl label namespace cloop-runners pod-security.kubernetes.io/enforce=restricted
+
+# The pool's controller credential, minted on the hub for the pool.
+kubectl -n cloop-runners create secret generic cloop-pool-credential \
+  --from-literal=credential='cloop_pool1_...'
+
+helm install runners deploy/helm/cloop-executor-controller -n cloop-runners \
+  --set pool.create=true \
+  --set pool.hubURL=https://cloop.example.com \
+  --set pool.credential.existingSecret=cloop-pool-credential
+```
+
+What it installs:
+
+- The ExecutorPool CRD, from the chart's `crds/` directory. Helm installs a
+  chart's CRDs on the first install and never upgrades them, so apply the new
+  one yourself when a release changes it:
+  `kubectl apply -f deploy/helm/cloop-executor-controller/crds/`.
+- Two controller replicas. A Lease elects the one that scales, and the other
+  takes over when it goes. The Pods meet the restricted Pod Security profile
+  and are probed on the controller's `/healthz` and `/readyz`; `/readyz`
+  answers once the controller's caches have synced.
+- One Role in the release namespace, bound to the controller's ServiceAccount.
+  It holds the rules `cloop executor controller rbac` prints and no others:
+  Pods, Secrets and PersistentVolumeClaims for the runners and their volumes,
+  Events, the Lease, and ExecutorPools with their status. Nothing is
+  cluster-wide. Kubernetes can't limit a list of Secrets to a label, so the
+  Role can read every Secret in its namespace. Keep nothing else there.
+- A ServiceAccount for the runners, bound to nothing, whose token is not
+  mounted. A pool can ask for the token with
+  `template.automountServiceAccountToken`; then bind that account to exactly
+  what the runs need, because model-written code will hold it. The controller
+  refuses a pool whose runners would run as the controller's own account.
+- With `pool.create`, an ExecutorPool built from `pool.*`. The credential comes
+  from `pool.credential.existingSecret`, or from `pool.credential.value`, which
+  the chart writes to a Secret (for evaluation, since the value then sits in
+  your values file and the release manifest).
+
+Two settings tighten it further:
+
+- `requireDigest=true` refuses to render unless the controller's image is
+  pinned (`image.digest`) and the pool's runner image is a digest, empty, or
+  one of cloop's own images by tag. Empty means cloop's harness image. The
+  controller resolves cloop's own images to a digest and verifies them, so
+  their runner Pods carry the digest either way. It also starts the controller
+  with `--require-image-digest`, so a pool created another way that names any
+  other runner image by tag is marked Invalid.
+- `networkPolicy.enabled=true` adds a NetworkPolicy that lets runner Pods reach
+  the hub (`networkPolicy.hub`: selectors for an in-cluster hub, CIDRs for one
+  outside, and its ports) and DNS (`networkPolicy.dns`; set its `ports` to
+  5353 on OpenShift), and nothing else. Nothing may connect to a runner. A run
+  then gets repositories through the hub's git proxy and anything else through
+  its egress proxy. Your CNI enforces the policy: flannel and kindnet don't,
+  and some CNIs don't filter traffic to the node's own addresses.
+
+The render refuses values that wouldn't work or would widen the controller's
+reach: more than one replica without leader election, the controller running
+as the namespace's `default` account, runners running as the controller's
+account or as `default`, a resync under the controller's 30-second floor, a
+pool with a plaintext hub URL or no credential, a template variable that reads
+the credential's Secret, and a NetworkPolicy with no way to the hub, no
+resolver, or a `/0`. With leader election off, the Deployment replaces its Pod
+by stopping the old one first, since two unelected replicas would both scale.
+Install one release per namespace.
+
+---
+
 ## What CI checks
 
 The `deploy-artifacts` job in [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)
@@ -782,6 +860,14 @@ can't run under. It runs the artifacts:
    trusting the hub's CA for its URL only, and runs `kubectl` through the
    Kubernetes access monitor, and the test then checks the forge, the audit
    trail and the cluster.
+9. Lints and renders the executor controller chart, installs it on the kind
+   cluster in a namespace that enforces the restricted Pod Security profile and
+   waits for both replicas. It asserts with `kubectl auth can-i` that the
+   controller's account holds exactly the verbs it calls in its namespace and
+   nothing anywhere else, that the runners' account holds nothing, and that a
+   pool created from values gets its status written. The Go tests in
+   `pkg/kubecontroller/helm_test.go` hold the rendered Role to the
+   controller's rules and to a fixed ceiling, and check the rest of the chart.
 
 ---
 
