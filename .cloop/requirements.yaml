@@ -738,3 +738,38 @@ requirements:
         timeout: 20m
       - name: the doctor
         command: go test ./pkg/hubdoctor -run '^TestHostSandboxFindingsAcrossTheMatrix$'
+  - id: R-37
+    title: An executor pool's runner volume shall be handed unwiped only to a runner of the project whose data it holds, and shall never hold a credential.
+    status: approved
+    priority: must
+    tags: [security, isolation, kubernetes, executor-pools]
+    details: |-
+      The executor controller keeps a pool's runner volumes past their runners.
+      A volume records whose data it holds; the controller gives it back unwiped
+      only to a runner it mints as holding that project, the hub hands such a
+      runner only that project's runs in the update that assigns one, and the
+      runner refuses a start for any other project. Every other runner gets a
+      fresh volume or one its init container emptied before it started, and a
+      hub too old to keep projects apart gets only emptied ones. One Pod claims a
+      volume at a time. Homes, leased files and git credentials stay on a
+      memory-backed emptyDir, and the agent refuses a layout that would put them
+      on the volume. The end-to-end proof runs the controller the Helm chart
+      installs on a real cluster, in CI's kube-controller job: a project's next
+      run finds the file and the commit its last run left, another project's
+      runs find none of it on a fresh or a wiped volume, and no volume holds a
+      credential afterwards. Without a cluster (CLOOP_KUBECONTROLLER_E2E_KUBECONFIG
+      unset) that test skips, and the unit tests below carry the guarantee.
+      Promised in docs/security/threat-model.md, the information-disclosure row
+      on executor pool runner volumes.
+    tests:
+      - name: end to end on a real cluster, the controller from its chart
+        command: go test ./tests/kubecontroller -run '^TestExecutorPoolOnARealCluster$' -count=1 -timeout 28m
+        timeout: 30m
+      - name: the controller picks and wipes volumes
+        command: go test ./pkg/kubecontroller -run '^(TestAVolumeIsWipedBeforeAnotherProjectUsesIt|TestAHubOlderThanRunnerStorageGetsOnlyWipedRunners|TestTwoControllersNeverMountOneVolumeTwice|TestPickVolumes)$'
+      - name: the hub hands a holding runner only its project's runs
+        command: go test ./pkg/executorpool -run '^TestARunnerHoldingAProjectIsHandedOnlyThatProjectsRuns$'
+      - name: the runner refuses another project and keeps credentials off the volume
+        command: go test ./pkg/executor/agent -run '^(TestARunnerHoldingAProjectsVolumeTakesOnlyThatProjectsRun|TestStorageRootsRefuseALayoutThatPutsACredentialOnTheVolume)$'
+      - name: a kept checkout is vetted before reuse
+        command: go test ./pkg/executor/gitprovision -run '^(TestAKeptCheckoutsConfigurationIsRewritten|TestAHookTheLastRunPlantedNeverRuns)$'

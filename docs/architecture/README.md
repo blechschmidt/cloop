@@ -1131,6 +1131,7 @@ run the real code:
 | `tests/flagship` | the main end-to-end scenario: hub bootstrap, a container executor, a repository-scoped lease, write-back |
 | `tests/cluster` | several hub members on one database: failover, revocation after a member dies, adopted credentials, a Pod's workspace session, a KMS and a change of root |
 | `tests/kube` | the Kubernetes driver on a real cluster, with the git proxy, the monitor, image resolution and cluster shares |
+| `tests/kubecontroller` | an executor pool on a real cluster, with the controller its Helm chart installs: scaling from zero and back, runner volumes kept for their project and wiped for any other, refused runner tokens, the controller's leader and runners killed mid-run, and a revoked controller credential |
 | `tests/upgrade` | a rolling upgrade from the latest release to `main` on one database and one cluster, and the rollback |
 | `tests/forwarder` | device forwarders with real USB/IP and TAP devices |
 | `tests/soak` | concurrent tenants: nothing leaks from one tenant to another, and no containers, credentials or goroutines are left behind |
