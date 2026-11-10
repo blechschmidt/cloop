@@ -32,7 +32,7 @@ import (
 
 // fakeObj is one stored object.
 type fakeObj struct {
-	kind string // "pools", "pods", "secrets", "leases", "events"
+	kind string // "pools", "pods", "secrets", "leases", "events", "persistentvolumeclaims"
 	ns   string
 	name string
 	body map[string]any
@@ -79,6 +79,14 @@ type fakeK8s struct {
 	onCreatePod func(pod map[string]any) int
 	// watchesOpen counts watch requests in flight.
 	watchesOpen int
+	// claimPhase decides a new claim's phase by its storage class: Bound
+	// unless it says otherwise, as a provisioner that binds at once would.
+	claimPhase func(class string) string
+	// onPatch, when set, runs before a PATCH is applied — a test's moment to
+	// change the object under the patcher.
+	onPatch func(kind, name string)
+	// patches counts PATCH requests, and conflicts the 409s they got.
+	patches, conflicts int
 }
 
 func newFakeK8s(t *testing.T) *fakeK8s {
@@ -139,7 +147,7 @@ func parsePath(p string) (parsedPath, bool) {
 	switch res {
 	case Plural:
 		out.kind = "pools"
-	case "pods", "secrets", "leases", "events":
+	case "pods", "secrets", "leases", "events", "persistentvolumeclaims":
 		out.kind = res
 	default:
 		return parsedPath{}, false
@@ -185,6 +193,8 @@ func (f *fakeK8s) route(w http.ResponseWriter, r *http.Request) {
 		f.handleCreate(w, r, p)
 	case r.Method == http.MethodPut:
 		f.handleUpdate(w, r, p)
+	case r.Method == http.MethodPatch:
+		f.handlePatch(w, r, p)
 	case r.Method == http.MethodDelete:
 		f.handleDelete(w, r, p)
 	default:
@@ -355,6 +365,23 @@ func (f *fakeK8s) handleCreate(w http.ResponseWriter, r *http.Request, p parsedP
 	if p.kind == "pods" {
 		body["status"] = map[string]any{"phase": PodPending}
 	}
+	if p.kind == "persistentvolumeclaims" {
+		spec, _ := body["spec"].(map[string]any)
+		class, _ := spec["storageClassName"].(string)
+		phase := ClaimBound
+		if f.claimPhase != nil {
+			phase = f.claimPhase(class)
+		}
+		st := map[string]any{"phase": phase}
+		if phase == ClaimBound {
+			req, _ := spec["resources"].(map[string]any)["requests"].(map[string]any)
+			st["capacity"] = map[string]any{"storage": req["storage"]}
+		}
+		body["status"] = st
+		// The protection finalizer every claim gets, which a PUT of a partial
+		// view would drop.
+		meta["finalizers"] = []any{"kubernetes.io/pvc-protection"}
+	}
 	o := &fakeObj{kind: p.kind, ns: p.ns, name: name, body: body}
 	f.putLocked(o, "ADDED")
 	writeK8sJSON(w, 201, deepCopyMap(body))
@@ -395,6 +422,76 @@ func (f *fakeK8s) handleUpdate(w http.ResponseWriter, r *http.Request, p parsedP
 	o := &fakeObj{kind: p.kind, ns: p.ns, name: p.name, body: next}
 	f.putLocked(o, "MODIFIED")
 	writeK8sJSON(w, 200, deepCopyMap(next))
+}
+
+// handlePatch applies a JSON merge patch to an object's metadata, with the
+// API server's optimistic concurrency: a resourceVersion in the patch that is
+// not the object's is a 409 Conflict, and nothing changes.
+func (f *fakeK8s) handlePatch(w http.ResponseWriter, r *http.Request, p parsedPath) {
+	if ct := r.Header.Get("Content-Type"); ct != "application/merge-patch+json" {
+		writeK8sStatus(w, 415, "UnsupportedMediaType", "patch type "+ct)
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeK8sStatus(w, 400, "BadRequest", err.Error())
+		return
+	}
+	if hook := f.onPatchHook(); hook != nil {
+		hook(p.kind, p.name)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.patches++
+	cur, ok := f.objs[objKey(p.kind, p.ns, p.name)]
+	if !ok {
+		writeK8sStatus(w, 404, "NotFound", p.name)
+		return
+	}
+	for k := range body {
+		if k != "metadata" {
+			writeK8sStatus(w, 422, "Invalid", "the fake applies metadata patches only, not "+k)
+			return
+		}
+	}
+	meta, _ := body["metadata"].(map[string]any)
+	if rv, _ := meta["resourceVersion"].(string); rv != "" && rv != cur.meta()["resourceVersion"] {
+		f.conflicts++
+		writeK8sStatus(w, 409, "Conflict", "the object has been modified; please apply your changes to the latest version")
+		return
+	}
+	next := deepCopyMap(cur.body)
+	nm := next["metadata"].(map[string]any)
+	for _, field := range []string{"annotations", "labels"} {
+		patch, ok := meta[field].(map[string]any)
+		if !ok {
+			continue
+		}
+		have, _ := nm[field].(map[string]any)
+		if have == nil {
+			have = map[string]any{}
+		}
+		for k, v := range patch {
+			if v == nil {
+				delete(have, k)
+			} else {
+				have[k] = v
+			}
+		}
+		nm[field] = have
+	}
+	if refs, ok := meta["ownerReferences"]; ok {
+		nm["ownerReferences"] = refs
+	}
+	o := &fakeObj{kind: p.kind, ns: p.ns, name: p.name, body: next}
+	f.putLocked(o, "MODIFIED")
+	writeK8sJSON(w, 200, deepCopyMap(next))
+}
+
+func (f *fakeK8s) onPatchHook() func(kind, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.onPatch
 }
 
 func (f *fakeK8s) handleDelete(w http.ResponseWriter, r *http.Request, p parsedPath) {
@@ -543,6 +640,25 @@ func (f *fakeK8s) setPodPhase(ns, name, phase string, exitCode int, message stri
 		status["containerStatuses"] = []any{map[string]any{"name": runnerContainer, "state": map[string]any{
 			"terminated": map[string]any{"exitCode": exitCode, "message": message}}}}
 	}
+	next["status"] = status
+	f.putLocked(&fakeObj{kind: "pods", ns: ns, name: name, body: next}, "MODIFIED")
+}
+
+// setPodStatus replaces a Pod's status with what set makes of it.
+func (f *fakeK8s) setPodStatus(ns, name string, set func(status map[string]any)) {
+	f.t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.objs[objKey("pods", ns, name)]
+	if !ok {
+		f.t.Fatalf("no Pod %s/%s", ns, name)
+	}
+	next := deepCopyMap(o.body)
+	status, _ := next["status"].(map[string]any)
+	if status == nil {
+		status = map[string]any{}
+	}
+	set(status)
 	next["status"] = status
 	f.putLocked(&fakeObj{kind: "pods", ns: ns, name: name, body: next}, "MODIFIED")
 }

@@ -50,6 +50,16 @@ type Access interface {
 	// OwnerMayRead reports whether the identity owner may read projectPath
 	// under the hub's project access policy. An error is read as "no".
 	OwnerMayRead(owner, projectPath string) (bool, error)
+	// Project returns the project projectPath belongs to as access is decided
+	// — a feature's is its project — and that project's owner key, "" when
+	// it is unowned (Task 20484): what a run's tenant is made of. An error
+	// means the hub cannot say, and the run goes only to a runner whose
+	// storage holds nothing.
+	Project(projectPath string) (path, owner string, err error)
+	// StarterMayRead reports whether the person who started a run (an owner
+	// key, "" for nobody) may read projectPath now (Task 20484): whether the
+	// run may be handed its project's kept workspace. An error is "no".
+	StarterMayRead(starter, projectPath string) (bool, error)
 }
 
 // Verdict is whether a queued run is visible to a pool.
@@ -263,6 +273,16 @@ type Snapshot struct {
 	// anything, and find a runner it minted and never started. Only the
 	// pool's own runners, which its controller minted.
 	RunnerStates []RunnerState `json:"runner_states"`
+	// QueuedProjects splits Demand by project (Task 20484), the project with
+	// the oldest waiting run first: what a controller that keeps runner
+	// storage reads to give a project back the volume that already holds its
+	// workspace. Runs whose project the hub cannot name, or whose starter may
+	// not be handed the project's kept data, are in Demand and not here: only
+	// a runner holding nothing may take them. Never nil from a hub that understands runner storage — a nil list
+	// is a hub older than that, which would hand a runner holding one
+	// project's data a run of another, so such a controller starts every
+	// runner on wiped storage.
+	QueuedProjects []ProjectDemand `json:"queued_projects"`
 	// Revision changes whenever anything above does, so a long-poll can ask
 	// for "anything newer than this" on whichever hub member it reaches.
 	Revision string `json:"revision"`
@@ -290,6 +310,18 @@ type RunnerState struct {
 	// the runner, so a controller can tell its own runners from those of
 	// another controller of the same pool.
 	CredentialID string `json:"credential_id,omitempty"`
+	// Holds is the tenant whose data the runner's storage holds, as its
+	// controller declared when minting it (Task 20484): the runner is handed
+	// only that tenant's runs. "" for storage that holds nothing, or none.
+	Holds string `json:"holds,omitempty"`
+	// Project is the tenant of the run the runner was handed, set from the
+	// moment it is handed one — the hub telling the controller each runner's
+	// project at assignment — with ProjectName and ProjectOwner (an owner
+	// key, "" when unowned) for the record the controller keeps on the
+	// runner's storage. They name; only Project decides anything.
+	Project      string `json:"project,omitempty"`
+	ProjectName  string `json:"project_name,omitempty"`
+	ProjectOwner string `json:"project_owner,omitempty"`
 }
 
 // ComputeSnapshot counts a pool's demand and runners. Only visible queued runs
@@ -299,14 +331,25 @@ func ComputeSnapshot(pool Pool, runners []statedb.ExecutorPoolRunnerRow, queue [
 	audienceFP string, access Access, now time.Time) (Snapshot, map[string]Verdict) {
 	snap := Snapshot{PoolID: pool.ID, Name: pool.Name, Revoked: pool.Revoked(), MaxRunners: pool.MaxRunners, At: now.UTC()}
 	verdicts := map[string]Verdict{}
+	snap.QueuedProjects = []ProjectDemand{}
+	byTenant := map[string]int{}
 	for _, q := range queue {
 		if q.PoolID != pool.ID || q.State != statedb.PoolQueueWaiting {
 			continue
 		}
 		v := Visible(pool, q, audienceFP, access)
 		verdicts[q.ID] = v
-		if v.Visible {
-			snap.Demand++
+		if !v.Visible {
+			continue
+		}
+		snap.Demand++
+		if tenant, _, _, ok := TenantOf(pool.ID, q.ProjectPath, access); ok && RunMayUseHeld(q, access) {
+			if i, seen := byTenant[tenant]; seen {
+				snap.QueuedProjects[i].Queued++
+			} else {
+				byTenant[tenant] = len(snap.QueuedProjects)
+				snap.QueuedProjects = append(snap.QueuedProjects, ProjectDemand{Tenant: tenant, Queued: 1})
+			}
 		}
 	}
 	snap.RunnerStates = []RunnerState{}
@@ -324,9 +367,13 @@ func ComputeSnapshot(pool Pool, runners []statedb.ExecutorPoolRunnerRow, queue [
 		default:
 			continue
 		}
-		snap.RunnerStates = append(snap.RunnerStates, RunnerState{EnrollmentID: r.EnrollmentID, Name: r.Name,
+		rs := RunnerState{EnrollmentID: r.EnrollmentID, Name: r.Name,
 			State: r.State, MintedAt: r.MintedAt, ExpiresAt: r.ExpiresAt, EnrolledAt: r.EnrolledAt, BusyAt: r.BusyAt,
-			CredentialID: r.CredentialID})
+			CredentialID: r.CredentialID, Holds: r.Holds}
+		if r.State == statedb.PoolRunnerBusy {
+			rs.Project, rs.ProjectName, rs.ProjectOwner = r.Project, r.ProjectName, r.ProjectOwner
+		}
+		snap.RunnerStates = append(snap.RunnerStates, rs)
 	}
 	snap.Runners = snap.Busy + snap.Idle + snap.Pending
 	if !snap.Revoked {
@@ -334,6 +381,7 @@ func ComputeSnapshot(pool Pool, runners []statedb.ExecutorPoolRunnerRow, queue [
 		snap.Wanted = min(snap.Spare, max(0, snap.Demand-snap.Idle-snap.Pending))
 	} else {
 		snap.Demand = 0
+		snap.QueuedProjects = []ProjectDemand{}
 	}
 	snap.Revision = snap.revision(pool)
 	return snap, verdicts
@@ -346,7 +394,10 @@ func (s Snapshot) revision(pool Pool) string {
 	spec, _ := json.Marshal(pool.Spec())
 	var states strings.Builder
 	for _, r := range s.RunnerStates {
-		states.WriteString(r.EnrollmentID + "=" + r.State + ";")
+		states.WriteString(r.EnrollmentID + "=" + r.State + "/" + r.Holds + "/" + r.Project + ";")
+	}
+	for _, d := range s.QueuedProjects {
+		states.WriteString(d.Tenant + "+" + fmt.Sprint(d.Queued) + ";")
 	}
 	key := fmt.Sprintf("%s|%t|%d|%d|%d|%d|%d|%d|%s|%s", s.PoolID, s.Revoked, s.MaxRunners, s.Demand, s.Busy, s.Idle,
 		s.Pending, s.Wanted, spec, states.String())

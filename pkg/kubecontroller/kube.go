@@ -67,6 +67,7 @@ type PodSpec struct {
 	ImagePullSecrets              []LocalObjectReference `json:"imagePullSecrets,omitempty"`
 	TerminationGracePeriodSeconds *int64                 `json:"terminationGracePeriodSeconds,omitempty"`
 	SecurityContext               *PodSecurityContext    `json:"securityContext,omitempty"`
+	InitContainers                []Container            `json:"initContainers,omitempty"`
 	Containers                    []Container            `json:"containers"`
 	Volumes                       []Volume               `json:"volumes,omitempty"`
 	HostNetwork                   bool                   `json:"hostNetwork,omitempty"`
@@ -81,11 +82,12 @@ type SeccompProfile struct {
 
 // PodSecurityContext is a Pod's security context.
 type PodSecurityContext struct {
-	RunAsNonRoot   *bool           `json:"runAsNonRoot,omitempty"`
-	RunAsUser      *int64          `json:"runAsUser,omitempty"`
-	RunAsGroup     *int64          `json:"runAsGroup,omitempty"`
-	FSGroup        *int64          `json:"fsGroup,omitempty"`
-	SeccompProfile *SeccompProfile `json:"seccompProfile,omitempty"`
+	RunAsNonRoot        *bool           `json:"runAsNonRoot,omitempty"`
+	RunAsUser           *int64          `json:"runAsUser,omitempty"`
+	RunAsGroup          *int64          `json:"runAsGroup,omitempty"`
+	FSGroup             *int64          `json:"fsGroup,omitempty"`
+	FSGroupChangePolicy *string         `json:"fsGroupChangePolicy,omitempty"`
+	SeccompProfile      *SeccompProfile `json:"seccompProfile,omitempty"`
 }
 
 // Capabilities are a container's Linux capabilities.
@@ -152,11 +154,18 @@ type ContainerResources struct {
 	Limits   map[string]string `json:"limits,omitempty"`
 }
 
-// Volume is a Pod volume: an emptyDir or a Secret.
+// Volume is a Pod volume: an emptyDir, a Secret, or a runner's claim.
 type Volume struct {
-	Name     string          `json:"name"`
-	EmptyDir *EmptyDirSource `json:"emptyDir,omitempty"`
-	Secret   *SecretVolume   `json:"secret,omitempty"`
+	Name                  string          `json:"name"`
+	EmptyDir              *EmptyDirSource `json:"emptyDir,omitempty"`
+	Secret                *SecretVolume   `json:"secret,omitempty"`
+	PersistentVolumeClaim *ClaimVolume    `json:"persistentVolumeClaim,omitempty"`
+}
+
+// ClaimVolume mounts a PersistentVolumeClaim.
+type ClaimVolume struct {
+	ClaimName string `json:"claimName"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
 // EmptyDirSource is an emptyDir.
@@ -174,10 +183,21 @@ type SecretVolume struct {
 
 // PodStatus is the part of a Pod's status the controller reads.
 type PodStatus struct {
-	Phase             string            `json:"phase,omitempty"`
-	Reason            string            `json:"reason,omitempty"`
-	Message           string            `json:"message,omitempty"`
-	ContainerStatuses []ContainerStatus `json:"containerStatuses,omitempty"`
+	Phase                 string            `json:"phase,omitempty"`
+	Reason                string            `json:"reason,omitempty"`
+	Message               string            `json:"message,omitempty"`
+	Conditions            []PodCondition    `json:"conditions,omitempty"`
+	InitContainerStatuses []ContainerStatus `json:"initContainerStatuses,omitempty"`
+	ContainerStatuses     []ContainerStatus `json:"containerStatuses,omitempty"`
+}
+
+// PodCondition is one of a Pod's conditions: PodScheduled says why a Pod
+// waits for a node — an unbound claim among the reasons.
+type PodCondition struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // ContainerStatus is one container's state.
@@ -229,6 +249,54 @@ type Secret struct {
 type secretMeta struct {
 	Metadata ObjectMeta `json:"metadata"`
 }
+
+// PersistentVolumeClaim is the part of a core/v1 PersistentVolumeClaim the
+// controller writes and reads (Task 20484). It is created whole, and only
+// ever changed afterwards by a merge patch of its metadata: a PUT of this
+// partial view would clear what it does not model — the volume the binder
+// chose, the protection finalizer.
+type PersistentVolumeClaim struct {
+	APIVersion string     `json:"apiVersion,omitempty"`
+	Kind       string     `json:"kind,omitempty"`
+	Metadata   ObjectMeta `json:"metadata"`
+	Spec       ClaimSpec  `json:"spec"`
+	Status     ClaimState `json:"status,omitempty"`
+}
+
+// ClaimSpec is a claim's spec.
+type ClaimSpec struct {
+	AccessModes      []string             `json:"accessModes,omitempty"`
+	StorageClassName *string              `json:"storageClassName,omitempty"`
+	VolumeMode       string               `json:"volumeMode,omitempty"`
+	Resources        ClaimResources       `json:"resources,omitempty"`
+	VolumeName       string               `json:"volumeName,omitempty"`
+	DataSource       *ObjectReferenceLite `json:"dataSource,omitempty"`
+}
+
+// ObjectReferenceLite is a typed local reference: a claim's data source.
+type ObjectReferenceLite struct {
+	APIGroup *string `json:"apiGroup,omitempty"`
+	Kind     string  `json:"kind"`
+	Name     string  `json:"name"`
+}
+
+// ClaimResources are a claim's requests.
+type ClaimResources struct {
+	Requests map[string]string `json:"requests,omitempty"`
+}
+
+// ClaimState is a claim's status.
+type ClaimState struct {
+	Phase    string            `json:"phase,omitempty"`
+	Capacity map[string]string `json:"capacity,omitempty"`
+}
+
+// Claim phases.
+const (
+	ClaimPending = "Pending"
+	ClaimBound   = "Bound"
+	ClaimLost    = "Lost"
+)
 
 // Lease is a coordination.k8s.io/v1 Lease.
 type Lease struct {
@@ -305,6 +373,7 @@ var (
 	resPools   = resource{poolsV1alpha1, Plural}
 	resPods    = resource{coreV1, "pods"}
 	resSecrets = resource{coreV1, "secrets"}
+	resClaims  = resource{coreV1, "persistentvolumeclaims"}
 )
 
 // list lists a resource in namespace ("" for every namespace), decoding the
@@ -467,6 +536,75 @@ func (k *kubeAPI) secretExists(ctx context.Context, namespace, name string) (boo
 		return false, nil
 	}
 	return false, err
+}
+
+// createClaim creates a PersistentVolumeClaim and returns the server's view.
+func (k *kubeAPI) createClaim(ctx context.Context, c *PersistentVolumeClaim) (*PersistentVolumeClaim, error) {
+	c.APIVersion, c.Kind = "v1", "PersistentVolumeClaim"
+	var out PersistentVolumeClaim
+	if err := k.c.Do(ctx, http.MethodPost, nsPath(coreV1, c.Metadata.Namespace, "persistentvolumeclaims"), nil, c,
+		&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// patchClaimMeta merge-patches a claim's metadata, guarded by
+// resourceVersion: the API server applies it only to the version the
+// controller read, and answers 409 Conflict to any other — the
+// compare-and-swap that keeps two reconcilers from claiming one volume.
+// labels and annotations set a key to its value, or remove it for nil;
+// owners, when not nil, replaces the ownerReferences.
+func (k *kubeAPI) patchClaimMeta(ctx context.Context, namespace, name, resourceVersion string,
+	annotations map[string]*string, labels map[string]*string, owners *[]OwnerReference) (*PersistentVolumeClaim, error) {
+	if resourceVersion == "" {
+		return nil, fmt.Errorf("kubecontroller: a claim's metadata is only changed against the version read")
+	}
+	return k.patchClaim(ctx, namespace, name, resourceVersion, annotations, labels, owners)
+}
+
+// patchClaimMetaUnguarded is patchClaimMeta with no resourceVersion: for the
+// one caller that may — giving back, seconds after taking it, a claim no rival
+// can have released and taken again within claimGrace (storage.go unclaim).
+func (k *kubeAPI) patchClaimMetaUnguarded(ctx context.Context, namespace, name string,
+	annotations map[string]*string) (*PersistentVolumeClaim, error) {
+	return k.patchClaim(ctx, namespace, name, "", annotations, nil, nil)
+}
+
+func (k *kubeAPI) patchClaim(ctx context.Context, namespace, name, resourceVersion string,
+	annotations map[string]*string, labels map[string]*string, owners *[]OwnerReference) (*PersistentVolumeClaim, error) {
+	meta := map[string]any{}
+	if resourceVersion != "" {
+		meta["resourceVersion"] = resourceVersion
+	}
+	if len(annotations) > 0 {
+		meta["annotations"] = annotations
+	}
+	if len(labels) > 0 {
+		meta["labels"] = labels
+	}
+	if owners != nil {
+		refs := *owners
+		if refs == nil {
+			refs = []OwnerReference{}
+		}
+		meta["ownerReferences"] = refs
+	}
+	body, err := json.Marshal(map[string]any{"metadata": meta})
+	if err != nil {
+		return nil, err
+	}
+	var out PersistentVolumeClaim
+	if err := k.c.Patch(ctx, objPath(coreV1, namespace, "persistentvolumeclaims", name), "application/merge-patch+json",
+		body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// deleteClaim deletes the claim with uid. One already gone is success.
+func (k *kubeAPI) deleteClaim(ctx context.Context, namespace, name, uid string) error {
+	return k.delete(ctx, objPath(coreV1, namespace, "persistentvolumeclaims", name), uid)
 }
 
 // getLease reads a Lease.

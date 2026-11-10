@@ -47,6 +47,18 @@ type poolDetail struct {
 	Audience    []statedb.ExecutorAudienceEntry `json:"audience"`
 	Runners     []poolRunnerView                `json:"runners"`
 	Queue       []poolQueueView                 `json:"queue"`
+	// ControllerReports are what each of the pool's controllers last said
+	// keeps it from starting runners, if anything (Task 20484).
+	ControllerReports []poolControllerReportView `json:"controller_reports"`
+}
+
+// poolControllerReportView is a controller's last health report.
+type poolControllerReportView struct {
+	CredentialID string    `json:"credential_id"`
+	Healthy      bool      `json:"healthy"`
+	Reason       string    `json:"reason,omitempty"`
+	Message      string    `json:"message,omitempty"`
+	ReportedAt   time.Time `json:"reported_at"`
 }
 
 // poolRunnerView is a runner as the API shows it.
@@ -62,6 +74,10 @@ type poolRunnerView struct {
 	EnrolledAt   time.Time `json:"enrolled_at,omitempty"`
 	RetiredAt    time.Time `json:"retired_at,omitempty"`
 	RetireReason string    `json:"retire_reason,omitempty"`
+	// Holds is the tenant whose data the runner's storage holds; Project the
+	// tenant of the run it was handed (Task 20484).
+	Holds   string `json:"holds,omitempty"`
+	Project string `json:"project,omitempty"`
 }
 
 // poolQueueView is a queued run as the API shows it.
@@ -201,7 +217,18 @@ func (s *Server) handleExecutorPoolDetail(w http.ResponseWriter, r *http.Request
 	for _, rr := range runners {
 		d.Runners = append(d.Runners, poolRunnerView{EnrollmentID: rr.EnrollmentID, Name: rr.Name, ExecutorID: rr.ExecutorID,
 			State: rr.State, Member: rr.Member, QueueID: rr.QueueID, MintedAt: rr.MintedAt, ExpiresAt: rr.ExpiresAt,
-			EnrolledAt: rr.EnrolledAt, RetiredAt: rr.RetiredAt, RetireReason: rr.RetireReason})
+			EnrolledAt: rr.EnrolledAt, RetiredAt: rr.RetiredAt, RetireReason: rr.RetireReason, Holds: rr.Holds,
+			Project: rr.Project})
+	}
+	d.ControllerReports = []poolControllerReportView{}
+	reports, err := store.DB().PoolControllerStatuses(p.ID)
+	if err != nil {
+		writePoolErr(w, err)
+		return
+	}
+	for _, cr := range reports {
+		d.ControllerReports = append(d.ControllerReports, poolControllerReportView{CredentialID: cr.CredentialID,
+			Healthy: cr.Healthy, Reason: cr.Reason, Message: cr.Message, ReportedAt: cr.ReportedAt})
 	}
 	queue, err := store.DB().ListPoolQueue(p.ID)
 	if err != nil {

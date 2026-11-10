@@ -170,7 +170,7 @@ func (a *Agent) materializeSecretFiles(spec *executor.Spec, files []executor.Sec
 	}
 
 	placed := &placedSecrets{}
-	base := secretFileBase()
+	base := a.secretBase()
 	// One directory per distinct declared directory. A lease produces exactly
 	// one; two leases on one workload produce two, and they must stay separate
 	// or revoking either would take both.

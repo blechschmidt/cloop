@@ -297,6 +297,12 @@ or when the control plane revokes its credential.`,
 		bundleStr, _ := cmd.Flags().GetString("bundle")
 		tokenFile, _ := cmd.Flags().GetString("token-file")
 		ephemeral, _ := cmd.Flags().GetBool("ephemeral")
+		workspaceRoot, _ := cmd.Flags().GetString("workspace-root")
+		homeRoot, _ := cmd.Flags().GetString("home-root")
+		secretDir, _ := cmd.Flags().GetString("secret-dir")
+		cacheDir, _ := cmd.Flags().GetString("cache-dir")
+		gitCacheDir, _ := cmd.Flags().GetString("git-cache-dir")
+		holds, _ := cmd.Flags().GetString("holds")
 		termLog, _ := cmd.Flags().GetString("termination-log")
 		retireGrace, _ := cmd.Flags().GetDuration("retire-grace")
 		if !ephemeral && (cmd.Flags().Changed("termination-log") || cmd.Flags().Changed("retire-grace")) {
@@ -373,6 +379,12 @@ or when the control plane revokes its credential.`,
 			RetireGrace:       retireGrace,
 			CredentialPath:    credPath,
 			WorkDirRoot:       root,
+			WorkspaceRoot:     workspaceRoot,
+			HomeRoot:          homeRoot,
+			SecretDir:         secretDir,
+			CacheDir:          cacheDir,
+			GitCacheDir:       gitCacheDir,
+			Holds:             holds,
 			MaxConcurrent:     maxConc,
 			Labels:            labels,
 			Pin:               pin,
@@ -803,6 +815,23 @@ func init() {
 		"path to the agent credential file (default: ~/.cloop/agent.json)")
 	executorAgentCmd.Flags().String("workdir-root", "",
 		"confine every workload beneath this directory (default: ~/.cloop/work)")
+	executorAgentCmd.Flags().String("workspace-root", "",
+		"keep workloads' trees beneath this directory instead of --workdir-root — a volume that outlives the agent, "+
+			"where a project's next run fetches instead of cloning; --workdir-root keeps the agent's own scratch")
+	executorAgentCmd.Flags().String("home-root", "",
+		"put workloads' home directories beneath this directory (memory-backed, ideally) rather than beside their "+
+			"trees; required with --ephemeral and a separate --workspace-root, so no login lands on the volume")
+	executorAgentCmd.Flags().String("secret-dir", "",
+		"write leased credential files beneath this directory first (memory-backed), ahead of the tmpfs the agent "+
+			"looks for")
+	executorAgentCmd.Flags().String("cache-dir", "",
+		"point workloads' package-manager caches (Go, npm, Yarn, pip, uv) at directories beneath this one")
+	executorAgentCmd.Flags().String("git-cache-dir", "",
+		"keep a git object cache here that a fresh checkout takes its objects from before it fetches")
+	executorAgentCmd.Flags().String("holds", "",
+		"the tenant whose data this runner's persistent storage holds, as its controller declared it: a start "+
+			"naming another project's tenant, or none, is refused (--ephemeral only; set by the controller)")
+	_ = executorAgentCmd.Flags().MarkHidden("holds")
 	executorAgentCmd.Flags().Int("max-concurrent", 0,
 		"maximum simultaneous workloads (default: number of CPUs)")
 	executorAgentCmd.Flags().StringSlice("label", nil,

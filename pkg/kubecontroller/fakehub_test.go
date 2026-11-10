@@ -56,6 +56,18 @@ type fakeHub struct {
 	// tokens are the runner tokens minted, by enrollment ID.
 	tokens map[string]string
 	pin    string
+	// projects is the demand by project (Task 20484); noStorage answers as a
+	// hub older than runner storage: no queued_projects, and holds neither
+	// recorded nor echoed.
+	projects  []executorpool.ProjectDemand
+	noStorage bool
+	// noEcho records holds and does not echo them, as no real hub does: the
+	// controller must not start a runner whose holds the hub did not confirm.
+	noEcho bool
+	// mintHolds records what each mint request declared its runners hold.
+	mintHolds [][]string
+	// reports are the controller's storage reports, in order.
+	reports []map[string]any
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
@@ -91,6 +103,14 @@ func (h *fakeHub) change(fn func()) {
 func (h *fakeHub) snapshotLocked() executorpool.Snapshot {
 	s := executorpool.Snapshot{PoolID: h.poolID, Name: h.poolName, MaxRunners: h.maxRunners, Demand: h.demand,
 		RunnerStates: []executorpool.RunnerState{}, At: time.Now().UTC()}
+	if !h.noStorage {
+		s.QueuedProjects = []executorpool.ProjectDemand{}
+		for _, d := range h.projects {
+			if d.Queued > 0 {
+				s.QueuedProjects = append(s.QueuedProjects, d)
+			}
+		}
+	}
 	for _, id := range h.order {
 		r := h.runners[id]
 		if r == nil {
@@ -110,9 +130,10 @@ func (h *fakeHub) snapshotLocked() executorpool.Snapshot {
 	s.Spare = max(0, h.maxRunners-s.Runners)
 	s.Wanted = min(s.Spare, max(0, s.Demand-s.Idle-s.Pending))
 	b, _ := json.Marshal(struct {
-		D, M   int
-		States []executorpool.RunnerState
-	}{s.Demand, s.MaxRunners, s.RunnerStates})
+		D, M     int
+		States   []executorpool.RunnerState
+		Projects []executorpool.ProjectDemand
+	}{s.Demand, s.MaxRunners, s.RunnerStates, s.QueuedProjects})
 	sum := sha256.Sum256(b)
 	s.Revision = hex.EncodeToString(sum[:8])
 	return s
@@ -138,6 +159,13 @@ func (h *fakeHub) route(w http.ResponseWriter, r *http.Request) {
 		h.handleMint(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == hubRetirePath:
 		h.handleRetire(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == hubStatusPath && !h.isLegacyStorage():
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		h.mu.Lock()
+		h.reports = append(h.reports, body)
+		h.mu.Unlock()
+		writeHubJSON(w, 200, map[string]any{"ok": true})
 	default:
 		writeHubJSON(w, 404, map[string]any{"error": "no route"})
 	}
@@ -183,14 +211,26 @@ func (h *fakeHub) handleFeed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *fakeHub) isLegacyStorage() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.noStorage
+}
+
 func (h *fakeHub) handleMint(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Count int `json:"count"`
+		Count int      `json:"count"`
+		Holds []string `json:"holds"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.mintReqs = append(h.mintReqs, req.Count)
+	h.mintHolds = append(h.mintHolds, append([]string(nil), req.Holds...))
+	if len(req.Holds) != 0 && len(req.Holds) != req.Count {
+		writeHubJSON(w, 400, map[string]any{"error": "holds must name every runner"})
+		return
+	}
 	live := 0
 	for _, r := range h.runners {
 		if r != nil {
@@ -216,11 +256,19 @@ func (h *fakeHub) handleMint(w http.ResponseWriter, r *http.Request) {
 			writeHubJSON(w, 500, map[string]any{"error": err.Error()})
 			return
 		}
+		holds := ""
+		if len(req.Holds) == req.Count && !h.noStorage {
+			holds = req.Holds[i]
+		}
 		h.runners[id] = &executorpool.RunnerState{EnrollmentID: id, Name: name, State: statedb.PoolRunnerPending,
-			MintedAt: now, ExpiresAt: exp, CredentialID: fakeCredentialID}
+			MintedAt: now, ExpiresAt: exp, CredentialID: fakeCredentialID, Holds: holds}
 		h.order = append(h.order, id)
+		echo := holds
+		if h.noEcho {
+			echo = ""
+		}
 		out = append(out, executorpool.RunnerConfig{EnrollmentID: id, Name: name, Token: token, Bundle: bundle,
-			Server: "wss://hub.example/api/executors/connect", ExpiresAt: exp, Ephemeral: true})
+			Server: "wss://hub.example/api/executors/connect", ExpiresAt: exp, Ephemeral: true, Holds: echo})
 	}
 	h.wakeLocked()
 	writeHubJSON(w, 201, map[string]any{"pool_id": h.poolID, "runners": out})
@@ -275,6 +323,72 @@ func (h *fakeHub) assign(id string) {
 			}
 		}
 	})
+}
+
+// assignProject hands runner id a queued run of tenant, as the hub does: only
+// a runner holding nothing or that tenant, and the runner records it.
+func (h *fakeHub) assignProject(id, tenant, name, owner string) bool {
+	ok := false
+	h.change(func() {
+		r := h.runners[id]
+		if r == nil || r.State != statedb.PoolRunnerIdle || (r.Holds != "" && r.Holds != tenant) {
+			return
+		}
+		r.State, r.BusyAt = statedb.PoolRunnerBusy, time.Now().UTC()
+		r.Project, r.ProjectName, r.ProjectOwner = tenant, name, owner
+		if h.demand > 0 {
+			h.demand--
+		}
+		for i := range h.projects {
+			if h.projects[i].Tenant == tenant && h.projects[i].Queued > 0 {
+				h.projects[i].Queued--
+			}
+		}
+		ok = true
+	})
+	return ok
+}
+
+// queue adds n runs of tenant to the demand.
+func (h *fakeHub) queue(tenant string, n int) {
+	h.change(func() {
+		h.demand += n
+		for i := range h.projects {
+			if h.projects[i].Tenant == tenant {
+				h.projects[i].Queued += n
+				return
+			}
+		}
+		h.projects = append(h.projects, executorpool.ProjectDemand{Tenant: tenant, Queued: n})
+	})
+}
+
+// runner returns a copy of runner id's state.
+func (h *fakeHub) runner(id string) (executorpool.RunnerState, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r := h.runners[id]
+	if r == nil {
+		return executorpool.RunnerState{}, false
+	}
+	return *r, true
+}
+
+// storageReports returns the controller's storage reports so far.
+func (h *fakeHub) storageReports() []map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]map[string]any(nil), h.reports...)
+}
+
+// lastMintHolds is what the last mint request declared.
+func (h *fakeHub) lastMintHolds() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.mintHolds) == 0 {
+		return nil
+	}
+	return h.mintHolds[len(h.mintHolds)-1]
 }
 
 // finish settles runner id's run and retires it.

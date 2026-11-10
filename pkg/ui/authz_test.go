@@ -209,6 +209,7 @@ var publicRouteAllowlist = map[string]string{
 	"GET /api/pool-controller/feed":            poolControllerPublicReason,
 	"POST /api/pool-controller/runners":        poolControllerPublicReason,
 	"POST /api/pool-controller/runners/retire": poolControllerPublicReason,
+	"POST /api/pool-controller/status":         poolControllerPublicReason,
 
 	// SCIM 2.0 provisioning (Task 20415): one justification for the service.
 	"GET /scim/v2/ServiceProviderConfig": scimPublicReason,

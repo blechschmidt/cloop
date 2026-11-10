@@ -4032,6 +4032,98 @@ instead of waiting out the grace a dropped connection gets. On the way out it
 removes everything it created under its work root, drops its credential and
 token, and writes a JSON retirement report to the container's termination log.
 
+#### Runner volumes
+
+A runner normally starts from nothing: it clones the project, downloads its
+dependencies and builds, and all of it is lost when the Pod exits. Set
+`spec.persistence` on the ExecutorPool to give runners PersistentVolumeClaims
+that outlive their Pods. The next run of the same project then finds its
+checkout, its git objects and its package caches where the last run left them,
+fetches the new commits and builds from a warm cache.
+
+```yaml
+spec:
+  persistence:
+    enabled: true
+    size: 50Gi                    # required
+    storageClassName: fast-ssd    # empty: the cluster's default class
+    accessModes: [ReadWriteOncePod]   # default: ReadWriteOnce
+    mounts: [workspace, gitCache, toolCache]   # default: all three
+    reclaimPolicy: Retain         # default: Delete
+    maxClaims: 8                  # default: maxRunners
+    minFree: 2Gi                  # default: 1Gi
+```
+
+`workspace` keeps the project's checkout, `gitCache` keeps a bare repository
+per upstream that a fresh checkout takes its objects from, and `toolCache`
+keeps the caches of Go, npm, Yarn, pip and uv. The controller names the claims
+`<pool>-storage-0`, `<pool>-storage-1` and so on, and creates them as runners
+need them, up to `maxClaims`.
+
+One volume is mounted by one runner Pod at a time. Before it creates a Pod, the
+controller writes the Pod's name into the claim's `cloop.dev/claimed-by`
+annotation with a merge patch that carries the `resourceVersion` it read, so of
+two controllers that both saw the volume free the API server accepts one and
+answers the other with a conflict. The claim is released only after the Pod
+has terminated.
+
+A volume never carries one project's data into another project's run:
+
+- Each volume records the project whose data it holds in `cloop.dev/holds`: a
+  digest of the hub's pool, the project and the project's owner, never a path.
+  The project's name and owner are recorded beside it for people reading the
+  claim.
+- When the hub hands a runner a run, it tells the controller whose project it
+  is, and its demand feed says which projects the waiting runs belong to. The
+  controller gives a project's run a runner on that project's own volume when
+  one is free.
+- Such a runner is minted as holding that project. The hub hands it only runs
+  of that project, and only when the person who started the run may still read
+  the project. The database update that assigns a run checks the project again,
+  so a change another hub member just made cannot slip through. The runner
+  checks it too: it is started with `--holds`, and refuses a start that names
+  another project or none.
+- Every other runner gets a fresh volume, or one that an init container
+  (`cloop executor runner-storage`) empties before the runner starts. That
+  covers a volume that last held another project's data and one whose last
+  runner never reported its project.
+- Credentials are never written to a volume. Payload homes, with the harness's
+  login and transcripts, leased credential files and git credentials live on a
+  memory-backed `emptyDir`, and the agent refuses a layout that would put any
+  of them on the volume.
+
+A runner does not trust a checkout it finds on its volume. It runs no hooks
+and no file-system monitor from it and rewrites its git configuration to the
+settings cloop sets before git reads it. After the fetch it checks that every
+object the commit needs is present and intact, resets the tree to that commit,
+removes untracked files (ignored ones such as `node_modules` stay), and checks
+the result against the seed the hub sent. If any of that fails, it clones
+afresh. The hub's write-back stays the record of what the run produced.
+
+Before each runner starts, the init container holds the volume to `minFree`,
+the same floor the hub keeps for its own disk. Below it, it clears the caches
+first and then the workspace. A volume that is still below the floor when
+empty is marked full and not used. A claim that stays `Pending`, or a runner
+Pod the scheduler cannot place because of its volume, is reported instead of
+retried in a loop: the controller deletes the runner, marks the volume, sets
+the pool's `Degraded` condition (`StoragePending`, `StorageFull`,
+`StoragePrepareFailed`) and records an Event. When no runner can start because
+of it, the hub shows the controller's message on the runs waiting in the
+pool's queue. `status.storage` counts the claims (bound, pending, in use,
+full, retained) and sums the bytes they use and hold.
+
+`reclaimPolicy` decides what happens to claims the pool no longer needs, past
+`maxClaims` or after persistence is turned off, and to all of them when the
+pool is deleted. `Delete` deletes them; the pool owns each claim, so the
+garbage collector removes them with the pool. `Retain` keeps them with their
+project record, and the pool takes them up again if it grows back. The
+controller's Role needs `persistentvolumeclaims` (list, watch, create, patch
+and delete); `cloop executor controller rbac` prints it.
+
+While any hub member runs a build that does not keep projects' volumes apart,
+the hub records no project on a runner and the controller starts every runner
+on an emptied volume.
+
 ---
 
 ## See also

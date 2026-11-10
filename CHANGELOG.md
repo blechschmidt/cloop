@@ -12,6 +12,15 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A checkout a device keeps between runs no longer runs its own hooks
+  while the agent fetches into it.** Workspace provisioning ran git in a kept
+  checkout with the repository's own hooks and filesystem monitor in force,
+  so a hook a previous run left in `.git/hooks` (`reference-transaction` runs
+  on every fetch that moves a ref) ran during the next run's authenticated
+  fetch, with the leased git credential in its environment. Every git command
+  provisioning runs now sets `core.hooksPath=/dev/null` and
+  `core.fsmonitor=false` (Task 20484).
+
 - **People's runs on the hub's own host are sandboxed from each other, and no
   host run inherits the hub's root key.** The host executor ran every person's
   run, and the agent in it, as the hub's own user, so on a hub with single
@@ -210,6 +219,51 @@ schema and the hub's HTTP API may change in any release.
   pulls it (`docker pull` of the digest the refusal names) (Task 20453).
 
 ### Added
+
+- **Executor pool runners can keep a persistent volume per project.** An
+  ExecutorPool's new `spec.persistence` (`enabled`, `storageClassName`,
+  `size`, `accessModes`, `mounts` of `workspace`, `gitCache` and `toolCache`,
+  `reclaimPolicy` of `Delete` or `Retain`, `maxClaims` and `minFree`) has the
+  controller keep up to `maxClaims` PersistentVolumeClaims named
+  `<pool>-storage-<n>` and mount a free one into each runner Pod. A claim is
+  taken with an annotation, written by a merge patch guarded by the claim's
+  resourceVersion, before the Pod that mounts it is created, and released only
+  once that Pod has terminated or is gone, so two runners never share one.
+  Each volume records the project and owner whose data it holds, which the hub
+  now reports for each runner as it hands it a run. A project's next run goes
+  to a runner on its own volume, unwiped, and the hub hands that runner only
+  that project's runs, and only when the run's starter may still read the
+  project. The runner checks this too: started with `--holds`, it refuses a
+  start that names another project, or none. Any other runner's volume is
+  wiped by an init container (`cloop executor runner-storage`) before it
+  starts, or is a fresh claim. Payload homes, leased credential files and
+  the runner's own home stay on a memory-backed emptyDir (the agent's new
+  `--workspace-root`, `--home-root`, `--secret-dir`, `--cache-dir` and
+  `--git-cache-dir`), and the agent refuses a layout that would put them on
+  the volume. A checkout kept on the volume is
+  fetched instead of cloned, with its git configuration first rewritten to the
+  keys cloop itself sets, and is reset to exactly the fetched commit before
+  the project's seed is written: its hooks, exclude and attributes files go,
+  every object the commit's checkout is made of is checked against its name,
+  and every tracked file is written again from the fetched objects. One that
+  does not name exactly one origin, that a replace ref or grafts file would
+  redirect, or that fails any of this is cloned again. A git object cache on
+  the volume feeds fresh checkouts. A volume under `minFree` (1Gi by default,
+  the hub's disk floor) has its caches and then its workspace cleared before
+  the runner starts, and a run that did not start on a kept volume gets it
+  wiped before the next one. A hub cluster hands out kept volumes only while
+  every member's build enforces what a runner holds. A volume still full after
+  that, a claim stuck Pending, or an init container that fails marks the
+  volume, deletes the runner, sets a `Degraded` condition and tells the hub
+  through the new `POST /api/pool-controller/status`, so the runs waiting in
+  the pool's queue and their projects' pause say why instead of the controller
+  retrying in a loop. Volumes past `maxClaims`, or all of them with
+  persistence turned off, are deleted under `Delete` and kept with their
+  records under `Retain`, which also leaves them in place when the pool is
+  deleted. The status reports the volumes (claims, bound, pending, in use,
+  full, retained) and the bytes in use, and the hub's pool view shows each
+  controller's last report. Against a hub without this change every runner
+  starts on a wiped volume (Task 20484).
 
 - **A Kubernetes executor controller keeps an executor pool's runners as
   Pods.** `cloop executor controller` runs in a cluster and serves

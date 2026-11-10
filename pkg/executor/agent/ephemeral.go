@@ -47,7 +47,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/executorpool"
 )
 
 // DefaultRetireGrace is how long an ephemeral runner whose run is over and
@@ -90,6 +92,13 @@ type RetirementReport struct {
 	// destroyed; WipeErrors says what could not be.
 	Wiped      bool     `json:"wiped"`
 	WipeErrors []string `json:"wipe_errors,omitempty"`
+	// Storage is how full its workspace volume was as it left (Task 20484),
+	// for a runner whose trees live on a volume of their own: what its
+	// controller records on the volume.
+	Storage *StorageUsage `json:"storage,omitempty"`
+	// StartFailed says its one run never started (Task 20484): its
+	// controller wipes the volume before another run uses it.
+	StartFailed string `json:"start_failed,omitempty"`
 	// At is when it ended.
 	At time.Time `json:"at"`
 }
@@ -107,6 +116,8 @@ type ephemeralState struct {
 	retiredByHub string
 	// selfRetired is set when the runner gave up waiting for the hub.
 	selfRetired string
+	// startFailed says its one run was handed to it and never started.
+	startFailed string
 }
 
 // initEphemeral prepares an --ephemeral agent in New, after the root exists.
@@ -133,7 +144,44 @@ func (a *Agent) initEphemeral() error {
 		return fmt.Errorf("agent: --ephemeral needs an empty --workdir-root of its own, which it empties again "+
 			"on exit; %s holds %d entries", a.root, len(entries))
 	}
+	// A --workspace-root of its own is a persistent volume (Task 20484): it
+	// may hold the project's checkout from its last run, and is not emptied
+	// on exit. Whether it may be reused for this runner's run is its
+	// controller's decision, made — and the volume wiped — before the
+	// runner started, and the hub's, which hands the runner only a run of
+	// the project its controller declared it holds. The runner holds the hub
+	// to that itself: see admitTenant.
+	a.cfg.Holds = strings.TrimSpace(a.cfg.Holds)
+	if a.cfg.Holds != "" && !executorpool.ValidTenant(a.cfg.Holds) {
+		return fmt.Errorf("agent: --holds %q is not a tenant an executor pool's controller declares", a.cfg.Holds)
+	}
 	return nil
+}
+
+// admitTenant refuses a start that may not see what this runner's storage
+// holds (Task 20484): a runner its controller started on a volume holding
+// one tenant's data takes a run of that tenant only, named by the start's
+// executor.LabelPoolTenant. The hub's assignment keeps the two apart; this
+// keeps them apart when the hub member handing out the run does not — an
+// older build that knows nothing of tenants sends no label, and is refused.
+// Storage holding nothing admits any start. "" admits.
+func (a *Agent) admitTenant(spec executor.Spec) string {
+	holds := a.cfg.Holds
+	if holds == "" {
+		return ""
+	}
+	got := strings.TrimSpace(spec.Labels[executor.LabelPoolTenant])
+	if got == holds {
+		return ""
+	}
+	if got == "" {
+		return fmt.Sprintf("this runner's volume holds a project's data from its last run, and takes only a run of "+
+			"that project (tenant %s); the start names no project's tenant, which a hub member too old to keep "+
+			"projects' volumes apart sends", holds)
+	}
+	return fmt.Sprintf("this runner's volume holds another project's data (tenant %s), not the data of the run "+
+		"it was handed (tenant %s); a runner never takes a run of a project other than the one its volume holds",
+		holds, got)
 }
 
 // reserveEphemeral is reserve's rule for a runner: one run, ever. Caller
@@ -192,6 +240,7 @@ func (a *Agent) runEphemeral(ctx context.Context) error {
 	report := a.retirement(ctx.Err() != nil, err)
 	report.WipeErrors = a.wipeEphemeral()
 	report.Wiped = len(report.WipeErrors) == 0
+	report.Storage = a.storageUsage()
 	a.writeTerminationLog(report)
 	line, _ := json.Marshal(report)
 	a.cfg.logf("runner report: %s", line)
@@ -255,7 +304,8 @@ func (a *Agent) leave() {
 // ended it.
 func (a *Agent) retirement(stopped bool, err error) RetirementReport {
 	a.mu.Lock()
-	r := RetirementReport{ExecutorID: a.cred.AgentID, Runs: a.eph.runs, At: a.cfg.now().UTC()}
+	r := RetirementReport{ExecutorID: a.cred.AgentID, Runs: a.eph.runs, At: a.cfg.now().UTC(),
+		StartFailed: a.eph.startFailed}
 	byHub, self := a.eph.retiredByHub, a.eph.selfRetired
 	running := len(a.workloads) > 0
 	a.mu.Unlock()
@@ -348,6 +398,10 @@ func (a *Agent) wipeEphemeral() []string {
 			problems = append(problems, fmt.Sprintf("remove the token file %s: %v", tf, err))
 		}
 	}
+
+	// The payload homes and stray lease directories it kept in memory (Task
+	// 20484). Never the workspace root of its own, which persists.
+	problems = append(problems, a.wipeEphemeralPrivate()...)
 
 	// Everything under its work root, which was empty when it started: the
 	// run's tree, its home, the lease directories, a shipped branch.

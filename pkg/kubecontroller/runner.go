@@ -32,9 +32,11 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 )
 
@@ -93,6 +95,50 @@ func runnerArgs(withCA bool) []string {
 	return args
 }
 
+// runnerStorage is a runner Pod's volume (Task 20484): the claim it mounts,
+// the tenant it was minted as holding, and whether its init container wipes
+// the volume before the runner starts.
+type runnerStorage struct {
+	claim string
+	holds string
+	wipe  bool
+	p     *Persistence
+}
+
+// storageArgs are the runner's flags for its volume: trees, caches and the
+// git object cache on it; homes and leased files on the memory-backed
+// emptyDir, never on it.
+func storageArgs(st *runnerStorage) []string {
+	args := []string{"--home-root", privateDir + "/homes", "--secret-dir", privateDir + "/secrets"}
+	if st.p.hasMount(MountWorkspace) {
+		args = append(args, "--workspace-root", storageDir+"/"+mountDirs[MountWorkspace])
+	}
+	if st.p.hasMount(MountGitCache) {
+		args = append(args, "--git-cache-dir", storageDir+"/"+mountDirs[MountGitCache])
+	}
+	if st.p.hasMount(MountToolCache) {
+		args = append(args, "--cache-dir", storageDir+"/"+mountDirs[MountToolCache])
+	}
+	if st.holds != "" {
+		// The runner holds the hub to what its volume holds, too: a start
+		// for another project's run is refused on the runner.
+		args = append(args, "--holds", st.holds)
+	}
+	return args
+}
+
+// prepareArgs are the init container's command line, after the program.
+func prepareArgs(st *runnerStorage) []string {
+	args := []string{"executor", "runner-storage", "--root", storageDir,
+		"--dirs", strings.Join(st.p.mountList(), ","),
+		"--min-free", strconv.FormatInt(st.p.minFreeBytes(), 10),
+		"--report", "/dev/termination-log"}
+	if st.wipe {
+		args = append(args, "--wipe")
+	}
+	return args
+}
+
 // runnerPodName is a fresh name for one of pool's runners.
 func runnerPodName(pool *ExecutorPool) (string, error) {
 	prefix := strings.TrimRight(truncate(pool.Metadata.Name, 50), "-.")
@@ -142,12 +188,31 @@ func runnerLabels(pool *ExecutorPool, secret bool, podName string) map[string]st
 	return out
 }
 
-// buildRunnerPod is one runner's Pod, before the API server has seen it.
-func buildRunnerPod(pool *ExecutorPool, name, image string) *Pod {
+// buildRunnerPod is one runner's Pod, before the API server has seen it; st
+// is its volume, nil for none.
+func buildRunnerPod(pool *ExecutorPool, name, image string, st *runnerStorage) *Pod {
 	t := pool.Spec.Template
 	withCA := strings.TrimSpace(pool.Spec.HubCABundle) != ""
 	ctrl := true
-	env := []EnvVar{{Name: "HOME", Value: stateDir + "/home"}}
+	home := stateDir + "/home"
+	if st != nil {
+		// With a volume, the runner's own HOME — what a workload inheriting
+		// its environment uses — is memory too.
+		home = privateDir
+	}
+	env := []EnvVar{{Name: "HOME", Value: home}}
+	if st != nil {
+		for _, kv := range executor.ScratchCacheEnv(scratchCacheDir) {
+			k, v, _ := strings.Cut(kv, "=")
+			env = append(env, EnvVar{Name: k, Value: v})
+		}
+	}
+	if st != nil && st.p.hasMount(MountToolCache) {
+		for _, kv := range executor.CacheEnv(storageDir + "/" + mountDirs[MountToolCache]) {
+			k, v, _ := strings.Cut(kv, "=")
+			env = append(env, EnvVar{Name: k, Value: v})
+		}
+	}
 	extra := append([]SecretEnvVar(nil), t.Env...)
 	sort.SliceStable(extra, func(i, j int) bool { return extra[i].Name < extra[j].Name })
 	for _, e := range extra {
@@ -166,13 +231,68 @@ func buildRunnerPod(pool *ExecutorPool, name, image string) *Pod {
 	if len(t.Affinity) > 0 && string(t.Affinity) != "null" {
 		affinity = append([]byte(nil), t.Affinity...)
 	}
+	args := runnerArgs(withCA)
+	mounts := []VolumeMount{
+		{Name: configVolume, MountPath: configDir, ReadOnly: true},
+		{Name: stateVolume, MountPath: stateDir},
+		{Name: tmpVolume, MountPath: "/tmp"},
+	}
+	volumes := []Volume{
+		{Name: configVolume, Secret: &SecretVolume{SecretName: name, DefaultMode: ptr(int32(0o400)),
+			Optional: ptr(false)}},
+		{Name: stateVolume, EmptyDir: &EmptyDirSource{}},
+		{Name: tmpVolume, EmptyDir: &EmptyDirSource{}},
+	}
+	var annotations map[string]string
+	var inits []Container
+	if st != nil {
+		args = append(args, storageArgs(st)...)
+		mounts = append(mounts,
+			VolumeMount{Name: storageVolume, MountPath: storageDir},
+			VolumeMount{Name: privateVolume, MountPath: privateDir})
+		volumes = append(volumes,
+			Volume{Name: storageVolume, PersistentVolumeClaim: &ClaimVolume{ClaimName: st.claim}},
+			Volume{Name: privateVolume, EmptyDir: &EmptyDirSource{Medium: "Memory", SizeLimit: privateSizeLimit}})
+		annotations = map[string]string{AnnotationPodClaim: st.claim, AnnotationPodHolds: st.holds,
+			AnnotationPodWipe: strconv.FormatBool(st.wipe)}
+		inits = []Container{{
+			Name:            storageInitContainer,
+			Image:           image,
+			ImagePullPolicy: t.ImagePullPolicy,
+			Command:         []string{"cloop"},
+			Args:            prepareArgs(st),
+			Env:             []EnvVar{{Name: "HOME", Value: "/tmp"}},
+			Resources:       resources,
+			VolumeMounts:    []VolumeMount{{Name: storageVolume, MountPath: storageDir}},
+			SecurityContext: restrictedContainer(),
+			// The step's own report is the message; an image too old to have
+			// the step fails before it can write one, and its last log lines
+			// say why instead.
+			TerminationMessagePath:   "/dev/termination-log",
+			TerminationMessagePolicy: "FallbackToLogsOnError",
+		}}
+	}
+	podSecurity := &PodSecurityContext{
+		RunAsNonRoot:   ptr(true),
+		RunAsUser:      ptr(runnerUID),
+		RunAsGroup:     ptr(runnerGID),
+		FSGroup:        ptr(runnerGID),
+		SeccompProfile: &SeccompProfile{Type: "RuntimeDefault"},
+	}
+	if st != nil {
+		// A kept volume holds a workspace's worth of files: the kubelet changes
+		// their group only when the volume's root shows they are not the
+		// runner's already, not on every Pod that mounts it.
+		podSecurity.FSGroupChangePolicy = ptr("OnRootMismatch")
+	}
 	return &Pod{
 		APIVersion: "v1",
 		Kind:       "Pod",
 		Metadata: ObjectMeta{
-			Name:      name,
-			Namespace: pool.Metadata.Namespace,
-			Labels:    runnerLabels(pool, false, name),
+			Name:        name,
+			Namespace:   pool.Metadata.Namespace,
+			Labels:      runnerLabels(pool, false, name),
+			Annotations: annotations,
 			OwnerReferences: []OwnerReference{{APIVersion: APIVersion, Kind: Kind, Name: pool.Metadata.Name,
 				UID: pool.Metadata.UID, Controller: &ctrl}},
 		},
@@ -187,46 +307,38 @@ func buildRunnerPod(pool *ExecutorPool, name, image string) *Pod {
 			Affinity:                      affinity,
 			ImagePullSecrets:              append([]LocalObjectReference(nil), t.ImagePullSecrets...),
 			TerminationGracePeriodSeconds: ptr(runnerGracePeriod),
-			SecurityContext: &PodSecurityContext{
-				RunAsNonRoot:   ptr(true),
-				RunAsUser:      ptr(runnerUID),
-				RunAsGroup:     ptr(runnerGID),
-				FSGroup:        ptr(runnerGID),
-				SeccompProfile: &SeccompProfile{Type: "RuntimeDefault"},
-			},
+			SecurityContext:               podSecurity,
+			InitContainers:                inits,
 			Containers: []Container{{
-				Name:            runnerContainer,
-				Image:           image,
-				ImagePullPolicy: t.ImagePullPolicy,
-				Command:         []string{"cloop"},
-				Args:            runnerArgs(withCA),
-				Env:             env,
-				Resources:       resources,
-				VolumeMounts: []VolumeMount{
-					{Name: configVolume, MountPath: configDir, ReadOnly: true},
-					{Name: stateVolume, MountPath: stateDir},
-					{Name: tmpVolume, MountPath: "/tmp"},
-				},
-				SecurityContext: &SecurityContext{
-					RunAsNonRoot:             ptr(true),
-					RunAsUser:                ptr(runnerUID),
-					RunAsGroup:               ptr(runnerGID),
-					Privileged:               ptr(false),
-					AllowPrivilegeEscalation: ptr(false),
-					ReadOnlyRootFilesystem:   ptr(true),
-					Capabilities:             &Capabilities{Drop: []string{"ALL"}},
-					SeccompProfile:           &SeccompProfile{Type: "RuntimeDefault"},
-				},
+				Name:                     runnerContainer,
+				Image:                    image,
+				ImagePullPolicy:          t.ImagePullPolicy,
+				Command:                  []string{"cloop"},
+				Args:                     args,
+				Env:                      env,
+				Resources:                resources,
+				VolumeMounts:             mounts,
+				SecurityContext:          restrictedContainer(),
 				TerminationMessagePath:   "/dev/termination-log",
 				TerminationMessagePolicy: "File",
 			}},
-			Volumes: []Volume{
-				{Name: configVolume, Secret: &SecretVolume{SecretName: name, DefaultMode: ptr(int32(0o400)),
-					Optional: ptr(false)}},
-				{Name: stateVolume, EmptyDir: &EmptyDirSource{}},
-				{Name: tmpVolume, EmptyDir: &EmptyDirSource{}},
-			},
+			Volumes: volumes,
 		},
+	}
+}
+
+// restrictedContainer is the security context of every container in a
+// runner Pod.
+func restrictedContainer() *SecurityContext {
+	return &SecurityContext{
+		RunAsNonRoot:             ptr(true),
+		RunAsUser:                ptr(runnerUID),
+		RunAsGroup:               ptr(runnerGID),
+		Privileged:               ptr(false),
+		AllowPrivilegeEscalation: ptr(false),
+		ReadOnlyRootFilesystem:   ptr(true),
+		Capabilities:             &Capabilities{Drop: []string{"ALL"}},
+		SeccompProfile:           &SeccompProfile{Type: "RuntimeDefault"},
 	}
 }
 

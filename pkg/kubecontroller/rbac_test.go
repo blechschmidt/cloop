@@ -66,7 +66,12 @@ func TestEveryAPICallIsCoveredByRequiredRulesAndEveryRuleIsUsed(t *testing.T) {
 		LabelManagedBy: ManagedBy}, CreationTimestamp: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
 		OwnerReferences: []OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "stale", UID: "gone", Controller: &ctrl}}}})
 	r.hub.setDemand(2)
-	r.pool("build", r.spec())
+	// With runner volumes (Task 20484): claims created, claimed and released
+	// by patch, and one deleted when the pool shrinks.
+	spec := r.spec()
+	spec.MaxRunners = 2
+	spec.Persistence = &Persistence{Enabled: true, Size: "5Gi"}
+	r.pool("build", spec)
 	rc := r.start(func(o *Options) {
 		o.LeaderElection = &LeaderElection{Namespace: testNS, Name: "lease", Identity: "me",
 			LeaseDuration: 1500 * time.Millisecond, RenewDeadline: time.Second, RetryPeriod: 200 * time.Millisecond}
@@ -86,6 +91,17 @@ func TestEveryAPICallIsCoveredByRequiredRulesAndEveryRuleIsUsed(t *testing.T) {
 		r.k8s.setPodPhase(testNS, p, PodSucceeded, 0, "")
 	}
 	r.eventually("both collected", func() bool { return len(r.pods()) == 0 })
+	r.eventually("both volumes released", func() bool {
+		for _, c := range r.claims() {
+			if r.claim(c).Metadata.Annotations[AnnotationClaimedBy] != "" {
+				return false
+			}
+		}
+		return len(r.claims()) == 2
+	})
+	spec.MaxRunners = 1
+	r.pool("build", spec)
+	r.eventually("the volume past maxClaims deleted", func() bool { return len(r.claims()) == 1 })
 	// Renew the lease a few times, then let it go on shutdown.
 	time.Sleep(500 * time.Millisecond)
 	rc.stop(t)

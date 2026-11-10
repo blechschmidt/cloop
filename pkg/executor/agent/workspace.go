@@ -92,7 +92,15 @@ func (a *Agent) prepareWorkspace(ctx context.Context, wl *workload, spec executo
 	}
 
 	started := a.cfg.now()
-	err := provisionWorkspaceWith(provCtx, spec.WorkDir, spec.Workspace, cred, branchFile, spec.GitCA, emit)
+	req := gitprovision.Request{
+		Dir: spec.WorkDir, Workspace: spec.Workspace, Credential: cred, BranchBundleFile: branchFile,
+		Emit: emit, Host: deviceName(), GitCA: spec.GitCA,
+	}
+	// Trees on a volume of their own outlive this agent (Task 20484): a
+	// checkout kept there is vetted and reset to the fetched commit. The git
+	// object cache, when there is one, feeds fresh checkouts either way.
+	req.Pristine, req.ObjectCache = a.persistentWorkspace(), a.gitCacheDir
+	err := gitprovision.Provision(provCtx, req)
 	took := a.cfg.now().Sub(started).Round(time.Millisecond)
 	if err != nil {
 		// Already redacted by the provisioner; logging it here is what puts the

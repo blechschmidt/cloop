@@ -7,6 +7,9 @@ package ui
 //	POST /api/pool-controller/runners         runner configurations: {"count": N}
 //	POST /api/pool-controller/runners/retire  retire runners that hold no run:
 //	                                          {"runners": ["<enrollment id>", …]}
+//	POST /api/pool-controller/status          what keeps the controller from
+//	                                          starting runners (Task 20484):
+//	                                          {"healthy": false, "reason": …}
 //
 // Both are authenticated by the pool's controller credential, presented as
 // "Authorization: Bearer cloop_pool1_…" and nowhere else — never a query
@@ -76,7 +79,7 @@ func isPoolControllerEndpoint(r *http.Request) bool {
 	switch r.URL.Path {
 	case poolFeedPath:
 		return r.Method == http.MethodGet || r.Method == http.MethodHead
-	case poolRunnersPath, poolRetirePath:
+	case poolRunnersPath, poolRetirePath, poolStatusPath:
 		return r.Method == http.MethodPost
 	}
 	return false
@@ -173,6 +176,11 @@ func (s *Server) poolFeedState(r *http.Request, store *executorpool.Store, token
 	snap, _, err := store.Snapshot(pool, s.poolAccessFor(store))
 	if err != nil {
 		return poolFeedMessage{}, true, err
+	}
+	if !s.poolStorageSupported() {
+		// A member that would hand a runner holding a project's data anybody's
+		// run shares this control plane: no runner may hold any (Task 20484).
+		snap.QueuedProjects = nil
 	}
 	return poolFeedMessage{Type: "snapshot", Snapshot: snap, Pool: pool.Spec(), Server: s.agentConnectURL(r),
 		Pin: s.transportPin()}, true, nil
@@ -308,6 +316,10 @@ func (s *Server) servePoolFeedWS(w http.ResponseWriter, r *http.Request, store *
 type poolRunnersRequest struct {
 	// Count is how many runners; 1..executorpool.MaxRunnersPerRequest.
 	Count int `json:"count"`
+	// Holds is, per runner, the tenant whose data its storage holds (Task
+	// 20484): empty, or Count entries, each "" or a tenant from the feed. A
+	// runner holding a tenant is handed only that tenant's runs.
+	Holds []string `json:"holds,omitempty"`
 	// TTLSeconds bounds the tokens; 0 is the most allowed, ten minutes.
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 }
@@ -334,9 +346,15 @@ func (s *Server) handlePoolControllerRunners(w http.ResponseWriter, r *http.Requ
 			http.StatusBadRequest)
 		return
 	}
+	holds := req.Holds
+	if !s.poolStorageSupported() {
+		// Recorded as holding nothing, and echoed so: the controller does not
+		// start a runner whose holds the hub did not confirm.
+		holds = nil
+	}
 	configs, err := store.MintRunners(pool, req.Count, executorpool.RunnerOptions{
 		Server: s.agentConnectURL(r), Pin: s.transportPin(), TTL: ttl,
-		Actor: executorpool.CredentialActor(pool.ID, cred.ID), CredentialID: cred.ID,
+		Actor: executorpool.CredentialActor(pool.ID, cred.ID), CredentialID: cred.ID, Holds: holds,
 	})
 	var capErr *statedb.PoolAtCapacityError
 	switch {
@@ -350,6 +368,10 @@ func (s *Server) handlePoolControllerRunners(w http.ResponseWriter, r *http.Requ
 	case errors.Is(err, executorpool.ErrRevoked):
 		hubmetrics.ExecutorPoolMintRefusals.Inc(hubmetrics.ExecutorPoolRefusalRevoked)
 		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized", "code": "pool_credential_revoked"})
+		return
+	case errors.Is(err, executorpool.ErrInvalidSpec):
+		hubmetrics.ExecutorPoolMintRefusals.Inc(hubmetrics.ExecutorPoolRefusalInvalidRequest)
+		writePoolErr(w, err)
 		return
 	case err != nil:
 		writePoolErr(w, err)

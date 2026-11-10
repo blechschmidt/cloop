@@ -55,6 +55,13 @@ func payloadHomeFor(root, workDir string) string {
 // directory, creating it, when env is an explicit environment that names no
 // HOME. env is never modified in place.
 func withPayloadHome(env []string, root, workDir string) ([]string, error) {
+	return withPayloadHomeAt(env, payloadHomeFor(root, workDir), root)
+}
+
+// withPayloadHomeAt is withPayloadHome for a home the caller chose, which must
+// lie beneath root: Agent.payloadHome's, beneath --home-root when it is set
+// (Task 20484), and otherwise beside the tree.
+func withPayloadHomeAt(env []string, home, root string) ([]string, error) {
 	if env == nil {
 		return env, nil
 	}
@@ -63,7 +70,6 @@ func withPayloadHome(env []string, root, workDir string) ([]string, error) {
 			return env, nil
 		}
 	}
-	home := payloadHomeFor(root, workDir)
 	if home == "" {
 		return env, nil
 	}

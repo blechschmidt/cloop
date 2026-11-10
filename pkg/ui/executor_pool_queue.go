@@ -130,7 +130,7 @@ func (s *Server) queuePoolRun(w http.ResponseWriter, r *http.Request, workDir, p
 	}
 
 	snap, _, _ := store.Snapshot(pool, s.poolAccessFor(store))
-	reason := queuedReason(pool, snap)
+	reason := s.queuedReasonFor(store, pool, snap)
 	row := statedb.PoolQueueRow{
 		ID:           "q-" + artifact.NewRunID(),
 		PoolID:       pool.ID,
@@ -223,8 +223,10 @@ func (s *Server) setRunStatus(workDir string, set func(*state.ProjectState)) {
 
 // startQueuedPoolRun starts the queued run q on the runner ex, which this
 // member holds and dispatchPool just assigned it. It follows the run here the
-// way handleRun follows one.
-func (s *Server) startQueuedPoolRun(q statedb.PoolQueueRow, ex executor.Executor) {
+// way handleRun follows one. tenant is the run's project's (Task 20484), ""
+// when the hub could not say whose the project is; the start names it, and a
+// runner whose volume holds another tenant's data refuses the start.
+func (s *Server) startQueuedPoolRun(q statedb.PoolQueueRow, ex executor.Executor, tenant string) {
 	defer recoverGoroutine("executor pool run start")
 	store, err := s.poolStore()
 	if err != nil {
@@ -302,6 +304,9 @@ func (s *Server) startQueuedPoolRun(q statedb.PoolQueueRow, ex executor.Executor
 	acct := s.accountForStarter(workDir, q.Starter)
 	s.openSpendCursor(workDir, q.Payer)
 	labels := map[string]string{"handler": q.Handler, labelExecutorPool: q.PoolID, labelPoolQueueID: q.ID}
+	if tenant != "" {
+		labels[executor.LabelPoolTenant] = tenant
+	}
 	started, handle, err := startWorkloadAs(acct.envFor, newResumeClearance(acct), q.Payer, workDir,
 		[]string{s.selfExe(), "run"}, labels, onPoolRunner(ex), s.recordingRunHolding(workDir, q.Handler, slot))
 	if err != nil {

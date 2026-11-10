@@ -135,6 +135,25 @@ type ExecutorPoolRunnerRow struct {
 	RetireReason string
 	// CredentialID is the controller credential that minted the runner.
 	CredentialID string
+	// Holds is the tenant whose data the runner's storage holds, as its
+	// controller declared when minting it (Task 20484); "" for storage that
+	// is empty, or none. Such a runner is handed only that tenant's runs.
+	Holds string
+	// Project, ProjectName and ProjectOwner are the run it was handed — its
+	// tenant, its name and its owner key — set as it is handed it.
+	Project      string
+	ProjectName  string
+	ProjectOwner string
+}
+
+// PoolRunnerProject is the project of a run as a runner is handed it (Task
+// 20484): the tenant (executorpool.ProjectTenant) that decides which runners
+// may take it, and the name and owner its controller records on the runner's
+// storage.
+type PoolRunnerProject struct {
+	Tenant string
+	Name   string
+	Owner  string
 }
 
 // Live reports whether the runner counts against its pool's max_runners at
@@ -182,7 +201,8 @@ const executorPoolColumns = `id, name, labels_json, capabilities_json, max_runne
 const poolCredentialColumns = `id, pool_id, secret_hash, created_at, created_by, last_used_at, revoked_at, revoked_by`
 
 const poolRunnerColumns = `enrollment_id, pool_id, name, executor_id, state, member, queue_id,
-	minted_at, expires_at, enrolled_at, busy_at, retired_at, retire_reason, credential_id`
+	minted_at, expires_at, enrolled_at, busy_at, retired_at, retire_reason, credential_id,
+	holds, project, project_name, project_owner`
 
 const poolQueueColumns = `id, pool_id, project_path, handler, starter, payer, audience_fp,
 	requirements_json, slot_json, state, reason, executor_id, member, attempts, created_at, updated_at`
@@ -703,9 +723,10 @@ func (d *DB) MintExecutorPoolRunners(poolID string, tokens []EnrollmentTokenRow,
 			return fmt.Errorf("statedb: runner %d names token %q, not %q", i, r.EnrollmentID, tok.ID)
 		}
 		if _, err := tx.Exec(`INSERT INTO executor_pool_runners(`+poolRunnerColumns+`)
-			VALUES(?,?,?,'',?,'','',?,?,'','','','',?)`,
+			VALUES(?,?,?,'',?,'','',?,?,'','','','',?,?,'','','')`,
 			r.EnrollmentID, poolID, r.Name, PoolRunnerPending,
-			formatOptionalTime(tok.CreatedAt), formatOptionalTime(tok.ExpiresAt), r.CredentialID); err != nil {
+			formatOptionalTime(tok.CreatedAt), formatOptionalTime(tok.ExpiresAt), r.CredentialID,
+			strings.TrimSpace(r.Holds)); err != nil {
 			return fmt.Errorf("statedb: insert runner %q: %w", r.EnrollmentID, classifyDriverErr(err))
 		}
 	}
@@ -839,8 +860,15 @@ func (d *DB) MarkExecutorPoolRunnerEnrolled(enrollmentID, executorID, member str
 
 // MovePoolRunnerIdle returns a busy runner that was never started on to
 // idle, for the next queued run, and reports whether it moved.
+//
+// A runner handed a run keeps that run's tenant as what it holds (Task
+// 20484), unless it already held one: whatever the hand-over got as far as —
+// a workspace fetched onto its storage, say — is that project's, and the next
+// run it may be handed is that project's too. Never another's on the strength
+// of "it did not start".
 func (d *DB) MovePoolRunnerIdle(executorID string) (bool, error) {
-	return d.execOne(`UPDATE executor_pool_runners SET state = ?, queue_id = '', busy_at = ''
+	return d.execOne(`UPDATE executor_pool_runners SET state = ?, queue_id = '', busy_at = '',
+		holds = CASE WHEN holds = '' THEN project ELSE holds END, project = '', project_name = '', project_owner = ''
 		WHERE executor_id = ? AND executor_id != '' AND state = ?`,
 		fmt.Sprintf("return runner %s to idle", executorID), PoolRunnerIdle, executorID, PoolRunnerBusy)
 }
@@ -1079,6 +1107,17 @@ func queryPoolQueue(q poolQuerier, where string, args ...any) ([]PoolQueueRow, e
 // either had moved on — another runner took the run, or this one was taken
 // or retired — and the caller tries the next.
 func (d *DB) AssignPoolQueueEntry(id, executorID, member string, at time.Time) (ok bool, err error) {
+	return d.AssignPoolQueueEntryTo(id, executorID, member, at, PoolRunnerProject{})
+}
+
+// AssignPoolQueueEntryTo is AssignPoolQueueEntry for a run of project p
+// (Task 20484): the runner is handed it only if its storage holds nothing or
+// holds p's tenant — checked by the same UPDATE that claims the runner, so no
+// reading of the runner beforehand can race it — and the runner records p, so
+// the pool's controller learns each runner's project as it is handed one. A
+// run whose tenant is unknown (p's zero value) goes to a runner holding
+// nothing, never to one holding anybody's data.
+func (d *DB) AssignPoolQueueEntryTo(id, executorID, member string, at time.Time, p PoolRunnerProject) (ok bool, err error) {
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -1099,9 +1138,12 @@ func (d *DB) AssignPoolQueueEntry(id, executorID, member string, at time.Time) (
 	if n, _ := res.RowsAffected(); n != 1 {
 		return false, nil
 	}
-	res, err = tx.Exec(`UPDATE executor_pool_runners SET state = ?, queue_id = ?, busy_at = ?, member = ?
-		WHERE executor_id = ? AND executor_id != '' AND state = ?`,
-		PoolRunnerBusy, id, stamp, member, executorID, PoolRunnerIdle)
+	tenant := strings.TrimSpace(p.Tenant)
+	res, err = tx.Exec(`UPDATE executor_pool_runners SET state = ?, queue_id = ?, busy_at = ?, member = ?,
+		project = ?, project_name = ?, project_owner = ?
+		WHERE executor_id = ? AND executor_id != '' AND state = ? AND (holds = '' OR holds = ?)`,
+		PoolRunnerBusy, id, stamp, member, tenant, strings.TrimSpace(p.Name), strings.TrimSpace(p.Owner),
+		executorID, PoolRunnerIdle, tenant)
 	if err != nil {
 		return false, fmt.Errorf("statedb: claim runner %q: %w", executorID, classifyDriverErr(err))
 	}
@@ -1196,6 +1238,78 @@ func (d *DB) BindProjectPool(projectPath, poolID, boundBy string) error {
 // import the executor package.
 func poolBindingValue(poolID string) string { return "pool:" + strings.TrimSpace(poolID) }
 
+// ── controller status ──────────────────────────────────────────────────────
+
+// PoolControllerStatusRow is the last health report one controller of a pool
+// made (Task 20484): healthy, or the reason it cannot start runners — a
+// volume stuck Pending, a full one — in a sentence for the people whose runs
+// wait in the pool's queue.
+type PoolControllerStatusRow struct {
+	PoolID       string
+	CredentialID string
+	Healthy      bool
+	Reason       string
+	Message      string
+	ReportedAt   time.Time
+}
+
+// PutPoolControllerStatus records a controller's health report in place of
+// its previous one.
+func (d *DB) PutPoolControllerStatus(row PoolControllerStatusRow) error {
+	if strings.TrimSpace(row.PoolID) == "" || strings.TrimSpace(row.CredentialID) == "" {
+		return errors.New("statedb: a pool controller's report needs its pool and its credential")
+	}
+	if row.ReportedAt.IsZero() {
+		row.ReportedAt = time.Now()
+	}
+	healthy := 0
+	if row.Healthy {
+		healthy = 1
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, err := d.conn.Exec(`INSERT INTO executor_pool_controller_status(pool_id, credential_id, healthy, reason,
+		message, reported_at) VALUES(?,?,?,?,?,?)
+		ON CONFLICT(pool_id, credential_id) DO UPDATE SET
+		  healthy = excluded.healthy, reason = excluded.reason, message = excluded.message,
+		  reported_at = excluded.reported_at`,
+		row.PoolID, row.CredentialID, healthy, row.Reason, row.Message, formatOptionalTime(row.ReportedAt)); err != nil {
+		return fmt.Errorf("statedb: record pool %q's controller report: %w", row.PoolID, classifyDriverErr(err))
+	}
+	return nil
+}
+
+// PoolControllerStatuses returns the last report of each of a pool's
+// controllers, the newest first.
+func (d *DB) PoolControllerStatuses(poolID string) ([]PoolControllerStatusRow, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	rows, err := d.conn.Query(`SELECT pool_id, credential_id, healthy, reason, message, reported_at
+		FROM executor_pool_controller_status WHERE pool_id = ? ORDER BY reported_at DESC, credential_id`,
+		strings.TrimSpace(poolID))
+	if err != nil {
+		return nil, fmt.Errorf("statedb: read pool %q's controller reports: %w", poolID, classifyDriverErr(err))
+	}
+	defer rows.Close()
+	var out []PoolControllerStatusRow
+	for rows.Next() {
+		var (
+			r       PoolControllerStatusRow
+			healthy int
+			at      string
+		)
+		if err := rows.Scan(&r.PoolID, &r.CredentialID, &healthy, &r.Reason, &r.Message, &at); err != nil {
+			return nil, fmt.Errorf("statedb: scan a pool controller's report: %w", classifyDriverErr(err))
+		}
+		r.Healthy, r.ReportedAt = healthy != 0, parseOptionalTime(at)
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("statedb: read pool %q's controller reports: %w", poolID, classifyDriverErr(err))
+	}
+	return out, nil
+}
+
 // ── scanning ───────────────────────────────────────────────────────────────
 
 // poolQuerier is what both the connection and a transaction offer: the reads
@@ -1246,7 +1360,8 @@ func scanPoolRunner(sc rowScanner) (ExecutorPoolRunnerRow, error) {
 		minted, expires, enrolled, busy, ret string
 	)
 	if err := sc.Scan(&r.EnrollmentID, &r.PoolID, &r.Name, &r.ExecutorID, &r.State, &r.Member, &r.QueueID,
-		&minted, &expires, &enrolled, &busy, &ret, &r.RetireReason, &r.CredentialID); err != nil {
+		&minted, &expires, &enrolled, &busy, &ret, &r.RetireReason, &r.CredentialID,
+		&r.Holds, &r.Project, &r.ProjectName, &r.ProjectOwner); err != nil {
 		return ExecutorPoolRunnerRow{}, err
 	}
 	r.MintedAt, r.ExpiresAt, r.EnrolledAt = parseOptionalTime(minted), parseOptionalTime(expires), parseOptionalTime(enrolled)

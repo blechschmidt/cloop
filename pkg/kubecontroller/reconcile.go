@@ -124,6 +124,7 @@ type passState struct {
 	idle     int
 	busy     int
 	queued   int
+	storage  *StorageStatus
 }
 
 func (s *passState) degrade(reason, msg string) {
@@ -138,10 +139,12 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 	feeds := c.feeds.Load()
 	if !ok {
 		// Deleted: its runner Pods are owned by it and go with it, their
-		// Secrets with them.
+		// Secrets with them; its volumes too under reclaimPolicy Delete, which
+		// made it their owner.
 		if feeds != nil {
 			feeds.stop(key)
 		}
+		c.reports.forget(key)
 		return res, nil
 	}
 	pool, err := deepCopyPool(cached)
@@ -162,7 +165,32 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 	st := &passState{}
 
 	views, created, deleted := c.runnersOf(pool, now)
-	live := c.collect(ctx, pool, views, deleted, now, &res)
+	// Runner volumes first (storage.go): a finished runner's claim is
+	// released while its Pod — and what it said about its volume — is still
+	// in the cache, and a runner stuck waiting on its volume goes with the
+	// finished ones.
+	persist := pool.Spec.Persistence
+	vols := c.volumesOf(pool)
+	stuck := c.settleVolumes(ctx, pool, vols, views, created, st, now, &res)
+	var giveBackIDs []string
+	holding := map[string]bool{}
+	for _, v := range stuck {
+		c.events.record(ctx, pool, EventWarning, ReasonStoragePending, fmt.Sprintf(
+			"deleted runner Pod %s, which could not start on its volume", v.pod.Metadata.Name))
+		c.deleteRunner(ctx, pool, v, now)
+		deleted[v.pod.Metadata.Name] = true
+		if v.enrollmentID != "" {
+			giveBackIDs = append(giveBackIDs, v.enrollmentID)
+		}
+	}
+	// A finished runner keeps its Pod until its volume is released: the Pod's
+	// status is the only record of what the runner said about the volume.
+	for _, vol := range vols {
+		if vol.claimedBy != "" {
+			holding[vol.claimedBy] = true
+		}
+	}
+	live := c.collect(ctx, pool, views, deleted, holding, now, &res)
 
 	if problems := pool.Spec.Validate(); len(problems) > 0 {
 		if feeds != nil {
@@ -171,7 +199,14 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 		st.invalid = problems
 		c.events.record(ctx, pool, EventWarning, ReasonInvalidSpec, "the spec is invalid: "+strings.Join(problems, "; "))
 		st.runners = len(live) + len(created)
+		st.storage = storageStatus(vols, 0, persist, now)
 		return res, c.writeStatus(ctx, cached, pool, st, nil, now)
+	}
+	retained := c.reclaimVolumes(ctx, pool, persist, vols)
+	st.storage = storageStatus(vols, retained, persist, now)
+	troubleReason, troubleMsg := storageTrouble(vols, now)
+	if troubleReason != "" {
+		st.degrade(troubleReason, troubleMsg)
 	}
 	if feeds == nil {
 		return res, nil
@@ -180,6 +215,11 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 	if err != nil {
 		st.degrade(ReasonHubUnavailable, err.Error())
 		return res, c.writeStatus(ctx, cached, pool, st, nil, now)
+	}
+	if len(giveBackIDs) > 0 {
+		if _, err := f.client.Retire(ctx, giveBackIDs); err != nil {
+			c.logf("give back %d runner(s) stuck on their volumes: %v; their tokens lapse unredeemed", len(giveBackIDs), err)
+		}
 	}
 	fs := f.snapshot()
 	fresh := fs.Have && fs.Err == nil && now.Sub(fs.At) <= feedFresh
@@ -225,23 +265,30 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 		live = c.collectGone(ctx, pool, live, now, &res)
 		if c.duplicateOf(pool, snap) == "" {
 			c.collectHubOrphans(ctx, pool, f, snap, now)
+			c.recordProjects(ctx, pool, vols, live, snap)
 		}
 	}
 
 	// Count.
 	var idle []*runnerView
+	var waiting []string
 	for _, v := range live {
 		switch classify(v) {
 		case runnerBusy:
 			st.busy++
+			continue
 		case runnerIdle:
 			st.idle++
 			idle = append(idle, v)
 		default:
 			st.pending++
 		}
+		waiting = append(waiting, heldBy(v))
 	}
 	st.pending += len(created)
+	for name := range created {
+		waiting = append(waiting, c.expect.heldBy(pool.Key(), name))
+	}
 	st.runners = st.busy + st.idle + st.pending
 	if snap != nil {
 		st.queued = snap.Demand
@@ -250,7 +297,26 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 	if snap != nil && snap.MaxRunners > 0 {
 		maxRunners = min(maxRunners, snap.MaxRunners)
 	}
-	st.desired = clamp(pool.Spec.MinRunners, pool.Spec.MinRunners+st.busy+st.queued, maxRunners)
+	// Runner volumes held per project need the hub to keep a runner that
+	// holds one project's data from another's runs: a hub older than that
+	// sends no queued_projects, and its runners all start on wiped volumes.
+	affinity := persist.On() && snap != nil && snap.QueuedProjects != nil
+	if persist.On() && fresh && !affinity {
+		c.events.record(ctx, pool, EventWarning, ReasonStorageUnsupported, fmt.Sprintf(
+			"the hub at %s does not record what a runner's volume holds; every runner starts on a wiped volume "+
+				"until it is upgraded", pool.Spec.HubURL))
+	}
+	in := demandInput{minRunners: pool.Spec.MinRunners, maxRunners: maxRunners, busy: st.busy, waiting: waiting,
+		demand: st.queued}
+	if affinity {
+		in.queued = snap.QueuedProjects
+	} else {
+		for i := range in.waiting {
+			in.waiting[i] = ""
+		}
+	}
+	plan := planDemand(in)
+	st.desired = plan.desired
 
 	image := imageChoice{}
 	if dup := c.duplicateOf(pool, snap); dup != "" {
@@ -269,11 +335,13 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 		}
 	}
 
+	started := 0
+	storageBlocked, blockedMsg := false, ""
 	switch {
 	case !fresh:
 		// Nothing is started or retired without the hub's current word.
-	case st.desired > st.runners && image.Err == nil:
-		n := min(st.desired-st.runners, maxCreatePerPass)
+	case len(plan.start) > 0 && image.Err == nil:
+		n := min(len(plan.start), maxCreatePerPass)
 		if snap.Spare < n {
 			if snap.Spare <= 0 {
 				c.events.record(ctx, pool, EventWarning, ReasonRunnersRefused, fmt.Sprintf(
@@ -282,20 +350,54 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 			}
 			n = max(0, snap.Spare)
 		}
-		if n > 0 {
-			started, err := c.startRunners(ctx, pool, f, image.Image, n, now)
-			st.pending += started
-			st.runners += started
+		starts := make([]startPlan, n)
+		if persist.On() && n > 0 {
+			queued := map[string]bool{}
+			for _, d := range snap.QueuedProjects {
+				queued[d.Tenant] = true
+			}
+			vplans, blocked := pickVolumes(plan.start[:n], vols, persist.MaxClaims, snap.PoolID, queued, now)
+			if len(vplans) < n {
+				if blocked != "" {
+					st.degrade(ReasonStorageUnavailable, blocked)
+					storageBlocked = true
+					blockedMsg = blocked
+				}
+				res.sooner(requeueWhileStarting)
+			}
+			starts = starts[:len(vplans)]
+			for i := range vplans {
+				starts[i].vol = &vplans[i]
+			}
+		}
+		if len(starts) > 0 {
+			n, err := c.startRunners(ctx, pool, f, image.Image, persist, snap.PoolID, starts, now)
+			started = n
+			st.pending += n
+			st.runners += n
 			if err != nil {
 				st.degrade(reasonOf(err), err.Error())
 			}
 		}
 		res.sooner(requeueWhileStarting)
-	case st.runners > st.desired:
-		retired, wait := c.scaleDown(ctx, pool, f, idle, st.runners-st.desired, now)
-		st.idle -= retired
-		st.runners -= retired
-		res.sooner(wait)
+	}
+	// Retiring is not the alternative to starting: runners holding data
+	// nobody's run waits for are retired while others start, and as soon as
+	// they may — not after scaleDownDelay — when a run has no runner and no
+	// room for one.
+	if fresh && plan.excess > 0 {
+		// Only idle runners can be retired: the stranded share of the quota
+		// is what of it is idle, or a runner holding nothing — one the idle
+		// target needs — would be retired in a pending one's place.
+		ordered, strandedIdle := retireOrder(idle, plan.stranded)
+		quota := strandedIdle + plan.cleanExcess
+		urgent := strandedIdle > 0 && (plan.unmet > 0 || started < len(plan.start))
+		if quota > 0 {
+			retired, wait := c.scaleDown(ctx, pool, f, ordered, quota, urgent, now)
+			st.idle -= retired
+			st.runners -= retired
+			res.sooner(wait)
+		}
 	}
 	if st.pending > 0 {
 		res.sooner(requeueWhileStarting)
@@ -303,7 +405,66 @@ func (c *Controller) reconcile(ctx context.Context, key string) (result, error) 
 	if fs.Err != nil || !fs.Have {
 		res.sooner(feedBackoffBase * 5)
 	}
+	if fs.Have && fs.Err == nil {
+		// The hub hears of trouble only while it keeps runners from starting:
+		// a full or broken volume among good ones does not.
+		reason, msg := "", ""
+		if storageBlocked {
+			reason, msg = troubleReason, troubleMsg
+			if reason == "" || reason == ReasonVolumeUnusable {
+				reason, msg = ReasonStorageUnavailable, blockedMsg
+			}
+		}
+		res.sooner(c.reportStorage(ctx, key, f, reason, msg, now))
+		if reason != "" {
+			res.sooner(storageReportRefresh)
+		}
+	}
 	return res, c.writeStatus(ctx, cached, pool, st, &fs, now)
+}
+
+// heldBy is the tenant whose data a runner's volume holds, by the hub's
+// record when it has one, or by the runner Pod's own annotation while it
+// starts; "" for none.
+func heldBy(v *runnerView) string {
+	if v.hub != nil {
+		return v.hub.Holds
+	}
+	return v.pod.Metadata.Annotations[AnnotationPodHolds]
+}
+
+// retireOrder orders idle runners for scale-down, oldest first within each
+// group: runners holding a project's data nobody's run waits for — as many
+// of each project's as are stranded — then runners holding nothing, then the
+// holders a waiting run needs. It returns how many of the first group there
+// are.
+func retireOrder(idle []*runnerView, stranded map[string]int) ([]*runnerView, int) {
+	enrolled := func(v *runnerView) time.Time {
+		if v.hub == nil {
+			return time.Time{}
+		}
+		return v.hub.EnrolledAt
+	}
+	byAge := append([]*runnerView(nil), idle...)
+	sort.SliceStable(byAge, func(i, j int) bool { return enrolled(byAge[i]).Before(enrolled(byAge[j])) })
+	budget := map[string]int{}
+	for t, n := range stranded {
+		budget[t] = n
+	}
+	var first, clean, needed []*runnerView
+	for _, v := range byAge {
+		switch t := heldBy(v); {
+		case t == "":
+			clean = append(clean, v)
+		case budget[t] > 0:
+			budget[t]--
+			first = append(first, v)
+		default:
+			needed = append(needed, v)
+		}
+	}
+	out := append(append(first, clean...), needed...)
+	return out, len(first)
 }
 
 // classify places a runner by the hub's record.
@@ -357,7 +518,7 @@ func (c *Controller) runnersOf(pool *ExecutorPool, now time.Time) ([]*runnerView
 
 // collect deletes finished runners and runner Pods orphaned without their
 // Secret, and returns the runners still live.
-func (c *Controller) collect(ctx context.Context, pool *ExecutorPool, views []*runnerView, deleted map[string]bool,
+func (c *Controller) collect(ctx context.Context, pool *ExecutorPool, views []*runnerView, deleted, holding map[string]bool,
 	now time.Time, res *result) []*runnerView {
 	var live []*runnerView
 	for _, v := range views {
@@ -365,6 +526,10 @@ func (c *Controller) collect(ctx context.Context, pool *ExecutorPool, views []*r
 		switch {
 		case deleted[p.Metadata.Name] || p.Metadata.DeletionTimestamp != "":
 			// Going.
+		case (p.Status.Phase == PodSucceeded || p.Status.Phase == PodFailed) && holding[p.Metadata.Name]:
+			// Finished, and its volume not yet released: the next pass
+			// releases it with what the runner said, and then collects it.
+			res.sooner(requeueWhileStarting)
 		case p.Status.Phase == PodSucceeded || p.Status.Phase == PodFailed:
 			if p.Status.Phase == PodFailed {
 				c.reportFailedRunner(ctx, pool, p)
@@ -568,27 +733,43 @@ func (c *Controller) duplicateOf(pool *ExecutorPool, snap *executorpool.Snapshot
 	return ""
 }
 
-// startRunners starts n runners: Pods first, then their configurations from
-// the hub in one request, then a Secret owned by each Pod. It returns how
-// many it started.
-func (c *Controller) startRunners(ctx context.Context, pool *ExecutorPool, f *feed, image string, n int,
-	now time.Time) (int, error) {
+// startPlan is one runner to start: its volume, when the pool keeps them.
+type startPlan struct {
+	vol *volumePlan
+}
+
+// startRunners starts a runner for each plan: Pods first — each claiming its
+// volume before its Pod is created — then their configurations from the hub
+// in one request, then a Secret owned by each Pod. It returns how many it
+// started.
+func (c *Controller) startRunners(ctx context.Context, pool *ExecutorPool, f *feed, image string, persist *Persistence,
+	hubPool string, plans []startPlan, now time.Time) (int, error) {
 	var pods []*Pod
+	var holds []string
 	var podErr error
-	for i := 0; i < n; i++ {
-		p, err := c.createRunnerPod(ctx, pool, image)
+	for _, plan := range plans {
+		p, held, err := c.createRunner(ctx, pool, image, persist, hubPool, plan, now)
 		if err != nil {
 			podErr = err
+			if errors.Is(err, errClaimRaced) {
+				// Another reconciler took the volume, or the cache was behind:
+				// the next pass sees it as it is.
+				continue
+			}
 			break
 		}
 		pods = append(pods, p)
-		c.expect.noteCreated(pool.Key(), p.Metadata.Name, now)
+		holds = append(holds, held)
+		c.expect.noteCreatedHolding(pool.Key(), p.Metadata.Name, held, now)
 	}
 	if len(pods) == 0 {
+		if podErr == nil || errors.Is(podErr, errClaimRaced) {
+			return 0, nil
+		}
 		c.events.record(ctx, pool, EventWarning, ReasonPodRefused, podErr.Error())
 		return 0, podErr
 	}
-	configs, err := f.client.MintRunners(ctx, len(pods))
+	configs, err := f.client.MintRunners(ctx, len(pods), holds)
 	if err != nil {
 		for _, p := range pods {
 			c.deleteRunner(ctx, pool, &runnerView{pod: p}, now)
@@ -601,6 +782,18 @@ func (c *Controller) startRunners(ctx context.Context, pool *ExecutorPool, f *fe
 	started := 0
 	for i, p := range pods {
 		cfg := configs[i]
+		if holds[i] != "" && cfg.Holds != holds[i] {
+			// A hub that did not record what the runner holds would hand it
+			// any project's run, onto another project's unwiped data: the
+			// runner never starts.
+			c.logf("start runner %s for %s: the hub did not record that it holds %s; not starting it", p.Metadata.Name,
+				pool.Key(), holds[i])
+			c.events.record(ctx, pool, EventWarning, ReasonStorageUnsupported, "the hub did not record what a "+
+				"runner's volume holds; the runner was not started, and its volume stays unused until the hub does")
+			c.deleteRunner(ctx, pool, &runnerView{pod: p}, now)
+			c.giveBack(ctx, f, configs[i:i+1])
+			continue
+		}
 		secret, err := buildRunnerSecret(pool, p, cfg, pool.Spec.HubCAPin)
 		if err == nil {
 			err = c.api.createSecret(ctx, secret)
@@ -617,7 +810,7 @@ func (c *Controller) startRunners(ctx context.Context, pool *ExecutorPool, f *fe
 	if started > 0 {
 		c.events.record(ctx, pool, EventNormal, ReasonScaledUp, fmt.Sprintf("started %d runner(s)", started))
 	}
-	if podErr != nil {
+	if podErr != nil && !errors.Is(podErr, errClaimRaced) {
 		if started == 0 {
 			c.events.record(ctx, pool, EventWarning, ReasonPodRefused, podErr.Error())
 		}
@@ -626,14 +819,55 @@ func (c *Controller) startRunners(ctx context.Context, pool *ExecutorPool, f *fe
 	return started, nil
 }
 
-// createRunnerPod creates one runner Pod under a fresh name.
+// errClaimRaced is a volume another reconciler claimed first, or one whose
+// cached version was behind.
+var errClaimRaced = errors.New("the volume was claimed by someone else first")
+
+// createRunner creates one runner Pod under a fresh name — claiming its
+// volume first when it has one — and returns it with the tenant its volume
+// holds.
+func (c *Controller) createRunner(ctx context.Context, pool *ExecutorPool, image string, persist *Persistence,
+	hubPool string, plan startPlan, now time.Time) (*Pod, string, error) {
+	if plan.vol == nil {
+		p, err := c.createRunnerPod(ctx, pool, image)
+		return p, "", err
+	}
+	name, err := runnerPodName(pool)
+	if err != nil {
+		return nil, "", err
+	}
+	claimedAt := c.now()
+	claimed, err := c.claimFor(ctx, pool, persist, *plan.vol, name, hubPool)
+	if err != nil {
+		if kubernetes.IsConflict(err) || kubernetes.IsNotFound(err) {
+			return nil, "", fmt.Errorf("%w: %v", errClaimRaced, err)
+		}
+		return nil, "", &refusal{reason: ReasonStorageUnavailable, err: err}
+	}
+	st := &runnerStorage{claim: claimed.Metadata.Name, holds: plan.vol.holds, wipe: plan.vol.wipe, p: persist}
+	cctx, cancel := context.WithTimeout(ctx, claimCreateTimeout)
+	defer cancel()
+	p, err := c.api.createPod(cctx, buildRunnerPod(pool, name, image, st))
+	if err != nil {
+		if kubernetes.IsConflict(err) || kubernetes.IsForbidden(err) || kubernetes.IsInvalid(err) {
+			// Refused outright: no Pod mounts the volume.
+			c.unclaim(ctx, claimed, name, claimedAt)
+		}
+		// Otherwise the create may have happened: the claim stays, and is
+		// released once its grace is over and no Pod of that name exists.
+		return nil, "", fmt.Errorf("create runner Pod %s: %w", name, err)
+	}
+	return p, plan.vol.holds, nil
+}
+
+// createRunnerPod creates one runner Pod, with no volume, under a fresh name.
 func (c *Controller) createRunnerPod(ctx context.Context, pool *ExecutorPool, image string) (*Pod, error) {
 	for attempt := 0; ; attempt++ {
 		name, err := runnerPodName(pool)
 		if err != nil {
 			return nil, err
 		}
-		p, err := c.api.createPod(ctx, buildRunnerPod(pool, name, image))
+		p, err := c.api.createPod(ctx, buildRunnerPod(pool, name, image, nil))
 		if kubernetes.IsConflict(err) && attempt < 3 {
 			continue
 		}
@@ -659,12 +893,14 @@ func (c *Controller) giveBack(ctx context.Context, f *feed, configs []RunnerConf
 }
 
 // scaleDown asks the hub to retire up to excess idle runners that have idled
-// for the scale-down delay, oldest first. It returns how many the hub
-// retired, and when to look again for the rest.
+// for the scale-down delay, in the order given (retireOrder). It returns how
+// many the hub retired, and when to look again for the rest.
 func (c *Controller) scaleDown(ctx context.Context, pool *ExecutorPool, f *feed, idle []*runnerView, excess int,
-	now time.Time) (int, time.Duration) {
+	urgent bool, now time.Time) (int, time.Duration) {
 	delay := max(pool.Spec.ScaleDownDelayDuration(), minIdleBeforeRetire)
-	sort.Slice(idle, func(i, j int) bool { return idle[i].hub.EnrolledAt.Before(idle[j].hub.EnrolledAt) })
+	if urgent {
+		delay = minIdleBeforeRetire
+	}
 	var ids []string
 	var wait time.Duration
 	for _, v := range idle {
@@ -764,6 +1000,7 @@ func (c *Controller) writeStatus(ctx context.Context, cached, pool *ExecutorPool
 	next.DesiredRunners, next.Runners = st.desired, st.runners
 	next.PendingRunners, next.IdleRunners, next.BusyRunners = st.pending, st.idle, st.busy
 	next.QueuedRuns = st.queued
+	next.Storage = st.storage
 	if fs != nil && fs.Have {
 		next.PoolID, next.PoolName = fs.Msg.Snapshot.PoolID, fs.Msg.Snapshot.Name
 		next.LastHubContact = fs.At.UTC().Truncate(time.Minute).Format(time.RFC3339)
@@ -849,7 +1086,7 @@ func setCondition(s *ExecutorPoolStatus, typ, status, reason, msg string, gen in
 // ── the sweep ──────────────────────────────────────────────────────────────
 
 // sweep deletes what no pool owns any more: runner Pods whose ExecutorPool is
-// gone, and runner Secrets whose Pod is gone. The API server's garbage
+// gone, the volumes such a pool owned, and runner Secrets whose Pod is gone. The API server's garbage
 // collector does both on its own; the sweep is for a cluster whose collector
 // is behind, and for the Secret a crash left between its two creates.
 func (c *Controller) sweep(ctx context.Context) {
@@ -871,6 +1108,24 @@ func (c *Controller) sweep(ctx context.Context) {
 		}
 		if err := c.api.deletePod(ctx, p.Metadata.Namespace, p.Metadata.Name, p.Metadata.UID); err != nil {
 			c.logf("sweep: delete runner Pod %s/%s of a deleted pool: %v", p.Metadata.Namespace, p.Metadata.Name, err)
+		}
+	}
+	// Runner volumes a deleted pool owned (reclaimPolicy Delete), once no
+	// runner holds them: the garbage collector's work, should it be behind.
+	// A volume the pool did not own was retained, and stays.
+	for _, cl := range c.claims.list() {
+		owner := controllerOf(cl.Metadata)
+		if owner == "" || pools[owner] || cl.Metadata.DeletionTimestamp != "" ||
+			cl.Metadata.Annotations[AnnotationClaimedBy] != "" {
+			continue
+		}
+		// Long after the collector would have: a pool this replica's cache has
+		// not shown yet must not lose a volume a rival just created for it.
+		if now.Sub(parseTime(cl.Metadata.CreationTimestamp, now)) < storageRetryAfter {
+			continue
+		}
+		if err := c.api.deleteClaim(ctx, cl.Metadata.Namespace, cl.Metadata.Name, cl.Metadata.UID); err != nil {
+			c.logf("sweep: delete volume %s/%s of a deleted pool: %v", cl.Metadata.Namespace, cl.Metadata.Name, err)
 		}
 	}
 	for _, s := range c.secrets.list() {

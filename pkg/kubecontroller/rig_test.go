@@ -32,6 +32,9 @@ func fastTimings(t *testing.T) {
 		{&requeueWhileStarting, 100 * time.Millisecond}, {&queueBaseDelay, 20 * time.Millisecond},
 		{&queueMaxDelay, 200 * time.Millisecond}, {&watchTimeout, 2 * time.Second},
 		{&expectationTTL, 5 * time.Second}, {&minIdleBeforeRetire, 0},
+		// Runner volumes (Task 20484).
+		{&claimGrace, 500 * time.Millisecond}, {&storagePendingTimeout, 400 * time.Millisecond},
+		{&storageRetryAfter, time.Minute}, {&storageReportRefresh, time.Minute},
 	}
 	for i := range saved {
 		old := *saved[i].p

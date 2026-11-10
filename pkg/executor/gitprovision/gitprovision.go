@@ -109,6 +109,17 @@ type Request struct {
 	// file for the length of the provisioning and named by
 	// http.<url>.sslCAInfo, beside the machine's own URL-scoped settings.
 	GitCA *executor.GitCA
+	// Pristine says a checkout already in Dir belongs to no one but the hub
+	// (Task 20484): an executor pool runner's persistent volume, whose runs
+	// return their work before they end. It is vetted before it is trusted
+	// and reset to exactly the fetched commit after — and discarded and
+	// cloned afresh when it fails either, never refused. See pristine.go.
+	Pristine bool
+	// ObjectCache is a directory of bare repositories, one per upstream, that
+	// a fresh checkout takes its objects from before it fetches, and that is
+	// refreshed from a checkout this provisioning can trust — one it created,
+	// or a kept one Pristine vetted (Task 20484). "" keeps none.
+	ObjectCache string
 }
 
 // HostLabel renders how the machine provisioning runs on refers to itself.
@@ -218,10 +229,49 @@ func Provision(ctx context.Context, r Request) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fail("cannot create the workspace directory %s on %s: %v", dir, hostName, err)
 	}
+	// A kept checkout on a runner's volume is the hub's copy, not anyone's
+	// only one: one that cannot be trusted, or that is of another repository,
+	// is discarded rather than refused (pristine.go). Vetted before git reads
+	// anything of it — inspectDir's own reads follow includes and gitdir files.
+	discard := func(why string) error {
+		emit(fmt.Sprintf("workspace: discarding the kept checkout and cloning afresh: %s\n", why))
+		if err := discardTree(dir); err != nil {
+			return fail("cannot discard the kept checkout in %s on %s: %v", dir, hostName, err)
+		}
+		return nil
+	}
+	if r.Pristine {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			if why := vetReusedRepository(ctx, dir, emit); why != "" {
+				if err := discard(why); err != nil {
+					return err
+				}
+			}
+		} else if entries, rerr := os.ReadDir(dir); rerr == nil && len(entries) > 0 {
+			// A tree whose .git is gone cannot be fetched into, and a clone
+			// over it would refuse the files it finds.
+			if err := discard("it has no .git"); err != nil {
+				return err
+			}
+		}
+	}
 	reuse, err := inspectDir(ctx, dir, w, hostName)
+	if r.Pristine && err != nil {
+		if derr := discard(err.Error()); derr != nil {
+			return derr
+		}
+		reuse, err = reuseState{fresh: true, empty: true}, nil
+	}
 	if err != nil {
 		return fail("%v", err)
 	}
+	cache := ""
+	if strings.TrimSpace(r.ObjectCache) != "" && reuse.fresh {
+		cache = usableCache(ctx, r.ObjectCache, w, emit)
+	}
+	// Refreshing the cache reads the checkout as a repository: only one this
+	// provisioning made, or a kept one it vetted.
+	refreshable := strings.TrimSpace(r.ObjectCache) != "" && (reuse.fresh || r.Pristine)
 
 	emit(fmt.Sprintf("workspace: provisioning %s into %s on %s\n", w.Describe(), dir, hostName))
 	if !reuse.fresh {
@@ -246,15 +296,34 @@ func Provision(ctx context.Context, r Request) error {
 			// `remote add` would simply fail.
 			continue
 		}
+		if step.Name == "fetch" && cache != "" && seedFromCache(ctx, dir, cache, emit) {
+			defer dropCacheRefs(context.WithoutCancel(ctx), dir)
+		}
+		if step.Name == "checkout" && r.Pristine && !reuse.fresh {
+			// A kept checkout is made exactly the fetched commit, and checked.
+			if err := pristineReset(ctx, dir); err != nil {
+				return r.retryFresh(ctx, dir, emit, fmt.Sprintf("the kept checkout could not be made the fetched commit: %v", err))
+			}
+			continue
+		}
 		if err := runStep(ctx, dir, w, cred, trust, step, hostName, secrets, emit); err != nil {
+			if r.Pristine && !reuse.fresh && ctx.Err() == nil {
+				// A kept checkout that cannot be fetched into — a ref lock a
+				// killed fetch left, a corrupt pack — is the hub's copy:
+				// cloned again rather than failing the run.
+				return r.retryFresh(ctx, dir, emit, fmt.Sprintf("the kept checkout could not be updated: %v",
+					executor.RedactSecrets(err.Error(), secrets)))
+			}
 			reuse.rollback(dir, emit)
 			return fail("%v", err)
 		}
 		// Checked immediately after the fetch, while the objects are on disk
 		// and the working tree has not been written yet: that is the earliest
 		// point at which an oversized repository is visible, and stopping there
-		// costs one checkout's worth of disk the machine does not have.
-		if step.Name == "fetch" {
+		// costs one checkout's worth of disk the machine does not have. Not for
+		// a runner's kept checkout, whose build caches the limit was never
+		// about: its volume's size and free-space floor bound it.
+		if step.Name == "fetch" && !(r.Pristine && !reuse.fresh) {
 			if err := enforceSize(dir, w, hostName); err != nil {
 				reuse.rollback(dir, emit)
 				return fail("%v", err)
@@ -264,9 +333,11 @@ func Provision(ctx context.Context, r Request) error {
 
 	// And once more at the end, because the checkout materialises a working
 	// tree that the fetched pack only implied.
-	if err := enforceSize(dir, w, hostName); err != nil {
-		reuse.rollback(dir, emit)
-		return fail("%v", err)
+	if !(r.Pristine && !reuse.fresh) {
+		if err := enforceSize(dir, w, hostName); err != nil {
+			reuse.rollback(dir, emit)
+			return fail("%v", err)
+		}
 	}
 
 	// Which repository this is, whatever its origin names: what lets the next
@@ -276,9 +347,27 @@ func Provision(ctx context.Context, r Request) error {
 	if err := gitLocal(ctx, dir, "config", "--local", upstreamConfigKey, w.UpstreamRepo()); err != nil {
 		emit(fmt.Sprintf("workspace: could not record which repository this checkout is of: %v\n", err))
 	}
+	if refreshable {
+		refreshCache(ctx, dir, r.ObjectCache, w, emit)
+	}
 
 	emit(fmt.Sprintf("workspace: ready at %s\n", dir))
 	return nil
+}
+
+// retryFresh discards a kept checkout that could not be made the fetched
+// commit and provisions dir again from nothing, once (Task 20484).
+func (r Request) retryFresh(ctx context.Context, dir string, emit func(string), why string) error {
+	emit(fmt.Sprintf("workspace: discarding the kept checkout and cloning afresh: %s\n", why))
+	if err := discardTree(dir); err != nil {
+		return fmt.Errorf("%w: %s", executor.ErrWorkspaceUnavailable,
+			executor.RedactSecrets(fmt.Sprintf("cannot discard the kept checkout in %s on %s: %v", dir, r.host(), err),
+				r.Credential.Secrets()))
+	}
+	again := r
+	// The directory is empty now, so the second provisioning is a fresh
+	// clone and never comes back here.
+	return Provision(ctx, again)
 }
 
 // transportVars are the only variables a provisioning step inherits from the
@@ -488,7 +577,7 @@ func runStep(ctx context.Context, dir string, w executor.Workspace, cred executo
 	//
 	// One configuration block (see executor.GitEnv): the machine's URL-scoped
 	// certificate settings, then the credential.
-	pairs := append(append(TransportConfig(), trust...), RootOwnedTrust(dir)...)
+	pairs := append(append(append(TransportConfig(), trust...), RootOwnedTrust(dir)...), noRepoPrograms...)
 	if step.Authenticated {
 		extra, err := executor.GitCredentialConfig(w, cred)
 		if err != nil {

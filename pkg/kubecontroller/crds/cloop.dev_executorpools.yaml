@@ -48,6 +48,10 @@ spec:
         - name: Queued
           type: integer
           jsonPath: .status.queuedRuns
+        - name: Volumes
+          type: integer
+          priority: 1
+          jsonPath: .status.storage.claims
         - name: Ready
           type: string
           jsonPath: .status.conditions[?(@.type=="Ready")].status
@@ -80,6 +84,8 @@ spec:
                   message: minRunners must not exceed maxRunners
                 - rule: "!has(self.template) || !has(self.template.env) || self.template.env.all(e, e.secretKeyRef.name != self.poolCredentialSecretRef.name)"
                   message: a runner is never given the Secret that holds the pool's controller credential
+                - rule: "!has(self.persistence) || !has(self.persistence.maxClaims) || self.persistence.maxClaims >= self.maxRunners"
+                  message: persistence.maxClaims must not be fewer than maxRunners; every runner needs a volume of its own
               properties:
                 hubURL:
                   type: string
@@ -305,6 +311,81 @@ spec:
                                 type: string
                                 maxLength: 253
                                 pattern: '^[-._a-zA-Z0-9]+$'
+                persistence:
+                  type: object
+                  description: >-
+                    PersistentVolumeClaims that outlive runners: a project's
+                    workspace and caches, kept for its next run. A volume is
+                    handed back unwiped only to a runner the hub gives that
+                    project's runs alone; any other runner's init container
+                    wipes it first. Credentials never reach it.
+                  x-kubernetes-validations:
+                    - rule: "!self.enabled || has(self.size)"
+                      message: persistence.size is required when persistence is enabled
+                    - rule: "!has(self.accessModes) || !self.accessModes.exists(m, m == 'ReadWriteOncePod') || size(self.accessModes) == 1"
+                      message: ReadWriteOncePod cannot be combined with another access mode
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      type: boolean
+                    storageClassName:
+                      type: string
+                      description: The claims' StorageClass; empty is the cluster's default.
+                      maxLength: 253
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                    size:
+                      type: string
+                      description: >-
+                        Each claim's request, such as 20Gi; more than minFree,
+                        which the controller checks.
+                      maxLength: 64
+                      pattern: '^\+?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[kMGTPE]|([eE]\+?[0-9]+))?$'
+                    accessModes:
+                      type: array
+                      description: The claims' access modes; ReadWriteOnce by default.
+                      maxItems: 3
+                      x-kubernetes-list-type: set
+                      items:
+                        type: string
+                        enum:
+                          - ReadWriteOnce
+                          - ReadWriteOncePod
+                          - ReadWriteMany
+                    mounts:
+                      type: array
+                      description: >-
+                        What a runner keeps on its volume: workspace, gitCache,
+                        toolCache. All three by default.
+                      maxItems: 3
+                      x-kubernetes-list-type: set
+                      items:
+                        type: string
+                        enum:
+                          - workspace
+                          - gitCache
+                          - toolCache
+                    reclaimPolicy:
+                      type: string
+                      description: >-
+                        Delete (the default) deletes claims the pool no longer
+                        needs, and all of them with the pool; Retain keeps them
+                        with the record of whose data they hold.
+                      default: Delete
+                      enum:
+                        - Delete
+                        - Retain
+                    maxClaims:
+                      type: integer
+                      description: The most claims the pool keeps; maxRunners by default.
+                      minimum: 1
+                      maximum: 10000
+                    minFree:
+                      type: string
+                      description: The free space a runner starts with; 1Gi by default.
+                      default: 1Gi
+                      maxLength: 64
+                      pattern: '^\+?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[kMGTPE]|([eE]\+?[0-9]+))?$'
             status:
               type: object
               properties:
@@ -332,6 +413,28 @@ spec:
                 lastHubContact:
                   type: string
                   format: date-time
+                storage:
+                  type: object
+                  description: The pool's runner volumes and their bytes.
+                  properties:
+                    claims:
+                      type: integer
+                    bound:
+                      type: integer
+                    pending:
+                      type: integer
+                    inUse:
+                      type: integer
+                    full:
+                      type: integer
+                    retained:
+                      type: integer
+                    bytesUsed:
+                      type: integer
+                      format: int64
+                    bytesCapacity:
+                      type: integer
+                      format: int64
                 conditions:
                   type: array
                   x-kubernetes-list-type: map

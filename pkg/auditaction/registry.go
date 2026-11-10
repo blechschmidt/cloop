@@ -950,7 +950,7 @@ var registry = []Entry{
 		Home:      HomeControlPlane,
 		Entity:    "executor_pool",
 		Trigger:   "A pool's controller is issued runner tokens: single-use, bound to the pool, valid for ten minutes at most.",
-		Payload:   []string{"pool_id", "credential_id", "count", "enrollment_ids", "expires_at", "runners", "max_runners"},
+		Payload:   []string{"pool_id", "credential_id", "count", "enrollment_ids", "holding", "expires_at", "runners", "max_runners"},
 		Stability: StabilityBeta,
 		Read:      authz.PermAuditRead,
 		Note:      "A refused request — the pool at max_runners, or revoked — is counted in cloop_executor_pool_mint_refusals_total rather than recorded here.",
@@ -982,6 +982,17 @@ var registry = []Entry{
 		Stability: StabilityBeta,
 		Read:      authz.PermAuditRead,
 		Note:      "`action` is queued, assigned, dispatched, cancelled or failed.",
+	},
+	{
+		Action:    ActionExecutorPoolControllerStatus,
+		Home:      HomeControlPlane,
+		Entity:    "executor_pool",
+		Trigger:   "A pool's controller reports that something keeps it from starting runners — a runner volume stuck Pending, a full one — or that it no longer does.",
+		Payload:   []string{"pool_id", "healthy", "reason", "message"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Recorded when the report changes, not every time the controller repeats it. The runs waiting in the " +
+			"pool's queue say the same while the report is under ten minutes old.",
 	},
 
 	// ── workspace ──────────────────────────────────────────────────────────

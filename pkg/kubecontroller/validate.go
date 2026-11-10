@@ -87,6 +87,7 @@ func (s ExecutorPoolSpec) Normalize() ExecutorPoolSpec {
 	if strings.TrimSpace(s.ScaleDownDelay) == "" {
 		s.ScaleDownDelay = DefaultScaleDownDelay
 	}
+	s.Persistence = s.Persistence.normalized(s.MaxRunners)
 	return s
 }
 
@@ -174,6 +175,7 @@ func (s ExecutorPoolSpec) Validate() []string {
 	v.labels("spec.runnerLabels", s.RunnerLabels, true)
 
 	s.Template.validate(&v)
+	s.Persistence.validate(&v, s.MaxRunners)
 	// A runner runs model-authored code: the controller's own credential is
 	// the one Secret it must never be handed — with it, a run could mint
 	// runners and read the pool's demand. CRD: the rule on spec.

@@ -376,7 +376,8 @@ type Spec struct {
 	Env []string `json:"env,omitempty"`
 	// Labels carry routing and bookkeeping metadata (project path, task ID,
 	// requesting user). Drivers may surface them for observability; they
-	// never affect execution. See LabelRunID for the one a driver reads.
+	// never affect execution. See LabelRunID for the one a driver reads, and
+	// LabelPoolTenant for the one a pool runner checks before it starts.
 	Labels map[string]string `json:"labels,omitempty"`
 	// ResourceLimits bounds the workload where the driver supports it.
 	ResourceLimits ResourceLimits `json:"resource_limits,omitempty"`
@@ -1078,6 +1079,16 @@ func (sig Signal) Valid() bool {
 // the same id the hub's lease rows carry (Task 20339). Bookkeeping only, like
 // every label: nothing about how the workload runs depends on it.
 const LabelRunID = "run_id"
+
+// LabelPoolTenant is the Spec label naming the tenant of an executor pool
+// run's project (Task 20484) — a digest of the pool, the project and its
+// owner, never a path. A runner whose persistent volume its controller
+// started it holding one tenant's data refuses a start that names another,
+// or none, before anything touches the volume: the hub's assignment already
+// keeps the two apart, and this keeps them apart against a hub member that
+// does not (an older build, or a fault). It decides only whether a start is
+// accepted, never how a workload runs.
+const LabelPoolTenant = "pool_tenant"
 
 // LabelHubCATrust and LabelHubCAUses record which of the hub's own CAs a
 // dispatch was told to trust, and on which paths (Task 20438): the serials,

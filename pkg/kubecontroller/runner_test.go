@@ -32,7 +32,7 @@ func templatePool(t *testing.T) *ExecutorPool {
 }
 
 func TestARunnerPodMeetsTheRestrictedProfileWhateverItsTemplate(t *testing.T) {
-	pod := buildRunnerPod(templatePool(t), "build-abc123", "ghcr.io/blechschmidt/cloop-harness@"+fakeDigest)
+	pod := buildRunnerPod(templatePool(t), "build-abc123", "ghcr.io/blechschmidt/cloop-harness@"+fakeDigest, nil)
 	raw, err := json.Marshal(pod)
 	if err != nil {
 		t.Fatal(err)

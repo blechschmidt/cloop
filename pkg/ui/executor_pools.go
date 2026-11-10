@@ -724,10 +724,12 @@ func (s *Server) dispatchPool(poolID string) {
 			s.poolChanged(poolID)
 		}
 	}()
+	type heldRunner struct {
+		row statedb.ExecutorPoolRunnerRow
+		ex  executor.Executor
+	}
+	var held []heldRunner
 	for _, r := range idle {
-		if len(visible) == 0 {
-			break
-		}
 		if !s.holdsRunner(r.ExecutorID) {
 			continue
 		}
@@ -735,28 +737,50 @@ func (s *Server) dispatchPool(poolID string) {
 		if err != nil {
 			continue
 		}
-		for len(visible) > 0 {
-			q := visible[0]
-			visible = visible[1:]
-			ok, err := store.DB().AssignPoolQueueEntry(q.ID, r.ExecutorID, member, time.Now())
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ui: hand queued run %s to runner %s: %v\n", q.ID, r.ExecutorID, err)
-				return
-			}
-			if !ok {
-				// Another member took this run, or this runner: try the next run
-				// against a runner whose state is re-read on the next pass.
-				if cur, err := store.RunnerByExecutor(r.ExecutorID); err != nil || cur.State != statedb.PoolRunnerIdle {
-					break
-				}
-				continue
-			}
-			q.State, q.ExecutorID, q.Member = statedb.PoolQueueAssigned, r.ExecutorID, member
-			store.AuditQueue(q, "assigned", "system", "")
-			assigned = true
-			go s.startQueuedPoolRun(q, ex)
+		held = append(held, heldRunner{row: r, ex: ex})
+	}
+	access := s.poolAccessFor(store)
+	// Oldest run first, each to the runner that suits it best (Task 20484):
+	// one whose storage already holds its project's data — its workspace and
+	// caches kept from the project's last run — and otherwise one whose
+	// storage holds nothing. Never a runner holding another project's data:
+	// a run no idle runner here may take waits for the next pass, and the
+	// runs behind it are not held up by it. The assignment's UPDATE checks
+	// the same rule again, so a runner another member just changed cannot
+	// slip through.
+	for _, q := range visible {
+		if len(held) == 0 {
 			break
 		}
+		project := s.runProjectFor(poolID, q, access)
+		holds := make([]string, len(held))
+		for i, h := range held {
+			holds[i] = h.row.Holds
+		}
+		pick := pickPoolRunner(holds, project.Tenant, project.Tenant != "" && executorpool.RunMayUseHeld(q, access))
+		if pick < 0 {
+			continue
+		}
+		h := held[pick]
+		ok, err := store.DB().AssignPoolQueueEntryTo(q.ID, h.row.ExecutorID, member, time.Now(), project)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ui: hand queued run %s to runner %s: %v\n", q.ID, h.row.ExecutorID, err)
+			return
+		}
+		if !ok {
+			// Another member took this run, or this runner. A runner that is
+			// no longer idle here is dropped; the run is tried again next pass.
+			if cur, err := store.RunnerByExecutor(h.row.ExecutorID); err != nil || cur.State != statedb.PoolRunnerIdle ||
+				cur.Holds != h.row.Holds {
+				held = append(held[:pick], held[pick+1:]...)
+			}
+			continue
+		}
+		held = append(held[:pick], held[pick+1:]...)
+		q.State, q.ExecutorID, q.Member = statedb.PoolQueueAssigned, h.row.ExecutorID, member
+		store.AuditQueue(q, "assigned", "system", "")
+		assigned = true
+		go s.startQueuedPoolRun(q, h.ex, project.Tenant)
 	}
 }
 

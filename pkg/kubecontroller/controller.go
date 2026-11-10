@@ -76,6 +76,13 @@ type Controller struct {
 	pools   *informer[ExecutorPool, *ExecutorPool]
 	pods    *informer[Pod, *Pod]
 	secrets *informer[secretMeta, *secretMeta]
+	// claims are the runner volumes (Task 20484).
+	claims *informer[PersistentVolumeClaim, *PersistentVolumeClaim]
+	// reports remembers, per pool, what was last told the hub about its
+	// storage, so a report is sent on a change and refreshed — not every pass.
+	reports *storageReports
+	// claimObs remembers when this replica first saw each volume claim.
+	claimObs *claimObservations
 
 	// queue is the leader term's queue, nil between terms.
 	queue atomic.Pointer[workQueue]
@@ -156,7 +163,26 @@ func New(opts Options) (*Controller, error) {
 	c.pods = newInformer[Pod](c.api, resPods, opts.Namespace, managed, opts.Resync, logf,
 		func(old, cur *Pod) { c.enqueueOwner(old, cur) })
 	c.secrets = newInformer[secretMeta](c.api, resSecrets, opts.Namespace, managed, opts.Resync, logf, nil)
+	c.claims = newInformer[PersistentVolumeClaim](c.api, resClaims, opts.Namespace, managed, opts.Resync, logf,
+		func(old, cur *PersistentVolumeClaim) { c.enqueueClaimPool(old, cur) })
+	c.reports = newStorageReports()
+	c.claimObs = newClaimObservations()
 	return c, nil
+}
+
+// enqueueClaimPool queues the pool a runner volume belongs to: released,
+// bound or deleted, it may let a runner start.
+func (c *Controller) enqueueClaimPool(old, cur *PersistentVolumeClaim) {
+	cl := cur
+	if cl == nil {
+		cl = old
+	}
+	if cl == nil {
+		return
+	}
+	if name := cl.Metadata.Annotations[AnnotationStoragePool]; name != "" {
+		c.enqueue(cl.Metadata.Namespace + "/" + name)
+	}
 }
 
 // enqueue queues a pool when this replica leads.
@@ -211,7 +237,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		defer stop()
 	}
 
-	for _, run := range []func(context.Context){c.pools.run, c.pods.run, c.secrets.run} {
+	for _, run := range []func(context.Context){c.pools.run, c.pods.run, c.secrets.run, c.claims.run} {
 		run := run
 		wg.Add(1)
 		go func() {
@@ -254,6 +280,9 @@ func (c *Controller) lead(ctx context.Context) {
 		feeds.stopAll()
 		c.feeds.Store(nil)
 		c.expect.reset()
+		// A new term tells the hub where storage stands again, healthy or
+		// not: another leader may have reported in between.
+		c.reports.reset()
 	}()
 
 	var wg sync.WaitGroup
@@ -284,13 +313,18 @@ func (c *Controller) lead(ctx context.Context) {
 // waitForSync waits for the informers' first lists.
 func (c *Controller) waitForSync(ctx context.Context) bool {
 	for {
-		if c.pools.HasSynced() && c.pods.HasSynced() && c.secrets.HasSynced() {
+		if c.synced() {
 			return true
 		}
 		if !sleep(ctx, 100*time.Millisecond) {
 			return false
 		}
 	}
+}
+
+// synced reports whether every informer has made its first list.
+func (c *Controller) synced() bool {
+	return c.pools.HasSynced() && c.pods.HasSynced() && c.secrets.HasSynced() && c.claims.HasSynced()
 }
 
 func (c *Controller) enqueueAll() {
@@ -359,7 +393,7 @@ func (c *Controller) healthServer(addr string) (*http.Server, net.Listener, erro
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if !(c.pools.HasSynced() && c.pods.HasSynced() && c.secrets.HasSynced()) {
+		if !c.synced() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte("caches not synced\n"))
 			return
@@ -483,10 +517,14 @@ type expectations struct {
 	mu      sync.Mutex
 	created map[string]map[string]time.Time
 	deleted map[string]map[string]time.Time
+	// holds is the tenant each created runner's volume holds (Task 20484),
+	// so a Pod the cache has not shown yet counts as the runner it is.
+	holds map[string]map[string]string
 }
 
 func newExpectations() *expectations {
-	return &expectations{created: map[string]map[string]time.Time{}, deleted: map[string]map[string]time.Time{}}
+	return &expectations{created: map[string]map[string]time.Time{}, deleted: map[string]map[string]time.Time{},
+		holds: map[string]map[string]string{}}
 }
 
 func (e *expectations) note(m map[string]map[string]time.Time, pool, pod string, at time.Time) {
@@ -498,7 +536,27 @@ func (e *expectations) note(m map[string]map[string]time.Time, pool, pod string,
 	m[pool][pod] = at
 }
 
-func (e *expectations) noteCreated(pool, pod string, at time.Time) { e.note(e.created, pool, pod, at) }
+// noteCreatedHolding records a runner Pod created at at, and the tenant its
+// volume holds ("" for none) until the cache shows the Pod.
+func (e *expectations) noteCreatedHolding(pool, pod, tenant string, at time.Time) {
+	e.note(e.created, pool, pod, at)
+	if tenant == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.holds[pool] == nil {
+		e.holds[pool] = map[string]string{}
+	}
+	e.holds[pool][pod] = tenant
+}
+
+// heldBy is the tenant a created runner's volume holds, "" for none.
+func (e *expectations) heldBy(pool, pod string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.holds[pool][pod]
+}
 func (e *expectations) noteDeleted(pool, pod string, at time.Time) {
 	e.note(e.deleted, pool, pod, at)
 	// A Pod deleted before the cache ever showed it is not one to wait for.
@@ -516,6 +574,7 @@ func (e *expectations) view(pool string, cached func(name string) bool, now time
 	for name, at := range e.created[pool] {
 		if cached(name) || now.Sub(at) > expectationTTL {
 			delete(e.created[pool], name)
+			delete(e.holds[pool], name)
 			continue
 		}
 		created[name] = true
@@ -535,6 +594,7 @@ func (e *expectations) reset() {
 	defer e.mu.Unlock()
 	e.created = map[string]map[string]time.Time{}
 	e.deleted = map[string]map[string]time.Time{}
+	e.holds = map[string]map[string]string{}
 }
 
 // hubConfigFor is a pool's hub connection.

@@ -45,9 +45,10 @@ type object interface {
 	meta() ObjectMeta
 }
 
-func (p *ExecutorPool) meta() ObjectMeta { return p.Metadata }
-func (p *Pod) meta() ObjectMeta          { return p.Metadata }
-func (s *secretMeta) meta() ObjectMeta   { return s.Metadata }
+func (p *ExecutorPool) meta() ObjectMeta          { return p.Metadata }
+func (p *Pod) meta() ObjectMeta                   { return p.Metadata }
+func (s *secretMeta) meta() ObjectMeta            { return s.Metadata }
+func (c *PersistentVolumeClaim) meta() ObjectMeta { return c.Metadata }
 
 // informer caches one resource.
 type informer[T any, PT interface {

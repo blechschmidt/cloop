@@ -13,7 +13,10 @@ package kubecontroller
 // or patches one. Pods: create and delete, get, list and watch — no exec,
 // no attach, no log, nothing that reaches inside a runner. The single gets
 // confirm with the API server, not the cache, that an object is gone before
-// the controller deletes what it leaves behind.
+// the controller deletes what it leaves behind. PersistentVolumeClaims (Task
+// 20484): runner volumes it creates, claims and releases by merge-patching
+// their metadata against the version it read — never their spec — and
+// deletes under reclaimPolicy Delete.
 
 import (
 	"strings"
@@ -35,6 +38,7 @@ func RequiredRules() []Rule {
 		{APIGroups: []string{Group}, Resources: []string{Plural + "/status"}, Verbs: []string{"update"}},
 		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch", "create", "delete"}},
 		{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get", "list", "watch", "create", "delete"}},
+		{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{"list", "watch", "create", "patch", "delete"}},
 		{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"create"}},
 		{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "create", "update"}},
 	}

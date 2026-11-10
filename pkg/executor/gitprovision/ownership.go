@@ -42,7 +42,18 @@ func RootOwnedTrust(dir string) [][2]string {
 }
 
 // localGitEnv is the closed environment for a local git command in dir: the
-// base block, with dir trusted when root owns it (RootOwnedTrust).
+// base block, with dir trusted when root owns it (RootOwnedTrust), and the
+// repository's own hooks and filesystem monitor off (noRepoPrograms).
 func localGitEnv(dir string) []string {
-	return executor.GitEnv(RootOwnedTrust(dir)...)
+	return executor.GitEnv(append(RootOwnedTrust(dir), noRepoPrograms...)...)
 }
+
+// noRepoPrograms keep a repository's own configuration and hooks from running
+// a program inside a git command cloop runs there (Task 20484). A checkout
+// kept between runs — on a device, or on an executor pool runner's volume —
+// was last written by a run, and a hook it planted (reference-transaction
+// runs on every fetch that moves a ref) would run with the next fetch's
+// credential in its environment. No provisioning step needs a hook or a
+// monitor; core.hooksPath=/dev/null and core.fsmonitor=false outrank the
+// repository's own file.
+var noRepoPrograms = [][2]string{{"core.hooksPath", "/dev/null"}, {"core.fsmonitor", "false"}}

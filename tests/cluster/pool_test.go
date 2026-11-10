@@ -9,6 +9,12 @@ package cluster_test
 // handed the run another member queued, and it ends the way a controller needs
 // it to — its run settled, its record retired, its process exited with
 // success. Revoking the pool on one member is refused by the other at once.
+//
+// The runner is minted, as a controller mints one on a volume a project's last
+// run left (Task 20484), holding the queued project's tenant, and started with
+// --holds and a --workspace-root of its own: it takes the run only if the
+// member handing it over names that tenant on the start, and its tree is still
+// on the volume once it has exited.
 
 import (
 	"encoding/json"
@@ -32,6 +38,11 @@ type poolSnapshot struct {
 		Pending  int    `json:"pending"`
 		Wanted   int    `json:"wanted"`
 		Revision string `json:"revision"`
+		// QueuedProjects is demand by project's tenant (Task 20484).
+		QueuedProjects []struct {
+			Tenant string `json:"tenant"`
+			Queued int    `json:"queued"`
+		} `json:"queued_projects"`
 	} `json:"snapshot"`
 }
 
@@ -112,10 +123,16 @@ func TestExecutorPoolOnAHubCluster(t *testing.T) {
 		!strings.Contains(r.body, `"queued":true`) {
 		t.Fatalf("POST /api/run on A: %d %s", r.status, r.body)
 	}
+	var tenant string
 	select {
 	case p := <-pushed:
 		if p.code != http.StatusOK || p.snap.Snapshot.Demand != 1 || p.snap.Snapshot.Wanted != 1 {
 			t.Fatalf("B's long-poll answered after %s with %d %+v", p.took, p.code, p.snap)
+		}
+		if q := p.snap.Snapshot.QueuedProjects; len(q) != 1 || q[0].Queued != 1 || !strings.HasPrefix(q[0].Tenant, "prj-") {
+			t.Fatalf("the feed's demand by project: %+v", q)
+		} else {
+			tenant = q[0].Tenant
 		}
 		if p.took > 20*time.Second {
 			t.Fatalf("B's long-poll took %s to learn of a run queued on A", p.took)
@@ -134,7 +151,8 @@ func TestExecutorPoolOnAHubCluster(t *testing.T) {
 	if r.status != http.StatusConflict || !strings.Contains(r.body, "executor_pool_max_runners") {
 		t.Fatalf("two runners from a pool of one: %d %s", r.status, r.body)
 	}
-	r = w.doWith(cred, http.MethodPost, b.url(), "/api/pool-controller/runners", []byte(`{"count":1}`))
+	r = w.doWith(cred, http.MethodPost, b.url(), "/api/pool-controller/runners",
+		[]byte(fmt.Sprintf(`{"count":1,"holds":[%q]}`, tenant)))
 	if r.status != http.StatusCreated {
 		t.Fatalf("mint a runner on B: %d %s", r.status, r.body)
 	}
@@ -142,10 +160,14 @@ func TestExecutorPoolOnAHubCluster(t *testing.T) {
 		Runners []struct {
 			EnrollmentID string `json:"enrollment_id"`
 			Bundle       string `json:"bundle"`
+			Holds        string `json:"holds"`
 		} `json:"runners"`
 	}
 	if err := json.Unmarshal([]byte(r.body), &minted); err != nil || len(minted.Runners) != 1 {
 		t.Fatalf("runner configuration: %v %s", err, r.body)
+	}
+	if minted.Runners[0].Holds != tenant {
+		t.Fatalf("the runner was minted holding %q, not the project's %s", minted.Runners[0].Holds, tenant)
 	}
 
 	// ── 4. The runner enrolls, takes the run, and is retired ─────────────
@@ -155,7 +177,9 @@ func TestExecutorPoolOnAHubCluster(t *testing.T) {
 	}
 	runnerHome := filepath.Join(w.root, "runnerhome")
 	runnerWork := filepath.Join(w.root, "runnerwork")
-	for _, d := range []string{runnerHome, runnerWork} {
+	runnerVolume := filepath.Join(w.root, "runnervolume")
+	runnerHomes := filepath.Join(w.root, "runnerhomes")
+	for _, d := range []string{runnerHome, runnerWork, runnerVolume, runnerHomes} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -166,7 +190,9 @@ func TestExecutorPoolOnAHubCluster(t *testing.T) {
 		"HOME=" + runnerHome,
 		"PATH=" + w.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"NO_COLOR=1",
-	}, "executor", "agent", "--token-file", bundle, "--credential", credPath, "--workdir-root", runnerWork)
+	}, "executor", "agent", "--token-file", bundle, "--credential", credPath, "--workdir-root", runnerWork,
+		"--ephemeral", "--termination-log", filepath.Join(w.root, "runner-termination-log"),
+		"--workspace-root", runnerVolume, "--home-root", runnerHomes, "--holds", tenant)
 
 	w.waitStubStarts(1)
 	var runnerID string
@@ -199,6 +225,19 @@ func TestExecutorPoolOnAHubCluster(t *testing.T) {
 	if code := runner.ProcessState.ExitCode(); code != 0 {
 		data, _ := os.ReadFile(runnerLog)
 		t.Fatalf("the retired runner exited %d, want 0:\n%s", code, tail(string(data), 30))
+	}
+	// Its tree stays on the volume for the project's next run; its scratch
+	// and its homes went with it.
+	if trees, _ := os.ReadDir(runnerVolume); len(trees) != 1 {
+		t.Fatalf("the runner's volume holds %d trees after it exited, want the project's one", len(trees))
+	}
+	for _, d := range []string{runnerWork, runnerHomes} {
+		if left, _ := os.ReadDir(d); len(left) != 0 {
+			t.Fatalf("%s holds %d entries after the runner exited, want none", d, len(left))
+		}
+	}
+	if h, err := w.queryControlPlane(`SELECT holds FROM executor_pool_runners WHERE executor_id = ?`, runnerID); err != nil || h != tenant {
+		t.Fatalf("the runner's record holds %q (%v), want %s", h, err, tenant)
 	}
 	w.eventually("the runner to be retired", 30*time.Second, func() bool {
 		v, err := w.queryControlPlane(`SELECT state || '|' || retire_reason FROM executor_pool_runners WHERE executor_id = ?`, runnerID)

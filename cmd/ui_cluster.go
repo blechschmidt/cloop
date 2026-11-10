@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/config"
+	"github.com/blechschmidt/cloop/pkg/executorpool"
 	"github.com/blechschmidt/cloop/pkg/exposure"
 	"github.com/blechschmidt/cloop/pkg/hubca"
 	"github.com/blechschmidt/cloop/pkg/hubcluster"
@@ -71,6 +72,10 @@ func joinHubCluster(workdir string, cfg *config.Config, listen exposure.Plan, ro
 	// 20438): it re-reads the CAs, records what each dispatch trusts and
 	// reports what it serves, so an activation may run beside it.
 	endpoints[hubca.EndpointRotation] = "1"
+	// That this member's build hands an executor pool runner holding a
+	// project's kept data only that project's runs (Task 20484): runners are
+	// minted holding a project only while every live member says so.
+	endpoints[executorpool.EndpointRunnerStorage] = "1"
 	node, err := hubcluster.Join(hubcluster.Options{
 		DBPath:       state.DBPath(workdir),
 		Address:      listen.String(),

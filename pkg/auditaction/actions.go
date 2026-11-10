@@ -282,6 +282,10 @@ const (
 	// ActionExecutorPoolRunQueue records a project's run entering, leaving or
 	// being handed on from a pool's queue.
 	ActionExecutorPoolRunQueue Action = "executor_pool.run_queue"
+	// ActionExecutorPoolControllerStatus records a pool's controller saying
+	// what keeps it from starting runners, or that nothing does any more
+	// (Task 20484): a runner volume stuck Pending, a full one.
+	ActionExecutorPoolControllerStatus Action = "executor_pool.controller_status"
 
 	// ── forwarder ──────────────────────────────────────────────────────────
 

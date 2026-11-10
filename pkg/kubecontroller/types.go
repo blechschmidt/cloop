@@ -84,7 +84,70 @@ type ExecutorPoolSpec struct {
 	RunnerLabels map[string]string `json:"runnerLabels,omitempty"`
 	// Template is what the runner Pods are made of.
 	Template RunnerTemplate `json:"template,omitempty"`
+	// Persistence gives runners PersistentVolumeClaims that outlive them
+	// (Task 20484): a project's workspace and caches, kept for its next run.
+	// Nil, or not enabled, starts every runner on emptyDirs alone.
+	Persistence *Persistence `json:"persistence,omitempty"`
 }
+
+// Persistence is what a pool's runner volumes are (Task 20484).
+//
+// The controller keeps up to MaxClaims PersistentVolumeClaims per pool,
+// named by a stable ordinal the way a StatefulSet's volumeClaimTemplates are
+// — <pool>-storage-<n> — and mounts a free one into each runner Pod it starts.
+// A claim is never mounted by two runner Pods at once: the controller claims
+// it with an annotation, by compare-and-swap on its resourceVersion, and
+// releases it only once the Pod that held it has terminated. A volume records
+// the project whose data it holds; it is handed back, unwiped, only to a
+// runner the hub will give only that project's runs, and wiped by an init
+// container before any other runner uses it. Credentials never reach it:
+// runners keep homes and leased files on memory-backed emptyDirs.
+type Persistence struct {
+	// Enabled turns runner volumes on.
+	Enabled bool `json:"enabled"`
+	// StorageClassName is the StorageClass of the claims; empty is the
+	// cluster's default class.
+	StorageClassName string `json:"storageClassName,omitempty"`
+	// Size is each claim's request, such as 20Gi. Required when enabled.
+	Size Quantity `json:"size,omitempty"`
+	// AccessModes are the claims' access modes: ReadWriteOnce by default;
+	// ReadWriteOncePod has the kubelet refuse a second Pod as well.
+	AccessModes []string `json:"accessModes,omitempty"`
+	// Mounts are what a runner keeps on its volume: workspace (the project's
+	// checkout), gitCache (a git object cache) and toolCache (package-manager
+	// caches). All three by default.
+	Mounts []string `json:"mounts,omitempty"`
+	// ReclaimPolicy says what becomes of claims the pool no longer needs —
+	// past maxClaims, or with persistence turned off — and of all of them
+	// when the pool is deleted: Delete (the default) deletes them; Retain
+	// keeps them with the record of the project whose data they hold.
+	ReclaimPolicy string `json:"reclaimPolicy,omitempty"`
+	// MaxClaims bounds the claims the pool keeps, one per runner at most at a
+	// time; more keep more projects' workspaces. Defaults to maxRunners, and
+	// may not be fewer.
+	MaxClaims int `json:"maxClaims,omitempty"`
+	// MinFree is the free space a runner starts with — the hub's disk floor,
+	// 1Gi by default. A volume under it has its caches, and then its
+	// workspace, cleared before the runner starts; one still under it after
+	// that is reported full and not used.
+	MinFree Quantity `json:"minFree,omitempty"`
+}
+
+// Persistence defaults and values.
+const (
+	DefaultPersistenceMinFree = "1Gi"
+	ReclaimDelete             = "Delete"
+	ReclaimRetain             = "Retain"
+	MountWorkspace            = "workspace"
+	MountGitCache             = "gitCache"
+	MountToolCache            = "toolCache"
+	AccessReadWriteOnce       = "ReadWriteOnce"
+	AccessReadWriteOncePod    = "ReadWriteOncePod"
+	AccessReadWriteMany       = "ReadWriteMany"
+)
+
+// On reports whether runner volumes are enabled.
+func (p *Persistence) On() bool { return p != nil && p.Enabled }
 
 // SecretKeyRef names one key of a Secret in the pool's namespace.
 type SecretKeyRef struct {
@@ -193,8 +256,29 @@ type ExecutorPoolStatus struct {
 	QueuedRuns int `json:"queuedRuns"`
 	// LastHubContact is when the hub last answered the demand feed.
 	LastHubContact string `json:"lastHubContact,omitempty"`
+	// Storage counts the pool's runner volumes and their bytes (Task 20484);
+	// absent for a pool without any.
+	Storage *StorageStatus `json:"storage,omitempty"`
 	// Conditions: Ready, Degraded, Invalid.
 	Conditions []Condition `json:"conditions,omitempty"`
+}
+
+// StorageStatus is what the controller knows of a pool's runner volumes.
+type StorageStatus struct {
+	// Claims counts the pool's PersistentVolumeClaims; Bound and Pending
+	// split them by phase; InUse are held by a runner Pod; Full were found
+	// under minFree even after clearing; Retained are kept past maxClaims
+	// (or with persistence off) under reclaimPolicy Retain.
+	Claims   int `json:"claims"`
+	Bound    int `json:"bound"`
+	Pending  int `json:"pending"`
+	InUse    int `json:"inUse"`
+	Full     int `json:"full"`
+	Retained int `json:"retained"`
+	// BytesUsed and BytesCapacity sum each claim's last measurement, made by
+	// the runner that last used it, or by its init container.
+	BytesUsed     int64 `json:"bytesUsed"`
+	BytesCapacity int64 `json:"bytesCapacity"`
 }
 
 // Condition types.

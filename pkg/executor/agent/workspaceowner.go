@@ -29,7 +29,7 @@ func (a *Agent) workspaceOwner() (uid, gid int, ok bool) {
 	if os.Geteuid() != 0 {
 		return 0, 0, false
 	}
-	fi, err := os.Stat(a.root)
+	fi, err := os.Stat(a.treesRoot())
 	if err != nil {
 		return 0, 0, false
 	}
@@ -47,7 +47,7 @@ func (a *Agent) handOverWorkspace(dir string) error {
 	if !ok {
 		return nil
 	}
-	if err := containedIn(a.root, dir); err != nil {
+	if err := containedIn(a.treesRoot(), dir); err != nil {
 		return err
 	}
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {

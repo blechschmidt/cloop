@@ -632,6 +632,13 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	if handleID == "" {
 		handleID = frame.Handle
 	}
+	// Before anything else, a runner whose volume holds one project's data
+	// checks that this is a run of that project (Task 20484).
+	if refusal := a.admitTenant(payload.Spec); refusal != "" {
+		a.cfg.logf("start %s refused: %s", handleID, refusal)
+		a.replyError(ctx, sess, frame.ID, remote.CodeStartFailed, refusal)
+		return
+	}
 
 	// A repeated start for a handle we already run is a duplicate caused by a
 	// lost response, not a request for a second copy. Re-answering with the
@@ -740,7 +747,11 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// tree, not the tree itself; see payloadhome.go. A container's home is the
 	// image's, inside the container, and never the mounted tree.
 	if payload.Virtual == nil && payload.Sandbox.Normalize().Mode != executor.SandboxModeContainer {
-		env, err := withPayloadHome(spec.Env, a.root, workDir)
+		home, homeRoot := a.payloadHome(workDir)
+		env, err := withPayloadHomeAt(spec.Env, home, homeRoot)
+		if err == nil {
+			env, err = a.withCacheEnv(env)
+		}
 		if err != nil {
 			a.forget(handleID)
 			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
@@ -1335,17 +1346,20 @@ func (a *Agent) handleLogAck(frame remote.Frame) {
 // provisions <root>/myproject without either side hardcoding device paths.
 func (a *Agent) resolveWorkDir(requested string) (string, error) {
 	requested = strings.TrimSpace(requested)
+	// Trees live beneath the workspace root, which is the work root unless
+	// --workspace-root put them on a volume of their own (Task 20484).
+	root := a.treesRoot()
 	if requested == "" {
-		return a.root, nil
+		return root, nil
 	}
 
 	candidate := requested
 	if !filepath.IsAbs(candidate) {
-		candidate = filepath.Join(a.root, candidate)
+		candidate = filepath.Join(root, candidate)
 	}
 	candidate = filepath.Clean(candidate)
 
-	if err := containedIn(a.root, candidate); err != nil {
+	if err := containedIn(root, candidate); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(candidate, 0o700); err != nil {
@@ -1358,7 +1372,7 @@ func (a *Agent) resolveWorkDir(requested string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("agent: resolve workdir %s: %w", candidate, err)
 	}
-	if err := containedIn(a.root, resolved); err != nil {
+	if err := containedIn(root, resolved); err != nil {
 		return "", err
 	}
 	return resolved, nil
@@ -1366,6 +1380,11 @@ func (a *Agent) resolveWorkDir(requested string) (string, error) {
 
 // containedIn reports whether path is the root or lies beneath it.
 func containedIn(root, path string) error {
+	if root == "" {
+		// No root confines nothing — and "" + "/" would admit every
+		// absolute path below.
+		return fmt.Errorf("%w: %s, with no agent root to confine it", remote.ErrPathOutsideRoot, path)
+	}
 	if path == root {
 		return nil
 	}
@@ -1408,9 +1427,21 @@ func (a *Agent) reserve(wl *workload) bool {
 }
 
 func (a *Agent) forget(handleID string) {
+	started := true
+	if wl, ok := a.workload(handleID); ok {
+		wl.mu.Lock()
+		started = wl.localID != ""
+		wl.mu.Unlock()
+	}
 	a.mu.Lock()
 	wl := a.workloads[handleID]
 	delete(a.workloads, handleID)
+	if wl != nil && !started && a.cfg.Ephemeral && a.eph.startFailed == "" {
+		// A runner's one run that never started (Task 20484): its controller
+		// wipes the volume before the next run rather than hand back a tree
+		// this run could not start on.
+		a.eph.startFailed = "its run did not start"
+	}
 	a.noteForgottenLocked()
 	a.mu.Unlock()
 	// The workload's forwarded devices go back with it (Task 20430); a

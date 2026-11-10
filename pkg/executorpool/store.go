@@ -352,6 +352,10 @@ type RunnerOptions struct {
 	Actor string
 	// CredentialID names the controller credential behind the request.
 	CredentialID string
+	// Holds is, per runner, the tenant whose data its storage holds (Task
+	// 20484): empty, or one entry per runner, each "" or a tenant. A runner
+	// holding a tenant is handed only that tenant's runs.
+	Holds []string
 }
 
 // RunnerConfig is one runner a controller may start.
@@ -373,6 +377,10 @@ type RunnerConfig struct {
 	ExpiresAt   time.Time         `json:"expires_at"`
 	// Ephemeral is always true: the runner takes one run and is retired.
 	Ephemeral bool `json:"ephemeral"`
+	// Holds echoes the tenant the runner was minted as holding (Task 20484):
+	// how a controller tells a hub that records it from one that predates
+	// runner storage and would hand the runner anybody's run.
+	Holds string `json:"holds,omitempty"`
 }
 
 // MintRunners issues n runner tokens for pool, or refuses: a revoked pool, an
@@ -387,6 +395,15 @@ func (s *Store) MintRunners(pool Pool, n int, opts RunnerOptions) ([]RunnerConfi
 	}
 	if strings.TrimSpace(opts.Server) == "" {
 		return nil, fmt.Errorf("executorpool: mint runners: no agent endpoint to put in the configuration")
+	}
+	if len(opts.Holds) != 0 && len(opts.Holds) != n {
+		return nil, fmt.Errorf("%w: %d runners asked for, and what %d of them hold", ErrInvalidSpec, n, len(opts.Holds))
+	}
+	for i, h := range opts.Holds {
+		if h != "" && !ValidTenant(h) {
+			return nil, fmt.Errorf("%w: runner %d holds %q, which is not a tenant (%s and 32 hex digits)",
+				ErrInvalidSpec, i, h, TenantPrefix)
+		}
 	}
 	now := s.now().UTC()
 	tokens := make([]statedb.EnrollmentTokenRow, 0, n)
@@ -408,8 +425,12 @@ func (s *Store) MintRunners(pool Pool, n int, opts RunnerOptions) ([]RunnerConfi
 		tokens = append(tokens, statedb.EnrollmentTokenRow{ID: rec.ID, Name: rec.Name, SecretHash: rec.SecretHash,
 			WorkDirRoot: rec.WorkDirRoot, Labels: rec.Labels, CreatedAt: rec.CreatedAt, ExpiresAt: rec.ExpiresAt,
 			CreatedBy: rec.CreatedBy})
+		holds := ""
+		if len(opts.Holds) == n {
+			holds = opts.Holds[i]
+		}
 		runners = append(runners, statedb.ExecutorPoolRunnerRow{EnrollmentID: rec.ID, PoolID: pool.ID, Name: name,
-			CredentialID: opts.CredentialID})
+			CredentialID: opts.CredentialID, Holds: holds})
 		bundle, err := remote.Bundle{Server: opts.Server, Token: token, Pin: opts.Pin, EnrollmentID: rec.ID,
 			Name: name, WorkDirRoot: rec.WorkDirRoot, ExpiresAt: rec.ExpiresAt}.Encode()
 		if err != nil {
@@ -417,7 +438,7 @@ func (s *Store) MintRunners(pool Pool, n int, opts RunnerOptions) ([]RunnerConfi
 		}
 		configs = append(configs, RunnerConfig{EnrollmentID: rec.ID, Name: name, Token: token, Bundle: bundle,
 			Server: opts.Server, Pin: opts.Pin, Labels: rec.Labels, WorkDirRoot: rec.WorkDirRoot,
-			ExpiresAt: rec.ExpiresAt, Ephemeral: true})
+			ExpiresAt: rec.ExpiresAt, Ephemeral: true, Holds: holds})
 	}
 	if err := s.db.MintExecutorPoolRunners(pool.ID, tokens, runners, now); err != nil {
 		return nil, err
@@ -433,8 +454,14 @@ func (s *Store) MintRunners(pool Pool, n int, opts RunnerOptions) ([]RunnerConfi
 			live++
 		}
 	}
+	holding := 0
+	for _, h := range opts.Holds {
+		if h != "" {
+			holding++
+		}
+	}
 	s.audit(auditaction.ActionExecutorPoolTokenMint, pool.ID, opts.Actor, map[string]any{
-		"credential_id": opts.CredentialID, "count": n, "enrollment_ids": ids,
+		"credential_id": opts.CredentialID, "count": n, "enrollment_ids": ids, "holding": holding,
 		"expires_at": configs[0].ExpiresAt.UTC().Format(time.RFC3339), "runners": live, "max_runners": pool.MaxRunners,
 	})
 	return configs, nil
@@ -558,6 +585,13 @@ func (s *Store) AuditRunnerRetired(poolID, executorID, reason string) {
 	s.audit(auditaction.ActionExecutorPoolRunnerRetire, poolID, "system", map[string]any{
 		"executor_id": executorID, "reason": reason,
 	})
+}
+
+// AuditControllerStatus records a pool's controller reporting what keeps it
+// from starting runners, or that nothing does (Task 20484).
+func (s *Store) AuditControllerStatus(poolID, credentialID string, healthy bool, reason, message string) {
+	s.audit(auditaction.ActionExecutorPoolControllerStatus, poolID, CredentialActor(poolID, credentialID),
+		map[string]any{"healthy": healthy, "reason": reason, "message": message})
 }
 
 // AuditQueue records a queued run's movement.

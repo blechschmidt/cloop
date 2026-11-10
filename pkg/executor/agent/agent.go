@@ -67,6 +67,42 @@ type Config struct {
 	CredentialPath string
 	// WorkDirRoot confines every workload. Empty uses ~/.cloop/work.
 	WorkDirRoot string
+	// WorkspaceRoot is where workloads' trees live, when not beneath
+	// WorkDirRoot (Task 20484): a runner's persistent volume, so a project's
+	// next run finds its checkout and fetches instead of cloning. Workloads
+	// are confined beneath it instead; WorkDirRoot keeps the agent's own
+	// scratch — shipped branches, the device ledger, staging. An ephemeral
+	// runner neither requires it empty nor empties it: its controller wipes
+	// the volume, before the runner starts, when it last served another
+	// project. Empty is WorkDirRoot.
+	WorkspaceRoot string
+	// HomeRoot is where payloads' home directories go (Task 20484): a
+	// memory-backed directory, so a harness's login state and transcripts
+	// never land on a persistent volume. Empty puts each beside its tree.
+	// An ephemeral runner empties it on exit.
+	HomeRoot string
+	// SecretDir is the first place leased credential files are written
+	// (Task 20484) — a memory-backed directory a runner's Pod provides —
+	// ahead of the usual tmpfs candidates. Empty probes those alone.
+	SecretDir string
+	// CacheDir is where the package-manager caches of workloads' builds go
+	// (Task 20484): Go's module and build caches, npm's, Yarn's, pip's and
+	// uv's, each in a directory of its own beneath it, named to them through
+	// their own variables unless a payload names one itself. Nothing that
+	// holds a login: no home, no config. Empty leaves the caches in each
+	// payload's home.
+	CacheDir string
+	// GitCacheDir keeps a bare repository per upstream that a fresh checkout
+	// takes its objects from before it fetches, and that is refreshed from
+	// each checkout it can trust (Task 20484). Empty keeps none.
+	GitCacheDir string
+	// Holds is the tenant whose data the runner's persistent storage — its
+	// WorkspaceRoot, CacheDir, GitCacheDir — already holds, as its controller
+	// declared it (Task 20484, ephemeral runners only): a start whose
+	// executor.LabelPoolTenant names another tenant, or none, is refused
+	// before anything touches the volume. Empty — storage that is fresh or
+	// was wiped before the runner started — takes a run of any tenant.
+	Holds string
 	// MaxConcurrent bounds simultaneous workloads. Zero means NumCPU.
 	MaxConcurrent int
 	// Labels are selectors set on the device and advertised at hello. They
@@ -183,6 +219,14 @@ type Agent struct {
 	devices deviceTable
 	ledger  *deviceforward.Ledger
 	root    string
+	// workspaceRoot, homeRoot, secretDir, cacheDir and gitCacheDir are
+	// Config's, resolved in New (Task 20484); workspaceRoot is root when the
+	// configuration names none, and the others "" when unset.
+	workspaceRoot string
+	homeRoot      string
+	secretDir     string
+	cacheDir      string
+	gitCacheDir   string
 
 	// Transport settings resolved once in New and read-only thereafter, so
 	// the reconnect loop never re-derives them and cannot drift mid-life.
@@ -473,10 +517,15 @@ func New(cfg Config) (*Agent, error) {
 	}
 	a.root = root
 	a.cfg.WorkDirRoot = root
+	if err := a.resolveStorageRoots(); err != nil {
+		return nil, err
+	}
 	if a.cfg.Ephemeral {
 		if err := a.initEphemeral(); err != nil {
 			return nil, err
 		}
+	} else if strings.TrimSpace(a.cfg.Holds) != "" {
+		return nil, errors.New("agent: --holds applies to --ephemeral runners only")
 	}
 	a.clearBranchIncoming()
 	// Undo what a previous agent process left attached — a vhci port, a TAP —

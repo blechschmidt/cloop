@@ -350,6 +350,26 @@ type access struct {
 	bindings map[string]string
 	readable map[string]map[string]bool // owner → project → may read
 	broken   bool                       // every binding read fails
+	owners   map[string]string          // project → owner key
+	parents  map[string]string          // feature → its project
+	barred   map[string]bool            // starters who may not read their projects
+}
+
+func (a access) StarterMayRead(starter, _ string) (bool, error) {
+	if a.broken {
+		return false, errors.New("database is locked")
+	}
+	return !a.barred[starter], nil
+}
+
+func (a access) Project(p string) (string, string, error) {
+	if a.broken {
+		return "", "", errors.New("database is locked")
+	}
+	if parent, ok := a.parents[p]; ok {
+		p = parent
+	}
+	return p, a.owners[p], nil
 }
 
 func (a access) Binding(p string) (string, error) {

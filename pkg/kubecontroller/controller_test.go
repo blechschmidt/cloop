@@ -245,13 +245,19 @@ func TestAStartedRunnerIsNeverCollectedForAMissingSecret(t *testing.T) {
 	r := newRig(t)
 	r.hub.setDemand(1)
 	r.pool("build", r.spec())
-	r.start()
+	rc := r.start()
 	r.eventually("a runner", func() bool { return len(r.runnerSecrets()) == 1 })
 	pod := r.pods()[0]
 	id := r.enrollmentOf(pod)
 	r.hub.enroll(id, time.Now())
 	r.hub.assign(id)
 	r.k8s.setPodPhase(testNS, pod, PodRunning, 0, "")
+	// The Pod's update and the Secret's deletion come on two watches: the
+	// runner is a started one only once the controller has seen it start.
+	r.eventually("the controller to see the runner started", func() bool {
+		p, ok := rc.c.pods.get(testNS + "/" + pod)
+		return ok && p.Status.Phase == PodRunning
+	})
 	r.k8s.removeObject("secrets", testNS, pod)
 	r.never("the busy runner's Pod deleted", 2*time.Second, func() bool { return !contains(r.pods(), pod) })
 }

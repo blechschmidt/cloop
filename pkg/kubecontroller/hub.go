@@ -42,6 +42,7 @@ const (
 	hubFeedPath    = "/api/pool-controller/feed"
 	hubRunnersPath = "/api/pool-controller/runners"
 	hubRetirePath  = "/api/pool-controller/runners/retire"
+	hubStatusPath  = "/api/pool-controller/status"
 )
 
 // Feed timing.
@@ -275,14 +276,24 @@ func (h *hubClient) Feed(ctx context.Context, after string, wait time.Duration) 
 // RunnerConfig is one runner the hub minted.
 type RunnerConfig = executorpool.RunnerConfig
 
-// MintRunners asks for n runner configurations.
-func (h *hubClient) MintRunners(ctx context.Context, n int) ([]RunnerConfig, error) {
+// MintRunners asks for n runner configurations. holds, when not empty, is
+// what each runner's storage holds (Task 20484): "" for nothing, or a tenant
+// whose runs alone the hub may hand the runner. A hub older than runner
+// storage ignores it; the caller checks each configuration's echo.
+func (h *hubClient) MintRunners(ctx context.Context, n int, holds []string) ([]RunnerConfig, error) {
 	ctx, cancel := context.WithTimeout(ctx, hubCallTimeout)
 	defer cancel()
 	var out struct {
 		Runners []RunnerConfig `json:"runners"`
 	}
-	if err := h.do(ctx, http.MethodPost, hubRunnersPath, nil, map[string]any{"count": n}, &out); err != nil {
+	body := map[string]any{"count": n}
+	for _, t := range holds {
+		if t != "" {
+			body["holds"] = holds
+			break
+		}
+	}
+	if err := h.do(ctx, http.MethodPost, hubRunnersPath, nil, body, &out); err != nil {
 		return nil, err
 	}
 	if len(out.Runners) != n {
@@ -307,6 +318,19 @@ func (h *hubClient) Retire(ctx context.Context, enrollmentIDs []string) ([]Retir
 	}
 	err := h.do(ctx, http.MethodPost, hubRetirePath, nil, map[string]any{"runners": enrollmentIDs}, &out)
 	return out.Results, err
+}
+
+// ReportStatus tells the hub what keeps the controller from starting runners,
+// or that nothing does (Task 20484), so the runs waiting in the pool's queue
+// say so.
+func (h *hubClient) ReportStatus(ctx context.Context, healthy bool, reason, message string) error {
+	ctx, cancel := context.WithTimeout(ctx, hubCallTimeout)
+	defer cancel()
+	body := map[string]any{"healthy": healthy}
+	if !healthy {
+		body["reason"], body["message"] = reason, message
+	}
+	return h.do(ctx, http.MethodPost, hubStatusPath, nil, body, nil)
 }
 
 // ── the feed ───────────────────────────────────────────────────────────────
