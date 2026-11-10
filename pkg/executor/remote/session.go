@@ -540,6 +540,12 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		if reason == "" {
 			reason = "agent said goodbye"
 		}
+		// An ephemeral runner leaving for good (Task 20483) — its run over,
+		// or its machine stopped — says so; noted before the close so the
+		// status change that follows can be read in its light.
+		if bye.Retired && s.ex != nil {
+			s.ex.noteLeaving()
+		}
 		s.closeWithReason(reason)
 		return true
 

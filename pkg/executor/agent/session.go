@@ -150,7 +150,7 @@ func (a *Agent) authToken() (token string, isEnrollment bool) {
 	if a.cred.Valid() {
 		return a.cred.Credential, false
 	}
-	return strings.TrimSpace(a.cfg.Token), true
+	return strings.TrimSpace(a.token), true
 }
 
 // dial lives in transport.go, alongside the pinning and plaintext policy it
@@ -224,6 +224,12 @@ func (a *Agent) handshake(ctx context.Context, sess *deviceSession, isEnrollment
 		return remote.WelcomePayload{}, err
 	}
 
+	if a.cfg.Ephemeral && !welcome.Ephemeral {
+		// Started as a runner and welcomed as a device (Task 20483): the
+		// token was a device's, or the hub predates pools. Either way this
+		// process must not become a permanent executor.
+		return remote.WelcomePayload{}, fmt.Errorf("%w: %w", errDoNotReconnect, errEphemeralNotRunner)
+	}
 	if welcome.Credential != "" && welcome.Ephemeral {
 		// An executor pool's runner (Task 20482): the credential is good for
 		// one run, so it is kept in memory for reconnects during that run and
@@ -303,7 +309,12 @@ func (a *Agent) retireTokenFile() {
 		return
 	}
 	if err := os.Remove(path); err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case a.cfg.Ephemeral && isReadOnlyFS(err):
+			// A runner's token arrives in a read-only Secret volume, which
+			// goes with its Pod (Task 20483): nothing here to remove.
+		default:
 			a.cfg.logf("note: could not remove the spent enrollment file %s: %v", path, err)
 		}
 		return
@@ -656,6 +667,10 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		},
 	}
 	if !a.reserve(wl) {
+		if a.cfg.Ephemeral {
+			a.replyError(ctx, sess, frame.ID, remote.CodeBusy, "this ephemeral runner already took its one run")
+			return
+		}
 		a.replyError(ctx, sess, frame.ID, remote.CodeBusy,
 			fmt.Sprintf("agent is at its concurrency ceiling of %d", a.cfg.MaxConcurrent))
 		return
@@ -1384,6 +1399,10 @@ func (a *Agent) reserve(wl *workload) bool {
 	if a.cfg.MaxConcurrent > 0 && len(a.workloads) >= a.cfg.MaxConcurrent {
 		return false
 	}
+	// An ephemeral runner takes one run, ever (Task 20483).
+	if !a.reserveEphemeralLocked() {
+		return false
+	}
 	a.workloads[wl.handleID] = wl
 	return true
 }
@@ -1392,6 +1411,7 @@ func (a *Agent) forget(handleID string) {
 	a.mu.Lock()
 	wl := a.workloads[handleID]
 	delete(a.workloads, handleID)
+	a.noteForgottenLocked()
 	a.mu.Unlock()
 	// The workload's forwarded devices go back with it (Task 20430); a
 	// workload that ended normally has given them back already, below in

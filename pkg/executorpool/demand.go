@@ -257,11 +257,39 @@ type Snapshot struct {
 	// Wanted is how many runners the controller should start now: the demand
 	// the idle and pending runners will not meet, within Spare.
 	Wanted int `json:"wanted"`
+	// RunnerStates are the live runners one by one (Task 20483), oldest
+	// first: what a controller matches its machines against, so it can tell a
+	// busy runner from an idle one by the hub's own record before it stops
+	// anything, and find a runner it minted and never started. Only the
+	// pool's own runners, which its controller minted.
+	RunnerStates []RunnerState `json:"runner_states"`
 	// Revision changes whenever anything above does, so a long-poll can ask
 	// for "anything newer than this" on whichever hub member it reaches.
 	Revision string `json:"revision"`
 	// At is when the snapshot was taken.
 	At time.Time `json:"at"`
+}
+
+// RunnerState is one live runner of a pool as its controller is told it.
+type RunnerState struct {
+	// EnrollmentID is the runner token's public ID: what the controller got
+	// back with the token, and what it labels the runner's machine with.
+	EnrollmentID string `json:"enrollment_id"`
+	// Name is the runner's name, the pool's name and a suffix.
+	Name string `json:"name"`
+	// State is pending (minted, not enrolled), idle or busy.
+	State string `json:"state"`
+	// MintedAt and ExpiresAt bound the token; EnrolledAt is when the runner
+	// enrolled, which for a runner that takes one run is also when it became
+	// idle; BusyAt is when it was handed its run.
+	MintedAt   time.Time `json:"minted_at"`
+	ExpiresAt  time.Time `json:"expires_at,omitzero"`
+	EnrolledAt time.Time `json:"enrolled_at,omitzero"`
+	BusyAt     time.Time `json:"busy_at,omitzero"`
+	// CredentialID is the public ID of the controller credential that minted
+	// the runner, so a controller can tell its own runners from those of
+	// another controller of the same pool.
+	CredentialID string `json:"credential_id,omitempty"`
 }
 
 // ComputeSnapshot counts a pool's demand and runners. Only visible queued runs
@@ -281,6 +309,7 @@ func ComputeSnapshot(pool Pool, runners []statedb.ExecutorPoolRunnerRow, queue [
 			snap.Demand++
 		}
 	}
+	snap.RunnerStates = []RunnerState{}
 	for _, r := range runners {
 		if r.PoolID != pool.ID || !r.Live(now) {
 			continue
@@ -292,7 +321,12 @@ func ComputeSnapshot(pool Pool, runners []statedb.ExecutorPoolRunnerRow, queue [
 			snap.Idle++
 		case statedb.PoolRunnerPending:
 			snap.Pending++
+		default:
+			continue
 		}
+		snap.RunnerStates = append(snap.RunnerStates, RunnerState{EnrollmentID: r.EnrollmentID, Name: r.Name,
+			State: r.State, MintedAt: r.MintedAt, ExpiresAt: r.ExpiresAt, EnrolledAt: r.EnrolledAt, BusyAt: r.BusyAt,
+			CredentialID: r.CredentialID})
 	}
 	snap.Runners = snap.Busy + snap.Idle + snap.Pending
 	if !snap.Revoked {
@@ -305,13 +339,17 @@ func ComputeSnapshot(pool Pool, runners []statedb.ExecutorPoolRunnerRow, queue [
 	return snap, verdicts
 }
 
-// revision fingerprints everything a controller acts on — the counts and the
-// pool's definition, which says what to start its runners as — and not the
-// time.
+// revision fingerprints everything a controller acts on — the counts, each
+// runner's state, and the pool's definition, which says what to start its
+// runners as — and not the time.
 func (s Snapshot) revision(pool Pool) string {
 	spec, _ := json.Marshal(pool.Spec())
-	key := fmt.Sprintf("%s|%t|%d|%d|%d|%d|%d|%d|%s", s.PoolID, s.Revoked, s.MaxRunners, s.Demand, s.Busy, s.Idle,
-		s.Pending, s.Wanted, spec)
+	var states strings.Builder
+	for _, r := range s.RunnerStates {
+		states.WriteString(r.EnrollmentID + "=" + r.State + ";")
+	}
+	key := fmt.Sprintf("%s|%t|%d|%d|%d|%d|%d|%d|%s|%s", s.PoolID, s.Revoked, s.MaxRunners, s.Demand, s.Busy, s.Idle,
+		s.Pending, s.Wanted, spec, states.String())
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:8])
 }

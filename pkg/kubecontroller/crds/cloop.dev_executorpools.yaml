@@ -1,0 +1,366 @@
+# The ExecutorPool custom resource: a pool of ephemeral cloop runners that
+# `cloop executor controller` keeps in this namespace, for one executor pool on
+# a cloop hub. Print it with `cloop executor controller crd`.
+#
+# Every rule here is repeated in Go (pkg/kubecontroller/validate.go), so an
+# object that reached the controller without it still shows an Invalid
+# condition rather than a half-started pool; pkg/kubecontroller/crd_test.go
+# holds the two to the same fields. The x-kubernetes-validations rules use CEL
+# functions of Kubernetes 1.27 and later.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: executorpools.cloop.dev
+  labels:
+    app.kubernetes.io/name: cloop-executor-controller
+    app.kubernetes.io/part-of: cloop
+spec:
+  group: cloop.dev
+  scope: Namespaced
+  names:
+    kind: ExecutorPool
+    listKind: ExecutorPoolList
+    plural: executorpools
+    singular: executorpool
+    shortNames:
+      - xpool
+    categories:
+      - cloop
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Desired
+          type: integer
+          jsonPath: .status.desiredRunners
+        - name: Runners
+          type: integer
+          jsonPath: .status.runners
+        - name: Busy
+          type: integer
+          jsonPath: .status.busyRunners
+        - name: Idle
+          type: integer
+          jsonPath: .status.idleRunners
+        - name: Queued
+          type: integer
+          jsonPath: .status.queuedRuns
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            A pool of ephemeral cloop runners: Pods that each enroll with the
+            hub for one run, started as the pool's queued runs need them.
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - hubURL
+                - poolCredentialSecretRef
+                - maxRunners
+              x-kubernetes-validations:
+                - rule: "!has(self.minRunners) || self.minRunners <= self.maxRunners"
+                  message: minRunners must not exceed maxRunners
+                - rule: "!has(self.template) || !has(self.template.env) || self.template.env.all(e, e.secretKeyRef.name != self.poolCredentialSecretRef.name)"
+                  message: a runner is never given the Secret that holds the pool's controller credential
+              properties:
+                hubURL:
+                  type: string
+                  description: The hub's https base URL.
+                  minLength: 1
+                  maxLength: 2048
+                  x-kubernetes-validations:
+                    - rule: "isURL(self) && url(self).getScheme() == 'https' && url(self).getHostname() != ''"
+                      message: hubURL must be an https URL naming a host
+                    - rule: "url(self).getQuery().size() == 0 && !self.contains('#') && !self.contains('@')"
+                      message: hubURL must not carry a query, a fragment or a user
+                hubCAPin:
+                  type: string
+                  description: >-
+                    sha256:<base64> SPKI pins of the hub's TLS key,
+                    comma-separated to stage a rotation.
+                  maxLength: 1024
+                  pattern: '^\s*(sha256:)?[A-Za-z0-9+/=_-]{43,44}(\s*,\s*(sha256:)?[A-Za-z0-9+/=_-]{43,44})*\s*$'
+                hubCABundle:
+                  type: string
+                  description: >-
+                    PEM certificates of the CAs the hub's certificate chains to;
+                    when set, the only trust extended to the hub.
+                  maxLength: 65536
+                  x-kubernetes-validations:
+                    - rule: "self.contains('-----BEGIN CERTIFICATE-----')"
+                      message: hubCABundle must hold PEM certificates
+                poolCredentialSecretRef:
+                  type: object
+                  description: The Secret holding the pool's controller credential.
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 253
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                    key:
+                      type: string
+                      default: credential
+                      maxLength: 253
+                      pattern: '^[-._a-zA-Z0-9]+$'
+                minRunners:
+                  type: integer
+                  description: Runners kept started beyond the demand.
+                  minimum: 0
+                  maximum: 1000
+                maxRunners:
+                  type: integer
+                  description: The most runners this pool starts.
+                  minimum: 1
+                  maximum: 1000
+                scaleDownDelay:
+                  type: string
+                  description: How long a runner must idle before it is retired to scale down.
+                  default: 5m
+                  maxLength: 32
+                  x-kubernetes-validations:
+                    - rule: "self.matches('^([0-9]+(\\\\.[0-9]+)?(ns|us|ms|s|m|h))+$') && duration(self) >= duration('0s') && duration(self) <= duration('24h')"
+                      message: scaleDownDelay must be a duration between 0s and 24h, such as 5m
+                runnerLabels:
+                  type: object
+                  description: Labels put on every runner Pod and its Secret.
+                  maxProperties: 32
+                  additionalProperties:
+                    type: string
+                    maxLength: 63
+                    pattern: '^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$'
+                  x-kubernetes-validations:
+                    - rule: "self.all(k, !k.startsWith('cloop.dev/') && !k.startsWith('app.kubernetes.io/managed-by') && !k.startsWith('app.kubernetes.io/name'))"
+                      message: label keys under cloop.dev/, app.kubernetes.io/name and app.kubernetes.io/managed-by are the controller's
+                    - rule: "self.all(k, size(k) <= 317 && k.matches('^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$'))"
+                      message: runnerLabels keys must be label keys
+                template:
+                  type: object
+                  description: What the runner Pods are made of.
+                  properties:
+                    image:
+                      type: string
+                      description: >-
+                        The runner image; empty is cloop's signed harness image,
+                        resolved to its digest.
+                      maxLength: 1024
+                      pattern: '^\S+$'
+                    imagePullPolicy:
+                      type: string
+                      enum:
+                        - Always
+                        - IfNotPresent
+                        - Never
+                    imagePullSecrets:
+                      type: array
+                      maxItems: 16
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                            pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                    runtimeClassName:
+                      type: string
+                      maxLength: 253
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                    resources:
+                      type: object
+                      properties:
+                        requests:
+                          type: object
+                          maxProperties: 3
+                          additionalProperties:
+                            anyOf:
+                              - type: integer
+                              - type: string
+                            pattern: '^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$'
+                            x-kubernetes-int-or-string: true
+                          x-kubernetes-validations:
+                            - rule: "self.all(k, k in ['cpu', 'memory', 'ephemeral-storage'])"
+                              message: requests may name cpu, memory and ephemeral-storage
+                        limits:
+                          type: object
+                          maxProperties: 3
+                          additionalProperties:
+                            anyOf:
+                              - type: integer
+                              - type: string
+                            pattern: '^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$'
+                            x-kubernetes-int-or-string: true
+                          x-kubernetes-validations:
+                            - rule: "self.all(k, k in ['cpu', 'memory', 'ephemeral-storage'])"
+                              message: limits may name cpu, memory and ephemeral-storage
+                    nodeSelector:
+                      type: object
+                      maxProperties: 32
+                      additionalProperties:
+                        type: string
+                        maxLength: 63
+                    tolerations:
+                      type: array
+                      maxItems: 32
+                      items:
+                        type: object
+                        x-kubernetes-validations:
+                          - rule: "!has(self.operator) || self.operator != 'Exists' || !has(self.value) || self.value == ''"
+                            message: a toleration with operator Exists takes no value
+                          - rule: "(has(self.key) && self.key != '') || (has(self.operator) && self.operator == 'Exists')"
+                            message: a toleration with no key must have operator Exists
+                          - rule: "!has(self.tolerationSeconds) || (has(self.effect) && self.effect == 'NoExecute')"
+                            message: tolerationSeconds applies to effect NoExecute only
+                        properties:
+                          key:
+                            type: string
+                            maxLength: 317
+                          operator:
+                            type: string
+                            enum:
+                              - Equal
+                              - Exists
+                          value:
+                            type: string
+                            maxLength: 63
+                          effect:
+                            type: string
+                            enum:
+                              - NoSchedule
+                              - PreferNoSchedule
+                              - NoExecute
+                          tolerationSeconds:
+                            type: integer
+                            format: int64
+                    affinity:
+                      type: object
+                      description: >-
+                        A core/v1 Affinity, passed to the runner Pods as written
+                        and validated by the API server when a Pod is created.
+                      properties:
+                        nodeAffinity:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        podAffinity:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        podAntiAffinity:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                    serviceAccountName:
+                      type: string
+                      maxLength: 253
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                    env:
+                      type: array
+                      description: Variables set on the runner from Secrets, by reference.
+                      maxItems: 64
+                      x-kubernetes-list-type: map
+                      x-kubernetes-list-map-keys:
+                        - name
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - secretKeyRef
+                        x-kubernetes-validations:
+                          - rule: "self.name != 'HOME' && self.name != 'PATH' && !self.name.startsWith('CLOOP_')"
+                            message: HOME, PATH and CLOOP_* are set by the controller
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 128
+                            pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+                          secretKeyRef:
+                            type: object
+                            required:
+                              - name
+                              - key
+                            properties:
+                              name:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                              key:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[-._a-zA-Z0-9]+$'
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                poolID:
+                  type: string
+                poolName:
+                  type: string
+                image:
+                  type: string
+                desiredRunners:
+                  type: integer
+                runners:
+                  type: integer
+                pendingRunners:
+                  type: integer
+                idleRunners:
+                  type: integer
+                busyRunners:
+                  type: integer
+                queuedRuns:
+                  type: integer
+                lastHubContact:
+                  type: string
+                  format: date-time
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - type
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                      - reason
+                      - message
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string

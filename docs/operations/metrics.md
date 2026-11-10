@@ -362,8 +362,9 @@ count runners in and out; a retired runner's `reason` is `run_settled`,
 `left_idle` (it went offline before it was handed a run), `idle_timeout`,
 `pool_revoked`, `credential_revoked` (the controller credential that minted it
 was revoked), `lost` (its run was lost with it), `start_failed` (a queued run
-could not be started on it), `token_expired` (minted and never redeemed) or
-`other`. Each member counts what it did.
+could not be started on it), `token_expired` (minted and never redeemed),
+`scaled_down` (its controller retired it while it was idle or not yet
+enrolled) or `other`. Each member counts what it did.
 
 **Runs wait and no runner comes.** The controller is down, or cannot start
 runners:

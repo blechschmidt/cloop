@@ -211,6 +211,51 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A Kubernetes executor controller keeps an executor pool's runners as
+  Pods.** `cloop executor controller` runs in a cluster and serves
+  `ExecutorPool` objects (`cloop.dev/v1alpha1`, namespaced, with a status
+  subresource; `cloop executor controller crd` prints the definition and
+  `cloop executor controller rbac` the Role rules it needs). An ExecutorPool
+  names the hub's https URL and its certificate pin or CA bundle, the Secret
+  holding the pool's controller credential, `minRunners` and `maxRunners`, a
+  scale-down delay, labels for the runner Pods and the parts of the Pod an
+  operator may choose: an image (by default cloop's harness image, resolved
+  to the digest its registry serves and checked against the signature of the
+  workflow that publishes it), a RuntimeClass, resources, node selector,
+  tolerations and affinity, a ServiceAccount, and variables taken from
+  Secrets by reference. The schema and its validation rules are in the CRD
+  and repeated in Go, so an invalid spec shows an `Invalid` condition naming
+  every problem and starts nothing. The controller keeps the pool's demand
+  feed open, reconnecting with backoff, and wants `minRunners` idle runners
+  on top of the busy ones and the queued runs, within `maxRunners` and the
+  hub pool's `max_runners`. Each runner is a Pod, then a configuration the hub
+  mints for it, then a Secret owned by the Pod that holds it; the Pod runs
+  `cloop executor agent --ephemeral` under the restricted Pod Security
+  profile (non-root, read-only root filesystem, no privilege escalation, no
+  capabilities, seccomp `RuntimeDefault`, no ServiceAccount token), and no
+  credential is ever in the Pod object. To scale down it asks the hub to
+  retire idle runners that have idled for the delay, and the hub decides by
+  its own record, so a busy runner is never stopped. Finished runners' Pods
+  and Secrets are deleted, and what a crash leaves behind (a Pod without its
+  Secret, a Secret without its Pod, a runner the hub minted that no Pod
+  carries) is collected. The status reports the runner counts,
+  `observedGeneration` and the `Ready`, `Degraded` (with the hub's own error
+  text) and `Invalid` conditions, and refusals are Kubernetes Events. A Lease
+  keeps two replicas from both scaling, the controller holds no state of its
+  own, and it talks to the API server through the Kubernetes driver's own
+  client rather than client-go. The hub's feed now lists each of the pool's
+  live runners with its state (`runner_states`), and
+  `POST /api/pool-controller/runners/retire` retires a controller's pending
+  and idle runners, never a busy one; a runner retired just as its handshake
+  completed is told again on its new session. With `--ephemeral` the agent
+  enrolls with a runner token only, never reads or writes a stored
+  credential, needs an empty work root of its own, takes one run, leaves two
+  minutes after its run is reported if the hub has not retired it, gives up
+  when the hub refuses its token, tells the hub when it leaves so it is
+  retired at once, stops its run and wipes what it created and the
+  credential it held, and writes a retirement report to its termination log
+  (Task 20483).
+
 - **Executor pools: runners a controller starts on demand, one run each.** A
   pool is modelled on GitHub's Actions Runner Controller scale sets: an
   administrator creates one (`/api/executor-pools`) with the labels and

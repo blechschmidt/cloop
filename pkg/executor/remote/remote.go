@@ -349,6 +349,23 @@ type Executor struct {
 	// is then no status change anybody should be told of — the executor is
 	// gone, not offline.
 	retired atomic.Bool
+	// leaving is set when an ephemeral runner said goodbye for good — a
+	// bye with Retired from the agent's side (Task 20483): it was stopped,
+	// or its one run is over, and it will not reconnect. The hub retires it
+	// at once instead of waiting out the grace a dropped link gets. A new
+	// session clears it.
+	leaving atomic.Bool
+}
+
+// Leaving reports whether this ephemeral runner announced, on its last
+// session, that it is going away for good (Task 20483).
+func (e *Executor) Leaving() bool { return e.opts.Ephemeral && e.leaving.Load() }
+
+// noteLeaving records an ephemeral runner's farewell.
+func (e *Executor) noteLeaving() {
+	if e.opts.Ephemeral {
+		e.leaving.Store(true)
+	}
 }
 
 // NewExecutor builds a remote executor for an enrolled agent. It starts
@@ -1575,6 +1592,8 @@ func (e *Executor) attach(sess *Session) {
 	e.session = sess
 	e.caps = caps
 	e.mu.Unlock()
+	// A runner that is back after saying goodbye is not leaving after all.
+	e.leaving.Store(false)
 
 	if prev != nil && prev != sess {
 		prev.closeWithReason("superseded by a newer session")

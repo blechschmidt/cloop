@@ -64,6 +64,9 @@ type client struct {
 	stream *http.Client
 	// userAgent identifies this control plane in API server audit logs.
 	userAgent string
+	// tokenFn, when set, supplies the bearer token per request in place of
+	// rest.BearerToken (APIClient, Task 20483).
+	tokenFn func() (string, error)
 }
 
 // newClient builds a client for rc. It performs no I/O.
@@ -150,8 +153,16 @@ func (c *client) newRequest(ctx context.Context, method, path string, query url.
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.rest.BearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.rest.BearerToken)
+	token := c.rest.BearerToken
+	if c.tokenFn != nil {
+		t, err := c.tokenFn()
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes: %s %s: read the bearer token: %w", method, path, err)
+		}
+		token = t
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	return req, nil
 }
@@ -238,6 +249,9 @@ type APIError struct {
 	// Verb and Path locate the call that failed.
 	Verb string
 	Path string
+	// plain leaves the driver's remediation hints out of Error(), for a
+	// caller that is not the driver (APIClient).
+	plain bool
 }
 
 func (e *APIError) Error() string {
@@ -246,6 +260,9 @@ func (e *APIError) Error() string {
 		msg = http.StatusText(e.Code)
 	}
 	s := fmt.Sprintf("kubernetes: %s %s failed: %d %s", e.Verb, e.Path, e.Code, msg)
+	if e.plain {
+		return s
+	}
 	if hint := e.hint(); hint != "" {
 		s += " — " + hint
 	}

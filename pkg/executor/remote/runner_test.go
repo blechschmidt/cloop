@@ -291,3 +291,68 @@ func TestRunnerTokenTTLIsBounded(t *testing.T) {
 		t.Fatal("runner token shape")
 	}
 }
+
+// A runner that says goodbye for good — its own retiring bye (Task 20483) —
+// is marked leaving, so the hub retires it without the grace a dropped link
+// gets; a new session clears the mark. A bye without the flag leaves nothing.
+func TestARunnersRetiringByeMarksItLeaving(t *testing.T) {
+	r := newRunnerRig(t, true)
+	token, _ := r.mint(true)
+	w, conn, _ := r.connect(token)
+	ex, ok := r.hub.Executor(w.ExecutorID)
+	if !ok {
+		t.Fatal("no executor for the runner")
+	}
+	if ex.Leaving() {
+		t.Fatal("a runner is leaving before it said so")
+	}
+	bye, _ := remote.NewFrame(remote.TypeBye, "", "", remote.ByePayload{Reason: "the runner was stopped", Retired: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := conn.WriteFrame(ctx, bye); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !ex.Leaving() {
+		if time.Now().After(deadline) {
+			t.Fatal("the runner's retiring bye did not mark it leaving")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A runner reconnecting with its credential is not leaving after all.
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(r.server.URL, "http"), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + w.Credential}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again := remote.NewWSConn(ws)
+	defer again.Close("test done")
+	hello, _ := remote.NewFrame(remote.TypeHello, "hello", "", remote.HelloPayload{
+		ProtocolVersion: remote.ProtocolVersion, AgentID: w.ExecutorID})
+	if err := again.WriteFrame(ctx, hello); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		f, err := again.ReadFrame(ctx)
+		if err != nil {
+			t.Fatalf("reconnect: %v", err)
+		}
+		if f.Type == remote.TypeWelcome {
+			break
+		}
+	}
+	// The session attaches just after the welcome is written.
+	deadline = time.Now().Add(5 * time.Second)
+	for ex.Leaving() {
+		if time.Now().After(deadline) {
+			t.Fatal("a runner that reconnected is still leaving")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A device's bye says nothing about leaving.
+	if (&remote.Executor{}).Leaving() {
+		t.Fatal("a device is leaving")
+	}
+}

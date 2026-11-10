@@ -1314,9 +1314,10 @@ func (s *Server) routeTable() []routeSpec {
 		// A pool's controller: public for the reason the CI relay is — the
 		// controller presents the cloop_pool1_ credential minted for its pool,
 		// which the handlers check, and holds no hub session by design.
-		// servedBeforeAuth carries the two paths past the hub's own auth.
+		// servedBeforeAuth carries the three paths past the hub's own auth.
 		{Pattern: "GET /api/pool-controller/feed", Handler: s.handlePoolControllerFeed, Perm: public, Scope: scopeGlobal},
 		{Pattern: "POST /api/pool-controller/runners", Handler: s.handlePoolControllerRunners, Perm: public, Scope: scopeGlobal},
+		{Pattern: "POST /api/pool-controller/runners/retire", Handler: s.handlePoolControllerRetire, Perm: public, Scope: scopeGlobal},
 
 		// ── SCIM 2.0 provisioning (Task 20415) ───────────────────────
 		// The identity provider's routes are public for the reason the CI

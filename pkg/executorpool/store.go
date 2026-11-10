@@ -498,6 +498,13 @@ func (s *Store) RunnerEnrolled(enrollmentID, executorID, name, member string) (s
 // retired it; only that call's caller writes its audit row. With states given,
 // only a runner still in one of them is retired.
 func (s *Store) RetireRunner(executorID, reason string, states ...string) (bool, error) {
+	return s.RetireRunnerBy("", executorID, reason, states...)
+}
+
+// RetireRunnerBy is RetireRunner with the audit row naming actor — a
+// controller credential that asked for the retirement (Task 20483) — rather
+// than the hub.
+func (s *Store) RetireRunnerBy(actor, executorID, reason string, states ...string) (bool, error) {
 	r, err := s.db.ExecutorPoolRunnerByExecutor(executorID)
 	if err != nil {
 		return false, err
@@ -513,8 +520,36 @@ func (s *Store) RetireRunner(executorID, reason string, states ...string) (bool,
 			payload["project_path"] = q.ProjectPath
 		}
 	}
-	s.audit(auditaction.ActionExecutorPoolRunnerRetire, r.PoolID, "system", payload)
+	s.audit(auditaction.ActionExecutorPoolRunnerRetire, r.PoolID, actorOrSystem(actor), payload)
 	return true, nil
+}
+
+// RetirePendingRunner retires a runner its controller minted and never
+// started, and revokes its token, if it is still pending (Task 20483); it
+// reports whether this call retired it, and only that call writes the audit
+// row.
+func (s *Store) RetirePendingRunner(enrollmentID, reason, actor string) (bool, error) {
+	r, err := s.db.GetExecutorPoolRunner(enrollmentID)
+	if err != nil {
+		return false, err
+	}
+	retired, err := s.db.RetirePendingExecutorPoolRunner(enrollmentID, reason, s.now().UTC())
+	if err != nil || !retired {
+		return retired, err
+	}
+	s.audit(auditaction.ActionExecutorPoolRunnerRetire, r.PoolID, actorOrSystem(actor), map[string]any{
+		"enrollment_id": enrollmentID, "reason": reason,
+	})
+	return true, nil
+}
+
+// actorOrSystem is the audit actor of a retirement: the controller credential
+// that asked for it, or the hub itself.
+func actorOrSystem(actor string) string {
+	if strings.TrimSpace(actor) == "" {
+		return "system"
+	}
+	return actor
 }
 
 // AuditRunnerRetired records a runner retired by its pool's revocation, which

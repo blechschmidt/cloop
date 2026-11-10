@@ -185,7 +185,7 @@ var (
 	// reason is one of the ExecutorPoolRetired* values.
 	ExecutorPoolRunnersRetired = Default.MustRegister(Definition{
 		Name:   "cloop_executor_pool_runners_retired_total",
-		Help:   "Executor pool runners retired, by reason: run_settled, left_idle (it went offline before it was handed a run), idle_timeout, pool_revoked, credential_revoked (the controller credential that minted it was revoked), lost (its run was lost with it), start_failed (a queued run could not be started on it), token_expired (minted and never redeemed), other.",
+		Help:   "Executor pool runners retired, by reason: run_settled, left_idle (it went offline before it was handed a run), idle_timeout, pool_revoked, credential_revoked (the controller credential that minted it was revoked), lost (its run was lost with it), start_failed (a queued run could not be started on it), token_expired (minted and never redeemed), scaled_down (its controller retired it, idle or never enrolled), other.",
 		Type:   TypeCounter,
 		Labels: []string{"reason"},
 	})

@@ -878,6 +878,47 @@ func (d *DB) RetireExecutorPoolRunner(executorID, reason string, at time.Time, s
 	return d.execOne(q, fmt.Sprintf("retire executor pool runner %s", executorID), args...)
 }
 
+// RetirePendingExecutorPoolRunner retires the runner minted as enrollmentID
+// while it is still pending — minted and not enrolled — and revokes its token
+// in the same transaction, so the token cannot be redeemed afterwards (Task
+// 20483: a controller that minted a runner it then did not start gives its
+// place under max_runners back at once rather than when the token lapses). It
+// reports whether this call retired it; a runner that already enrolled, or was
+// retired, is left alone.
+func (d *DB) RetirePendingExecutorPoolRunner(enrollmentID, reason string, at time.Time) (bool, error) {
+	enrollmentID = strings.TrimSpace(enrollmentID)
+	if enrollmentID == "" {
+		return false, fmt.Errorf("%w: no enrollment id", ErrPoolRunnerNotFound)
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return false, fmt.Errorf("statedb: retire pending runner: %w", classifyDriverErr(err))
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`UPDATE executor_pool_runners SET state = ?, retired_at = ?, retire_reason = ?
+		WHERE enrollment_id = ? AND state = ?`, PoolRunnerRetired, formatOptionalTime(at), reason,
+		enrollmentID, PoolRunnerPending)
+	if err != nil {
+		return false, fmt.Errorf("statedb: retire pending runner %q: %w", enrollmentID, classifyDriverErr(err))
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return false, nil
+	}
+	if _, err := tx.Exec(`UPDATE executor_enrollment_tokens SET revoked_at = ? WHERE id = ? AND revoked_at = ''`,
+		formatOptionalTime(at), enrollmentID); err != nil {
+		return false, fmt.Errorf("statedb: revoke runner token %q: %w", enrollmentID, classifyDriverErr(err))
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("statedb: retire pending runner %q: commit: %w", enrollmentID, classifyDriverErr(err))
+	}
+	return true, nil
+}
+
 // ExpireExecutorPoolRunners retires every runner token that lapsed unredeemed
 // before now, and returns them.
 func (d *DB) ExpireExecutorPoolRunners(now time.Time) ([]ExecutorPoolRunnerRow, error) {

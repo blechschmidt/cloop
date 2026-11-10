@@ -83,9 +83,11 @@ const poolControllerPublicReason = "an executor pool's controller (Task 20482). 
 	"other credential of the hub's: only the cloop_pool1_ credential minted for its pool, presented in the " +
 	"Authorization header and compared in constant time against a SHA-256 the hub holds " +
 	"(pkg/executorpool/store.go). An unknown, revoked or malformed credential, and one whose pool was " +
-	"revoked, is refused with the same 401. The feed tells the controller only its own pool's counts, and " +
-	"the runner tokens it mints are single-use, bound to the pool, valid ten minutes at most and refused " +
-	"past the pool's max_runners; the per-IP rate limiter still applies"
+	"revoked, is refused with the same 401. The feed tells the controller only its own pool's counts and " +
+	"its own pool's runners' states, and the runner tokens it mints are single-use, bound to the pool, " +
+	"valid ten minutes at most and refused past the pool's max_runners. Retirement (Task 20483) reaches " +
+	"only the pool's own runners, and the hub's record decides it: a busy runner is never retired; the " +
+	"per-IP rate limiter still applies"
 
 var publicRouteAllowlist = map[string]string{
 	"/":                  "the SPA shell; authMiddleware already gated whether this caller may load it",
@@ -204,8 +206,9 @@ var publicRouteAllowlist = map[string]string{
 	"POST /api/run/knowledge/citations": knowledgeRunPublicReason,
 
 	// Executor pool controllers (Task 20482): one justification for both.
-	"GET /api/pool-controller/feed":     poolControllerPublicReason,
-	"POST /api/pool-controller/runners": poolControllerPublicReason,
+	"GET /api/pool-controller/feed":            poolControllerPublicReason,
+	"POST /api/pool-controller/runners":        poolControllerPublicReason,
+	"POST /api/pool-controller/runners/retire": poolControllerPublicReason,
 
 	// SCIM 2.0 provisioning (Task 20415): one justification for the service.
 	"GET /scim/v2/ServiceProviderConfig": scimPublicReason,

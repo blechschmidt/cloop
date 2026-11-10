@@ -1014,6 +1014,7 @@ calls helpers that use a model: `pkg/clarify`, `pkg/coach`, `pkg/diagnosis`,
 | `pkg/executor/featurehub` | the hub's half of a feature on an isolating executor |
 | `pkg/executorstore` | enrollment, agent credentials and handles in the database |
 | `pkg/executorpool` | executor pools: their controllers' credentials, runner tokens, and which queued runs a pool may see and take |
+| `pkg/kubecontroller` | `cloop executor controller`: the in-cluster controller that keeps an ExecutorPool's ephemeral runner Pods, scaled by the hub's demand feed |
 | `pkg/sandbox` | parsing and validating `.cloop/sandbox.yaml` |
 | `pkg/hostsandbox` | keeping a person's runs on the hub's own host to their own files (Landlock, namespaces) |
 | `pkg/imagepolicy` | which images may run, pinned to a digest |

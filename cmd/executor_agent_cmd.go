@@ -296,6 +296,19 @@ or when the control plane revokes its credential.`,
 		insecure, _ := cmd.Flags().GetBool("insecure-transport")
 		bundleStr, _ := cmd.Flags().GetString("bundle")
 		tokenFile, _ := cmd.Flags().GetString("token-file")
+		ephemeral, _ := cmd.Flags().GetBool("ephemeral")
+		termLog, _ := cmd.Flags().GetString("termination-log")
+		retireGrace, _ := cmd.Flags().GetDuration("retire-grace")
+		if !ephemeral && (cmd.Flags().Changed("termination-log") || cmd.Flags().Changed("retire-grace")) {
+			return errors.New("--termination-log and --retire-grace apply to --ephemeral runners only")
+		}
+		if ephemeral && !cmd.Flags().Changed("termination-log") {
+			// Kubernetes mounts this file into every container; elsewhere the
+			// runner writes no termination log unless it is asked to.
+			if _, err := os.Stat(agent.DefaultTerminationLog); err == nil {
+				termLog = agent.DefaultTerminationLog
+			}
+		}
 
 		// A bundle carries server, token and pin together, which is the
 		// point: those three have to agree, and three separately-pasted
@@ -323,6 +336,12 @@ or when the control plane revokes its credential.`,
 		if err != nil {
 			return err
 		}
+		if ephemeral && warning != "" && groupReadableOnly(tokenFile) {
+			// A Kubernetes Secret volume is group-readable by the Pod's
+			// fsGroup, which is the runner's own: nobody else is in the
+			// container to read it (Task 20483).
+			warning = ""
+		}
 		if warning != "" {
 			color.New(color.FgYellow, color.Bold).Fprintf(os.Stderr, "warning: %s\n", warning)
 		}
@@ -349,6 +368,9 @@ or when the control plane revokes its credential.`,
 			Server:            server,
 			Token:             token,
 			TokenFile:         strings.TrimSpace(tokenFile),
+			Ephemeral:         ephemeral,
+			TerminationLog:    termLog,
+			RetireGrace:       retireGrace,
 			CredentialPath:    credPath,
 			WorkDirRoot:       root,
 			MaxConcurrent:     maxConc,
@@ -718,6 +740,17 @@ func applyBundleDefaults(b remote.Bundle, server, token, pin, root *string) {
 // Anything else stays fatal. A file that exists but cannot be read, is empty,
 // or does not parse is a provisioning mistake the operator needs told about;
 // only ErrNotExist carries the "already enrolled" meaning.
+// groupReadableOnly reports whether path is readable by its group but not by
+// others: a Secret volume under a Pod's fsGroup.
+func groupReadableOnly(path string) bool {
+	info, err := os.Stat(strings.TrimSpace(path))
+	if err != nil {
+		return false
+	}
+	perm := info.Mode().Perm()
+	return perm&0o007 == 0 && perm&0o070 != 0
+}
+
 func loadEnrollmentFile(path string) (b remote.Bundle, warning string, present bool, err error) {
 	if strings.TrimSpace(path) == "" {
 		return remote.Bundle{}, "", false, nil
@@ -783,6 +816,14 @@ func init() {
 		"permit plaintext ws:// to a non-loopback host — credentials travel in the clear")
 	executorAgentCmd.Flags().String("bundle", "",
 		"enrollment bundle from `cloop executor enroll` (supplies --server, --token and --pin together)")
+	executorAgentCmd.Flags().Bool("ephemeral", false,
+		"run as an executor pool's runner: enroll with a runner token, keep the credential in memory, take one run, "+
+			"then exit, wiping what it held and reporting its retirement (what the executor controller starts)")
+	executorAgentCmd.Flags().String("termination-log", "",
+		"--ephemeral: write the retirement report to this file as the runner exits "+
+			"(default: "+agent.DefaultTerminationLog+" when it exists, as in a Kubernetes container)")
+	executorAgentCmd.Flags().Duration("retire-grace", agent.DefaultRetireGrace,
+		"--ephemeral: how long a runner whose run is over waits for the hub to retire it before it exits on its own")
 
 	executorEnrollCmd.Flags().String("bundle-file", "",
 		"also write the enrollment bundle to this file (mode 0600), for provisioning that "+

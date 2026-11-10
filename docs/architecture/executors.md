@@ -3986,6 +3986,52 @@ end. Revoking one controller credential does the same for what that credential
 minted: a credential that leaked does not leave behind the runners it started
 or tokens that still redeem.
 
+### The Kubernetes executor controller
+
+`cloop executor controller` is a controller for a Kubernetes cluster
+(`pkg/kubecontroller`). An operator describes a pool in an `ExecutorPool`
+object (`cloop.dev/v1alpha1`, namespaced; `cloop executor controller crd`
+prints the CustomResourceDefinition): the hub's URL and certificate pin, the
+Secret that holds the pool's controller credential, `minRunners` and
+`maxRunners`, a scale-down delay, labels for the runner Pods, and the parts of
+the Pod an operator may choose (image, RuntimeClass, resources, placement, a
+ServiceAccount, variables from Secrets). It talks to the API server through the
+Kubernetes driver's own client, with list and watch, a work queue and a Lease
+for leader election, and keeps no state of its own: a restarted controller
+rebuilds everything from the API server and the hub.
+
+The feed lists the pool's live runners one by one (`runner_states`: each
+runner's enrollment ID and whether it is pending, idle or busy), so the
+controller can match its Pods to the hub's record. It starts a runner as a Pod
+first, then asks the hub for the runner's configuration, then writes it to a
+Secret owned by the Pod; the Pod runs `cloop executor agent --ephemeral` and
+reads the configuration from that Secret, so no credential is ever part of the
+Pod object. The controller wants `minRunners` idle runners beyond the busy ones
+and the queued runs, within `maxRunners` and the pool's `max_runners`. To scale
+down it calls `POST /api/pool-controller/runners/retire` with the runners'
+enrollment IDs. The hub decides from its own record: a pending runner is
+retired and its token revoked in one transaction, an idle runner is retired
+only while it is still idle, and a busy runner is never retired. A retired
+runner exits on its own, and the controller then deletes its Pod and Secret.
+Each runner state names the controller credential that minted the runner, and
+the controller gives back only its own runners that no Pod carries; give each
+controller of a pool its own credential. A hub too old to list runner states
+leaves the pool `Degraded`, and the controller then starts and stops nothing.
+Write access to ExecutorPool objects amounts to creating Pods in the
+namespace: the template chooses the image, the ServiceAccount and Secrets to
+read from, so grant it as you would Pod creation. The one Secret a template may
+not name is the one holding the pool's controller credential.
+
+With `--ephemeral` the agent keeps the runner's side of this itself. It
+enrolls with a runner token and nothing else, never reads or writes a stored
+credential, and refuses a hub whose welcome does not mark it ephemeral. It
+takes one run. When the run's outcome has been delivered it waits two minutes
+for the hub to retire it and then leaves anyway. When it leaves of its own
+accord it sends the hub a bye marked `retired`, and the hub retires it at once
+instead of waiting out the grace a dropped connection gets. On the way out it
+removes everything it created under its work root, drops its credential and
+token, and writes a JSON retirement report to the container's termination log.
+
 ---
 
 ## See also

@@ -334,12 +334,22 @@ func (s *Server) poolRunnerStatus(next func(string, string, time.Time)) func(str
 		if err != nil || !executor.IsEphemeral(ex) {
 			return
 		}
+		// A runner that said goodbye for good (Task 20483) — stopped by its
+		// controller or its node — will not be back: there is nothing to wait
+		// for, and every second it stays idle on the record is one a queued
+		// run could be handed to it.
+		leaving := false
+		if l, ok := ex.(interface{ Leaving() bool }); ok {
+			leaving = l.Leaving()
+		}
 		go func() {
 			defer recoverGoroutine("executor pool runner offline")
 			// A grace first: a runner whose hub member is restarting, or
 			// whose link dropped for a moment, reconnects — here, or to
 			// another member, which records itself as the runner's member.
-			time.Sleep(poolRunnerOfflineGrace)
+			if !leaving {
+				time.Sleep(poolRunnerOfflineGrace)
+			}
 			store, err := s.poolStore()
 			if err != nil {
 				return
@@ -381,9 +391,24 @@ func (s *Server) poolRunnerConnected(agent remote.AgentRecord) {
 	if err := store.DB().SetExecutorPoolRunnerMember(agent.AgentID, s.hubInstanceID()); err != nil {
 		fmt.Fprintf(os.Stderr, "ui: record runner %s's member: %v\n", agent.AgentID, err)
 	}
-	if r, err := store.RunnerByExecutor(agent.AgentID); err == nil {
-		s.poolChangedLocal(r.PoolID)
+	r, err := store.RunnerByExecutor(agent.AgentID)
+	if err != nil {
+		return
 	}
+	if r.State == statedb.PoolRunnerRetired {
+		// Retired between its enrollment and this handshake (Task 20483): a
+		// controller scaling down the moment the feed showed it idle. The
+		// retirement found no session to tell, and the handshake then built
+		// the runner a fresh executor; tell it now, on the session it has,
+		// and drop the records the connect just wrote back.
+		reason := r.RetireReason
+		if reason == "" {
+			reason = "it was retired"
+		}
+		s.retireRunnerHere(agent.AgentID, reason)
+		s.forgetRunnerRecords(store.DB(), agent.AgentID)
+	}
+	s.poolChangedLocal(r.PoolID)
 }
 
 // ── retirement ─────────────────────────────────────────────────────────────
@@ -399,22 +424,29 @@ func (s *Server) retirePoolRunner(executorID, reason string) {
 // (any state when none are given): a caller that judged a runner idle from an
 // earlier read must not end it after another member handed it a run.
 func (s *Server) retirePoolRunnerIf(executorID, reason string, states ...string) {
+	s.retirePoolRunnerBy("", executorID, reason, states...)
+}
+
+// retirePoolRunnerBy is retirePoolRunnerIf with the audit row naming actor —
+// the controller credential that asked (Task 20483) — and reports whether
+// this call retired the runner.
+func (s *Server) retirePoolRunnerBy(actor, executorID, reason string, states ...string) bool {
 	store, err := s.poolStore()
 	if err != nil {
-		return
+		return false
 	}
 	r, err := store.RunnerByExecutor(executorID)
 	if err != nil {
-		return
+		return false
 	}
-	retired, err := store.RetireRunner(executorID, reason, states...)
+	retired, err := store.RetireRunnerBy(actor, executorID, reason, states...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ui: retire runner %s: %v\n", executorID, err)
-		return
+		return false
 	}
 	if !retired && len(states) > 0 {
 		// It moved on — or was retired by someone else, who ended it.
-		return
+		return false
 	}
 	s.retireRunnerHere(executorID, reason)
 	if retired {
@@ -425,6 +457,7 @@ func (s *Server) retirePoolRunnerIf(executorID, reason string, states ...string)
 		n.Publish(busTopicPool, r.PoolID, poolBusNotice{Retire: []string{executorID}, Reason: reason})
 	}
 	s.poolChangedLocal(r.PoolID)
+	return retired
 }
 
 // forgetRunnerRecords removes what the fleet view keeps of a retired runner:
@@ -475,6 +508,8 @@ func retireReasonLabel(reason string) string {
 		return "lost"
 	case strings.Contains(reason, "could not be started"):
 		return "start_failed"
+	case strings.Contains(reason, "its controller"):
+		return "scaled_down"
 	}
 	return "other"
 }

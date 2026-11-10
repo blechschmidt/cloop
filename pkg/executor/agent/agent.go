@@ -129,6 +129,18 @@ type Config struct {
 	// container driver. Nil is the container driver; tests substitute an
 	// answer, so the frame pair can be exercised without an engine.
 	IsolationProbe func(context.Context, executor.SandboxSettings) remote.IsolationEvidencePayload
+	// Ephemeral runs this agent as an executor pool's runner for one run
+	// (Task 20483): it enrolls with a runner token only, never reads or
+	// writes a stored credential, exits once its run is over, wipes what it
+	// held, and reports its retirement. See ephemeral.go.
+	Ephemeral bool
+	// TerminationLog is where an ephemeral runner writes its retirement
+	// report as it exits — DefaultTerminationLog in a Kubernetes container;
+	// "" writes none.
+	TerminationLog string
+	// RetireGrace is how long an ephemeral runner whose run is over waits for
+	// the hub to retire it; zero is DefaultRetireGrace.
+	RetireGrace time.Duration
 	// Channel is the update channel this device follows (Task 20376), from
 	// the unit's channel drop-in by way of CLOOP_UPDATE_CHANNEL. Empty is
 	// stable. It is reported in the hello, so the hub knows what to offer,
@@ -193,8 +205,12 @@ type Agent struct {
 	branchMu sync.Mutex
 	branches map[string]*branchTransfer
 
-	mu        sync.Mutex
-	cred      Credential
+	mu   sync.Mutex
+	cred Credential
+	// token is the enrollment token, taken out of cfg in New so the one copy
+	// is behind mu and an ephemeral runner's wipe can drop it (Task 20483):
+	// cfg is read without a lock everywhere.
+	token     string
 	workloads map[string]*workload
 	sess      *deviceSession
 	hbSeq     uint64
@@ -206,6 +222,9 @@ type Agent struct {
 	// runner (Task 20482): its credential lives in cred only, and a retiring
 	// bye ends Run with success.
 	ephemeral bool
+	// eph is what an --ephemeral agent tracks about its one run (Task
+	// 20483). Guarded by mu.
+	eph ephemeralState
 }
 
 // workload is one running task on this device.
@@ -352,8 +371,11 @@ func New(cfg Config) (*Agent, error) {
 		cfg.CredentialPath = p
 	}
 
+	token := cfg.Token
+	cfg.Token = ""
 	a := &Agent{
 		cfg:       cfg,
+		token:     token,
 		local:     localprocess.New("agent-local"),
 		drivers:   newDriverCache(),
 		workloads: make(map[string]*workload),
@@ -363,7 +385,15 @@ func New(cfg Config) (*Agent, error) {
 
 	// A stored credential supplies defaults for anything the operator did not
 	// pass, so `cloop executor agent` with no flags works after enrollment.
-	if cred, err := LoadCredential(cfg.CredentialPath); err == nil {
+	// Never for an ephemeral runner (Task 20483): its identity is the runner
+	// token it was started with, and a device's credential lying in the same
+	// home must not turn it into that device.
+	if cfg.Ephemeral {
+		if strings.TrimSpace(token) == "" {
+			return nil, fmt.Errorf("agent: --ephemeral needs a runner token (--token-file or --bundle), " +
+				"which the runner's controller provides")
+		}
+	} else if cred, err := LoadCredential(cfg.CredentialPath); err == nil {
 		a.cred = cred
 		if strings.TrimSpace(cfg.Server) == "" {
 			a.cfg.Server = cred.Server
@@ -387,7 +417,7 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("agent: --server is required (no credential at %s to take it from)",
 			cfg.CredentialPath)
 	}
-	if !a.cred.Valid() && strings.TrimSpace(cfg.Token) == "" {
+	if !a.cred.Valid() && strings.TrimSpace(token) == "" {
 		// Name the enrollment file when one was configured. Otherwise this
 		// reads as "no --token was given" to an operator who did supply one,
 		// via the path the installed unit uses — and who then has no hint
@@ -443,6 +473,11 @@ func New(cfg Config) (*Agent, error) {
 	}
 	a.root = root
 	a.cfg.WorkDirRoot = root
+	if a.cfg.Ephemeral {
+		if err := a.initEphemeral(); err != nil {
+			return nil, err
+		}
+	}
 	a.clearBranchIncoming()
 	// Undo what a previous agent process left attached — a vhci port, a TAP —
 	// before this one attaches anything (Task 20430).
@@ -548,8 +583,17 @@ func (a *Agent) channel() provenance.Channel {
 }
 
 // Run connects and serves until ctx is cancelled or the control plane refuses
-// this agent permanently.
+// this agent permanently. An ephemeral runner (Config.Ephemeral) serves until
+// its one run is over, then wipes what it held and reports its retirement.
 func (a *Agent) Run(ctx context.Context) error {
+	if a.cfg.Ephemeral {
+		return a.runEphemeral(ctx)
+	}
+	return a.serve(ctx)
+}
+
+// serve is Run's connect-and-reconnect loop.
+func (a *Agent) serve(ctx context.Context) error {
 	// What this device's sandbox firewalls refuse goes to the hub (Task
 	// 20437) — only from an agent that probes its host, which is the one that
 	// installs firewalls: a test agent in another process's tests must not
@@ -571,18 +615,22 @@ func (a *Agent) Run(ctx context.Context) error {
 		case errors.Is(err, errRetired):
 			// An ephemeral runner retired after its run (Task 20482): the
 			// ordinary end of its life, not a refusal.
-			a.cfg.logf("ephemeral runner retired: %v", errors.Unwrap(err))
+			a.cfg.logf("ephemeral runner retired: %v", err)
+			a.noteRetiredByHub(strings.TrimSpace(strings.TrimPrefix(err.Error(), errRetired.Error()+":")))
 			return nil
 		case errors.Is(err, errDoNotReconnect):
 			a.cfg.logf("control plane refused this agent permanently: %v", errors.Unwrap(err))
 			return err
-		case errors.Is(err, remote.ErrCredentialInvalid) && a.isEphemeral():
+		case errors.Is(err, remote.ErrCredentialInvalid) && (a.cfg.Ephemeral || a.isEphemeral()):
 			// An ephemeral runner whose credential the hub stopped accepting
 			// while it was away (Task 20482): it was retired, and there is no
 			// enrollment to fall back to. A device would retry until an
 			// operator re-enrolled it; a runner is replaced by its controller.
+			// The same for an --ephemeral runner refused before it ever
+			// enrolled (Task 20483) — its token lapsed during a slow start, or
+			// its pool was revoked — which no retry can mend.
 			a.cfg.logf("ephemeral runner's credential was refused; it was retired while disconnected: %v", err)
-			return fmt.Errorf("%w: %v", errDoNotReconnect, err)
+			return fmt.Errorf("%w: %w", errDoNotReconnect, err)
 		case errors.Is(err, context.Canceled):
 			return nil
 		}

@@ -3,8 +3,10 @@ package ui
 // executor_pool_controller.go: what a pool's controller talks to (Task
 // 20482).
 //
-//	GET  /api/pool-controller/feed      the pool's demand and runners, pushed
-//	POST /api/pool-controller/runners   runner configurations: {"count": N}
+//	GET  /api/pool-controller/feed            the pool's demand and runners, pushed
+//	POST /api/pool-controller/runners         runner configurations: {"count": N}
+//	POST /api/pool-controller/runners/retire  retire runners that hold no run:
+//	                                          {"runners": ["<enrollment id>", …]}
 //
 // Both are authenticated by the pool's controller credential, presented as
 // "Authorization: Bearer cloop_pool1_…" and nowhere else — never a query
@@ -50,6 +52,7 @@ import (
 const (
 	poolFeedPath    = "/api/pool-controller/feed"
 	poolRunnersPath = "/api/pool-controller/runners"
+	poolRetirePath  = "/api/pool-controller/runners/retire"
 )
 
 // Feed timing.
@@ -73,7 +76,7 @@ func isPoolControllerEndpoint(r *http.Request) bool {
 	switch r.URL.Path {
 	case poolFeedPath:
 		return r.Method == http.MethodGet || r.Method == http.MethodHead
-	case poolRunnersPath:
+	case poolRunnersPath, poolRetirePath:
 		return r.Method == http.MethodPost
 	}
 	return false
@@ -359,4 +362,136 @@ func (s *Server) handlePoolControllerRunners(w http.ResponseWriter, r *http.Requ
 		"pool_id": pool.ID, "runners": configs,
 		"notice": "Each token is single-use and expires as stated; the runner it enrolls takes one run and is retired.",
 	})
+}
+
+// poolRetireRequest is a controller asking for runners to be retired.
+type poolRetireRequest struct {
+	// Runners are enrollment IDs, as the runner configurations and the feed's
+	// runner states name them; 1..executorpool.MaxRunnersPerRequest.
+	Runners []string `json:"runners"`
+}
+
+// poolRetireResult is what became of one runner a controller asked to retire.
+type poolRetireResult struct {
+	EnrollmentID string `json:"enrollment_id"`
+	// Outcome is "retired" (this request retired it), "busy" (it holds a run,
+	// and was left alone), "gone" (already retired) or "unknown" (no runner of
+	// this pool has that ID).
+	Outcome string `json:"outcome"`
+	// State is the runner's state as the hub read it, "" when unknown.
+	State string `json:"state,omitempty"`
+}
+
+// Outcomes of a retirement request.
+const (
+	poolRetireRetired = "retired"
+	poolRetireBusy    = "busy"
+	poolRetireGone    = "gone"
+	poolRetireUnknown = "unknown"
+)
+
+// handlePoolControllerRetire serves POST /api/pool-controller/runners/retire
+// (Task 20483): a controller scaling its pool down, or giving back a runner it
+// minted and did not start.
+//
+// The hub decides, by its own record, never by what the controller believes:
+// a pending runner — minted, not enrolled — is retired and its token revoked
+// in one transaction, so it cannot enroll afterwards; an idle runner is
+// retired only while it is still idle, in the update that retires it, so one
+// another member hands a run to in the same moment is left with its run; a
+// busy runner is never retired here. A retired idle runner is told so on its
+// connection, wherever it is held, and exits with success — which is how its
+// controller learns it may delete the machine. The controller asks for
+// runners of its own pool only: an ID of another pool's runner is "unknown",
+// the answer an ID that does not exist gets.
+func (s *Server) handlePoolControllerRetire(w http.ResponseWriter, r *http.Request) {
+	store, pool, cred, _, ok := s.authenticatePoolController(w, r, false)
+	if !ok {
+		return
+	}
+	var req poolRetireRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.Runners) < 1 || len(req.Runners) > executorpool.MaxRunnersPerRequest {
+		jsonErr(w, fmt.Sprintf("runners must name between 1 and %d runners", executorpool.MaxRunnersPerRequest),
+			http.StatusBadRequest)
+		return
+	}
+	// Every ID is checked before any is acted on, so a malformed request
+	// retires nothing.
+	ids := make([]string, 0, len(req.Runners))
+	seen := map[string]bool{}
+	for _, raw := range req.Runners {
+		id := strings.TrimSpace(raw)
+		if id == "" || len(id) > 64 {
+			jsonErr(w, "each runner is an enrollment id", http.StatusBadRequest)
+			return
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	actor := executorpool.CredentialActor(pool.ID, cred.ID)
+	results := make([]poolRetireResult, 0, len(ids))
+	changed := false
+	for _, id := range ids {
+		res := poolRetireResult{EnrollmentID: id, Outcome: poolRetireUnknown}
+		row, err := store.RunnerOf(id)
+		if err != nil || row.PoolID != pool.ID {
+			results = append(results, res)
+			continue
+		}
+		res.Outcome, res.State = s.retireControllerRunner(store, row, actor)
+		if res.Outcome == poolRetireRetired {
+			changed = true
+		}
+		results = append(results, res)
+	}
+	if changed {
+		s.poolChanged(pool.ID)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jsonOK(w, map[string]any{"pool_id": pool.ID, "results": results})
+}
+
+// retireControllerRunner retires one runner a controller asked about, by the
+// hub's record: pending and idle runners are retired by a conditional update,
+// busy ones never. A runner that moves on between the read and the update —
+// pending to idle as it enrolls, idle to busy as it is handed a run — is read
+// again and judged as what it is now, once; anything still in motion after
+// that is reported busy, and the controller asks again on its next pass.
+func (s *Server) retireControllerRunner(store *executorpool.Store, row statedb.ExecutorPoolRunnerRow, actor string) (outcome, state string) {
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			fresh, err := store.RunnerOf(row.EnrollmentID)
+			if err != nil {
+				return poolRetireUnknown, ""
+			}
+			row = fresh
+		}
+		switch row.State {
+		case statedb.PoolRunnerPending:
+			retired, err := store.RetirePendingRunner(row.EnrollmentID,
+				"its controller scaled the pool down before it enrolled", actor)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ui: retire pending runner %s: %v\n", row.EnrollmentID, err)
+				return poolRetireBusy, row.State
+			}
+			if retired {
+				hubmetrics.ExecutorPoolRunnersRetired.Inc("scaled_down")
+				return poolRetireRetired, statedb.PoolRunnerRetired
+			}
+		case statedb.PoolRunnerIdle:
+			if s.retirePoolRunnerBy(actor, row.ExecutorID, "its controller scaled the pool down", statedb.PoolRunnerIdle) {
+				return poolRetireRetired, statedb.PoolRunnerRetired
+			}
+		case statedb.PoolRunnerBusy:
+			return poolRetireBusy, row.State
+		default:
+			return poolRetireGone, row.State
+		}
+	}
+	return poolRetireBusy, row.State
 }
