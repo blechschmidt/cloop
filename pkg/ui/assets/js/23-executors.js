@@ -217,6 +217,9 @@ window.loadCCLimits = function(opts) {
       row('5-Hour',       u.five_hour,        limits.max_five_hour_pct);
       row('Weekly Opus',  u.seven_day_opus,   limits.max_weekly_opus_pct);
       row('Weekly Sonnet',u.seven_day_sonnet, limits.max_weekly_sonnet_pct);
+      // Windows the plan meters for one model alone, Fable's among them.
+      // Shown as reported; there is no cap to set on them.
+      (u.seven_day_models || []).forEach(function(m) { row('Weekly ' + esc(m.model), m); });
       // `rows` is never empty (every window emits at least "not reported"),
       // so gate the empty-state hint on whether any window actually reported.
       // Keying it off `rows` made this hint unreachable, which is part of why

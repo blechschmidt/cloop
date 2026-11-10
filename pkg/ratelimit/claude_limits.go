@@ -127,6 +127,14 @@ func (u *ClaudeUsage) At(now time.Time) *ClaudeUsage {
 	out.SevenDay = current(u.SevenDay)
 	out.SevenDayOpus = current(u.SevenDayOpus)
 	out.SevenDaySonnet = current(u.SevenDaySonnet)
+	// A fresh slice: appending to the receiver's would write into the
+	// cached snapshot's backing array.
+	out.SevenDayModels = nil
+	for _, m := range u.SevenDayModels {
+		if current(&m.UsageDetail) != nil {
+			out.SevenDayModels = append(out.SevenDayModels, m)
+		}
+	}
 	return &out
 }
 

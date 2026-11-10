@@ -241,6 +241,17 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **The Claude Code usage views show Fable's weekly limit.** Claude plans now
+  limit Fable on its own each week. The usage API reports that window only
+  as a model-scoped row of its `limits` list, where Opus and Sonnet each have
+  a `seven_day_<model>` key, and cloop read the keys alone, so neither the
+  Overview's Claude Code Subscription Caps panel nor the Budget tab's usage
+  panel showed it. Both now show a "Weekly Fable" row, and a row for any
+  other model the plan limits this way, named as the server names it. There
+  is no cap to set on it: the caps and `budget.block_extra_usage` read the
+  same windows as before. A `limits` list cloop cannot read costs only those
+  rows, and the windows the caps use still come through (Task 20490).
+
 - **The model pickers offer every Claude model Anthropic serves, Claude Fable
   5.2 among them.** The dashboard's model pickers (new project, the Overview's
   provider card, the review gate) and `cloop init --interactive` list the

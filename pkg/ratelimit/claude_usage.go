@@ -45,7 +45,13 @@ type ClaudeUsageResponse struct {
 	SevenDayOpus   *UsageWindow `json:"seven_day_opus"`
 	SevenDaySonnet *UsageWindow `json:"seven_day_sonnet"`
 	ExtraUsage     *ExtraUsage  `json:"extra_usage"`
-	Error          *struct {
+	// Limits is the server's list of usage meters, the rows claude.ai's
+	// usage page draws. A weekly window the plan meters for one model alone,
+	// such as Fable's, appears only here. Kept raw and read row by row by
+	// modelWindows, so a list whose shape changes costs those rows and not
+	// the windows above, which the caps are enforced on.
+	Limits json.RawMessage `json:"limits"`
+	Error  *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 }
@@ -56,8 +62,11 @@ type ClaudeUsage struct {
 	SevenDay       *UsageDetail `json:"seven_day,omitempty"`
 	SevenDayOpus   *UsageDetail `json:"seven_day_opus,omitempty"`
 	SevenDaySonnet *UsageDetail `json:"seven_day_sonnet,omitempty"`
-	ExtraUsage     *ExtraUsage  `json:"extra_usage,omitempty"`
-	FetchedAt      time.Time    `json:"fetched_at"`
+	// SevenDayModels are the weekly windows the plan meters for one model
+	// alone that have no field above, in the server's order: Fable's today.
+	SevenDayModels []ModelWindow `json:"seven_day_models,omitempty"`
+	ExtraUsage     *ExtraUsage   `json:"extra_usage,omitempty"`
+	FetchedAt      time.Time     `json:"fetched_at"`
 }
 
 // UsageDetail is a single limit window with parsed fields.
@@ -382,6 +391,7 @@ func fetchUsageWithToken(dir, token string) (*ClaudeUsage, int, error) {
 	if raw.SevenDaySonnet != nil && raw.SevenDaySonnet.Utilization != nil {
 		usage.SevenDaySonnet = parseWindow(raw.SevenDaySonnet)
 	}
+	addModelWindows(usage, modelWindows(raw.Limits))
 
 	setCachedUsage(dir, usage)
 

@@ -182,6 +182,8 @@
         addBar('Weekly (All Models)', d.seven_day);
         addBar('Weekly Opus', d.seven_day_opus);
         addBar('Weekly Sonnet', d.seven_day_sonnet);
+        // Windows the plan meters for one model alone, Fable's among them.
+        (d.seven_day_models || []).forEach(function(m) { addBar('Weekly ' + esc(m.model), m); });
         if (d.extra_usage && d.extra_usage.is_enabled) {
           var eu = d.extra_usage;
           var euPct = Math.round(eu.utilization || 0);
