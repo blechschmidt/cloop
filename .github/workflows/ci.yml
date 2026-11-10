@@ -553,11 +553,15 @@ jobs:
     # over them; the jobs took 444, 514 and 440 s, 63-81 s of each compiling
     # the test binary in the check step, so they finish well inside Build and
     # Test.
+    #
+    # A fourth shard since Task 20486: by then the three ran 1,020-1,275 s each
+    # on the usual runners, at the 60% budget's edge, and two runs of one tree
+    # landed either side of it.
     timeout-minutes: 40 # the -timeout below fires first, and says which test
     strategy:
-      fail-fast: false # a red shard should not hide the other two's verdicts
+      fail-fast: false # a red shard should not hide the others' verdicts
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     env:
       RACE_TIMEOUT: 30m
       # Listing the tests builds the same binary the shard then runs, so the
