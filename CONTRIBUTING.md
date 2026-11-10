@@ -33,7 +33,7 @@ Those code paths have had subtle data races before.
 ### Keeping the suite fast
 
 CI's race step is the slowest job, and the longest-running packages
-(`pkg/orchestrator`, `pkg/statedb`, `tests/security`) decide how long it takes.
+(`pkg/hubdoctor`, `tests/security`) decide how long it takes.
 `go test` starts packages in the order they are named, so the step (and
 `make test-unit`) lists them through `scripts/race-packages.sh`, longest
 first. If a package starts taking minutes, add it to the script's `slow` list.
@@ -46,7 +46,9 @@ its shard, and the shards' first step fails if a test is selected by no shard,
 or by two. When the shards' times drift apart, refresh the table
 (`scripts/test-durations.py ./pkg/ui/ > scripts/test-durations/pkg-ui.txt`).
 When they all grow, add a shard to the matrix. `make test-unit` still runs the
-whole package.
+whole package. `pkg/orchestrator`, `cmd` and `pkg/statedb` outgrew the race
+step the same way and run in shard jobs of their own, each balanced by its own
+table in `scripts/test-durations/`.
 
 Every package has a time budget. The race step and each shard fail, naming the
 package, when a package takes more than 60% of its 30-minute `-timeout`
