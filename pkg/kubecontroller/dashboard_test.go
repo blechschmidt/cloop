@@ -91,13 +91,17 @@ func TestTheHubIsToldTheVolumeCounts(t *testing.T) {
 		}
 		return false
 	})
-	// A pool without volumes reports none.
-	r2 := newRig(t)
-	r2.hub.setDemand(1)
-	r2.pool("plain", r2.spec())
-	r2.start()
-	r2.eventually("a report", func() bool { return len(r2.hub.storageReports()) > 0 })
-	for _, rep := range r2.hub.storageReports() {
+}
+
+// A pool without volumes reports none. A test of its own: a second rig in one
+// test would set the package's timings under the first rig's running controller.
+func TestAPoolWithoutVolumesReportsNoVolumeCounts(t *testing.T) {
+	r := newRig(t)
+	r.hub.setDemand(1)
+	r.pool("plain", r.spec())
+	r.start()
+	r.eventually("a report", func() bool { return len(r.hub.storageReports()) > 0 })
+	for _, rep := range r.hub.storageReports() {
 		if _, ok := rep["storage"]; ok {
 			t.Fatalf("a pool without volumes reported some: %v", rep)
 		}
