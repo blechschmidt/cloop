@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -62,20 +63,22 @@ func helmBinary(t *testing.T) string {
 	return helm
 }
 
-// chartDir is the chart's directory in this module.
+// chartDir is the chart's directory in this module, found from this source
+// file rather than the working directory, which a test may have changed.
 func chartDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller found no source file")
 	}
+	dir := filepath.Dir(thisFile)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return filepath.Join(dir, "deploy", "helm", "cloop-executor-controller")
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatal("no go.mod above the test's working directory")
+			t.Fatal("no go.mod above " + thisFile)
 		}
 		dir = parent
 	}
@@ -102,6 +105,7 @@ func helmTemplateFiles(t *testing.T, helm string, files []string, set ...string)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, helm, args...)
+	cmd.Dir = filepath.Dir(chartDir(t))
 	tmp := t.TempDir()
 	cmd.Env = append(os.Environ(),
 		"HELM_CACHE_HOME="+filepath.Join(tmp, "cache"),

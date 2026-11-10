@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,11 +68,13 @@ func TestTheControllerChartPassesFlagsTheCommandAccepts(t *testing.T) {
 		}
 		t.Skip("helm is not on PATH, so the executor controller chart cannot be rendered")
 	}
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
+	// From this file, not the working directory: other tests in this package
+	// change directory, and one may leave the process in a removed one.
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller found no source file")
 	}
-	chart := filepath.Join(filepath.Dir(wd), "deploy", "helm", "cloop-executor-controller")
+	chart := filepath.Join(filepath.Dir(thisFile), "..", "deploy", "helm", "cloop-executor-controller")
 
 	for _, tc := range []struct {
 		name string
@@ -92,6 +95,7 @@ func TestTheControllerChartPassesFlagsTheCommandAccepts(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, helm, args...)
+			cmd.Dir = filepath.Dir(chart)
 			tmp := t.TempDir()
 			cmd.Env = append(os.Environ(), "HELM_CACHE_HOME="+filepath.Join(tmp, "cache"),
 				"HELM_CONFIG_HOME="+filepath.Join(tmp, "config"), "HELM_DATA_HOME="+filepath.Join(tmp, "data"))
