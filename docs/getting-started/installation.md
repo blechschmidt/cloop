@@ -21,7 +21,7 @@ credential, and Ollama needs a local server.
 ## Prerequisites
 
 **Go 1.26 or newer.** `go.mod` declares `go 1.26.0` and pins
-`toolchain go1.26.10`. Go 1.21 and later read that line and download the pinned
+`toolchain go1.26.11`. Go 1.21 and later read that line and download the pinned
 toolchain automatically, so any recent Go works. Older versions refuse to build
 the module.
 

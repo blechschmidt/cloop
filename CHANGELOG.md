@@ -12,6 +12,12 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **cloop is built with Go 1.26.11**, for GO-2026-6859 ("HTTP/1 server crash
+  due to MaxBytesReader header race in net/http"). The hub's HTTP server
+  reads request bodies through `http.MaxBytesReader`, as does the git proxy,
+  and Go 1.26.10 is affected. `go.mod` now pins `toolchain go1.26.11`
+  (Task 20492).
+
 - **Revoking an executor pool, or the controller credential that minted its
   runners, now revokes the leases those runners hold everywhere, and the
   audit trail records it.** The revocation was pushed only to runners
