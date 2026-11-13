@@ -258,7 +258,17 @@
         '</div>';
     }
 
-    return h.mount({open: loadAssistantHistory, clear: clearAssistantPanel, ask: chipAsk, grow: autoGrow, submit: submitAssistantChat}, 'assistant', `
+    // The newest message stays in view while the list changes size — the
+    // box growing as a question is typed, a bar appearing above, the window
+    // resized — for a reader who was at it (Task 20492); one who scrolled up
+    // is left where they were. The Chat tab's pinToNewest.
+    function pinToNewest(box) {
+      let atEnd = true;
+      box.addEventListener('scroll', () => { atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 4; });
+      new ResizeObserver(() => { if (atEnd) box.scrollTop = box.scrollHeight; }).observe(box);
+    }
+
+    const fns = h.mount({open: loadAssistantHistory, clear: clearAssistantPanel, ask: chipAsk, grow: autoGrow, submit: submitAssistantChat}, 'assistant', `
     <div class="chat-layout">
       <div class="chat-header">
         <span class="section-title" style="margin:0">&#129302; Plan Assistant</span>
@@ -292,5 +302,7 @@
       </div>
     </div>
     `);
+    pinToNewest(document.getElementById('assistantMessages'));
+    return fns;
   };
 })();

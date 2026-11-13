@@ -1050,6 +1050,22 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **The Chat and Assistant tabs fit the window, and the box you type in is
+  always on screen.** Both tabs were sized as the window's height less 120
+  pixels, a guess at the header's height. The header is taller than that
+  wherever its tabs wrap, and the keyboard shortcut bar is fixed over the
+  bottom of the window, so on a laptop the page scrolled and the input sat
+  under the shortcut bar until you scrolled down to it. On either tab the
+  page no longer scrolls: the conversation takes the room the header, any
+  banner and the shortcut bar leave, only the messages scroll, and the input
+  stays at the bottom. The newest message stays in view when a bar appears
+  above the conversation, the window is resized or the Assistant's box grows
+  with a long question. A window too short for the input and a few messages
+  keeps the message list at its minimum height and lets the page scroll
+  instead. A new browser test checks both tabs at laptop, desktop, tablet and
+  phone sizes, at 125% and 150% display scaling and in short windows
+  (Task 20492).
+
 - **Runs that cloop started with `--pm` start again.** A project created in
   the dashboard with *PM mode* and *Start run immediately* ticked,
   `cloop watch --auto-run`, `cloop serve`'s `/run/start` with `"pm": true`,

@@ -1625,12 +1625,21 @@
   .proj-actions .btn { padding: 4px 10px; font-size: 12px; }
 
   /* ── Chat panel ── */
-  .chat-layout {
-    display: flex;
-    flex-direction: column;
-    height: calc(100vh - 120px);
-    min-height: 400px;
-  }
+  /* On the Chat and Assistant tabs the page does not scroll (Task 20492).
+     The body is a column the height of the viewport: the shortcut footer
+     takes its last row instead of covering the bottom of the page, and every
+     box down to the message list fills what the one above it leaves, so only
+     the messages scroll and the input stays on screen. The tabs used to be
+     the viewport less a guess at the header, calc(100vh - 120px), which put
+     the input under the footer on a 1920x1200 laptop. A zero flex basis
+     keeps each box's minimum at its controls plus the list's min-height, so
+     a window shorter than that scrolls instead of squeezing the input out. */
+  .chat-layout { display: flex; flex-direction: column; }
+  body:has(.tab-panel.active > .chat-layout) { display: flex; flex-direction: column; height: 100dvh; padding-bottom: env(safe-area-inset-bottom); }
+  body:has(.tab-panel.active > .chat-layout) :is(.layout, main, .tab-panel.active, .chat-layout, .chat-messages) { flex: 1 1 0; }
+  body:has(.tab-panel.active > .chat-layout) :is(main, .tab-panel.active) { display: flex; flex-direction: column; }
+  body:has(.tab-panel.active > .chat-layout) .layout { min-height: auto; }
+  body:has(.tab-panel.active > .chat-layout) #kb-footer { position: static; }
   .chat-header {
     display: flex;
     align-items: center;
@@ -1662,6 +1671,7 @@
   .chat-tts-label input { accent-color: var(--accent); }
   .chat-messages {
     flex: 1;
+    min-height: 120px;
     overflow-y: auto;
     padding: 16px 0;
     display: flex;
@@ -2176,7 +2186,6 @@
     #timelineChart svg { min-width: 560px; }
 
     /* Chat */
-    .chat-layout { height: calc(100vh - 160px); }
     .chat-bubble { max-width: 88%; }
 
     /* Controls strip */

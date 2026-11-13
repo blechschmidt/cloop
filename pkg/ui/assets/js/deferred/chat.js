@@ -250,7 +250,17 @@
       if (chatVoiceRecording) stopChatVoice();
     });
 
-    return h.mount({open: loadChatHistory, toggleTTS, clear: clearChatHistory, toggleVoice: toggleChatVoice, submit: submitChat, stopVoice: stopChatVoice, cancelVoice: cancelChatVoice}, 'chat', `
+    // pinToNewest keeps the newest message in view while the list changes
+    // size — a bar appearing above the chat, the recording bar below it, the
+    // window resized — for a reader who was at the newest message (Task
+    // 20492). One who scrolled up to an older one is left where they were.
+    function pinToNewest(box) {
+      let atEnd = true;
+      box.addEventListener('scroll', () => { atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 4; });
+      new ResizeObserver(() => { if (atEnd) box.scrollTop = box.scrollHeight; }).observe(box);
+    }
+
+    const fns = h.mount({open: loadChatHistory, toggleTTS, clear: clearChatHistory, toggleVoice: toggleChatVoice, submit: submitChat, stopVoice: stopChatVoice, cancelVoice: cancelChatVoice}, 'chat', `
     <div class="chat-layout">
       <div class="chat-header">
         <span class="section-title" style="margin:0">AI Chat</span>
@@ -291,5 +301,7 @@
       </div>
     </div>
     `);
+    pinToNewest(document.getElementById('chatMessages'));
+    return fns;
   };
 })();
