@@ -1066,6 +1066,32 @@ schema and the hub's HTTP API may change in any release.
   phone sizes, at 125% and 150% display scaling and in short windows
   (Task 20492).
 
+- **The dashboard's Chat tab runs what you ask it to.** Every message sent
+  there ended in "Cancelled.": the hub ran `cloop do` with the message, which
+  asked "Execute the command above? [y/N]" on a terminal the hub's workload
+  does not have, read nothing and cancelled, and the hub still answered as if
+  it had worked, so the tab refreshed the page and, with TTS on, read the
+  cancellation aloud. Sending the message is the decision, as it always was
+  for the tab's voice commands, so the hub now passes `--yes`, and `--` so
+  that a message starting with a dash stays text. The reply still quotes the
+  command that ran. Without `--yes` and without a terminal, `cloop do` now
+  says it cannot ask and stops before calling the model (Task 48).
+
+- **Migrations that a reused version number skipped are applied.** Two
+  migrations had been given the same number on separate lines of work, and the
+  apply loop compares only the number, so whichever arrived second never ran
+  on a database that already had the first. Such databases lacked tables and
+  columns the current binary expects, `autoupdate_policy` among them, and
+  cloop warned on every start that the operator should renumber the migration
+  and re-apply it by hand, which nobody holding a database can do. Opening a
+  database now applies a migration it skipped, matched by name: only a
+  migration that database never applied runs, each in one transaction, and an
+  `ADD COLUMN` that a near-identical migration already made is adopted rather
+  than failing. The repair is recorded in a new `schema_migration_repairs`
+  table beside the original record, and a repaired database stops warning. A
+  repair that cannot be made leaves the database open with the old warning
+  (Task 48).
+
 - **Runs that cloop started with `--pm` start again.** A project created in
   the dashboard with *PM mode* and *Start run immediately* ticked,
   `cloop watch --auto-run`, `cloop serve`'s `/run/start` with `"pm": true`,
