@@ -175,12 +175,12 @@ func recoverSkipped(db *sql.DB, m migration, displaced string) error {
 		}
 		if ok {
 			if err := add.apply(tx); err != nil {
-				return fmt.Errorf("statement %d: %w\n--- SQL ---\n%s", i+1, err, stmt)
+				return fmt.Errorf("statement %d: %w", i+1, err)
 			}
 			continue
 		}
 		if _, err := tx.Exec(stmt); err != nil {
-			return fmt.Errorf("statement %d: %w\n--- SQL ---\n%s", i+1, err, stmt)
+			return fmt.Errorf("statement %d: %w", i+1, err)
 		}
 	}
 
@@ -203,6 +203,12 @@ func recoverSkipped(db *sql.DB, m migration, displaced string) error {
 
 // reportRepairFailure prints why a divergence could not be repaired, once per
 // process, so the warning that follows it is not the whole story.
+//
+// One line, and the statement is named rather than quoted. Unlike a migration
+// that fails on the way in — where the developer who wrote the SQL is the
+// reader and wants to see it — the reader here is an operator holding a
+// database, the file is named, and the line travels: this is stderr from a
+// sub-binary the Web UI merges into a chat reply.
 //
 // Deduplicated on the same key and for the same reason as the warning itself:
 // a single command opens statedb more than once, and one problem should read

@@ -569,6 +569,61 @@ func TestRepairAdoptsAColumnTheDisplacingSiblingAlreadyAdded(t *testing.T) {
 	}
 }
 
+// TestARepairThatCannotBeMadeIsNotFatal is the safety net under the whole
+// repair path, and the reason it is allowed to run unattended on every open.
+//
+// Migrate is called by Open, which every cloop process does before it does
+// anything else. If a repair that fails took the database down with it, a
+// divergence — today a warning an operator can act on at their leisure —
+// would become every hub refusing to start. So a repair that cannot be made
+// must leave exactly the state that existed before repairs did: the database
+// open, the divergence reported, the warning printed.
+func TestARepairThatCannotBeMadeIsNotFatal(t *testing.T) {
+	db := openRaw(t, filepath.Join(t.TempDir(), "state.db"))
+	if _, err := Migrate(db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// 0047_executor_sandbox_network.sql adds a column to executor_sandbox.
+	// Take the table away and the statement cannot run at all — no adoption,
+	// no idempotent reading of it, just SQLite refusing.
+	if _, err := db.Exec(`DROP TABLE executor_sandbox`); err != nil {
+		t.Fatalf("stage the unrepairable divergence: %v", err)
+	}
+	if _, err := db.Exec(
+		`UPDATE schema_migrations SET name = ? WHERE version = ?`,
+		"0047_somebody_elses_change.sql", 47,
+	); err != nil {
+		t.Fatalf("stage the divergence: %v", err)
+	}
+
+	report, err := Migrate(db)
+	if err != nil {
+		t.Fatalf("a failed repair must not refuse the database — that would turn a warning "+
+			"into an outage for every process that opens it: %v", err)
+	}
+	if len(report.Recovered) != 0 {
+		t.Errorf("Recovered = %+v, want nothing: the repair could not be made", report.Recovered)
+	}
+	if len(report.Divergent) != 1 || report.Divergent[0].Version != 47 {
+		t.Fatalf("Divergent = %+v, want the unrepaired version 47 still reported",
+			report.Divergent)
+	}
+
+	// And it is not recorded as repaired, so the next open tries again rather
+	// than believing a repair that never happened.
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM schema_migration_repairs WHERE name = ?`,
+		"0047_executor_sandbox_network.sql").Scan(&n); err != nil {
+		t.Fatalf("read schema_migration_repairs: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("the failed repair was recorded as done (%d rows); the next open would "+
+			"skip it and the migration would stay missing for good", n)
+	}
+}
+
 // mustHaveTable reports whether the database holds a table of that name,
 // failing the test if the question itself cannot be asked.
 func mustHaveTable(t *testing.T, db *sql.DB, name string) bool {
