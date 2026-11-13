@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/clarify"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/nlcli"
 	"github.com/blechschmidt/cloop/pkg/provider"
@@ -42,6 +43,26 @@ Examples:
 		input := strings.TrimSpace(strings.Join(args, " "))
 		if input == "" {
 			return fmt.Errorf("instruction cannot be empty")
+		}
+
+		// Nobody can answer a prompt down a pipe. The confirmation below is a
+		// fmt.Scanln, and on a stdin that is closed or redirected it returns
+		// at once with an empty answer — which is not "y", so the command was
+		// cancelled. Every non-interactive caller therefore got a confident
+		// "Cancelled." for a command it was never given the chance to approve,
+		// with nothing to say the question had been put to something that
+		// cannot speak. The Web UI's AI Chat panel ran this way for its whole
+		// life: it dispatches `cloop do` through pkg/executor, which has no
+		// terminal on either end, so every message a user ever sent it came
+		// back as the resolved command followed by "Cancelled." (Task 48).
+		//
+		// Refuse instead, and refuse here rather than after the interpretation
+		// — a confirmation that cannot be given will not become possible by
+		// spending a provider call first.
+		if !doYes && !clarify.IsTTY() {
+			return fmt.Errorf("stdin is not a terminal, so the confirmation prompt cannot be " +
+				"answered and the interpreted command would never run. Pass --yes to execute it " +
+				"without asking")
 		}
 
 		workdir, _ := os.Getwd()

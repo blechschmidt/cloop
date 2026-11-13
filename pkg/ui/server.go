@@ -5853,9 +5853,24 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Run cloop do <message> to parse and execute the intent. The subprocess
 	// is bound by both r.Context() (browser tab close = SIGKILL the child) and
 	// a hard timeout so a wedged provider call can't pin this goroutine.
+	//
+	// --yes is not a convenience here, it is the only way this handler works
+	// at all. `cloop do` otherwise prints "Execute the command above? [y/N]"
+	// and reads stdin — which, for a workload dispatched through an executor,
+	// is never a terminal. The read returned nothing, nothing is not "y", and
+	// every message anyone ever sent to this chat came back as the resolved
+	// command followed by "Cancelled." with ok=true (Task 48). The user's
+	// decision is the message they sent; the prompt is a terminal affordance
+	// that no transport reaches this handler through, and `cloop listen` —
+	// the voice half of the very same panel — has always executed without it.
+	// The reply still quotes the command that ran, so an interpretation that
+	// missed is visible rather than silent.
+	//
+	// "--" ends the flags, so a message that happens to open with a dash is
+	// the instruction to interpret and not an option to this binary.
 	exe := s.selfExe()
 	out, cmdErr := runCloopSubcommandFor(r.Context(), exe, chatWorkDir, chatSubprocessTimeout,
-		s.claudeEnvResolver(r), chatClear, "do", msg)
+		s.claudeEnvResolver(r), chatClear, "do", "--yes", "--", msg)
 	output := strings.TrimSpace(string(out))
 
 	ok := cmdErr == nil
