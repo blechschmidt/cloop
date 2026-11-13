@@ -128,8 +128,15 @@ type MigrationReport struct {
 	BaselineApplied bool  // true when an existing pre-framework DB was adopted at v1
 
 	// Divergent names a version this database recorded under a different
-	// migration file than this binary embeds. See checkNames.
+	// migration file than this binary embeds, and whose embedded migration is
+	// therefore still missing from it. See checkNames.
 	Divergent []VersionDivergence
+
+	// Recovered names a divergence this run repaired: the embedded migration
+	// the reused number had skipped has now been applied. See repair.go. A
+	// divergence repaired by an earlier run appears in neither list, because
+	// nothing is missing any more.
+	Recovered []VersionDivergence
 }
 
 // VersionDivergence is one version whose recorded name is not the name this
@@ -285,8 +292,21 @@ func MigrateWithOptions(db *sql.DB, opts MigrateOptions) (*MigrationReport, erro
 		// next statement will surface with a better message.
 		return report, nil
 	}
-	report.Divergent = div
-	for _, d := range div {
+	// A divergence is a migration this database never ran, so repair it rather
+	// than only name it (Task 48, repair.go). What is left afterwards is what
+	// could not be repaired, and only that still warrants the warning — a
+	// repaired version is no longer missing anything.
+	remaining, recovered := recoverDivergent(db, migrations, div)
+	report.Divergent = remaining
+	report.Recovered = recovered
+
+	for _, d := range recovered {
+		fmt.Fprintf(os.Stderr,
+			"notice: schema version %d was applied from %q, so this build's %q had been skipped; "+
+				"it has now been applied and recorded in schema_migration_repairs.\n",
+			d.Version, d.Recorded, d.Embedded)
+	}
+	for _, d := range remaining {
 		if divergenceAlreadyWarned(d) {
 			continue
 		}

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -423,19 +424,160 @@ func TestMigrateNamesADivergentVersion(t *testing.T) {
 		t.Fatalf("Migrate must not refuse a divergent name — that would turn a fixable "+
 			"skew into an outage: %v", err)
 	}
-	if len(report.Divergent) != 1 {
-		t.Fatalf("Divergent = %+v, want exactly the one version whose name was rewritten",
-			report.Divergent)
+	// Since Task 48 the finding is repaired as well as named, so it arrives in
+	// Recovered. Divergent keeps its meaning — a migration still missing — and
+	// is therefore empty here.
+	if len(report.Recovered) != 1 {
+		t.Fatalf("Recovered = %+v, want exactly the one version whose name was rewritten",
+			report.Recovered)
 	}
-	got := report.Divergent[0]
+	got := report.Recovered[0]
 	if got.Version != victim.Version || got.Embedded != victim.Name {
-		t.Errorf("Divergent[0] = %+v, want version %d embedded as %q",
+		t.Errorf("Recovered[0] = %+v, want version %d embedded as %q",
 			got, victim.Version, victim.Name)
 	}
 	if got.Recorded != "0999_somebody_elses_change.sql" {
-		t.Errorf("Divergent[0].Recorded = %q, want the name the database actually holds",
+		t.Errorf("Recovered[0].Recorded = %q, want the name the database actually holds",
 			got.Recorded)
 	}
+	if len(report.Divergent) != 0 {
+		t.Errorf("Divergent = %+v, want nothing: the skipped migration has been applied",
+			report.Divergent)
+	}
+
+	// The recorded name is history and must survive the repair: version N
+	// really was applied from the other file. Overwriting it would destroy the
+	// only evidence of what happened.
+	var recorded string
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE version = ?`,
+		victim.Version).Scan(&recorded); err != nil {
+		t.Fatalf("read back the recorded name: %v", err)
+	}
+	if recorded != "0999_somebody_elses_change.sql" {
+		t.Errorf("schema_migrations.name = %q after repair, want the name the database "+
+			"actually applied", recorded)
+	}
+
+	// And the repair is not repeated: a second open finds the bookkeeping row
+	// and reports nothing at all, which is what stops the warning recurring on
+	// every start for the life of the database.
+	again, err := Migrate(db)
+	if err != nil {
+		t.Fatalf("Migrate (second): %v", err)
+	}
+	if len(again.Recovered) != 0 || len(again.Divergent) != 0 {
+		t.Errorf("second Migrate reported Recovered=%+v Divergent=%+v, want both empty",
+			again.Recovered, again.Divergent)
+	}
+}
+
+// TestMigrateRepairsASkippedMigrationsEffects is the half of the repair that
+// matters to the running hub: not the bookkeeping, but the table that was
+// missing.
+//
+// It stages the real failure — the version number is recorded, so the apply
+// loop skips the file, and the object the binary expects is simply not there
+// — and asserts that opening the database puts it back.
+func TestMigrateRepairsASkippedMigrationsEffects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db := openRaw(t, path)
+
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	// 0048_autoupdate_policy.sql is the migration this deployment actually
+	// lost, to a sibling that took version 48 first; it creates one table,
+	// which makes "was it applied" a question with a yes/no answer.
+	var victim migration
+	for _, m := range migs {
+		if m.Name == "0048_autoupdate_policy.sql" {
+			victim = m
+		}
+	}
+	if victim.Name == "" {
+		t.Skip("0048_autoupdate_policy.sql is no longer embedded")
+	}
+
+	// Migrate to just before it, then record its version under the name of the
+	// file that beat it to the number. That is precisely the state a
+	// duplicate-numbered pair leaves behind.
+	if _, err := MigrateTo(db, victim.Version-1); err != nil {
+		t.Fatalf("MigrateTo(%d): %v", victim.Version-1, err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO schema_migrations(version, applied_at, name, applied_by, compat)
+		 VALUES (?, ?, ?, ?, ?)`,
+		victim.Version, time.Now().UTC().Format(time.RFC3339Nano),
+		"0048_egress_firewall_rules.sql", "test", "additive",
+	); err != nil {
+		t.Fatalf("stage the skipped migration: %v", err)
+	}
+
+	if mustHaveTable(t, db, "autoupdate_policy") {
+		t.Fatal("staging is wrong: the table the skipped migration creates is already there")
+	}
+
+	report, err := Migrate(db)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !mustHaveTable(t, db, "autoupdate_policy") {
+		t.Fatalf("the skipped migration's table is still missing after Migrate; "+
+			"Recovered=%+v Divergent=%+v", report.Recovered, report.Divergent)
+	}
+	if len(report.Divergent) != 0 {
+		t.Errorf("Divergent = %+v, want nothing left missing", report.Divergent)
+	}
+}
+
+// TestRepairAdoptsAColumnTheDisplacingSiblingAlreadyAdded covers the collision
+// the repair exists to survive.
+//
+// A migration that lost its number to a near-twin is replayed against a
+// database the twin already changed, so its ALTER TABLE ... ADD COLUMN meets
+// its own column. SQLite has no idempotent spelling for that statement and
+// fails the whole transaction with "duplicate column name"; the repair runs it
+// through addcolumn.go instead, which adopts a column of the declared shape.
+func TestRepairAdoptsAColumnTheDisplacingSiblingAlreadyAdded(t *testing.T) {
+	db := openRaw(t, filepath.Join(t.TempDir(), "state.db"))
+	if _, err := Migrate(db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// sessions.claims_as_of is added by 0038_session_claim_freshness.sql, and
+	// on the hub's own database that file lost version 38 while its columns
+	// arrived anyway under 39. Reproduce both halves: the column is present,
+	// and the migration that declares it is recorded under someone else's name.
+	if _, err := db.Exec(
+		`UPDATE schema_migrations SET name = ? WHERE version = ?`,
+		"0038_somebody_elses_change.sql", 38,
+	); err != nil {
+		t.Fatalf("stage the divergence: %v", err)
+	}
+
+	report, err := Migrate(db)
+	if err != nil {
+		t.Fatalf("Migrate must not fail on a column that is already there: %v", err)
+	}
+	if len(report.Divergent) != 0 {
+		t.Errorf("Divergent = %+v, want the repair to have adopted the existing column",
+			report.Divergent)
+	}
+	if len(report.Recovered) != 1 || report.Recovered[0].Version != 38 {
+		t.Errorf("Recovered = %+v, want version 38 repaired", report.Recovered)
+	}
+}
+
+// mustHaveTable reports whether the database holds a table of that name,
+// failing the test if the question itself cannot be asked.
+func mustHaveTable(t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+	ok, err := tableExists(db, name)
+	if err != nil {
+		t.Fatalf("look for table %s: %v", name, err)
+	}
+	return ok
 }
 
 // TestMigrateReportsNoDivergenceOnACleanDatabase keeps the check from warning

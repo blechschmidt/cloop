@@ -42,6 +42,16 @@ import (
 var addColumnIfNotExistsRE = regexp.MustCompile(
 	`(?is)^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+(?:COLUMN\s+)?IF\s+NOT\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)\s+(\S.*)$`)
 
+// addColumnRE matches a plain ALTER TABLE ... ADD COLUMN — the form SQLite
+// does execute, and so the form migrations are normally written in. Only the
+// repair path in repair.go parses it: a migration that a reused version number
+// skipped is replayed long after its sibling took the number, and that sibling
+// has often already added the very column this statement declares. Running it
+// through the idempotent path turns that collision from a failed repair into
+// an adopted column, and still refuses a column of some other shape.
+var addColumnRE = regexp.MustCompile(
+	`(?is)^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+(?:COLUMN\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+(\S.*)$`)
+
 // addColumnIfNotExists is one parsed ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
 type addColumnIfNotExists struct {
 	table, column, declaration string
@@ -51,6 +61,26 @@ type addColumnIfNotExists struct {
 // Any other statement, including a plain ADD COLUMN, is not one.
 func parseAddColumnIfNotExists(stmt string) (addColumnIfNotExists, bool) {
 	m := addColumnIfNotExistsRE.FindStringSubmatch(strings.TrimSpace(stmt))
+	if m == nil {
+		return addColumnIfNotExists{}, false
+	}
+	return addColumnIfNotExists{table: m[1], column: m[2], declaration: strings.TrimSpace(m[3])}, true
+}
+
+// parseAddColumn recognises a plain ADD COLUMN and returns it as the
+// idempotent form, so a caller that must tolerate the column already existing
+// can apply it that way. Any other statement is not one.
+//
+// The IF NOT EXISTS spelling is rejected here rather than accepted, because
+// addColumnRE would read its "IF" as the column name. Callers try
+// parseAddColumnIfNotExists first; this only has to decline what that one
+// claims.
+func parseAddColumn(stmt string) (addColumnIfNotExists, bool) {
+	s := strings.TrimSpace(stmt)
+	if _, ok := parseAddColumnIfNotExists(s); ok {
+		return addColumnIfNotExists{}, false
+	}
+	m := addColumnRE.FindStringSubmatch(s)
 	if m == nil {
 		return addColumnIfNotExists{}, false
 	}
