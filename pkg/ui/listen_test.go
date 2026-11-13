@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/statedbtest"
 	"github.com/blechschmidt/cloop/pkg/exposure"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 )
@@ -46,7 +47,7 @@ func TestRunRefusesAnOpenHubBeyondLoopback(t *testing.T) {
 // binds 127.0.0.1 — not the wildcard every hub bound before Task 20393.
 func TestRunBindsLoopbackWithoutSignIn(t *testing.T) {
 	t.Parallel()
-	addr := runAndReadBoundAddr(t, New(t.TempDir(), pickFreePort(t), ""))
+	addr := runAndReadBoundAddr(t, New(statedbtest.Dir(t), pickFreePort(t), ""))
 	if !addr.IP.Equal(net.IPv4(127, 0, 0, 1)) {
 		t.Fatalf("an open hub bound %v, want 127.0.0.1", addr)
 	}
@@ -56,7 +57,7 @@ func TestRunBindsLoopbackWithoutSignIn(t *testing.T) {
 // so an authenticated deployment that never named an address is unchanged.
 func TestRunBindsEveryInterfaceWithSignIn(t *testing.T) {
 	t.Parallel()
-	addr := runAndReadBoundAddr(t, New(t.TempDir(), pickFreePort(t), "s3cret-token"))
+	addr := runAndReadBoundAddr(t, New(statedbtest.Dir(t), pickFreePort(t), "s3cret-token"))
 	if !addr.IP.IsUnspecified() {
 		t.Fatalf("a token-protected hub bound %v, want every interface", addr)
 	}
@@ -64,6 +65,10 @@ func TestRunBindsEveryInterfaceWithSignIn(t *testing.T) {
 
 // runAndReadBoundAddr starts srv, waits until it answers on loopback, and
 // returns the address its listener holds. The server is shut down on cleanup.
+// Give it a migrated control plane (statedbtest.Dir): in an empty directory the
+// hub's pool janitor creates and migrates one in its first seconds while
+// holding the lock Shutdown takes next, so a shutdown then waits about 5 s
+// here, and past the 10 s bound below under -race on a busy runner.
 func runAndReadBoundAddr(t *testing.T, srv *Server) *net.TCPAddr {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
