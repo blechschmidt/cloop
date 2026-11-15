@@ -462,6 +462,34 @@ func TestTheProjectsListSaysAProjectIsMoving(t *testing.T) {
 	}
 }
 
+// TestAStoppingServerReadsNoMoreMoves: once Shutdown has begun, a projects
+// list opens the control plane no more to read the open moves. One sent
+// while the server stood down, after a lost lease say, would otherwise open
+// the database after Run returned, recreating it in a directory its owner
+// was removing.
+func TestAStoppingServerReadsNoMoreMoves(t *testing.T) {
+	t.Setenv(multiui.EnvRoot, t.TempDir())
+	dir := setupProjectDir(t, "stopping", nil)
+	db := hubWithControlPlane(t, dir)
+	srv := New(dir, 0, "")
+	if _, err := db.CreateProjectMove(statedb.ProjectMoveRow{ID: "99aa99aa99aa99aa", ProjectPath: dir, Phase: "capture",
+		TargetBinding: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	srv.dropMovingIndex()
+	if got := srv.movingProjects(); len(got) != 1 {
+		t.Fatalf("a running server's open moves = %v, want the one recorded", got)
+	}
+	srv.stopMovingIndex()
+	if got := srv.movingProjects(); len(got) != 1 {
+		t.Errorf("a stopping server forgot what it knew: %v", got)
+	}
+	srv.dropMovingIndex()
+	if got := srv.movingProjects(); len(got) != 0 {
+		t.Errorf("a stopping server read the open moves again: %v", got)
+	}
+}
+
 // wsCollector reads one WebSocket's messages of one type.
 type wsCollector struct {
 	mu   sync.Mutex

@@ -56,6 +56,9 @@ type movingIndex struct {
 	mu sync.Mutex
 	at time.Time
 	by map[string]multiui.MovingStatus
+	// stopped: the server is shutting down, so the index opens the control
+	// plane no more (stopMovingIndex).
+	stopped bool
 }
 
 // movingProjects returns the open moves by the path of the project they move.
@@ -64,10 +67,13 @@ type movingIndex struct {
 func (s *Server) movingProjects() map[string]multiui.MovingStatus {
 	s.moving.mu.Lock()
 	defer s.moving.mu.Unlock()
-	if s.moving.by != nil && time.Since(s.moving.at) < movingIndexTTL {
+	if s.moving.by != nil && (s.moving.stopped || time.Since(s.moving.at) < movingIndexTTL) {
 		return s.moving.by
 	}
 	by := map[string]multiui.MovingStatus{}
+	if s.moving.stopped {
+		return by
+	}
 	if _, err := os.Stat(state.DBPath(s.WorkDir)); err == nil {
 		db, err := s.controlPlaneDB()
 		var moves []projectmove.Move
@@ -94,6 +100,17 @@ func (s *Server) movingProjects() map[string]multiui.MovingStatus {
 	}
 	s.moving.by, s.moving.at = by, time.Now()
 	return by
+}
+
+// stopMovingIndex is Shutdown's: it waits out a read of the open moves in
+// flight, which holds the index's lock from opening the control plane to
+// closing it, and lets none open it again. Without it a projects list sent
+// while the server stood down could open the database after Run returned,
+// recreating files in a directory its owner was removing.
+func (s *Server) stopMovingIndex() {
+	s.moving.mu.Lock()
+	s.moving.stopped = true
+	s.moving.mu.Unlock()
 }
 
 // dropMovingIndex forgets the cached open moves: a move started, moved on or

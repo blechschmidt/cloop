@@ -1782,6 +1782,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// still writing health rows into a database handle that is about to be
 	// closed under it.
 	stopExecutorSupervisor()
+	// Nor read open moves for a projects list sent from here on: that read
+	// opens the control plane on its own handle (Task 20496).
+	s.stopMovingIndex()
 	// And take no more failovers: the runs this server follows are being
 	// handed to whichever member adopts them.
 	unregisterRunServer(s)
