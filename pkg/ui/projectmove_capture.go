@@ -242,6 +242,11 @@ func (d *moveDriver) captureFromDevice(ctx context.Context, m projectmove.Move, 
 	if _, held := d.s.agentHeldByPeer(device); held {
 		return errMoveElsewhere
 	}
+	// A hub that restarted part-way through the move resumes it before the
+	// device's agent has reconnected (Task 20497).
+	if err := waitForAgent(ctx, device, func() bool { _, held := d.s.agentHeldByPeer(device); return held }); err != nil {
+		return err
+	}
 	rec.From = "device " + device.ID()
 	if ex.ID() != device.ID() {
 		rec.From += " (virtual executor " + ex.ID() + ")"

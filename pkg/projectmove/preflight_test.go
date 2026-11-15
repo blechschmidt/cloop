@@ -238,6 +238,12 @@ func TestProjectFileFindings(t *testing.T) {
 				{KindProjectFiles, SeverityWillCarry, "feature widget: checkpoints"},
 				{KindProjectFiles, SeverityWarning, "report.pdf"},
 			}},
+		// Task 20497: the finding says which of the listed files never leave.
+		{name: "the configuration is listed and never sent", setup: func(e *fakeEnv) {
+			files(e)
+			e.tree.Files.Categories = append(e.tree.Files.Categories, FileCategory{Name: FilesConfig, Files: 1, Bytes: 260})
+		},
+			wants: []want{{KindProjectFiles, SeverityWillCarry, "never sent to the target — the project's configuration (.cloop/config.yaml): the project's configuration can hold API keys"}}},
 		{name: "the outbox is no concern when the tree stays", target: "box", setup: files,
 			wants: []want{{KindProjectFiles, SeverityWillCarry, "stay where they are"}},
 			none:  nil},
@@ -763,6 +769,22 @@ func TestDeviceSourceFindings(t *testing.T) {
 		{name: "the hub's directory holding a working copy blocks", target: "local", blocked: true,
 			setup: func(e *fakeEnv) { onDev1(e); e.hubEntries = []string{".git", "README.md"} },
 			wants: []want{{KindTarget, SeverityBlocker, "already holds 2 entr(ies)"}}},
+		// Task 20497: the copy a move left there, untouched, is rebuilt in
+		// place; one changed since still blocks, saying what changed.
+		{name: "the copy the project left in the hub's directory is rebuilt in place", target: "local",
+			setup: func(e *fakeEnv) {
+				onDev1(e)
+				e.hubEntries = []string{".git", "README.md"}
+				e.leftBehind = &LeftBehindCopy{MoveID: "5eedc0de5eedc0de", Target: "dev1"}
+			},
+			wants: []want{{KindTarget, SeverityWillCarry, "move 5eedc0de5eedc0de captured there"}}},
+		{name: "the copy the project left in the hub's directory, changed since, blocks", target: "local", blocked: true,
+			setup: func(e *fakeEnv) {
+				onDev1(e)
+				e.hubEntries = []string{".git", "README.md"}
+				e.leftBehind = &LeftBehindCopy{MoveID: "5eedc0de5eedc0de", Target: "dev1", Problems: []string{"files on disk changed"}}
+			},
+			wants: []want{{KindTarget, SeverityBlocker, "files on disk changed"}}},
 		{name: "a Pod would never see a device's changes", target: "k8s", blocked: true, setup: onDev1,
 			wants: []want{
 				{KindWorkingTree, SeverityBlocker, "from the forge"},

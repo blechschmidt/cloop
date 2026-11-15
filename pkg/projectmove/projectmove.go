@@ -143,8 +143,13 @@ type Env interface {
 	SourceTree(ctx context.Context, project Project, features []Feature, source Endpoint) (Tree, error)
 	// HubDirEntries lists what the project's directory on the hub holds
 	// besides .cloop: a move from a device seeds the hub's own directory
-	// only when it holds nothing else.
+	// only when it holds nothing else, or the copy an earlier move left.
 	HubDirEntries(ctx context.Context, project Project) ([]string, error)
+	// LeftBehind reports the copy of the project the hub's directory still
+	// holds from an earlier move that took the project off the hub, and how
+	// the directory differs from that move's capture; nil when no move on
+	// record left one (Task 20497).
+	LeftBehind(ctx context.Context, project Project) (*LeftBehindCopy, error)
 	// Pool returns what the hub knows about an executor pool, for this
 	// project and caller.
 	Pool(ctx context.Context, poolID string, project Project) (PoolFacts, error)

@@ -206,6 +206,11 @@ func applyWorkspaceFor(spec executor.Spec, ex executor.Executor, workDir string,
 		// pinned to the commit the push is measured against.
 		spec, ws = applyPushWriteBack(spec, ws, ex, workDir, origin)
 	}
+	// A working copy a project move placed on this executor is the project's
+	// own: the run starts from it, not from the forge's tip (Task 20497).
+	// Not where the run's work is pushed back, which is measured from the
+	// commit the workspace was just pinned to.
+	ws.Keep = keepsMovedCopy(spec, workDir, ex)
 
 	// Validate here rather than leaving it to the driver. Everything in ws was
 	// derived from files on disk, so a repository whose branch name git accepts

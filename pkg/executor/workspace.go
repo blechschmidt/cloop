@@ -185,6 +185,14 @@ type Workspace struct {
 	// feature's. Metadata only: the bundle's bytes travel beside the Spec, as
 	// Spec.BranchBundleFile on the hub and as chunk frames on the wire.
 	Branch *BranchBundle `json:"branch_bundle,omitempty"`
+	// Keep says the checkout already on the executor is the project's own
+	// working copy, which a project move placed there (Task 20497): the
+	// branch it is on, the commits no remote has and its uncommitted
+	// changes are the project's work, and the run starts from them. A
+	// checkout found there is fetched into, so its remote-tracking branches
+	// are current, and nothing is checked out over it. With no checkout
+	// there, the tree is cloned as without it. Kind git only.
+	Keep bool `json:"keep,omitempty"`
 }
 
 // UpstreamRepo returns the repository the workspace is a checkout of: Upstream
@@ -267,8 +275,15 @@ func (w Workspace) Validate() error {
 				ErrInvalidSpec, w.Kind)
 		case strings.TrimSpace(w.Upstream) != "":
 			return fmt.Errorf("%w: workspace upstream is set but kind is %q, not git", ErrInvalidSpec, w.Kind)
+		case w.Keep:
+			return fmt.Errorf("%w: workspace keep is set but kind is %q, not git", ErrInvalidSpec, w.Kind)
 		}
 		return nil
+	}
+	if w.Keep && w.Branch != nil {
+		// A shipped branch is built afresh every time, over whatever the
+		// directory held: there is no working copy of the project's to keep.
+		return fmt.Errorf("%w: workspace keep cannot be set with a shipped branch", ErrInvalidSpec)
 	}
 
 	if _, err := w.parseRepo(); err != nil {
@@ -409,6 +424,9 @@ func (w Workspace) Describe() string {
 		}
 		if w.Branch != nil {
 			s += ", then " + w.Branch.Describe()
+		}
+		if w.Keep {
+			s += ", keeping the working copy a move placed there"
 		}
 		return s
 	case WorkspaceBind:

@@ -128,6 +128,9 @@ func TestWorkspaceStructurallyCannotCarryACredential(t *testing.T) {
 		// rules, two kinds of hex object id, a hex digest and a size —
 		// enumerated and asserted below, so it can hold no more than Ref can.
 		"Branch": true,
+		// Keep (Task 20497) is a bool: keep the working copy a move placed on
+		// the executor. A bool carries no credential.
+		"Keep": true,
 	}
 	ty := reflect.TypeOf(executor.Workspace{})
 	for i := 0; i < ty.NumField(); i++ {

@@ -283,15 +283,50 @@ func (p *preflight) checkHubDir(mode carry) {
 	if len(shown) > maxExamples {
 		shown = shown[:maxExamples]
 	}
-	p.add(Finding{
+	items := []Item{{Name: "entries", Path: p.project.Path, Count: len(entries), Examples: shown}}
+	// The copy the project left there when a move took it off the hub
+	// (Task 20497): unchanged since, it is rebuilt in place.
+	lb, err := p.env.LeftBehind(p.ctx, p.project)
+	if err != nil {
+		p.add(Finding{
+			Kind: KindTarget, Severity: SeverityBlocker, Side: SideTarget,
+			Title:   "Could not tell whether the hub's directory holds the copy the project left there",
+			Message: "The move builds the project's working copy in " + p.project.Path + ", which holds files, and reading what an earlier move left there failed: " + err.Error() + ".",
+			Remedy:  "Fix what stops the hub reading its move journal or the directory, then run the preflight again.",
+			Items:   items,
+		})
+		return
+	}
+	if lb != nil && len(lb.Problems) == 0 {
+		p.add(Finding{
+			Kind: KindTarget, Severity: SeverityWillCarry, Side: SideTarget,
+			Title: "The hub's directory still holds the copy the project left there",
+			Message: "The target works in " + p.project.Path + ", which still holds the working copy move " + lb.MoveID +
+				" captured there when it took the project to " + DescribeTarget(lb.Target) + ", unchanged since. " +
+				"The move puts the source's working copy in its place, in the same repository: your features' worktrees stay " +
+				"registered there, and a branch the hub moved on since (a feature's work written back while the project was away) keeps the hub's commits.",
+			Items: items,
+		})
+		return
+	}
+	f := Finding{
 		Kind: KindTarget, Severity: SeverityBlocker, Side: SideTarget,
 		Title: fmt.Sprintf("The hub's directory for the project already holds %d entr(ies) besides .cloop", len(entries)),
 		Message: "The target works in " + p.project.Path + ", where the move builds the working copy it captures from the source. " +
 			"That directory already holds files the move did not put there, and a move never overwrites them.",
 		Remedy: "Move those entries aside (they are the hub's copy, not the source's), then run the preflight again — " +
 			"or move the project to an executor that keeps a working copy of its own.",
-		Items: []Item{{Name: "entries", Path: p.project.Path, Count: len(entries), Examples: shown}},
-	})
+		Items: items,
+	}
+	if lb != nil {
+		f.Title = "The copy the project left in the hub's directory has changed since"
+		f.Message = "The target works in " + p.project.Path + ", which holds the working copy move " + lb.MoveID +
+			" captured there when it took the project to " + DescribeTarget(lb.Target) + ". It has changed since (" +
+			strings.Join(lb.Problems, "; ") + "), and a move never overwrites a change it did not capture."
+		f.Remedy = "Commit those changes on a branch of their own, or move them aside, so that the directory is the copy the move left; " +
+			"then run the preflight again."
+	}
+	p.add(f)
 }
 
 // sourceUnreachable is (e) for a source that cannot be reached.
@@ -541,6 +576,7 @@ func (p *preflight) checkFiles(t Tree, mode carry) {
 		files         int
 		bytes         int64
 		problems      []Item
+		kept          []string
 	)
 	for _, x := range invs {
 		if x.inv.Error != "" {
@@ -559,6 +595,9 @@ func (p *preflight) checkFiles(t Tree, mode carry) {
 			items = append(items, it)
 			if c.Name == FilesAttachmentOutbox {
 				outbox = append(outbox, it)
+			}
+			if !deliveredCategories[c.Name] && !containsString(kept, c.Name) {
+				kept = append(kept, c.Name)
 			}
 		}
 		if x.inv.Links > 0 {
@@ -587,10 +626,19 @@ func (p *preflight) checkFiles(t Tree, mode carry) {
 	case carryUndeliverable:
 		f.Message = "These stay in the hub's copy of the project, where the hub reads them: the sandbox spec and the requirements spec still apply to runs on the target, and the dashboard still shows the artifacts."
 	default:
-		f.Message = "The move captures these with the tree. The hub's copy of the project keeps them too: the sandbox spec and the requirements spec go on applying to runs, and the dashboard goes on showing the artifacts."
+		f.Message = "The move delivers the task output, artifacts, attachment outbox, checkpoints and spec files among these to the target with the tree. " +
+			"The hub's copy of the project keeps them too: the sandbox spec and the requirements spec go on applying to runs, and the dashboard goes on showing the artifacts."
 		if w := p.report.Source.Workspace; w == WorkspaceDevice || w == WorkspacePool {
-			f.Message = "These are the source's own, written by runs there. The move captures them with the working copy and delivers them to the target, " +
-				"beside the hub's copy of the project, which keeps its own."
+			f.Message = "These are the source's own, written by runs there. The move captures the task output, artifacts, attachment outbox, checkpoints and spec files " +
+				"among them with the working copy and delivers them to the target, beside the hub's copy of the project, which keeps its own."
+		}
+		if len(kept) > 0 {
+			// Task 20497: say which of the listed files never travel.
+			var why []string
+			for _, name := range kept {
+				why = append(why, categoryLabels[name]+": "+keptReasons[name])
+			}
+			f.Message += " The rest stays where it is and is never sent to the target — " + strings.Join(why, "; ") + "."
 		}
 	}
 	p.add(f)
@@ -698,4 +746,13 @@ func ReadHubTree(ctx context.Context, project Project, features []Feature) (Tree
 		t.FeatureFiles[f.Slug] = InventoryFiles(f.Path)
 	}
 	return t, nil
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

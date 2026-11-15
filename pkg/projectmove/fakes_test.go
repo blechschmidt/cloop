@@ -138,6 +138,7 @@ type fakeEnv struct {
 	deviceTree *Tree
 	upgrade    *AgentUpgradeError
 	hubEntries []string
+	leftBehind *LeftBehindCopy
 
 	// reachableAsked records which executors were probed.
 	reachableAsked []string
@@ -210,6 +211,9 @@ func (f *fakeEnv) SourceTree(_ context.Context, _ Project, _ []Feature, src Endp
 }
 
 func (f *fakeEnv) HubDirEntries(context.Context, Project) ([]string, error) { return f.hubEntries, nil }
+func (f *fakeEnv) LeftBehind(context.Context, Project) (*LeftBehindCopy, error) {
+	return f.leftBehind, nil
+}
 
 func (f *fakeEnv) Pool(_ context.Context, id string, _ Project) (PoolFacts, error) {
 	if f.poolErr != nil {

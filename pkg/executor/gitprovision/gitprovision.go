@@ -306,6 +306,19 @@ func Provision(ctx context.Context, r Request) error {
 			}
 			continue
 		}
+		if step.Name == "checkout" && w.Keep && !r.Pristine && !reuse.fresh {
+			// The checkout is the project's working copy, which a move put
+			// here (Task 20497): its branch, its unpushed commits and its
+			// uncommitted changes are what the run starts from. Checking
+			// out the fetched commit over it would put the run on the
+			// forge's tip, away from that work — or refuse outright where
+			// the uncommitted changes touch a file the two commits differ
+			// in. The fetch above brought its remote-tracking branches up
+			// to date; nothing is checked out.
+			emit("workspace: keeping the working copy a project move placed here: its branch, " +
+				"commits and uncommitted changes are left as they are\n")
+			continue
+		}
 		if err := runStep(ctx, dir, w, cred, trust, step, hostName, secrets, emit); err != nil {
 			if r.Pristine && !reuse.fresh && ctx.Err() == nil {
 				// A kept checkout that cannot be fetched into — a ref lock a

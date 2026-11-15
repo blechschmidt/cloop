@@ -38,6 +38,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/diskusage"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/movegit"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/feature"
 	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/hublease"
@@ -63,7 +64,48 @@ var (
 	moveSweepInterval = 30 * time.Second
 	// moveLeaseTTL is how long a move's lease outlives its holder.
 	moveLeaseTTL = hublease.DefaultTTL
+	// moveAgentWait bounds how long a move's step on a device waits for the
+	// device's agent to connect (Task 20497). A hub that restarted part-way
+	// through a move resumes it within seconds, and its agents reconnect on
+	// their own a few seconds after that: failing the step in between would
+	// roll a sound move back.
+	moveAgentWait = 2 * time.Minute
+	// moveAgentPoll is how often that wait looks.
+	moveAgentPoll = 500 * time.Millisecond
+	// movePreflightStale is how long a move may sit at its preflight before
+	// a sweep takes it for one whose start died with its hub process. The
+	// preflight's probes are bounded well below it.
+	movePreflightStale = 5 * time.Minute
 )
+
+// waitForAgent waits up to moveAgentWait for ex's agent to be connected,
+// when ex is a device (or a virtual executor on one) that is not. Any other
+// answer from its health check is left for the step itself to report. An
+// agent that connects to another member of a hub cluster hands the step to
+// that member (elsewhere reports it). A workload a hub that stopped had left
+// running on the device is ended when the agent reconnects: the restarted hub
+// answers its resume offer with a terminate for every handle it does not
+// track (remote.reconcileResume).
+func waitForAgent(ctx context.Context, ex executor.Executor, elsewhere func() bool) error {
+	deadline := time.Now().Add(moveAgentWait)
+	for {
+		if elsewhere != nil && elsewhere() {
+			return errMoveElsewhere
+		}
+		err := ex.HealthCheck(ctx)
+		if err == nil || !errors.Is(err, remote.ErrAgentUnreachable) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w; the move waited %s for it to connect", err, moveAgentWait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(moveAgentPoll):
+		}
+	}
+}
 
 // moveStoreMaxBytes bounds what one move writes into the move store: its
 // bundle and its tar together. A target that receives them through a shipped
@@ -147,6 +189,131 @@ func checkNoOpenMove(workDir string) error {
 		return &projectMovingError{Project: workDir, Move: m}
 	}
 	return nil
+}
+
+// keepsMovedCopy decides Workspace.Keep for a dispatch of the project at
+// workDir to ex: the working copy a move placed there is kept, unless the
+// run's work goes back by push, which is measured from the commit the
+// workspace is pinned to.
+func keepsMovedCopy(spec executor.Spec, workDir string, ex executor.Executor) bool {
+	return spec.WriteBack.Mode != executor.WriteBackPush && movedCopyOn(workDir, ex)
+}
+
+// movedCopyOn reports whether the project's working copy on ex is the one a
+// move placed there (Task 20497): the project's latest finished move seeded a
+// working copy on ex, or on the device ex runs on. That copy is the project's
+// own — the branch it is on, the commits no remote has and the uncommitted
+// changes the move carried — and a run there starts from it as it is, where a
+// device otherwise checks out its forge's tip over the checkout it keeps. A
+// move that failed or was rolled back since changed nothing there, and a
+// journal that cannot be read answers no: the run then provisions as it
+// always has.
+func movedCopyOn(workDir string, ex executor.Executor) bool {
+	dir := controlPlaneDir()
+	if ex == nil || strings.TrimSpace(dir) == "" || strings.TrimSpace(workDir) == "" {
+		return false
+	}
+	dbPath := state.DBPath(dir)
+	// A control plane with no database yet has recorded no move, and opening
+	// one here would create it.
+	if _, err := os.Stat(dbPath); err != nil {
+		return false
+	}
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	moves, err := projectmove.ListMoves(db, statedb.ProjectMoveFilter{ProjectPath: policyProjectPath(workDir), Limit: 50})
+	if err != nil {
+		return false
+	}
+	var lastEnded time.Time
+	for _, m := range moves {
+		if m.Phase != projectmove.PhaseDone {
+			continue
+		}
+		if lastEnded.IsZero() {
+			lastEnded = m.FinishedAt
+		}
+		c := m.Detail.Capture
+		if c != nil && c.Delivery == projectmove.DeliverSameDevice {
+			// Nothing moved: the copy an earlier move put on the device is
+			// still the one its runs use.
+			continue
+		}
+		if c == nil || c.Delivery != projectmove.DeliverDevice {
+			return false
+		}
+		// A device and its virtual executors keep one working copy.
+		device := deviceOfExecutor(ex).ID()
+		onIt := m.Target == ex.ID() || m.Target == device
+		if !onIt {
+			if target, err := executor.Get(m.Target); err == nil && deviceOfExecutor(target).ID() == device {
+				onIt = true
+			}
+		}
+		if !onIt {
+			return false
+		}
+		// Bound away and back by hand since the last move ended: what the
+		// project did elsewhere is not in the device's copy.
+		return !reboundSince(db, policyProjectPath(workDir), lastEnded)
+	}
+	return false
+}
+
+// reboundSince reports whether the project's binding was written after at:
+// by hand, since a move writes it before it ends.
+func reboundSince(db *statedb.DB, path string, at time.Time) bool {
+	if at.IsZero() {
+		return false
+	}
+	bindings, err := db.ListProjectExecutorBindings()
+	if err != nil {
+		return true
+	}
+	for _, b := range bindings {
+		if b.ProjectPath == path {
+			return b.BoundAt.After(at)
+		}
+	}
+	return false
+}
+
+// leftBehind reads which move left the copy of the project its directory on
+// the hub still holds, and how the directory differs from what that move
+// captured (Task 20497). It answers nil when no move on record left one.
+func (s *Server) leftBehind(ctx context.Context, path string) (*projectmove.LeftBehindCopy, projectmove.Move, error) {
+	db, err := s.controlPlaneDB()
+	if err != nil {
+		return nil, projectmove.Move{}, err
+	}
+	moves, err := projectmove.ListMoves(db, statedb.ProjectMoveFilter{ProjectPath: policyProjectPath(path), Limit: 100})
+	db.Close()
+	if err != nil {
+		return nil, projectmove.Move{}, err
+	}
+	m, ok := projectmove.LeftBehindBy(moves)
+	// A move back that restored into the directory and was then rolled back
+	// or failed left the directory holding its own capture: that is what a
+	// later move back settles against.
+	if id := projectmove.SeedMarker(path); id != "" {
+		for _, x := range moves {
+			if x.ID == id && (x.Phase == projectmove.PhaseRolledBack || x.Phase == projectmove.PhaseFailed) &&
+				x.Detail.Capture != nil && x.Detail.Capture.Delivery == projectmove.DeliverHubTree && x.Detail.Capture.Git.Repository {
+				m, ok = x, true
+			}
+		}
+	}
+	if !ok {
+		return nil, projectmove.Move{}, nil
+	}
+	problems, err := movegit.LeftBehindProblems(ctx, path, m.Detail.Capture.Git, movegit.InspectOptions{})
+	if err != nil {
+		return nil, projectmove.Move{}, err
+	}
+	return &projectmove.LeftBehindCopy{MoveID: m.ID, Target: m.Target, Problems: problems}, m, nil
 }
 
 // refuseWhileMoving answers 409 for a project a move is moving, reporting
@@ -344,6 +511,14 @@ func (s *Server) sweepProjectMoves(ctx context.Context) {
 // the member running the project's run for quiesce, and for the phases that
 // put work on a device, the member holding its connection.
 func (s *Server) drivesHere(m projectmove.Move) bool {
+	if m.Phase == projectmove.PhasePreflight {
+		// The request that started the move runs its preflight and hands it
+		// on from there; driven by a sweep, the move would be failed as one
+		// whose start died, under the request still running it (Task 20497).
+		// Only a preflight that has gone quiet for longer than any takes is
+		// a start that died, and failing it frees the project.
+		return time.Since(m.UpdatedAt) > movePreflightStale
+	}
 	if m.Phase == projectmove.PhaseQuiesce {
 		return s.runOwnedByPeer(m.Project.Path) == ""
 	}
@@ -644,6 +819,15 @@ func (d *moveDriver) Capture(ctx context.Context, m projectmove.Move) (*projectm
 
 	switch src.Workspace {
 	case projectmove.WorkspaceDevice, projectmove.WorkspacePool:
+		if delivery == projectmove.DeliverHubTree {
+			// The working copy is built in the hub's own directory, which
+			// may still hold the copy an earlier move left there: the seed
+			// restores into it, and records which move left it now, so a
+			// seed run again after a restart builds the same way (Task 20497).
+			if err := d.recordLeftBehind(ctx, m, rec); err != nil {
+				return nil, err
+			}
+		}
 		// Asked of the device, or of a runner attached to the pool's volume,
 		// over the agent protocol (Task 20495).
 		if src.Workspace == projectmove.WorkspaceDevice {
@@ -719,6 +903,30 @@ func (d *moveDriver) Capture(ctx context.Context, m projectmove.Move) (*projectm
 			humanMiB(rec.Bytes), projectmove.DescribeTarget(m.Target), humanMiB(limit))
 	}
 	return rec, nil
+}
+
+// recordLeftBehind notes in rec the move whose copy of the project the hub's
+// directory still holds, when it holds anything besides .cloop, and refuses a
+// directory holding anything else: a move never overwrites what it did not
+// capture.
+func (d *moveDriver) recordLeftBehind(ctx context.Context, m projectmove.Move, rec *projectmove.CaptureRecord) error {
+	entries, err := projectmove.HubDirEntries(m.Project.Path)
+	if err != nil || len(entries) == 0 {
+		return err
+	}
+	lb, _, err := d.s.leftBehind(ctx, m.Project.Path)
+	if err != nil {
+		return fmt.Errorf("could not tell whether %s holds the copy the project left there: %w", m.Project.Path, err)
+	}
+	if lb == nil {
+		return fmt.Errorf("%w: %s holds %s", projectmove.ErrHubDirOccupied, m.Project.Path, strings.Join(entries, ", "))
+	}
+	if len(lb.Problems) > 0 {
+		return fmt.Errorf("%w: %s holds the copy move %s left there, changed since (%s); commit those changes on a branch of their own or move them aside, then move the project again",
+			projectmove.ErrHubDirOccupied, m.Project.Path, lb.MoveID, strings.Join(lb.Problems, "; "))
+	}
+	rec.LeftBehind = lb.MoveID
+	return nil
 }
 
 // forgeHoldsEverything says what a forge-built target would not see.
@@ -870,6 +1078,30 @@ func (d *moveDriver) Seed(ctx context.Context, m projectmove.Move) (*projectmove
 		rec.Note = "the target works in the same working copy on the same device"
 		return rec, nil
 	case projectmove.DeliverHubTree:
+		if !c.Git.Repository && len(c.Files) == 0 {
+			rec.Note = "the source held no working copy of the project, so the hub's own directory for it was left as it was"
+			return rec, nil
+		}
+		if c.LeftBehind != "" {
+			// The hub's directory still holds the copy an earlier move left
+			// there: the working copy is restored into its repository
+			// (Task 20497).
+			base, err := (projectmove.DBStore{Open: d.s.controlPlaneDB}).Get(ctx, c.LeftBehind)
+			if err != nil {
+				return nil, fmt.Errorf("read move %s, which left the copy the hub's directory holds: %w", c.LeftBehind, err)
+			}
+			kept, err := projectmove.SeedLeftBehind(ctx, m.Project.Path, m.ID, c, base)
+			if err != nil {
+				return nil, err
+			}
+			rec.WorkDir, rec.Bytes, rec.Kept = m.Project.Path, c.Bytes, kept
+			rec.Note = "the copy move " + c.LeftBehind + " left in the hub's own directory for the project was rebuilt in place from what " +
+				nonEmpty(c.From, "the source") + " held"
+			if len(kept) > 0 {
+				rec.Note += fmt.Sprintf("; %d branch(es) the hub moved on since kept the hub's commits", len(kept))
+			}
+			return rec, nil
+		}
 		// The capture came from a device or a runner's volume (Task 20495):
 		// the hub's own directory for the project is built from it.
 		if err := projectmove.SeedHubTree(ctx, m.Project.Path, m.ID, c, ""); err != nil {
@@ -979,6 +1211,9 @@ func (d *moveDriver) buildCarrier(ctx context.Context, m projectmove.Move, c *pr
 // leased nothing: it only rebuilds or reads the project's working copy.
 func (d *moveDriver) runOnTarget(ctx context.Context, ex executor.Executor, m projectmove.Move, command string, ws executor.Workspace, bundle string, extra ...string) (projectmove.WorkingCopyReport, error) {
 	path := m.Project.Path
+	if err := waitForAgent(ctx, ex, func() bool { _, held := d.s.agentHeldByPeer(ex); return held }); err != nil {
+		return projectmove.WorkingCopyReport{}, err
+	}
 	clear := newLeaseClearance(path, harnessWho{})
 	if _, err := clear.settle(ex, path); err != nil {
 		return projectmove.WorkingCopyReport{}, err
@@ -1054,7 +1289,13 @@ func (d *moveDriver) Verify(ctx context.Context, m projectmove.Move) (*projectmo
 		if err != nil {
 			return nil, err
 		}
-		for _, mm := range movegit.Compare(c.Git, o) {
+		want := c.Git
+		if sr := m.Detail.Seed; sr != nil {
+			// Branches the hub's directory kept when the seed restored into
+			// the copy a move left there (Task 20497).
+			want = want.WithRefs(sr.Kept)
+		}
+		for _, mm := range movegit.Compare(want, o) {
 			rec.Mismatches = append(rec.Mismatches, mm.String())
 		}
 		rec.Mismatches = append(rec.Mismatches, projectmove.CheckFiles(filepath.Join(m.Project.Path, ".cloop"), c.Files)...)

@@ -1472,6 +1472,11 @@ func Compare(m Manifest, o Observed) []Mismatch {
 	}
 	want, got := describeHead(m.Head), describeHead(o.Head)
 	add("HEAD", want, got)
+	if !m.Head.Detached && !m.Head.Unborn && m.Head.Commit != "" && want == got {
+		// The branch's name alone would pass a HEAD on the right branch at
+		// the wrong commit (Task 20497).
+		add("HEAD's commit", m.Head.Commit, o.Head.Commit)
+	}
 	return out
 }
 

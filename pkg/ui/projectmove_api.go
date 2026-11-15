@@ -295,6 +295,15 @@ func (e *moveEnv) HubDirEntries(_ context.Context, p projectmove.Project) ([]str
 	return projectmove.HubDirEntries(p.Path)
 }
 
+func (e *moveEnv) LeftBehind(ctx context.Context, p projectmove.Project) (*projectmove.LeftBehindCopy, error) {
+	// Bounded well below movePreflightStale: reading the directory is the
+	// slowest step of a preflight on a large tree.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	lb, _, err := e.s.leftBehind(ctx, p.Path)
+	return lb, err
+}
+
 // Pool answers what bindProjectToPool checks before a bind.
 func (e *moveEnv) Pool(_ context.Context, poolID string, p projectmove.Project) (projectmove.PoolFacts, error) {
 	store, err := e.s.poolStore()

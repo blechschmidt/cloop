@@ -38,6 +38,8 @@ func TestWorkspaceValidateAccepts(t *testing.T) {
 		"git slash ref":   {Kind: WorkspaceGit, Repo: "https://git.example/a/b", Ref: "release/1.2"},
 		"git nested path": {Kind: WorkspaceGit, Repo: "https://gitlab.example/group/sub/proj.git"},
 		"size limit":      {Kind: WorkspaceBind, SizeLimitMB: 2048},
+		// Keep (Task 20497): a working copy a move placed on a device.
+		"git keep": {Kind: WorkspaceGit, Repo: "https://github.com/acme/tool.git", Ref: "main", Keep: true},
 	}
 	for name, w := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -90,6 +92,13 @@ func TestWorkspaceValidateRejects(t *testing.T) {
 		"none with ref":   {Kind: WorkspaceNone, Ref: "main"},
 		"none with grant": {Kind: WorkspaceNone, CredentialGrant: "github-ci"},
 		"bind with depth": {Kind: WorkspaceBind, Depth: 1},
+		// Keep is a git checkout's: an executor-kept or bound tree has no
+		// fetched checkout to leave alone, and a shipped branch is rebuilt
+		// from scratch every time.
+		"bind with keep":     {Kind: WorkspaceBind, Keep: true},
+		"executor with keep": {Kind: WorkspaceExecutor, Keep: true},
+		"keep with a branch": {Kind: WorkspaceGit, Repo: "https://github.com/a/b", Keep: true,
+			Branch: &BranchBundle{Branch: "cloop/feature/x", Head: strings.Repeat("a", 40), Bytes: 1, SHA256: strings.Repeat("b", 64)}},
 	}
 	for name, w := range cases {
 		t.Run(name, func(t *testing.T) {

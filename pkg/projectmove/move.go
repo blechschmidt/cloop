@@ -237,6 +237,11 @@ type CaptureRecord struct {
 	// Scan is what the capture taken from a device was scanned for, and what
 	// the scan found.
 	Scan *ScanRecord `json:"scan,omitempty"`
+	// LeftBehind names the move whose copy of the project the hub's own
+	// directory still held when this capture was taken, for a move that
+	// builds the working copy there: the seed restores into that copy's
+	// repository rather than a new one (Task 20497).
+	LeftBehind string `json:"left_behind,omitempty"`
 }
 
 // ScanRecord is how a capture from a device was scanned for the credentials
@@ -274,6 +279,11 @@ type SeedRecord struct {
 	// Bytes is what was shipped.
 	Bytes int64  `json:"bytes,omitempty"`
 	Note  string `json:"note,omitempty"`
+	// Kept are the branches and tags the hub's directory kept when the seed
+	// restored into the copy a move left there (Task 20497): moved on the
+	// hub since, and not in the capture. Verification expects them in place
+	// of the capture's.
+	Kept []movegit.Ref `json:"kept_refs,omitempty"`
 }
 
 // VerifyRecord is what verification compared.
