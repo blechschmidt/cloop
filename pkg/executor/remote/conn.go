@@ -169,21 +169,41 @@ func NewPipe(buffer int) (Conn, Conn) {
 	return a, b
 }
 
+// ReadFrame returns the next frame, or the close once every frame written
+// before it has been read — the order a real connection keeps. A select over
+// both alone picks at random when both are ready, and so dropped a frame
+// written just before the close about half the time the reader was slower
+// than the writer: an ephemeral runner's farewell, under CI load.
 func (p *pipeConn) ReadFrame(ctx context.Context) (Frame, error) {
 	select {
 	case f, ok := <-p.in:
-		if !ok {
-			return Frame{}, fmt.Errorf("%w: pipe drained", ErrSessionClosed)
-		}
-		if err := f.Validate(); err != nil {
-			return Frame{}, err
-		}
-		return f, nil
+		return p.received(f, ok)
+	default:
+	}
+	select {
+	case f, ok := <-p.in:
+		return p.received(f, ok)
 	case <-p.shared.closed:
+		select {
+		case f, ok := <-p.in:
+			return p.received(f, ok)
+		default:
+		}
 		return Frame{}, fmt.Errorf("%w: %s", ErrSessionClosed, p.closeReason())
 	case <-ctx.Done():
 		return Frame{}, ctx.Err()
 	}
+}
+
+// received checks a frame taken off the pipe.
+func (p *pipeConn) received(f Frame, ok bool) (Frame, error) {
+	if !ok {
+		return Frame{}, fmt.Errorf("%w: pipe drained", ErrSessionClosed)
+	}
+	if err := f.Validate(); err != nil {
+		return Frame{}, err
+	}
+	return f, nil
 }
 
 func (p *pipeConn) WriteFrame(ctx context.Context, f Frame) error {
@@ -197,6 +217,14 @@ func (p *pipeConn) WriteFrame(ctx context.Context, f Frame) error {
 	var decoded Frame
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return fmt.Errorf("remote: re-decode %s frame: %w", f.Type, err)
+	}
+	// A write after the close is refused, as on a real connection, rather than
+	// left to the select below, which would buffer it half the time for a
+	// reader that now drains what is buffered before it reports the close.
+	select {
+	case <-p.shared.closed:
+		return fmt.Errorf("%w: %s", ErrSessionClosed, p.closeReason())
+	default:
 	}
 	select {
 	case p.out <- decoded:
