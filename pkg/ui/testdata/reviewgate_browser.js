@@ -214,10 +214,12 @@ async function scenarioTask(cdp) {
   r.chip = await waitFor(cdp, `(() => { const e = document.querySelector('.task-item[data-task-id="1"]');
     return !!e && e.textContent.includes('review: not published'); })()`);
   await cdp.eval(`openTaskDetails(1)`);
-  r.details = await waitFor(cdp, `(document.getElementById('td-body') || {}).textContent &&
-    document.getElementById('td-body').textContent.includes('Review gate: changes requested')`);
-  r.details_text = await cdp.eval(`(() => { const s = [...document.querySelectorAll('#td-body .td-section')]
-    .find(e => e.textContent.includes('Review gate')); return s ? s.textContent : ''; })()`);
+  // deferred/tdreview.js draws the review section once it has loaded, and
+  // the failure diagnosis, drawn at once, quotes the verdict too: wait for
+  // the section itself, not for the words anywhere in the details.
+  r.details = await waitFor(cdp, `(() => { const s = document.querySelector('#td-body #td-review h3');
+    return !!s && s.textContent.includes('Review gate: changes requested'); })()`);
+  r.details_text = await cdp.eval(`(document.getElementById('td-review') || {}).textContent || ''`);
   await shot(cdp, 'review-gate-task');
   results.task = r;
 }
