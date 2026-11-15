@@ -39,7 +39,7 @@ import (
 
 var projectCmd = &cobra.Command{
 	Use:   "project",
-	Short: "Administer projects on a hub: who may reach them",
+	Short: "Administer projects on a hub: who may reach them, and which projects may read them",
 	Long: `Administer the projects a hub serves.
 
   cloop project members list [<project>]
@@ -47,7 +47,13 @@ var projectCmd = &cobra.Command{
   cloop project members add <project> team:<slug> --role viewer --reason "..."
   cloop project members remove <project> <identity> --reason "..."
 
-Run it from the hub's directory, or pass --workdir.`,
+  cloop project readers ls <project>
+  cloop project readers add <project> <reader>
+  cloop project readers rm <project> <reader>
+
+members writes the hub's database: run it from the hub's directory, or pass
+--workdir. readers asks the hub, like the dashboard: a hub on this machine, or
+the one ` + "`cloop login`" + ` signed this terminal in to (--hub picks another).`,
 }
 
 var projectMembersCmd = &cobra.Command{

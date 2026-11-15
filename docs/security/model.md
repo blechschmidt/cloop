@@ -2023,19 +2023,24 @@ as `none`. A hub with single sign-on and no policy at all runs with RBAC
 | `viewer` | `project.read`, `executor.read`, `view.prefs` |
 | `operator` | `run.start`, `run.stop`, `task.mutate`, `secret.request`, `secret.own` |
 | `maintainer` | `project.write`, `project.share`, `config.write`, `secret.grant`, `secret.revoke` |
-| `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin`, `session.admin`, `knowledge.admin` |
+| `admin` | everything, including `executor.manage`, `audit.read`, `user.manage`, `token.admin`, `session.admin`, `knowledge.admin`, `project.readers` |
 
 **Permissions** (`AllPermissions`): `project.read`, `project.write`, `run.start`,
 `run.stop`, `task.mutate`, `executor.read`, `executor.manage`, `secret.grant`,
 `secret.revoke`, `config.write`, `audit.read`, `user.manage`, `token.admin`,
 `session.admin`, `view.prefs`, `sandbox.attach`, `sandbox.attach.write`,
-`secret.request`, `secret.own`, `project.share`, `knowledge.admin`.
+`secret.request`, `secret.own`, `project.share`, `knowledge.admin`,
+`project.readers`.
 
 - `knowledge.admin` lets you connect the organisation's knowledge sources (a
   Confluence site, a Jira project) and bind them to projects. Only `admin`
   holds it. A personal source, read with its owner's own secret, needs only
   `secret.own` to connect, and `project.write` on a project to bind it there.
   See [knowledge sources](#knowledge-sources).
+- `project.readers` lets you change which other projects may read a project
+  (its [readers list](#project-readers)). Only `admin` holds it, which on a
+  project makes it its owner, a member at `admin` or a hub administrator.
+  Seeing the list needs only `project.read`.
 - `project.share` lets you change who else may reach a project (its
   [members](#project-members), people and teams), and belongs to `maintainer`.
   It is separate from `project.write`, which is on the same rung, because every
@@ -2640,10 +2645,11 @@ a stricter check:
 
 The second row covers `secret.grant`, `secret.revoke`, `user.manage`,
 `token.admin`, `session.admin`, `executor.manage`, `config.write`,
-`project.write`, `project.share`, `audit.read`, `sandbox.attach` and
-`knowledge.admin`. The set is derived from the role ladder instead of being
-listed: it is every permission an operator doesn't hold. A permission added
-above that tier is therefore covered from the day it is added.
+`project.write`, `project.share`, `audit.read`, `sandbox.attach`,
+`knowledge.admin` and `project.readers`. The set is derived from the role
+ladder instead of being listed: it is every permission an operator doesn't
+hold. A permission added above that tier is therefore covered from the day it
+is added.
 
 **The bound doesn't depend on `refresh_interval_minutes`.** That setting
 controls a background schedule and can be switched off. This bound always
@@ -3636,6 +3642,61 @@ the normal case, since most mappings belong to someone else, and reporting those
 would bury the one that can never match. It fires once per hub, not once per
 request, because this is a configuration fact, and a repeated warning is one
 people learn to filter out.
+
+### Project readers
+
+A project's **readers list** names the other projects whose runs may read it
+(`pkg/projectreaders`, stored in the control plane's `project_readers` table).
+It is deny-by-default: a project's runs may read another project only when that
+project's list names it, and nothing else counts. A project is never on its own
+list. Being a feature of a project, sharing its owner or running on the same
+executor gives no access either. A feature is never on a list on either side: it
+has no list of its own, and it reads nothing because its project is listed
+(`TestCanReadIsDenyByDefault`, `TestReaders_FeaturesAreNeverListed`).
+
+Today the list is only kept: no run reads another project through it yet. It is
+what the hub will check before it gives a run read access to another project's
+source.
+
+**Who may see and change it.** Everyone who can see a project may see its list,
+and the projects it may read, with `GET /api/projects/{idx}/readers` or
+`cloop project readers ls`. Changing the list needs `project.readers` on the
+project, which only `admin` holds: the project's owner, a member at `admin`, the
+hub's administrators, and on a hub without sign-in whoever holds its static
+admin token. A maintainer can't add a reader. An entry gives every run of
+another project this project's source, and nobody on that project is limited by
+a role here. On a hub with single sign-on, adding and removing an entry also
+need a [recent sign-in](#recent-sign-in-for-privileged-actions)
+(`TestReaders_RefuseANonAdminMemberAForeignUserAndARevokedShare`,
+`TestReaders_WritesAskForARecentSignIn`).
+
+**Only projects you can see.** You can add a project only if you can see it, and
+only if it is a different project. A list names a project only to a caller who
+can see it. An entry naming a project you can't see, or one no longer on the
+hub, is counted but not named. The project's administrators also get that
+entry's id, who added it and when, so they can remove it without learning
+anything about the other project (`TestReaders_OnlyProjectsTheCallerCanSee`).
+
+**Entries follow the project's path.** An entry names both projects by their
+paths on the hub. Renaming a project's registry entry doesn't change its
+entries, and neither does moving it to another executor, which keeps the path
+(`TestReaders_SurviveARename`, `TestReaders_SurviveAMove`). Removing a project
+from the hub removes every entry naming it, on either side, before the project
+is unregistered, because an entry left behind would hand its access to whatever
+is registered at that path next
+(`TestReaders_RemovingAProjectTakesEveryEntryNamingIt`).
+
+**It leaves evidence.** Each change commits in the same transaction as its audit
+row, [`project.reader.add`](../reference/audit-events.md#projectreader) or
+[`project.reader.remove`](../reference/audit-events.md#projectreader). A removal
+caused by a project leaving the hub says so in `reason`. Adding a project that
+is already listed changes nothing and writes no row.
+
+```bash
+cloop project readers ls shop
+cloop project readers add shop billing
+cloop project readers rm shop billing
+```
 
 ### When RBAC is in force
 

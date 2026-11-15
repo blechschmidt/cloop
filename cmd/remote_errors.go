@@ -145,6 +145,13 @@ func permissionRemedy(perm authz.Permission, scope string) string {
 		project = strings.TrimPrefix(scope, "project=")
 	}
 	switch perm {
+	case authz.PermProjectReaders:
+		where := "the project"
+		if project != "" {
+			where = project
+		}
+		return "only the administrators of " + where + " change which projects may read it — its owner, " +
+			"a member at admin, or a hub administrator: ask one of them"
 	case authz.PermExecutorManage:
 		return "only an administrator binds a project to an executor — ask one to bind it, " +
 			"or leave out --executor to use the hub's default"

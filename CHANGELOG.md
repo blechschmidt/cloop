@@ -247,6 +247,27 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Each project now has a readers list: the other projects whose runs may
+  read it.** The list is deny-by-default. A project may read another only when
+  the other's list names it; a project is never on its own list, and a
+  feature is never on one. `GET /api/projects/{idx}/readers` shows a project's
+  list and the projects it may read to anyone who can see the project, naming
+  only projects the caller can see and counting the rest. `PUT` and `DELETE`
+  on the same route change it, and need the new `project.readers` permission,
+  which only `admin` holds: the project's owner, a member at admin, a hub
+  administrator, or on a hub without sign-in the static admin. On a hub with
+  single sign-on they also need a recent sign-in. `cloop project readers
+  ls|add|rm <project> <reader>` does the same from a terminal, against the hub
+  on this machine or one `cloop login` signed in to. Entries are kept in a new
+  `project_readers` table (migration 0103, a new table created `IF NOT EXISTS`,
+  so older hubs sharing the database keep working). They name projects by
+  path, so a rename or a move keeps them; removing a project removes every
+  entry naming it. Each change writes a `project.reader.add` or
+  `project.reader.remove` audit row in the same transaction. `pkg/projectreaders`
+  answers "may this project read that one" for the parts of the hub that will
+  give runs read access to other projects; nothing reads through the list yet
+  (Task 20498).
+
 - **A guide to moving projects, and an end-to-end proof that moves lose
   nothing.** `docs/guides/moving-projects.md` explains what a move carries and
   what it never carries (credentials, your harness login), how to read the

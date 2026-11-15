@@ -2749,10 +2749,11 @@ session keeps its sign-in-time permissions for its whole life.
 matters. Before using a permission above the operator tier (`secret.grant`,
 `secret.revoke`, `user.manage`, `token.admin`, `session.admin`,
 `executor.manage`, `config.write`, `project.write`, `project.share`,
-`audit.read`, `sandbox.attach`, `knowledge.admin`), cloop checks when the
-provider last confirmed that session's claims. If that was longer ago than this
-limit, cloop asks the provider before acting, decides based on its current
-answer, and refuses the action if the provider can't be reached.
+`audit.read`, `sandbox.attach`, `knowledge.admin`, `project.readers`), cloop
+checks when the provider last confirmed that session's claims. If that was
+longer ago than this limit, cloop asks the provider before acting, decides
+based on its current answer, and refuses the action if the provider can't be
+reached.
 
 Three things keep this cheap:
 

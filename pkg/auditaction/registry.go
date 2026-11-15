@@ -2964,6 +2964,35 @@ var registry = []Entry{
 		Note:      "Separate from project.member.revoke so \"was this person removed or did they leave\" stays answerable.",
 	},
 
+	// ── project.reader ─────────────────────────────────────────────────────
+	// Which other projects may read a project (Task 20498). A project's
+	// administrator keeps its list, and nothing reads a project the list does
+	// not name. Each row is committed in the same transaction as the change it
+	// records. entity_id is "<project path>|<reader path>", so a reader
+	// filtering on either project finds it.
+	{
+		Action:    ActionProjectReaderAdd,
+		Home:      HomeControlPlane,
+		Entity:    "project_reader",
+		Trigger:   "A project is added to another project's readers list — PUT /api/projects/{idx}/readers, or `cloop project readers add`.",
+		Payload:   projectReaderPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`project` and `project_path` name the project that may now be read, `reader` and `reader_path` the one that may " +
+			"read it, `id` the row. Adding a project that is already listed changes nothing and writes no row.",
+	},
+	{
+		Action:    ActionProjectReaderRemove,
+		Home:      HomeControlPlane,
+		Entity:    "project_reader",
+		Trigger:   "A project is taken off another project's readers list, or either project is removed from the hub.",
+		Payload:   projectReaderPayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "A project removed from the hub takes every row naming it with it, on either side of a list, one row each " +
+			"with `reason` saying so.",
+	},
+
 	// ── team ───────────────────────────────────────────────────────────────
 	// Named groups of people a project can be shared with (Task 20478). The
 	// hub's administrators keep them, because who is on a team decides who
@@ -3219,6 +3248,9 @@ var (
 	offboardPayload = []string{"identity", "identity_input", "subjects", "emails", "reason", "via"}
 
 	projectMemberPayload = []string{"project", "project_path", "identity", "team", "role", "previous_role", "reason", "via", "left"}
+
+	// projectReaderPayload is what every project.reader row carries.
+	projectReaderPayload = []string{"id", "project", "project_path", "reader", "reader_path", "reason", "via"}
 
 	// projectMovePayload is what every project.move row carries.
 	projectMovePayload = []string{"move", "project", "project_path", "source", "target", "phase", "abandon_source",

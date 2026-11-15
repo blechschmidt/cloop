@@ -489,16 +489,16 @@ func recoversItsDatabase(cmd *cobra.Command) bool {
 }
 
 // talksOnlyToAHub reports whether a command is a client of a remote hub and
-// nothing else (Task 20412): `cloop login`, `logout`, `whoami` and the `cloop
-// remote` and `cloop knowledge` families read the credential file and make
-// HTTP calls, so reconciling
+// nothing else (Task 20412): `cloop login`, `logout`, `whoami`, the `cloop
+// remote` and `cloop knowledge` families, `cloop executor move` and `cloop
+// project readers` read the credential file and make HTTP calls, so reconciling
 // executors against — and creating a state.db in — whatever directory the
 // developer happened to run them from would be work for nobody, and a
 // database left behind in it.
 func talksOnlyToAHub(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		switch c {
-		case loginCmd, logoutCmd, whoamiCmd, remoteCmd, knowledgeCmd, executorMoveCmd:
+		case loginCmd, logoutCmd, whoamiCmd, remoteCmd, knowledgeCmd, executorMoveCmd, projectReadersCmd:
 			return true
 		}
 	}

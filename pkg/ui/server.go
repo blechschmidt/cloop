@@ -8038,6 +8038,14 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "could not remove the project's knowledge bindings, so it was not removed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// And every readers-list entry naming it, on either side (Task 20498):
+	// the projects that could read it, and what it could read. Keyed by path,
+	// an entry left behind would let whatever is registered here next read,
+	// or be read by, the other project.
+	if err := s.dropProjectReaders(r, entry); err != nil {
+		jsonErr(w, "could not remove the project's readers-list entries, so it was not removed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	// Remove from the persistent registry. This is a no-op for entries that
 	// only live in the in-process Projects slice or are derived from

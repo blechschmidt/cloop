@@ -141,20 +141,27 @@ type moveSource struct {
 	RemovedAt *time.Time `json:"removed_at,omitempty"`
 }
 
-// emoveHubClient is the hub this command talks to, resolved as `cloop task
+// emoveHubClient is the hub this command talks to: localOrLoginHubClient for
+// its --hub and --token.
+func emoveHubClient() (*hubclient.Client, error) {
+	return localOrLoginHubClient(emoveHub, emoveToken)
+}
+
+// localOrLoginHubClient is the hub a command acts on, resolved as `cloop task
 // attach` resolves its own: --hub, CLOOP_HUB_URL, the default hub `cloop
 // login` recorded, or else the hub on this machine — with --token, the
 // session this terminal holds for that hub, or CLOOP_API_TOKEN where it is
 // that hub's. A hub this terminal holds no session for is asked with no
 // credential at all, which a hub without sign-in on this machine answers and
-// any other refuses with what it wants presented.
-func emoveHubClient() (*hubclient.Client, error) {
+// any other refuses with what it wants presented. `cloop executor move` and
+// `cloop project readers` (Task 20498) act on hubs this way.
+func localOrLoginHubClient(hubFlag, tokenFlag string) (*hubclient.Client, error) {
 	envHub := strings.TrimSpace(os.Getenv("CLOOP_HUB_URL"))
-	base := strings.TrimSpace(emoveHub)
+	base := strings.TrimSpace(hubFlag)
 	if base == "" {
 		base = envHub
 	}
-	if tok := strings.TrimSpace(emoveToken); tok != "" {
+	if tok := strings.TrimSpace(tokenFlag); tok != "" {
 		// Never guessed: a token sent to whichever hub answers on this
 		// machine could act on another hub's project of the same name.
 		if base == "" {
@@ -194,9 +201,9 @@ func emoveHubClient() (*hubclient.Client, error) {
 	return hubclient.New(h.URL, h.CAFile, h.Credential)
 }
 
-// moveErr is remoteErr for this command, which may have asked a hub with no
-// credential at all: that hub's 401 asks for a sign-in rather than reporting
-// a session ended.
+// moveErr is remoteErr for a command that may have asked a hub with no
+// credential at all (localOrLoginHubClient): that hub's 401 asks for a sign-in
+// rather than reporting a session ended.
 func moveErr(c *hubclient.Client, err error) error {
 	if c != nil && c.Credential == "" && hubclient.IsUnauthorized(err) && !hubclient.IsReauthRequired(err) {
 		return fmt.Errorf("%w — %s asks for a sign-in: run `cloop login %s`, or pass --token", err, c.Base, c.Base)

@@ -846,6 +846,15 @@ const (
 	// ActionProjectMemberLeave records a member removing themselves.
 	ActionProjectMemberLeave Action = "project.member.leave"
 
+	// ── project.reader ─────────────────────────────────────────────────────
+
+	// ActionProjectReaderAdd records a project added to another project's
+	// readers list: from then on it may read that project (Task 20498).
+	ActionProjectReaderAdd Action = "project.reader.add"
+	// ActionProjectReaderRemove records a project taken off another project's
+	// readers list, by a person or because one of the two left the hub.
+	ActionProjectReaderRemove Action = "project.reader.remove"
+
 	// ── team ───────────────────────────────────────────────────────────────
 
 	// ActionTeamCreate records an administrator creating a team (Task 20478).

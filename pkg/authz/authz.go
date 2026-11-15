@@ -301,6 +301,25 @@ const (
 	// with their own credential, and bind it to a project they may write.
 	PermKnowledgeAdmin Permission = "knowledge.admin"
 
+	// PermProjectReaders is the right to decide which other projects may read
+	// a project: to add a project to its readers list and to take one off it
+	// (Task 20498).
+	//
+	// Admin-only, and its own permission rather than a reuse of project.share.
+	// project.share decides which people may work on a project, and the people
+	// it admits are bounded by the role they are given. A readers-list entry
+	// admits every run of another project — its agents, and through them
+	// whatever that project's own members and credentials reach — to this
+	// project's source, and none of them is bounded by a role here. Handing
+	// that to maintainer would let the role that reshapes a project also copy
+	// it into somebody else's sandbox. A project's owner holds admin on it, so
+	// holds this too; so does a member at admin, and on a hub without sign-in,
+	// the static admin.
+	//
+	// Reading the list is not this permission: everyone who can see a project
+	// may see which other projects can read it (project.read).
+	PermProjectReaders Permission = "project.readers"
+
 	// PermPublic is not a permission. It is the explicit marker a route
 	// declares when it must stay reachable before authorization can even be
 	// evaluated — the login machinery, the SPA shell, static assets, and
@@ -338,6 +357,7 @@ var AllPermissions = []Permission{
 	PermSecretOwn,
 	PermProjectShare,
 	PermKnowledgeAdmin,
+	PermProjectReaders,
 }
 
 // Valid reports whether p is a known permission. PermPublic is not a

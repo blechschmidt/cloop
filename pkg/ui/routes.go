@@ -537,6 +537,7 @@ func (s *Server) routeTable() []routeSpec {
 		read       = authz.PermProjectRead
 		write      = authz.PermProjectWrite
 		share      = authz.PermProjectShare
+		readers    = authz.PermProjectReaders
 		task       = authz.PermTaskMutate
 		start      = authz.PermRunStart
 		stop       = authz.PermRunStop
@@ -993,6 +994,16 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "PATCH /api/projects/{idx}/members", Handler: s.handleProjectMemberChange, Perm: share, Scope: scopeProjectIdx, Sudo: sudoHandler},
 		{Pattern: "DELETE /api/projects/{idx}/members", Handler: s.handleProjectMemberRemove, Perm: share, Scope: scopeProjectIdx},
 		{Pattern: "DELETE /api/projects/{idx}/members/self", Handler: s.handleProjectMemberLeave, Perm: viewPrefs, Scope: scopeProjectIdx},
+		// Which other projects may read this one (Task 20498). Reading the
+		// list is a read: everyone on a project may see it, narrowed to the
+		// projects they can see themselves. Changing it takes
+		// project.readers, which only the project's administrators hold: an
+		// entry hands this project's source to every run of another project,
+		// and nobody there is bounded by a role here. Both writes ask for a
+		// recent sign-in. See readers_api.go.
+		{Pattern: "GET /api/projects/{idx}/readers", Handler: s.handleProjectReaders, Perm: read, Scope: scopeProjectIdx},
+		{Pattern: "PUT /api/projects/{idx}/readers", Handler: s.handleProjectReaderAdd, Perm: readers, Scope: scopeProjectIdx, Sudo: sudoWrites},
+		{Pattern: "DELETE /api/projects/{idx}/readers", Handler: s.handleProjectReaderRemove, Perm: readers, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		// Parallel features (Task 20341): git worktrees of the project, each
 		// with its own task list and run settings. Addressed through the
 		// parent project, so each is authorized against it; see

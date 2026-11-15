@@ -37,6 +37,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/fwpolicy"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/projectmove"
+	"github.com/blechschmidt/cloop/pkg/projectreaders"
 	"github.com/blechschmidt/cloop/pkg/sandbox"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -705,6 +706,12 @@ func (e *moveEnv) PathBindings(_ context.Context, p projectmove.Project) ([]proj
 		}
 	}
 	add("project_members", "people and teams the project is shared with", n)
+	readers, err := projectreaders.Load(db)
+	if err != nil {
+		return nil, err
+	}
+	add("project_readers", "projects that may read this one, and projects it may read",
+		len(readers.ReadersOf(path))+len(readers.ReadableBy(path)))
 	if _, ok, err := db.ProjectFirewall(executor.PolicyProjectPath(path)); err != nil {
 		return nil, err
 	} else {

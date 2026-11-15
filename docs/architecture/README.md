@@ -956,6 +956,7 @@ each one is for.
 | `pkg/authz` | roles, permissions, scopes, bindings and the enforcement predicate |
 | `pkg/rolestore` | role bindings written at runtime |
 | `pkg/projectmember` | a project's members, people and teams, and the role each one holds |
+| `pkg/projectreaders` | a project's readers list: which other projects may read it, deny-by-default, and the answers to "may this project read that one" and "what may it read" |
 | `pkg/hubteam` | the hub's teams: named groups of people, optionally following an IdP or SCIM group, that projects are shared with |
 | `pkg/projectconfine` | which directories may be a hub project |
 | `pkg/quota` | quotas and admission |

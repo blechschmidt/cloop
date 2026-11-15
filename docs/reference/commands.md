@@ -2037,6 +2037,38 @@ removed member's open dashboards. They also re-read the table every few seconds.
 | `--workdir` | all | Hub directory holding `.cloop/state.db` |
 | `--json` | `list` | Machine-readable output |
 
+### `cloop project readers`
+
+List and change a project's readers list: the other projects whose runs may
+read it. No project reads another unless the other's list names it. Unlike
+`cloop project members`, this command asks the hub, the way the dashboard does:
+the hub on this machine, the one `cloop login` signed this terminal in to, or
+the one `--hub` names.
+
+```bash
+cloop project readers ls shop                 # who may read shop, and what shop may read
+cloop project readers add shop billing        # billing's runs may read shop
+cloop project readers rm shop billing
+cloop project readers rm shop prd_3f9c2a7d10b4e865a1b2c3d4   # an entry for a project you can't see
+```
+
+`<project>` and `<reader>` are a project's name, index or path, as
+[`cloop remote projects`](#cloop-remote) lists them. Anyone who can see a
+project may list its readers. Only its administrators may change them: its
+owner, a member at `admin`, a hub administrator, or on a hub without sign-in
+whoever holds its static admin token. On a hub with single sign-on a change also
+needs a recent sign-in, so run `cloop login` again when asked. You can add only
+a project you can see. A project is never on its own list, and a feature is never
+on a list, so name its project. `ls` names only projects you can see and counts
+the others; an administrator also gets those entries' ids, which `rm` takes. See
+[Project readers](../security/model.md#project-readers).
+
+| Flag | Applies to | Description |
+|------|-----------|-------------|
+| `--hub` | all | The hub's URL (default: `CLOOP_HUB_URL`, the hub you signed in to, or this machine's) |
+| `--token` | all | An API token for `--hub`, instead of your session |
+| `--json` | all | Print the hub's answer as JSON |
+
 ### `cloop hub team`
 
 Keep the teams projects are shared with. A team's members are the people added
