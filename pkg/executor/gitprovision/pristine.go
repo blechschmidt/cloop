@@ -270,6 +270,51 @@ func vetReusedRepository(ctx context.Context, dir string, emit func(string)) str
 	return ""
 }
 
+// hardenKeptRepository makes a kept checkout safe for this machine's git to
+// run in without resetting it (Request.Harden): .git must be a directory of
+// its own; the files that point git at another repository's objects, refs or
+// configuration, and the grafts and replacement refs that substitute what it
+// reads, are removed; and the configuration is rewritten as sanitizeReusedConfig
+// does. It returns why it cannot be made safe, "" when it was.
+func hardenKeptRepository(ctx context.Context, dir string, emit func(string)) string {
+	gitDir := filepath.Join(dir, ".git")
+	info, err := os.Lstat(gitDir)
+	if err != nil {
+		return fmt.Sprintf("its .git cannot be read: %v", err)
+	}
+	if !info.IsDir() {
+		return ".git is not a directory (a gitdir file or a link would point git at another repository)"
+	}
+	for _, rel := range append(append([]string{}, redirectFiles...), "config.worktree", filepath.Join("info", "grafts")) {
+		p := filepath.Join(gitDir, rel)
+		if _, err := os.Lstat(p); err == nil {
+			if err := os.Remove(p); err != nil {
+				return fmt.Sprintf("cannot remove .git/%s, which points git elsewhere: %v", rel, err)
+			}
+			emit(fmt.Sprintf("workspace: removed .git/%s from the kept checkout\n", rel))
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(gitDir, "refs", "replace")); err != nil {
+		return fmt.Sprintf("cannot remove its replacement refs: %v", err)
+	}
+	if fi, err := os.Lstat(filepath.Join(gitDir, "config")); err != nil || !fi.Mode().IsRegular() {
+		return ".git/config is not a regular file"
+	}
+	dropped, why := sanitizeReusedConfig(ctx, gitDir)
+	if why != "" {
+		return why
+	}
+	if len(dropped) > 0 {
+		names := dropped
+		if len(names) > 8 {
+			names = append(names[:8:8], fmt.Sprintf("and %d more", len(dropped)-8))
+		}
+		emit(fmt.Sprintf("workspace: the kept checkout's configuration set what no checkout needs; dropped %s\n",
+			strings.Join(names, ", ")))
+	}
+	return ""
+}
+
 func quoteName(s string) string {
 	if len(s) > 120 {
 		s = s[:120] + "…"

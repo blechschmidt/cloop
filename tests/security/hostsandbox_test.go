@@ -197,10 +197,29 @@ func TestAPersonsWorkOnTheHubsHostCannotReachAnotherPersonsFiles(t *testing.T) {
 		}
 	})
 
-	t.Run("an administrator's is not on a project only administrators write, and holds no root key", func(t *testing.T) {
+	t.Run("an administrator's is too once the host serves other projects, and holds no root key", func(t *testing.T) {
+		// Task 20500: a run that acts for one project must not reach another's
+		// files, whoever it acts for.
+		got := revise(t, rootB, indexOf(t, hub, rootB, rootDir))
+		if !strings.Contains(got, "bob-project:denied") || !strings.Contains(got, "root-key:absent") {
+			t.Errorf("the administrator's call on their own project on a shared host under mode auto: %s", got)
+		}
+	})
+
+	t.Run("an administrator's is not on a project only administrators write that the operator opted out", func(t *testing.T) {
+		cfg := "executors:\n  host_sandbox:\n    opt_out:\n      - " + rootDir + "\n"
+		if err := os.WriteFile(filepath.Join(hub.Dir, ".cloop", "config.yaml"), []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(filepath.Join(hub.Dir, ".cloop", "config.yaml")) })
 		got := revise(t, rootB, indexOf(t, hub, rootB, rootDir))
 		if !strings.Contains(got, "bob-project:ok") || !strings.Contains(got, "root-key:absent") {
-			t.Errorf("the administrator's call on their own project under mode auto: %s", got)
+			t.Errorf("the administrator's call on their own opted-out project under mode auto: %s", got)
+		}
+		// An opt-out never frees a person: alice's project is not listed, and
+		// listing it would not change hers either.
+		if got := revise(t, aliceB, indexOf(t, hub, aliceB, aliceDir)); !strings.Contains(got, "bob-project:denied") {
+			t.Errorf("alice's call while an administrator's project is opted out: %s", got)
 		}
 	})
 

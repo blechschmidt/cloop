@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -400,5 +401,32 @@ func TestTheRunsOwnLeaseFilesAreReadable(t *testing.T) {
 				t.Errorf("the run's lease files:\n%s", out)
 			}
 		})
+	}
+}
+
+// TestARemountRefusedBusyIsAskedAgain: making the tree read-only is refused
+// with EBUSY while a mount has a writer that instant, which the helper does
+// not hold; it asks again for a while, and any other refusal ends it at once.
+func TestARemountRefusedBusyIsAskedAgain(t *testing.T) {
+	calls := 0
+	if err := retryBusy(func() error {
+		calls++
+		if calls < 3 {
+			return unix.EBUSY
+		}
+		return nil
+	}); err != nil || calls != 3 {
+		t.Fatalf("busy twice then done: %v after %d calls", err, calls)
+	}
+	calls = 0
+	if err := retryBusy(func() error { calls++; return unix.EPERM }); !errors.Is(err, unix.EPERM) || calls != 1 {
+		t.Fatalf("a refusal that is not busy: %v after %d calls", err, calls)
+	}
+	start := time.Now()
+	if err := retryBusy(func() error { return unix.EBUSY }); !errors.Is(err, unix.EBUSY) {
+		t.Fatalf("busy for good: %v", err)
+	}
+	if took := time.Since(start); took < time.Second || took > 5*time.Second {
+		t.Fatalf("busy for good gave up after %s", took)
 	}
 }

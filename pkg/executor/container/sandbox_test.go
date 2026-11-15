@@ -212,16 +212,44 @@ func TestRenderDockerfile_RefusesInjection(t *testing.T) {
 // stale derived image forever.
 func TestDerivedKey_TracksContentNotTags(t *testing.T) {
 	setup := []string{"apk add git"}
-	a := derivedKey(ImageIdentity{Ref: "alpine:3.20", ID: "sha256:aaa"}, setup)
-	b := derivedKey(ImageIdentity{Ref: "alpine:3.20", ID: "sha256:bbb"}, setup)
+	a := derivedKey(ImageIdentity{Ref: "alpine:3.20", ID: "sha256:aaa"}, setup, "/srv/web")
+	b := derivedKey(ImageIdentity{Ref: "alpine:3.20", ID: "sha256:bbb"}, setup, "/srv/web")
 	if a == b {
 		t.Fatal("the key did not change when the base image content did")
 	}
-	if c := derivedKey(ImageIdentity{Ref: "alpine:3.20", ID: "sha256:aaa"}, []string{"apk add curl"}); a == c {
+	if c := derivedKey(ImageIdentity{Ref: "alpine:3.20", ID: "sha256:aaa"}, []string{"apk add curl"}, "/srv/web"); a == c {
 		t.Fatal("the key did not change when the setup commands did")
 	}
-	if a != derivedKey(ImageIdentity{Ref: "alpine:3.20", ID: "sha256:aaa"}, setup) {
+	if a != derivedKey(ImageIdentity{Ref: "alpine:3.20", ID: "sha256:aaa"}, setup, "/srv/web") {
 		t.Fatal("the key is not deterministic")
+	}
+}
+
+// TestDerivedKey_IsEachProjectsOwn: two projects with the same base and the
+// same setup never share a derived image (Task 20500) — the image is a cache
+// a workload starts from, and setup: is repo-controlled — while a feature
+// builds its project's, under whose sandbox.yaml it runs.
+func TestDerivedKey_IsEachProjectsOwn(t *testing.T) {
+	// The control plane's mapping of a feature onto its project, as the hub
+	// installs it; a device installs none, and its trees are not nested.
+	executor.SetPolicyProjectMapper(func(p string) string {
+		if parent, _, ok := strings.Cut(p, "/.cloop/features/"); ok {
+			return parent
+		}
+		return p
+	})
+	t.Cleanup(func() { executor.SetPolicyProjectMapper(nil) })
+	base := ImageIdentity{Ref: "alpine:3.20", ID: "sha256:aaa"}
+	setup := []string{"apk add git"}
+	web := derivedKey(base, setup, derivedProject("/srv/web"))
+	if api := derivedKey(base, setup, derivedProject("/srv/api")); api == web {
+		t.Fatal("two projects with the same setup share one derived image")
+	}
+	if f := derivedKey(base, setup, derivedProject("/srv/web/.cloop/features/login")); f != web {
+		t.Fatal("a feature builds an image apart from its project's")
+	}
+	if again := derivedKey(base, setup, derivedProject("/srv/web/")); again != web {
+		t.Fatal("one project spelled two ways builds two images")
 	}
 }
 
@@ -354,7 +382,9 @@ func TestSandboxImage_BuildsAndCachesSetup(t *testing.T) {
 	// A setup step that needs no network, so the test does not depend on
 	// egress — and neither does the build, which runs with --network none
 	// because the spec asks for no egress.
+	project := t.TempDir()
 	spec := executor.Spec{
+		WorkDir:       project,
 		Image:         image,
 		SetupCommands: []string{"mkdir -p /opt/marker && echo built-by-cloop > /opt/marker/id"},
 	}
@@ -389,7 +419,7 @@ func TestSandboxImage_BuildsAndCachesSetup(t *testing.T) {
 		t.Fatal("the base image should not contain the marker; the test is not proving anything")
 	}
 	res, err = executor.Run(ctx, ex, executor.Spec{
-		WorkDir:       t.TempDir(),
+		WorkDir:       project,
 		Argv:          []string{"/bin/cat", "/opt/marker/id"},
 		Image:         image,
 		SetupCommands: spec.SetupCommands,

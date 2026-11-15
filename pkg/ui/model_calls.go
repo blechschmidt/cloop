@@ -230,13 +230,15 @@ func denyInlineModelCall(w http.ResponseWriter, workDir, what string, who harnes
 		return true
 	}
 	// A call in the hub's own process has no sandbox to be made in (Task
-	// 20480): for a person whose runs on this host are sandboxed, it would
-	// run the harness, tools and all, with the hub's whole filesystem.
+	// 20480): for a person whose runs on this host are sandboxed — or for a
+	// project whose runs are kept to it because the host serves others too
+	// (Task 20500) — it would run the harness, tools and all, with the hub's
+	// whole filesystem.
 	if hostSandboxApplies(who, workDir) {
 		writeSandboxDenied(w, "inline_call_unsandboxed",
-			fmt.Sprintf("%s calls the project's provider inside the hub's own process, and your runs on "+
-				"this host run in the host sandbox (executors.host_sandbox), which a call there "+
-				"cannot be made in", what),
+			fmt.Sprintf("%s calls the project's provider inside the hub's own process, and your runs of "+
+				"this project on this host run in the host sandbox (executors.host_sandbox), which a call "+
+				"there cannot be made in", what),
 			"Run the task again instead: a run goes to the project's executor, in the sandbox.", nil)
 		return true
 	}

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -395,15 +396,17 @@ func TestResolveWorkDirConfinement(t *testing.T) {
 		}
 	})
 
-	t.Run("empty means the root itself", func(t *testing.T) {
-		got, err := a.resolveWorkDir("")
-		if err != nil {
-			t.Fatalf("resolveWorkDir: %v", err)
-		}
-		if got != a.root {
-			t.Errorf("got %q, want %q", got, a.root)
-		}
-	})
+	// The root holds every project's tree (Task 20500): no workload is given
+	// it, whether it names nothing, the root itself, or a directory inside
+	// another project's. A workload naming nothing gets a private directory
+	// from scratchWorkDir instead.
+	for _, shared := range []string{"", ".", a.root, "myproject/nested", "a/b/c", ".myproject.home", ".cloop-unscoped"} {
+		t.Run("refuses "+strconv.Quote(shared), func(t *testing.T) {
+			if got, err := a.resolveWorkDir(shared); !errors.Is(err, remote.ErrPathOutsideRoot) {
+				t.Fatalf("resolveWorkDir(%q) = %q, %v; want ErrPathOutsideRoot", shared, got, err)
+			}
+		})
+	}
 
 	for _, escape := range []string{
 		"/etc",

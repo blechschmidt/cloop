@@ -1572,7 +1572,14 @@ tree is sent. Three consequences:
 - **`WorkDir` names a path on the executor, not on the hub.** It is
   `DeviceWorkDir(<hub path>)`, a stable name derived from the hub's project
   path, resolved beneath the agent's own `--workdir-root`. The device is never
-  asked to open the hub's absolute path.
+  asked to open the hub's absolute path. The agent accepts it only as one
+  directory directly below its trees root, never a link, which it keeps at
+  mode `0700`, so no project's directory contains another's; a workload that
+  names none runs in a private directory removed when it ends. When the hub sets
+  `Spec.ConfineToProject` (protocol v30), because another project may run on the
+  device, a host-mode payload runs in the host sandbox with only its project's
+  directory, home and caches writable
+  ([on a device](../security/model.md#on-a-device)).
 - **The directory is kept.** The name is deterministic and the agent doesn't
   wipe it, so a repository cloned by one task is still there for the next. This
   is the only kind for which `WorkspaceKind.KeepsWorkDir()` is true. The

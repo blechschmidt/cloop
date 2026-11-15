@@ -45,7 +45,9 @@
 //	                       feature_bundle_mb, failover (the cap on
 //	                       re-dispatching a lost node's work, Task 20391),
 //	                       remote (the memory returned work may hold,
-//	                       Task 20399)
+//	                       Task 20399), host_sandbox (whose runs on a
+//	                       host are confined, and the projects opted out of
+//	                       it, Tasks 20480 and 20500)
 //	sandbox.image_policy   the image trust policy, at the hub's early check
 //	                       and in the copy each driver takes at startup
 //	ui.*                   listen and allow_unauthenticated_network (where

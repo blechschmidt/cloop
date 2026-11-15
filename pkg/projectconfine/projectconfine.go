@@ -108,7 +108,9 @@ type Violation struct {
 	Other string
 	// Relation is how Path sits relative to Other.
 	Relation Relation
-	// Reason is the specific rule's wording, for the rules that have no Other.
+	// Reason is the specific rule's wording, for the rules that have no Other,
+	// and why the hub's own directory may not run when it holds the projects
+	// root (RuleProject).
 	Reason string
 }
 
@@ -142,6 +144,10 @@ func (v *Violation) Error() string {
 	case RuleProject:
 		if v.Relation == Same {
 			return fmt.Sprintf("a project is already registered at %s", v.Path)
+		}
+		if v.Reason != "" {
+			return fmt.Sprintf("%s %s the project at %s: %s, and two projects may not share a tree",
+				v.Path, describe(v.Relation), v.Other, v.Reason)
 		}
 		return fmt.Sprintf("%s %s the project at %s: two projects may not share a tree", v.Path, describe(v.Relation), v.Other)
 	case RuleUnverifiable:
@@ -457,6 +463,22 @@ func (p Policy) Check(path string) (string, error) {
 	if p.Existing && p.ControlPlane != "" && canon == p.ControlPlane {
 		// The hub's own entry: the operator's directory, never registered
 		// through the API, and the project this hub was started in.
+		//
+		// Except where the operator put the projects root inside it, as the
+		// packaged image does (Task 20500): every project created by name is
+		// then inside the hub's own directory, and a run of that directory —
+		// bound into a sandbox or forked in it — would have each of them in
+		// reach. Projects inside the hub's directory anywhere else break the
+		// control-plane rule themselves, below, and never run.
+		if root := p.ProjectsRoot; root != "" && Within(root, canon) {
+			for _, e := range p.Projects {
+				if e != "" && e != canon && Within(e, root) {
+					return canon, &Violation{Path: canon, Rule: RuleProject, Other: e, Relation: Contains,
+						Reason: "it is the hub's own directory, and holds the projects root " + root +
+							" with every project created by name in it"}
+				}
+			}
+		}
 		return canon, nil
 	}
 	if reason := UnsafeReason(canon, p.Home); reason != "" {

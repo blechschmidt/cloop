@@ -745,7 +745,24 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// word for what the lease covers; this is the device's own record.
 	a.vault.own(handleID, placed.paths())
 
-	workDir, err := a.resolveWorkDir(spec.WorkDir)
+	// A project's own directory, one level beneath the trees root; a workload
+	// that names none gets a private directory instead of the root, which
+	// holds every project's tree (Task 20500).
+	var workDir string
+	scratch := strings.TrimSpace(spec.WorkDir) == ""
+	if scratch {
+		workDir, err = a.scratchWorkDir(handleID)
+		if err == nil {
+			wl.setScratch(workDir)
+		}
+	} else {
+		workDir, err = a.resolveWorkDir(spec.WorkDir)
+		if err == nil {
+			// The directory is the project's the hub names it for, and no
+			// other's whose name happens to be the same.
+			err = claimProjectDir(workDir, spec.Labels["project"])
+		}
+	}
 	if err != nil {
 		a.forget(handleID)
 		a.replyError(ctx, sess, frame.ID, remote.CodeForbiddenPath, err.Error())
@@ -755,11 +772,31 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// A host-mode payload carrying its own environment gets a home beside its
 	// tree, not the tree itself; see payloadhome.go. A container's home is the
 	// image's, inside the container, and never the mounted tree.
-	if payload.Virtual == nil && payload.Sandbox.Normalize().Mode != executor.SandboxModeContainer {
+	hostMode := payload.Virtual == nil && payload.Sandbox.Normalize().Mode != executor.SandboxModeContainer
+	var payloadHome string
+	if hostMode {
 		home, homeRoot := a.payloadHome(workDir)
+		if scratch {
+			// A workload with no project keeps nothing between runs: its
+			// home is its private directory (the host driver's floor), or a
+			// fresh one the sandbox makes, and goes with it.
+			home = ""
+		}
+		payloadHome = home
 		env, err := withPayloadHomeAt(spec.Env, home, homeRoot)
 		if err == nil {
-			env, err = a.withCacheEnv(env)
+			// A workload with no project keeps no caches: its directory goes
+			// with it, and caches named after it would only pile up.
+			cacheFor := workDir
+			if scratch {
+				cacheFor = ""
+			}
+			env, err = a.withCacheEnv(env, cacheFor)
+		}
+		if err == nil && spec.ConfineToProject && home != "" {
+			// A confined payload's home is its project's whatever its
+			// environment says: with none, it would inherit this agent's own.
+			err = ensurePayloadHome(home)
 		}
 		if err != nil {
 			a.forget(handleID)
@@ -961,6 +998,27 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		spec.Devices = append(append([]executor.HostDevice(nil), spec.Devices...), nodes...)
 		spec.Interfaces = append(append([]executor.HostInterface(nil), spec.Interfaces...), ifaces...)
 		spec.Env = executor.WithForwardedEnv(spec.Env, fwdEnv)
+	}
+
+	// A host payload the hub asked to keep to its project, because this
+	// device serves other projects too (Task 20500): it runs in the host
+	// sandbox with its tree, its home and its caches, and nothing else of
+	// this device's trees root. The host-process driver refuses it when this
+	// device cannot give the sandbox, which is the answer the hub relays.
+	if hostMode && spec.ConfineToProject {
+		cacheFor := spec.WorkDir
+		if scratch {
+			cacheFor = ""
+		}
+		spec.HostSandbox = a.projectSandbox(cacheFor, payloadHome, spec.Env)
+		labels := make(map[string]string, len(spec.Labels)+1)
+		for k, v := range spec.Labels {
+			labels[k] = v
+		}
+		labels[executor.LabelHostSandbox] = "on"
+		spec.Labels = labels
+		wl.setConfined(spec)
+		a.cfg.logf("workload %s: kept to its project's directory %s", handleID, spec.WorkDir)
 	}
 
 	// A root agent's container workload runs as its work root's owner, which
@@ -1341,8 +1399,8 @@ func (a *Agent) handleLogAck(frame remote.Frame) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// resolveWorkDir maps a control-plane-supplied path onto a real directory
-// beneath this agent's root, creating it if needed.
+// resolveWorkDir maps a control-plane-supplied path onto the project's own
+// directory beneath this agent's trees root, creating it if needed.
 //
 // This is the agent's primary security boundary. The control plane is the
 // party that could be compromised, and a workload's WorkDir is attacker-
@@ -1353,13 +1411,22 @@ func (a *Agent) handleLogAck(frame remote.Frame) {
 // Relative paths are resolved beneath the root, which is also what makes the
 // common case work: a control plane says "run in myproject" and the agent
 // provisions <root>/myproject without either side hardcoding device paths.
+//
+// A project's directory is exactly one level beneath the root (Task 20500),
+// so that no project's tree contains or sits inside another's: the hub names
+// each project by one component (executor.DeviceWorkDir), and a deeper path
+// would put one project inside another's tree, where every run of the outer
+// one reads it. It is a real directory of mode 0700, never a link, and never
+// the root itself, which holds every project; a workload that names no
+// directory is given a private one by scratchWorkDir instead.
 func (a *Agent) resolveWorkDir(requested string) (string, error) {
 	requested = strings.TrimSpace(requested)
 	// Trees live beneath the workspace root, which is the work root unless
 	// --workspace-root put them on a volume of their own (Task 20484).
 	root := a.treesRoot()
 	if requested == "" {
-		return root, nil
+		return "", fmt.Errorf("%w: a workload names no directory, and the root %s holds every project's "+
+			"tree", remote.ErrPathOutsideRoot, root)
 	}
 
 	candidate := requested
@@ -1371,12 +1438,28 @@ func (a *Agent) resolveWorkDir(requested string) (string, error) {
 	if err := containedIn(root, candidate); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(candidate, 0o700); err != nil {
-		return "", fmt.Errorf("agent: create workdir %s: %w", candidate, err)
+	if candidate == root {
+		return "", fmt.Errorf("%w: %s is the root itself, which holds every project's tree; a project's "+
+			"directory is one level beneath it", remote.ErrPathOutsideRoot, root)
 	}
-	// Re-check after creation with symlinks resolved. The pre-creation check
-	// compares lexical paths, which a symlink planted inside the root would
-	// defeat: <root>/escape → /etc is lexically contained but resolves out.
+	if filepath.Dir(candidate) != root {
+		return "", fmt.Errorf("%w: %s is more than one level beneath %s, where it would sit inside another "+
+			"project's directory; a project's directory is one level beneath the root",
+			remote.ErrPathOutsideRoot, candidate, root)
+	}
+	if strings.HasPrefix(filepath.Base(candidate), ".") {
+		// The agent's own: a project's home (.<dir>.home) and the private
+		// directories of workloads with no project. The hub never names one
+		// (executor.DeviceWorkDir cannot make a leading dot).
+		return "", fmt.Errorf("%w: %s begins with a dot, which names this agent's own directories beside "+
+			"the projects' — their homes and private directories", remote.ErrPathOutsideRoot, candidate)
+	}
+	if err := ensureProjectDir(candidate); err != nil {
+		return "", err
+	}
+	// Re-check after creation with symlinks resolved. ensureProjectDir has
+	// refused a link at the directory itself; the root was resolved at
+	// startup, so this holds unless something moved the root since.
 	resolved, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		return "", fmt.Errorf("agent: resolve workdir %s: %w", candidate, err)
@@ -1473,6 +1556,8 @@ func (a *Agent) forget(handleID string) {
 		// true. A revoke that already scrubbed the files leaves nothing to do:
 		// wipeCredentialFile treats a missing file as the desired end state.
 		wl.takeSecrets().wipe(a.cfg.logf)
+		// And the private directory of a workload that named no project.
+		a.removeScratchWorkDir(wl.takeScratch())
 	}
 	// Destroy whatever the vault still holds for this workload, then drop the
 	// binding so a revocation does not wait for an ack about nothing.

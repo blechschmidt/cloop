@@ -432,3 +432,53 @@ func TestRelocatedState(t *testing.T) {
 		t.Fatalf("the refusal does not say what the link does: %v", v)
 	}
 }
+
+// TestTheHubsOwnEntryMayNotHoldOtherProjects (Task 20500): at dispatch the
+// hub's own directory is still its own project — except where the projects
+// root, and with it every project created by name, lies inside it, as in the
+// packaged image: a run of it would have each of them in reach. A project
+// inside the hub's directory anywhere else is refused by its own rule, and
+// does not stop the hub's.
+func TestTheHubsOwnEntryMayNotHoldOtherProjects(t *testing.T) {
+	cp := t.TempDir()
+	root := filepath.Join(cp, "projects")
+	web := filepath.Join(root, "web")
+	stray := filepath.Join(cp, "stray")
+	for _, d := range []string{web, stray} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cp, root, web, stray = canon(t, cp), canon(t, root), canon(t, web), canon(t, stray)
+
+	packaged := Policy{ControlPlane: cp, ProjectsRoot: root, Projects: []string{cp}, Existing: true}
+	if _, err := packaged.Check(cp); err != nil {
+		t.Fatalf("the hub's own entry with no project in its projects root: %v", err)
+	}
+	packaged.Projects = []string{cp, web}
+	_, err := packaged.Check(cp)
+	v, ok := IsViolation(err)
+	if !ok || v.Rule != RuleProject || v.Relation != Contains || v.Other != web || !strings.Contains(v.Reason, "projects root") {
+		t.Fatalf("the hub's own entry holding the projects root and a project in it: %v", err)
+	}
+	if _, err := packaged.Check(web); err != nil {
+		t.Errorf("a project in the projects root inside the hub: %v", err)
+	}
+
+	elsewhere := Policy{ControlPlane: cp, ProjectsRoot: canon(t, t.TempDir()), Projects: []string{cp, stray}, Existing: true}
+	if _, err := elsewhere.Check(cp); err != nil {
+		t.Errorf("the hub's own entry, a stray project inside it refused on its own: %v", err)
+	}
+	if _, err := elsewhere.Check(stray); err == nil {
+		t.Error("a project inside the hub's directory, outside any projects root there, was allowed")
+	}
+}
+
+func canon(t *testing.T, p string) string {
+	t.Helper()
+	c, err := Canonical(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}

@@ -35,6 +35,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/ptyshell"
+	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/redact"
 )
@@ -63,6 +64,10 @@ type attachProc struct {
 
 	closeOnce sync.Once
 	done      chan struct{}
+
+	// sandboxDir is the private directory of a terminal started in the host
+	// sandbox (Task 20500), removed once the terminal has been reaped.
+	sandboxDir string
 }
 
 // wait reaps the command and reports how it ended.
@@ -77,11 +82,17 @@ type attachProc struct {
 // the race detector caught every time an operator closed a terminal whose
 // command was exiting anyway.
 func (p *attachProc) wait() error {
+	var err error
 	if p.pty != nil {
-		return p.pty.Wait()
+		err = p.pty.Wait()
+	} else {
+		p.waitOnce.Do(func() { p.waitErr = p.cmd.Wait() })
+		err = p.waitErr
 	}
-	p.waitOnce.Do(func() { p.waitErr = p.cmd.Wait() })
-	return p.waitErr
+	if p.sandboxDir != "" {
+		localprocess.RemoveSandboxDir(p.sandboxDir)
+	}
+	return err
 }
 
 // attachTable is the agent's registry of live terminals.
@@ -183,6 +194,19 @@ func (a *Agent) handleAttachOpen(ctx context.Context, sess *deviceSession, frame
 	cmd.Env = attachEnv(workDir, payload)
 
 	proc := &attachProc{id: payload.SessionID, handleID: frame.Handle, cmd: cmd, done: make(chan struct{})}
+	// A terminal beside a workload kept to its project (Task 20500) is kept
+	// to the same reach: on a device that serves other projects, a shell as
+	// this agent's user would read every one of them.
+	if conf := wl.confinedSpec(); conf != nil {
+		conf.Argv, conf.Env = argv, cmd.Env
+		dir, serr := localprocess.SandboxCommand(cmd, *conf)
+		if serr != nil {
+			a.replyError(ctx, sess, frame.ID, remote.CodeProtocol,
+				fmt.Sprintf("the terminal cannot be kept to the workload's project on %s: %v", deviceName(), serr))
+			return
+		}
+		proc.sandboxDir = dir
+	}
 
 	var out io.Reader
 	gotTTY := false

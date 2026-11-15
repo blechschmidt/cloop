@@ -248,6 +248,11 @@ type Options struct {
 	// invariant before it dispatches; this is the half a driver can check by
 	// itself, for any caller that reaches it another way. Empty checks
 	// nothing, which is what a device's agent and the CLI pass.
+	//
+	// Nor is the directory itself ever bound (Task 20500): its .cloop is the
+	// control plane, so a sandbox given it read-write could rewrite the hub's
+	// own records. A feature of the hub's directory runs in a checkout this
+	// driver stages, and is bound like any other.
 	ControlPlaneDir string
 
 	// ImagePolicy constrains the images a *project* may name in its
@@ -791,6 +796,11 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 			executor.ErrUnsupported, executor.KindContainer)
 	}
 
+	// The tree bound read-write at /workspace is never the hub's own
+	// directory (Task 20500): see Options.ControlPlaneDir.
+	if err := refuseControlPlaneTree(e.opts.ControlPlaneDir, tree, e.id); err != nil {
+		return executor.Handle{}, err
+	}
 	req, err := e.buildRequestFor(spec, workDir, tree, append(append([]mount(nil), extraMounts...), stage.mountList()...))
 	if err != nil {
 		return executor.Handle{}, err
@@ -1187,6 +1197,33 @@ func (e *Executor) resolveWorkDir(dir string) (string, error) {
 		return "", fmt.Errorf("%w: work_dir %q is not a directory", executor.ErrInvalidSpec, dir)
 	}
 	return abs, nil
+}
+
+// refuseControlPlaneTree refuses to bind tree when it is the hub's own
+// directory, controlPlane: its .cloop holds the control plane — every
+// project's state, the sealed credentials, the role bindings, the audit
+// trail — and a sandbox given it read-write could rewrite them (Task 20500).
+// An empty controlPlane checks nothing.
+func refuseControlPlaneTree(controlPlane, tree, executorID string) error {
+	if strings.TrimSpace(controlPlane) == "" || strings.TrimSpace(tree) == "" {
+		return nil
+	}
+	cp, err := projectconfine.Canonical(controlPlane)
+	if err != nil {
+		return nil // no control plane to protect: it does not exist
+	}
+	t, err := projectconfine.Canonical(tree)
+	if err != nil {
+		return fmt.Errorf("%w: work_dir %q: %w", executor.ErrInvalidSpec, tree, err)
+	}
+	if t != cp {
+		return nil
+	}
+	return fmt.Errorf("%w: the %s executor will not bind %s into a sandbox: it is the hub's own directory, whose "+
+		".cloop holds the control plane — every project's state, the sealed credentials and the audit trail — "+
+		"which a sandbox given it could rewrite. Register the project from a directory of its own; on a hub "+
+		"that allows host execution it can instead run on the hub's host, unconfined, once it is listed in "+
+		"executors.host_sandbox.opt_out", executor.ErrUnsupported, executorID, t)
 }
 
 // sandboxMounts converts a Spec's workspace-relative mounts into binds.

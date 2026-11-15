@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -247,6 +248,22 @@ func initNamespace(p Policy) error {
 	}
 }
 
+// retryBusy runs op until it succeeds, fails with anything but EBUSY, or has
+// been refused busy for about two seconds.
+func retryBusy(op func() error) error {
+	delay := 10 * time.Millisecond
+	var err error
+	for elapsed := time.Duration(0); ; elapsed += delay {
+		if err = op(); !errors.Is(err, unix.EBUSY) || elapsed >= 2*time.Second {
+			return err
+		}
+		time.Sleep(delay)
+		if delay < 200*time.Millisecond {
+			delay *= 2
+		}
+	}
+}
+
 // privateMounts builds the workload's view of the filesystem.
 //
 // /tmp and /var/tmp become the driver's private directory, /dev/shm and /run
@@ -410,9 +427,15 @@ func privateMounts(p Policy) error {
 		}
 	}
 
-	// Read-only, all of it; then writable where the policy says.
-	if err := unix.MountSetattr(-1, "/", unix.AT_RECURSIVE, &unix.MountAttr{
-		Attr_set: unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOSUID,
+	// Read-only, all of it; then writable where the policy says. The kernel
+	// refuses with EBUSY while any mount in the tree has a writer at that
+	// instant, and this process holds none (every grant is an O_PATH), so a
+	// refusal is a moment's activity it does not own — seen once in a busy
+	// test run, never alone. Asked again for a while before it is a failure.
+	if err := retryBusy(func() error {
+		return unix.MountSetattr(-1, "/", unix.AT_RECURSIVE, &unix.MountAttr{
+			Attr_set: unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOSUID,
+		})
 	}); err != nil {
 		return fmt.Errorf("make the filesystem read-only: %w", err)
 	}

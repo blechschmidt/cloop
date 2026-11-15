@@ -782,7 +782,9 @@ are in the package suites and in `tests/kubecontroller`, not yet in
 
 > On a hub with single sign-on, a run or model call the hub forks on its own
 > host for a person can open that person's project and Claude login, and
-> nothing that belongs to anyone else.
+> nothing that belongs to anyone else. On a host that serves more than one
+> project, a run of one project can open, list and write that project and
+> nothing of another's, whoever it acts for.
 
 The host executor starts `cloop run`, and the agent it runs, as the hub's own
 operating-system user. Without a sandbox that user's permissions are the only
@@ -797,7 +799,7 @@ the people a hub serves.
 
 | Mode | Dispatches to the hub's host that run in the sandbox |
 | --- | --- |
-| `auto` (default) | On a hub with sign-in, every one that acts for a person who is not a hub administrator. One that acts for an administrator, or for no one (the static token, the hub's own automatic work), is sandboxed too when the project is one somebody whose runs are sandboxed may write. Without sign-in there is one person, and nobody to keep apart |
+| `auto` (default) | On a hub with sign-in, every one that acts for a person who is not a hub administrator. One that acts for an administrator, or for no one (the static token, the hub's own automatic work), is sandboxed too when the project is one somebody whose runs are sandboxed may write. On any hub, with or without sign-in, every one that acts for anyone once the hub serves a second project, unless the project is listed in `executors.host_sandbox.opt_out`. A hub without sign-in that serves one project has nobody to keep apart |
 | `all` | Every one that acts for anyone, hub administrators and the hub's own login included |
 | `off` | None. On a hub with sign-in, `cloop hub doctor` fails `executors.host_sandbox` |
 
@@ -815,12 +817,37 @@ an administrator, or it is shared with people or a team at `operator` or
 above, or the role policy gives somebody who is not an administrator a role
 that runs work on it. When the hub cannot tell, the run is sandboxed.
 
+**Projects that share a host.** A hub registers every project's directory on
+its own host, so a run of one project that is not confined can open, list and
+write every other project there: its source tree, its `.cloop/state.db` with
+the plan and the task outputs, and its features. Under `auto`, once the hub
+serves a second project (its own directory counts, features do not), every run,
+resume, failover and model call it forks on its host is kept to its own project
+whoever it acts for, administrators and the hub's own login included. A project
+whose runs need more of the host, such as the Docker socket or an SSH key in the
+hub user's home, can be listed in `executors.host_sandbox.opt_out`:
+
+```yaml
+executors:
+  host_sandbox:
+    opt_out:
+      - /srv/projects/infra   # runs here can read every other project on this host
+```
+
+An opted-out project's runs are unconfined and can read every other project on
+the host, and `cloop hub doctor` names each one as a warning
+(`executors.host_sandbox.opt_out`). The opt-out lets a project out of this rule
+only: a person who is not a hub administrator is still sandboxed on a hub with
+sign-in, and `mode: all` sandboxes everyone. The model-call replays that run in
+the hub's own process (the provider-call and task replays) are refused for a
+confined project, because the hub's process has no sandbox to give them.
+
 **What a sandboxed workload can open:**
 
 | Path | Access |
 | --- | --- |
 | Its project's directory, feature checkouts included | read and write |
-| The Claude login directory of the person it acts for, with their Copilot home inside it | read and write |
+| The Claude login directory of the person it acts for, with their Copilot home inside it; for a run that acts for no one, the hub's own Claude directory (`CLAUDE_CONFIG_DIR` or `~/.claude`), named in its environment | read and write |
 | `sandbox-home` inside that directory, which becomes `HOME`, so caches and `~/.gitconfig` are per person and go when the person is offboarded | read and write |
 | A private temporary directory, which becomes `TMPDIR` (on a root hub, `/tmp` itself) | read and write |
 | Its own lease files and the hub CA file the driver wrote for it | read |
@@ -892,8 +919,14 @@ project the person owns may be granted to another of theirs.
 **The hub's own directory** cannot be sandboxed from itself: a run of it needs
 the project's state, and that state is the control plane. Under `auto`, only a
 hub administrator may run it on the hub's host, and a dispatch of it for anyone
-else is refused with `409`. Under `all` nobody may, and it has to be bound to a
-container executor. The voice-command dialog runs `cloop listen`, which carries
+else is refused with `409`. Once the hub serves another project, an
+administrator may run it only after the operator lists it in
+`executors.host_sandbox.opt_out`, because its runs are then unconfined. Where
+the projects root lies inside the hub's directory, as in the packaged image,
+it holds every project created by name, and no run of it starts anywhere. Under
+`all` nobody may. No container is given it either, since its `.cloop` holds the
+control plane: register the project from a directory of its own instead. The
+voice-command dialog runs `cloop listen`, which carries
 out what it heard in the hub's own directory, so it is refused the same way;
 dictating into a field is not a dispatch and works for everyone. A paused run
 of the hub's own directory that a person started before the sandbox existed is
@@ -901,8 +934,60 @@ not resumed for them: it is held with the reason `starter_unavailable`.
 
 **Inline replays.** The provider-call replay and the task replay run the
 provider in the hub's own process, where there is no sandbox to run it in. For
-a person whose runs are sandboxed they are refused with `409`
-`inline_call_unsandboxed`.
+a person whose runs are sandboxed, and for a project kept to itself on a shared
+host, they are refused with `409` `inline_call_unsandboxed`.
+
+### On a device
+
+An executor agent keeps every project the hub hands it beneath one root, and
+runs host-mode payloads as its own user. The agent keeps the projects apart:
+
+- Each project's directory is exactly one level below the agent's trees root,
+  a real directory (never a link) with mode `0700`. A work directory deeper
+  than that, the root itself, or a link where a project's directory goes is
+  refused, so no project's tree contains another's.
+- A workload that names no directory runs in a private directory of its own
+  under the agent's scratch root, removed when it ends, never in the root that
+  holds every project's tree.
+- The package-manager caches the agent points payloads at (`--cache-dir`) are
+  kept per project, one directory per project's tree, so one project cannot
+  plant an object into another's Go build cache.
+- The first run in a project's directory records whose it is, by a digest of
+  the project's path on the hub, and a run of another project named into the
+  same directory is refused. The directory's name carries only 32 bits of a
+  hash, so someone who may choose a project's path could otherwise find one
+  that names another project's directory.
+- When another registered project may run on the same device (one bound to it
+  or to one of its virtual executors, one bound nowhere when the device is the
+  default executor, or one with a workload there now, such as a run failed
+  over onto it), the hub asks the agent to keep a host-mode payload to its
+  project, unless the project is in `executors.host_sandbox.opt_out`. The
+  agent then runs it in the host sandbox with its tree, its home and its caches
+  writable, its own lease files and the harness it starts readable, and
+  nothing else of the root; a payload that names no directory gets its private
+  directory alone, and an attach terminal opened beside a confined payload is
+  confined the same way. An agent that cannot give the sandbox refuses the
+  payload, and the hub refuses to ask an agent below protocol 30, which would
+  ignore the request. A container or virtual executor's payload already sees
+  only its bind mount, and a pool's runner takes one run of one project.
+- The agent's own git, which provisions the next run and returns this one's
+  work outside the sandbox, obeys nothing a run left in its checkout's `.git`
+  on such a device: before it fetches into a kept checkout it rewrites the
+  checkout's configuration to what cloop writes, drops anything that points
+  git at another repository, and resets the tree to the fetched commit, except
+  for a working copy a project move placed there, which keeps its changes.
+
+### In a container
+
+The container driver, under runc, Kata or gVisor alike, binds one directory
+read-write at `/workspace`: the project's own, or the checkout it stages for a
+feature. It binds no parent directory and no other project, and it never binds
+the hub's own directory, whose `.cloop` holds the control plane. Each sandbox
+gets its own `/tmp` on a tmpfs and a home inside it, so nothing one project's
+run leaves there reaches another's. A derived image built from a project's
+`setup:` commands is that project's own: its tag includes the project, and the
+build takes no layer from the builder's cache, so two projects with the same
+`setup:` never start from each other's build.
 
 ---
 
@@ -5297,6 +5382,23 @@ Retiring the static token while the hub runs (see
 | The inline replays are refused to a person whose runs are sandboxed | `TestInlineReplaysAreRefusedToAPersonWhoseRunsAreSandboxed` |
 | A paused run of the hub's own directory that a person started before the sandbox is held, naming them and why, instead of being resumed for them | `TestAResumeTheHostSandboxRefusesIsHeldSayingWhy` |
 | `cloop hub doctor` fails a hub with sign-in whose people's runs are not sandboxed, or which cannot sandbox them | `TestHostSandboxFindingsAcrossTheMatrix` |
+| On a hub without sign-in serving three projects, as a root hub runs it, a run of one project can neither open, list nor write another's tree, its state, the hub's database or the registry; the hub's own directory runs only once opted out, and an opted-out project's run reaches everything again | `TestProjectsOnTheHubsHostCannotReachEachOther` |
+| Under `auto`, once the host serves a second project, every run is kept to its own whoever it acts for; `opt_out` lets a project out (named as written or through a link, with its features) but never frees a person, and `all` ignores it | `TestHostSandbox_ASecondProjectKeepsEveryRunOnTheHostToItsOwn`, `TestHostSandbox_AnOptedOutProjectRunsUnconfinedButNeverFreesAPerson`, `TestHostSharingCountsEveryRegisteredProjectButFeatures` |
+| On a shared host the hub's own directory is refused to everyone until it is opted out | `TestHostSandbox_TheHubsOwnDirectoryNeedsTheOptOutOnASharedHost` |
+| The host driver keeps a run of one project out of another's tree when the run acts for no one and uses the hub's own login | `TestTwoProjectsOnOneHostCannotOpenListOrWriteEachOther` |
+| `cloop hub doctor` reports the projects a host serves, fails a shared host that cannot sandbox, and names every opted-out project | `TestHostSandboxFindingsOnAHostServingSeveralProjects` |
+
+### Projects on a device, a container executor and a cluster — the package suites
+
+| Guarantee | Test |
+| --- | --- |
+| A device asked to keep a host-mode payload to its project does: the payload cannot open, list or write another project's tree, with or without an environment of its own, while an unconfined one could | `TestLoopbackHostRunsOfTwoProjectsCannotReachEachOther` |
+| A project's directory on a device is one level below the root, mode `0700` and never a link; a payload naming no directory gets a private one that goes with it | `TestLoopbackProjectDirectoriesArePrivateAndOneLevelDeep` |
+| The hub asks a device to confine a host-mode run only when another project may run there (bound, unbound on a default device, or with a workload there now), never for a pool's runner, a virtual executor or an opted-out project, and refuses to ask an agent below protocol 30 | `TestDeviceConfinement_ASharedDeviceKeepsAHostRunToItsProject`, `TestDeviceSharingFollowsTheBindings`, `TestAFailedOverRunSharesTheDeviceItRunsOn`, `TestConfinementNeedsProtocol30` |
+| On a shared device a payload naming no directory, and an attach terminal beside a confined payload, are confined too; a directory the hub names for two projects serves the first only | `TestLoopbackAWorkloadNamingNoProjectOnASharedDeviceIsConfined`, `TestLoopbackAnAttachTerminalBesideAConfinedWorkloadIsConfined`, `TestLoopbackADirectoryNamedForTwoProjectsServesTheFirstOnly` |
+| A device's own git obeys nothing a confined run left in a kept checkout, and never appends through a link the tree left | `TestAHardenedKeptWorkingCopyObeysNothingItsLastRunLeft`, `TestHideControlDirFollowsNoLinkTheTreeLeft`, `TestAKeptCheckoutsConfigurationIsRewritten` |
+| A container sandbox binds its own project's tree alone, under every runtime; it cannot reach another project's tree or `/tmp`; the hub's own directory is never bound; derived images are per project | `TestTwoProjectsOnOneContainerExecutorShareNothing`, `TestASandboxOfOneProjectCannotReachAnothers`, `TestTheHubsOwnDirectoryIsNeverBoundIntoASandbox`, `TestDerivedKey_IsEachProjectsOwn` |
+| Two projects' Pods share no volume and no Secret, and a runner volume's wipe takes the last project's caches with its tree | `TestTwoProjectsPodsShareNoVolume`, `TestAWipeTakesTheLastProjectsCachesWithItsTree` |
 
 ### Sandbox egress filtering — `netfilter_test.go` and the package suites
 
@@ -6435,15 +6537,29 @@ to get anywhere with the hub's. Landlock can restrict TCP ports but not
 addresses, so the sandbox does not use it (`pkg/hostsandbox/landlock_linux.go`).
 Run people's projects on container executors where the network matters.
 
-**A hub administrator's run of a project only administrators may write is not
-sandboxed under `auto`.** It runs as the hub's user with the whole filesystem,
-as every run did before, and so can read other people's projects and Claude
-logins (`TestHostSandbox_AutoSandboxesEveryPersonButTheAdministrators`). So
-can a run that acts for no one there, such as the static token's. Set
+**An opted-out project's runs, and an administrator's on a hub that serves one
+project, are not sandboxed under `auto`.** A project listed in
+`executors.host_sandbox.opt_out` runs as the hub's user with the whole
+filesystem, whoever starts it, and so can read every other project on the host
+and, on a hub with sign-in, other people's Claude logins
+(`TestHostSandbox_AnOptedOutProjectRunsUnconfinedButNeverFreesAPerson`). So
+does an administrator's run, or one for no one, on a hub that serves a single
+project (`TestHostSandbox_AutoSandboxesEveryPersonButTheAdministrators`). Set
 `executors.host_sandbox.mode: all` to sandbox them too. A resumed run decides
 again from the starter's address alone, so an administrator only by a group
 mapping is sandboxed when their run resumes, and so are their runs of projects
 they own (`TestProjectExposureFollowsTheAccessModel`).
+
+**Runs that share a Claude login share its directory.** A confined run can
+write the Claude directory it signs in with: the person's login on a hub with
+sign-in, the hub's own for a run that acts for no one. Claude Code keeps every
+project's session transcripts and memory there, and reads its settings and
+hooks from there, so a confined run of one project can read what the same
+login's runs of other projects said and read, and can leave a hook or a memory
+file that the next run of another project obeys inside that project's sandbox
+(`pkg/ui/host_sandbox.go`). Give projects that must stay apart different
+logins, or run them on container executors, which take the login from the
+lease alone.
 
 **Without namespaces, a sandboxed run can still reach what a socket path leads
 to, and change the metadata of the hub user's files.** On a hub that does not
@@ -6489,11 +6605,14 @@ restoring it, one built before foreign reads existed above all, would serve it
 without asking the readers list. After a restart its fetches are refused until
 the session is minted again (`TestForeignReadIsFetchOnlyAndNeverDurable`).
 
-**Whether an administrator's run is sandboxed is decided when it starts.** A
-run already going when its project is first shared with somebody whose runs
-are sandboxed keeps running outside the sandbox until it ends, and so picks up
-what their model calls write there in the meantime
+**Whether a run is sandboxed is decided when it starts.** A run already going
+when its project is first shared with somebody whose runs are sandboxed keeps
+running outside the sandbox until it ends, and so picks up what their model
+calls write there in the meantime
 (`TestHostSandbox_AnAdministratorsRunOfAProjectSandboxedPeopleWriteIsSandboxed`).
+Likewise a run that started while its host served one project, or while its
+project was opted out, stays unconfined until it ends, and can reach a project
+registered in the meantime (`TestHostSandbox_ASecondProjectKeepsEveryRunOnTheHostToItsOwn`).
 
 **A read-only grant inside a writable one is writable.** Landlock adds the
 rights of every rule along a path, so a read-only `local_repo` grant that lies
@@ -6504,11 +6623,14 @@ are on the allow-list because runs need the network, so credentials in a
 proxy URL (`http://user:password@proxy:3128`) are visible to every sandboxed
 run (`TestOnlyHarmlessSettingsAreInheritedByDefault`).
 
-**A device that runs payloads on its own host does not sandbox them.** The
-host sandbox is for the hub's own host: the request never travels to a device
-(`pkg/executor/hostsandbox.go`), so a device in host mode still runs every
-project's payload as its agent's user. Give a device that serves more than one
-person a container engine.
+**A device confines a host-mode payload only while another project may run
+there.** The hub decides from its bindings and the workloads it records on the
+device when it dispatches: a device that serves one project runs its payloads
+as the agent's user, with the whole of the agent's root in reach, including
+the trees of projects that ran there before and were moved or unbound since
+(`TestDeviceSharingFollowsTheBindings`, `TestAFailedOverRunSharesTheDeviceItRunsOn`).
+A run that started before another project arrived stays unconfined until it
+ends. Give a device that serves more than one person a container engine.
 
 **An agent on a local executor can open a human review gate itself.** No agent
 is handed a gate (`TestRunStopsAtAReviewGateUntilItIsApproved`), the MCP

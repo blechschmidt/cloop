@@ -120,6 +120,16 @@ type Request struct {
 	// refreshed from a checkout this provisioning can trust — one it created,
 	// or a kept one Pristine vetted (Task 20484). "" keeps none.
 	ObjectCache string
+	// Harden says a checkout already in Dir was last written by a run that
+	// may have been another project's adversary (Task 20500): a device that
+	// serves several projects keeps each run to its own, and its own git,
+	// which runs outside that confinement, must obey nothing such a run left
+	// in .git. The configuration is rewritten to what a checkout cloop
+	// provisioned carries, as Pristine does, and what points git at another
+	// repository is removed, without resetting the tree: Harden is for a
+	// working copy that must be kept (Workspace.Keep), which Pristine would
+	// reset. A checkout that cannot be made safe is refused.
+	Harden bool
 }
 
 // HostLabel renders how the machine provisioning runs on refers to itself.
@@ -252,6 +262,13 @@ func Provision(ctx context.Context, r Request) error {
 			// over it would refuse the files it finds.
 			if err := discard("it has no .git"); err != nil {
 				return err
+			}
+		}
+	}
+	if r.Harden && !r.Pristine {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			if why := hardenKeptRepository(ctx, dir, emit); why != "" {
+				return fail("the checkout kept in %s on %s cannot be used safely: %s", dir, hostName, why)
 			}
 		}
 	}

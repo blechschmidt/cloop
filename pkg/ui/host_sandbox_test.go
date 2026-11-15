@@ -27,6 +27,12 @@ type hostSandboxFixture struct {
 }
 
 func newHostSandboxFixture(t *testing.T, mode string, readOnly ...string) hostSandboxFixture {
+	return newHostSandboxFixtureOptedOut(t, mode, nil, readOnly...)
+}
+
+// newHostSandboxFixtureOptedOut is newHostSandboxFixture with
+// executors.host_sandbox.opt_out listing optOut (Task 20500).
+func newHostSandboxFixtureOptedOut(t *testing.T, mode string, optOut []string, readOnly ...string) hostSandboxFixture {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
@@ -54,6 +60,12 @@ func newHostSandboxFixture(t *testing.T, mode string, readOnly ...string) hostSa
 			cfg.WriteString("      - " + p + "\n")
 		}
 	}
+	if len(optOut) > 0 {
+		cfg.WriteString("    opt_out:\n")
+		for _, p := range optOut {
+			cfg.WriteString("      - " + p + "\n")
+		}
+	}
 	if err := os.WriteFile(filepath.Join(f.controlPlane, ".cloop", "config.yaml"), []byte(cfg.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +73,10 @@ func newHostSandboxFixture(t *testing.T, mode string, readOnly ...string) hostSa
 	// No project here is one a sandboxed person may write, unless a test says
 	// so: that is the Server's to answer (projectExposedToSandboxedPeople).
 	withHostSandboxExposure(t, func(string) bool { return false })
+	// Nor does the host serve another project, unless a test says so (Task
+	// 20500): the registered projects are the Server's to list.
+	withHostSharing(t, func(string) bool { return false })
+	withDeviceSharing(t, func(string, string) bool { return false })
 	var err error
 	if f.aliceHome, err = claudecodeauth.HomeFor("alice@corp.example"); err != nil {
 		t.Fatal(err)
@@ -171,8 +187,10 @@ func TestHostSandbox_TheHubsOwnDirectoryIsRefusedRatherThanSandboxed(t *testing.
 		t.Errorf("an administrator's run of the hub's own directory: %v %v", sb, err)
 	}
 	all := newHostSandboxFixture(t, config.HostSandboxAll)
+	// No container is handed the control plane either (Task 20500), so the
+	// advice is a directory of its own.
 	if _, _, err := sandboxOf(t, all, all.host, all.controlPlane, adminPerson); err == nil ||
-		!strings.Contains(err.Error(), "container executor") {
+		!strings.Contains(err.Error(), "a directory of its own") || strings.Contains(err.Error(), "container executor") {
 		t.Errorf("mode all let the hub's own directory run on its host: %v", err)
 	}
 }
@@ -306,6 +324,24 @@ func withHostSandboxMode(t *testing.T, mode string) {
 	prev := hostSandboxModeOverride.Load()
 	hostSandboxModeOverride.Store(&mode)
 	t.Cleanup(func() { hostSandboxModeOverride.Store(prev) })
+}
+
+// withHostSharing answers, for the test, whether the hub's host serves a
+// project besides the one asked about (Task 20500).
+func withHostSharing(t *testing.T, fn func(string) bool) {
+	t.Helper()
+	prev := hostSharingFn.Load()
+	setHostSharing(fn)
+	t.Cleanup(func() { hostSharingFn.Store(prev) })
+}
+
+// withDeviceSharing answers, for the test, whether another project may run on
+// a device (Task 20500).
+func withDeviceSharing(t *testing.T, fn func(string, string) bool) {
+	t.Helper()
+	prev := deviceSharingFn.Load()
+	setDeviceSharing(fn)
+	t.Cleanup(func() { deviceSharingFn.Store(prev) })
 }
 
 // withHostSandboxExposure answers, for the test, whether people whose runs are

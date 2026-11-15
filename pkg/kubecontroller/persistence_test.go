@@ -426,3 +426,43 @@ func TestRetireOrderCountsOnlyIdleStrandedRunners(t *testing.T) {
 		t.Fatalf("%d stranded idle runners among runners holding nothing", n)
 	}
 }
+
+// TestAWipeTakesTheLastProjectsCachesWithItsTree (Task 20500): what a runner
+// keeps on its volume for a project is the project's tree, its package-manager
+// caches beneath tools/ (one directory per project's tree, as the agent keys
+// them) and the git objects its checkouts were made from; when the next
+// runner on the volume serves another project, the init container's wipe
+// takes all of it, so the next project's build starts from nothing the last
+// one left.
+func TestAWipeTakesTheLastProjectsCachesWithItsTree(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{
+		filepath.Join("workspace", "web-1a2b3c4d", "main.go"),
+		filepath.Join("workspace", ".web-1a2b3c4d.home", ".claude.json"),
+		filepath.Join("tools", "web-1a2b3c4d", "go-build", "ab", "planted-action-output"),
+		filepath.Join("tools", "web-1a2b3c4d", "npm", "_cacache", "index"),
+		filepath.Join("git", "objects", "pack", "pack-1.pack"),
+	} {
+		path := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("web's"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep, err := PrepareStorage(PrepareOptions{Root: root, Dirs: []string{"workspace", "git", "tools"}, Wipe: true,
+		Measure: fakeFS{root, 1 << 20}.measure})
+	if err != nil || !rep.Wiped {
+		t.Fatalf("%+v, %v", rep, err)
+	}
+	for _, d := range []string{"workspace", "git", "tools"} {
+		entries, err := os.ReadDir(filepath.Join(root, d))
+		if err != nil {
+			t.Fatalf("%s after the wipe: %v", d, err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("%s kept %d entries of the last project's through the wipe", d, len(entries))
+		}
+	}
+}

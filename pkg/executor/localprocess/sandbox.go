@@ -152,6 +152,27 @@ func sandboxCommand(cmd *exec.Cmd, spec executor.Spec, gitCADir string) (string,
 	return dir, nil
 }
 
+// SandboxCommand turns cmd into one that runs in the host sandbox spec asks
+// for, as Start does for the workload itself: for something started beside a
+// confined workload with the same reach — a device's attach terminal (Task
+// 20500). spec.Argv names what cmd runs. It returns the private directory it
+// made, which the caller removes with RemoveSandboxDir once cmd has ended.
+func SandboxCommand(cmd *exec.Cmd, spec executor.Spec) (string, error) {
+	if spec.HostSandbox == nil {
+		return "", fmt.Errorf("%w: no host sandbox to start the command in", executor.ErrInvalidSpec)
+	}
+	if len(spec.Argv) == 0 {
+		return "", fmt.Errorf("%w: no command to start in the host sandbox", executor.ErrInvalidSpec)
+	}
+	if err := spec.HostSandbox.Validate(); err != nil {
+		return "", err
+	}
+	return sandboxCommand(cmd, spec, "")
+}
+
+// RemoveSandboxDir removes a directory SandboxCommand made, and nothing else.
+func RemoveSandboxDir(dir string) { removeSandboxDir(dir) }
+
 // onlyInheritable keeps, of what a sandboxed workload's environment inherited
 // from the hub's own, only what hostsandbox.Inheritable allows and what pass
 // names: not the hub's OpenAI key, a GitHub token the service holds for

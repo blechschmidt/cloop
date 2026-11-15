@@ -15,9 +15,13 @@ package ui
 // Who is sandboxed is executors.host_sandbox.mode:
 //
 //   - auto (the default): on a hub with sign-in, every dispatch acting for a
-//     person who is not a hub administrator. Administrators configure the
-//     executors and this setting itself, and their runs keep the host as
-//     before; without sign-in there is one person and nobody to keep apart.
+//     person who is not a hub administrator; and, on any hub, every dispatch
+//     acting for anyone — administrators and the hub's own login included —
+//     once the host serves a second project (Task 20500), because a run that
+//     acts for one project must not open, list or write another's. A project
+//     listed in executors.host_sandbox.opt_out is left out of that second
+//     rule, and `cloop hub doctor` names it. A hub with one project and no
+//     sign-in has nothing to keep apart.
 //   - all: every dispatch that acts for anyone, administrators and the hub's
 //     own login included.
 //   - off: none.
@@ -25,7 +29,15 @@ package ui
 // The hub's own directory cannot be sandboxed from itself: its run needs the
 // project's state, and that state is the control plane. A dispatch of it that
 // the mode would sandbox is refused instead, which on an auto hub leaves it to
-// the administrators.
+// the administrators, and once the host serves other projects to an operator
+// who opts it out.
+//
+// A device is a host too (Task 20500). Its agent runs every project the hub
+// hands it beneath one root, as one user, so a project run there as a host
+// process is kept to its own directory by the agent — the hub cannot build a
+// sandbox from paths only the device knows — whenever another project may
+// run on that device: the hub sets Spec.ConfineToProject, and a device whose
+// agent cannot honour it is refused the dispatch.
 
 import (
 	"errors"
@@ -58,10 +70,13 @@ const sandboxHomeDir = "sandbox-home"
 // refuses, to test something the sandbox does not change. Nil in production.
 var hostSandboxModeOverride atomic.Pointer[string]
 
+// hostSandboxView is executors.host_sandbox as the dispatch path reads it.
+type hostSandboxView struct{ config.HostSandboxConfig }
+
 // hostSandboxSettings reads executors.host_sandbox from the hub's own
 // configuration. A configuration that cannot be read gives the default,
-// which sandboxes people.
-func hostSandboxSettings() config.HostSandboxConfig {
+// which sandboxes people, and keeps every project on a shared host to itself.
+func hostSandboxSettings() hostSandboxView {
 	var hs config.HostSandboxConfig
 	if cfg, err := controlPlaneConfig(); err == nil && cfg != nil {
 		hs = cfg.Executors.HostSandbox
@@ -69,7 +84,7 @@ func hostSandboxSettings() config.HostSandboxConfig {
 	if m := hostSandboxModeOverride.Load(); m != nil {
 		hs.Mode = *m
 	}
-	return hs
+	return hostSandboxView{hs}
 }
 
 // sandboxesWho reports whether mode puts a dispatch of project acting for who
@@ -90,6 +105,10 @@ func sandboxesWho(mode string, clear *harnessClearance, project string) bool {
 // that nobody whose runs are sandboxed may write. Otherwise it would run, with
 // the hub's whole filesystem, whatever such a person's agent left in the
 // project: a hook in .claude/settings.json, a git hook, a build script.
+//
+// And, on any hub, only while the host serves no other project, or the
+// operator opted this one out (Task 20500): otherwise its run could open,
+// list and write every other project's files on the host.
 func sandboxesPerson(mode string, who harnessWho, project string) bool {
 	switch mode {
 	case config.HostSandboxOff:
@@ -98,13 +117,84 @@ func sandboxesPerson(mode string, who harnessWho, project string) bool {
 		return true
 	}
 	// auto, and anything Validate let through
-	if !who.personal {
-		return false
-	}
-	if who.identity != "" && !who.hubAdmin {
+	if who.personal && who.identity != "" && !who.hubAdmin {
 		return true
 	}
-	return project != "" && hostSandboxExposure(project)
+	if project == "" {
+		return false
+	}
+	if who.personal && hostSandboxExposure(project) {
+		return true
+	}
+	return confinedAmongProjects(project)
+}
+
+// confinedAmongProjects reports whether auto keeps a run of project to it
+// because the host serves other projects too (Task 20500), unless the
+// operator opted project out.
+func confinedAmongProjects(project string) bool {
+	return hostSharedWithOtherProjects(project) && !hostSandboxOptedOut(project)
+}
+
+// hostSharingFn answers whether the hub's host serves a project besides the
+// one named; nil asks the registered projects (registeredProjectDirs). Tests
+// pin it, like the exposure.
+var hostSharingFn atomic.Pointer[func(string) bool]
+
+func setHostSharing(fn func(string) bool) {
+	if fn == nil {
+		hostSharingFn.Store(nil)
+		return
+	}
+	hostSharingFn.Store(&fn)
+}
+
+// hostSharedWithOtherProjects reports whether the hub serves a project besides
+// project — whose directory, its state at least, is on this host, where a run
+// of project could read it.
+func hostSharedWithOtherProjects(project string) bool {
+	if fn := hostSharingFn.Load(); fn != nil {
+		return (*fn)(project)
+	}
+	return otherProjectAmong(project, registeredProjectDirs())
+}
+
+// otherProjectAmong reports whether dirs — canonical project directories,
+// features excluded — hold one that is not project, a feature being its
+// project's.
+func otherProjectAmong(project string, dirs []string) bool {
+	own := canonicalDir(policyProjectPath(project))
+	for _, d := range dirs {
+		if d != "" && d != own {
+			return true
+		}
+	}
+	return false
+}
+
+// hostSandboxOptedOut reports whether executors.host_sandbox.opt_out lists
+// project, compared both as written and with links resolved.
+func hostSandboxOptedOut(project string) bool {
+	return hostSandboxSettings().optedOut(project)
+}
+
+// optedOut is hostSandboxOptedOut against these settings.
+func (h hostSandboxView) optedOut(project string) bool {
+	if strings.TrimSpace(project) == "" {
+		return false
+	}
+	own := canonicalDir(project)
+	clean := filepath.Clean(project)
+	for _, p := range h.OptOut {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if filepath.Clean(p) == clean || canonicalDir(p) == own {
+			return true
+		}
+	}
+	return false
 }
 
 // hostSandboxExposureFn answers whether people whose runs are sandboxed may
@@ -150,8 +240,12 @@ func (e *hostSandboxRefusal) Unwrap() error { return executor.ErrUnsupported }
 // never from what the environment says, so no grant can point a run at another
 // person's files.
 func applyHostSandbox(spec executor.Spec, ex executor.Executor, workDir string, clear *harnessClearance, lease *secretLease) (executor.Spec, error) {
-	if ex == nil || executor.IsolatesFromHost(ex) {
+	if ex == nil {
 		return spec, nil
+	}
+	if executor.IsolatesFromHost(ex) {
+		// A device's own host, which its agent confines (Task 20500).
+		return applyDeviceConfinement(spec, ex, workDir, clear), nil
 	}
 	settings := hostSandboxSettings()
 	mode := settings.EffectiveMode()
@@ -162,11 +256,23 @@ func applyHostSandbox(spec executor.Spec, ex executor.Executor, workDir string, 
 	if cp := strings.TrimSpace(controlPlaneDir()); cp != "" && sameDir(project, cp) {
 		reason := "it is the hub's own directory, which holds the control plane — the database every " +
 			"person's sealed credentials and sessions are in — and a run of it needs that state. "
-		if mode == config.HostSandboxAll {
-			reason += "With executors.host_sandbox.mode all, nobody may run it on the hub's host: " +
-				"bind it to a container executor."
-		} else {
-			reason += "Only a hub administrator may run it on the hub's host."
+		shared := hostSharedWithOtherProjects(project)
+		switch {
+		case mode == config.HostSandboxAll:
+			reason += "With executors.host_sandbox.mode all, nobody may run it on the hub's host, and no " +
+				"container is given the control plane either: register the project from a directory of " +
+				"its own."
+		case clear.who.personal && clear.who.identity != "" && !clear.who.hubAdmin:
+			reason += "Only a hub administrator may run it on the hub's host"
+			if shared && !settings.optedOut(project) {
+				reason += ", and only once the operator lists it in executors.host_sandbox.opt_out, " +
+					"since this host serves other projects whose files a run of it could read"
+			}
+			reason += "."
+		default:
+			reason += "This host serves other projects, whose files a run of it could open, list and write. " +
+				"Only once the operator lists it in executors.host_sandbox.opt_out does it run here, " +
+				"unconfined; or register the project from a directory of its own."
 		}
 		return spec, &hostSandboxRefusal{Project: project, Reason: reason}
 	}
@@ -429,6 +535,125 @@ func checkRepoMounts(mounts []secretbroker.RepoMount, workDir string, who harnes
 // pathWithin reports whether path is dir or beneath it.
 func pathWithin(path, dir string) bool {
 	return path == dir || strings.HasPrefix(path, strings.TrimSuffix(dir, "/")+"/")
+}
+
+// applyDeviceConfinement asks a device to keep a run of workDir's project to
+// that project when another project may run on the same device (Task 20500).
+// The agent builds the confinement from its own paths and honours it only for
+// a payload it runs as a host process; a container or a virtual executor's
+// sandbox already sees nothing but its bind mount. A dispatch for nobody at
+// all — cloop's own code — and a pool runner, which takes one run of one
+// project and is gone, are left alone, and so is a project the operator opted
+// out under mode auto.
+func applyDeviceConfinement(spec executor.Spec, ex executor.Executor, workDir string, clear *harnessClearance) executor.Spec {
+	if clear == nil || ex.Kind() != executor.KindRemoteAgent || executor.IsEphemeral(ex) {
+		return spec
+	}
+	settings := hostSandboxSettings()
+	// A dispatch that names no directory is nobody's project: on the device
+	// it runs in a private directory of its own, kept to that directory
+	// whenever any project's tree may be beside it.
+	project := ""
+	if strings.TrimSpace(workDir) != "" {
+		project = dispatchProject(workDir)
+	}
+	switch settings.EffectiveMode() {
+	case config.HostSandboxOff:
+		return spec
+	case config.HostSandboxAll:
+	default:
+		if (project != "" && settings.optedOut(project)) || !deviceSharedWithOtherProjects(ex.ID(), project) {
+			return spec
+		}
+	}
+	spec.ConfineToProject = true
+	labels := make(map[string]string, len(spec.Labels)+1)
+	for k, v := range spec.Labels {
+		labels[k] = v
+	}
+	labels[executor.LabelHostSandbox] = "device"
+	spec.Labels = labels
+	return spec
+}
+
+// deviceSharingFn answers whether a project besides the one named may run on
+// the device executorID; nil works it out from the bindings. Tests pin it.
+var deviceSharingFn atomic.Pointer[func(executorID, project string) bool]
+
+func setDeviceSharing(fn func(executorID, project string) bool) {
+	if fn == nil {
+		deviceSharingFn.Store(nil)
+		return
+	}
+	deviceSharingFn.Store(&fn)
+}
+
+// deviceSharedWithOtherProjects reports whether a registered project besides
+// project ("" for a dispatch of no project, for which every project counts)
+// may run on the device executorID: one bound to it or to one of its virtual
+// executors — whose trees are beneath the same agent's root — or, when it is
+// the default executor, one bound nowhere.
+func deviceSharedWithOtherProjects(executorID, project string) bool {
+	if fn := deviceSharingFn.Load(); fn != nil {
+		return (*fn)(executorID, project)
+	}
+	onDevice := map[string]bool{executorID: true}
+	for _, other := range executor.List() {
+		if v, ok := other.(interface{ ParentID() string }); ok && v.ParentID() == executorID {
+			onDevice[other.ID()] = true
+		}
+	}
+	isDefault := executor.DefaultRegistry.DefaultID() == executorID
+	own := canonicalDir(policyProjectPath(project))
+	for _, e := range registeredProjectEntries() {
+		if e.IsFeature() {
+			continue
+		}
+		d := canonicalDir(e.Path)
+		if d == "" || d == own {
+			continue
+		}
+		// A binding is keyed by the path as it was registered, which may
+		// name the directory through a link; asked both ways.
+		id, bound := executor.DefaultRegistry.Binding(e.Path)
+		if !bound {
+			id, bound = executor.DefaultRegistry.Binding(d)
+		}
+		if (bound && onDevice[id]) || (!bound && isDefault) {
+			return true
+		}
+	}
+	// And a project with a workload on the device now that no binding names:
+	// a run failed over onto it, which placement put on a healthy executor
+	// without rebinding its project.
+	return otherProjectWorkloadOn(executorID, own)
+}
+
+// otherProjectWorkloadOn reports whether the hub records a workload on the
+// executor executorID of a project other than own (canonical; "" counts
+// every project). A record that cannot be read counts as none: the bindings
+// above are the rule, this is its backstop.
+func otherProjectWorkloadOn(executorID, own string) bool {
+	cp := strings.TrimSpace(controlPlaneDir())
+	if cp == "" || !hasProjectDB(cp) {
+		return false
+	}
+	db, err := statedb.Open(state.DBPath(cp))
+	if err != nil {
+		return false
+	}
+	defer db.Close() //nolint:errcheck
+	rows, err := db.ListExecutorHandles(executorID)
+	if err != nil {
+		return false
+	}
+	for _, r := range rows {
+		p := strings.TrimSpace(r.ProjectPath)
+		if p != "" && canonicalDir(policyProjectPath(p)) != own {
+			return true
+		}
+	}
+	return false
 }
 
 // hostSandboxApplies reports whether who's dispatches of workDir to the hub's

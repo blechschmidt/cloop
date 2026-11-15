@@ -66,15 +66,21 @@ func TestPayloadHomesGoBeneathTheHomeRootOnePerTree(t *testing.T) {
 	if root != a.homeRoot || filepath.Dir(home) != a.homeRoot || filepath.Base(home) != "web-1a2b3c4d.home" {
 		t.Fatalf("home %s beneath %s", home, root)
 	}
-	nested, _ := a.resolveWorkDir("web-1a2b3c4d/sub")
-	if other, _ := a.payloadHome(nested); other == home {
+	other, err := a.resolveWorkDir("api-5e6f7a8b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherHome, _ := a.payloadHome(other); otherHome == home {
 		t.Fatal("two trees share a home")
+	}
+	if _, err := a.resolveWorkDir("web-1a2b3c4d/sub"); err == nil {
+		t.Fatal("a tree inside another project's tree was accepted")
 	}
 	env, err := withPayloadHomeAt([]string{"PATH=/bin"}, home, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	env, err = a.withCacheEnv(append(env, "GOCACHE=/mine"))
+	env, err = a.withCacheEnv(append(env, "GOCACHE=/mine"), tree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +89,11 @@ func TestPayloadHomesGoBeneathTheHomeRootOnePerTree(t *testing.T) {
 		k, v, _ := strings.Cut(kv, "=")
 		got[k] = v
 	}
-	if got["HOME"] != home || got["GOCACHE"] != "/mine" || got["GOMODCACHE"] != filepath.Join(a.cacheDir, "go-mod") ||
-		got["npm_config_cache"] != filepath.Join(a.cacheDir, "npm") {
+	// The caches are the project's own (Task 20500): beneath the cache
+	// directory by the tree's name, never shared with another project's.
+	caches := filepath.Join(a.cacheDir, "web-1a2b3c4d")
+	if got["HOME"] != home || got["GOCACHE"] != "/mine" || got["GOMODCACHE"] != filepath.Join(caches, "go-mod") ||
+		got["npm_config_cache"] != filepath.Join(caches, "npm") {
 		t.Fatalf("the payload's environment: %v", got)
 	}
 	for _, kv := range env {
@@ -92,10 +101,10 @@ func TestPayloadHomesGoBeneathTheHomeRootOnePerTree(t *testing.T) {
 			t.Fatalf("a home on the volume: %s", kv)
 		}
 	}
-	if fi, err := os.Stat(filepath.Join(a.cacheDir, "pip")); err != nil || !fi.IsDir() {
+	if fi, err := os.Stat(filepath.Join(caches, "pip")); err != nil || !fi.IsDir() {
 		t.Fatalf("the pip cache directory was not created: %v", err)
 	}
-	if env, _ := a.withCacheEnv(nil); env != nil {
+	if env, _ := a.withCacheEnv(nil, tree); env != nil {
 		t.Fatal("a payload inheriting the agent's environment was given one")
 	}
 }
@@ -227,14 +236,15 @@ func TestInheritedScratchCachesReachAPayloadWithItsOwnEnvironment(t *testing.T) 
 		t.Fatal(err)
 	}
 	reapOnCleanup(t, a)
-	env, err := a.withCacheEnv([]string{"PATH=/bin"})
+	tree := filepath.Join(a.workspaceRoot, "web-1a2b3c4d")
+	env, err := a.withCacheEnv([]string{"PATH=/bin"}, tree)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Contains(env, "XDG_CACHE_HOME=/var/lib/cloop-runner/caches/xdg") {
 		t.Fatalf("env %v", env)
 	}
-	mine, _ := a.withCacheEnv([]string{"PATH=/bin", "XDG_CACHE_HOME=/mine"})
+	mine, _ := a.withCacheEnv([]string{"PATH=/bin", "XDG_CACHE_HOME=/mine"}, tree)
 	if slices.Contains(mine, "XDG_CACHE_HOME=/var/lib/cloop-runner/caches/xdg") {
 		t.Fatalf("a payload's own cache was overridden: %v", mine)
 	}
@@ -326,5 +336,51 @@ func TestHoldsIsARunnersOnlyAndNamesATenant(t *testing.T) {
 		Holds: "/srv/web"}
 	if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "not a tenant") {
 		t.Fatalf("--holds naming a path: %v", err)
+	}
+}
+
+// TestAProjectsCachesAreItsOwnEvenWhereALinkWasLeft (Task 20500): a link an
+// earlier run left where a project's cache directory goes is replaced by a
+// directory of the project's own, mode 0700, and what it pointed at is left
+// alone; and a workload with no project gets no caches.
+func TestAProjectsCachesAreItsOwnEvenWhereALinkWasLeft(t *testing.T) {
+	base := t.TempDir()
+	a, err := New(Config{Server: "wss://hub.invalid/api/executors/connect", Token: "clet1.id.secret.mac",
+		CredentialPath: filepath.Join(base, "agent.json"), WorkDirRoot: filepath.Join(base, "work"),
+		CacheDir: filepath.Join(base, "cache")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reapOnCleanup(t, a)
+	web, err := a.resolveWorkDir("web-1a2b3c4d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := a.resolveWorkDir("api-5e6f7a8b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(a.cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(api, filepath.Join(a.cacheDir, "web-1a2b3c4d")); err != nil {
+		t.Fatal(err)
+	}
+	env, err := a.withCacheEnv([]string{"PATH=/bin"}, web)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(filepath.Join(a.cacheDir, "web-1a2b3c4d"))
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("web's cache directory: %v %v, want a directory of its own", fi, err)
+	}
+	if entries, _ := os.ReadDir(api); len(entries) != 0 {
+		t.Fatalf("web's caches were made in api's tree: %v", entries)
+	}
+	if !slices.Contains(env, "GOCACHE="+filepath.Join(a.cacheDir, "web-1a2b3c4d", "go-build")) {
+		t.Fatalf("env %v", env)
+	}
+	if env, _ := a.withCacheEnv([]string{"PATH=/bin"}, ""); len(env) != 1 {
+		t.Fatalf("a workload with no project was given caches: %v", env)
 	}
 }

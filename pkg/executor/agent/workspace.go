@@ -100,6 +100,21 @@ func (a *Agent) prepareWorkspace(ctx context.Context, wl *workload, spec executo
 	// checkout kept there is vetted and reset to the fetched commit. The git
 	// object cache, when there is one, feeds fresh checkouts either way.
 	req.Pristine, req.ObjectCache = a.persistentWorkspace(), a.gitCacheDir
+	// On a device that serves other projects too (Task 20500) the checkout
+	// kept here was last written by a run that may be another project's
+	// adversary, and this agent's own git runs outside the confinement that
+	// run had: a filter, a proxy or an alternates file it left in .git would
+	// run, or read, as this agent. So it is vetted the way a runner's volume
+	// is, and reset to the fetched commit; a working copy a move placed here,
+	// which must not be reset, has its configuration rewritten and its
+	// redirects removed instead.
+	if spec.ConfineToProject {
+		if spec.Workspace.Keep {
+			req.Harden = true
+		} else {
+			req.Pristine = true
+		}
+	}
 	err := gitprovision.Provision(provCtx, req)
 	took := a.cfg.now().Sub(started).Round(time.Millisecond)
 	if err != nil {

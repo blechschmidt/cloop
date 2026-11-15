@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -405,7 +406,7 @@ func (e *Executor) ensureDerivedImage(ctx context.Context, base ImageIdentity, s
 		// a repo digest it never sends the builder to a registry.
 		from = base.ID
 	}
-	key := derivedKey(base, spec.SetupCommands)
+	key := derivedKey(base, spec.SetupCommands, derivedProject(spec.WorkDir))
 	tag := DerivedImagePrefix + ":" + key
 
 	// Cache hit: the image exists, so the setup already ran.
@@ -434,6 +435,14 @@ func (e *Executor) ensureDerivedImage(ctx context.Context, base ImageIdentity, s
 		"--tag", tag,
 		// Never reach a registry for the base: it is already resolved above.
 		"--pull=false",
+		// Never take a layer from the builder's own cache either (Task 20500).
+		// The tag above is the project's, but a builder keys its layer cache
+		// by the base and the command alone, so without this one project's
+		// build would reuse the layer another project's identical setup:
+		// produced — whatever that build happened to fetch. Within a project
+		// the tag is the cache, and a rebuild happens only when the setup
+		// changed.
+		"--no-cache",
 		// The build inherits the workload's network posture. See the file
 		// header — this is the boundary that keeps `setup:` from being an
 		// egress channel a no-network deployment did not sign up for.
@@ -477,8 +486,16 @@ func (e *Executor) buildNetwork(spec executor.Spec) string {
 	return e.opts.Network
 }
 
-// derivedKey is the content-addressed tag suffix for a derived image.
-func derivedKey(base ImageIdentity, setup []string) string {
+// derivedKey is the tag suffix for a derived image: content-addressed by the
+// base and the setup commands, and keyed by the project it was built for
+// (Task 20500).
+//
+// The project is part of the key because `setup:` is repo-controlled and the
+// image is a cache another workload starts from. Shared across projects, a
+// project whose sandbox.yaml repeated another's setup would run on whatever
+// the other project's build produced, and could learn from a cache hit what
+// that project installs. Each project builds its own.
+func derivedKey(base ImageIdentity, setup []string, project string) string {
 	var b strings.Builder
 	// The base's content identity, not its tag: rebuilding when the base tag
 	// moves is the entire reason the digest is resolved first.
@@ -489,7 +506,19 @@ func derivedKey(base ImageIdentity, setup []string) string {
 		b.WriteString("\x00")
 		b.WriteString(cmd)
 	}
+	b.WriteString("\x00project\x00")
+	b.WriteString(project)
 	return shortHash(b.String())
+}
+
+// derivedProject is the project a workload in workDir builds its derived
+// image for: a feature's is its project's, whose sandbox.yaml it runs under.
+func derivedProject(workDir string) string {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return ""
+	}
+	return filepath.Clean(executor.PolicyProjectPath(workDir))
 }
 
 // renderDockerfile builds the Dockerfile for a derived image.

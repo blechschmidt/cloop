@@ -324,7 +324,22 @@ const (
 	// and a move that went on without the device's working copy would lose
 	// it, so the preflight blocks the move and names the upgrade. See
 	// MinProjectCaptureVersion.
-	ProtocolVersion = 29
+	//
+	// v30 makes the agent honour Spec.ConfineToProject (Task 20500): a
+	// workload it runs as a host process — no container, no virtual
+	// executor — is kept by the host sandbox (Landlock, no_new_privs) to its
+	// own project's directory beneath the agent's root, the home and caches
+	// kept for that project, its own lease files and the system's read-only
+	// directories, so a device serving several projects keeps them out of
+	// each other's trees. Each project's directory beneath the root is the
+	// project's own, 0700, one level deep; an empty work directory gets a
+	// private one for the workload instead of the root. No frame changes; the
+	// field rides inside the Spec. Gated on the hub side and refused, not
+	// degraded: an older agent ignores the field and would run the workload
+	// with every other project's tree in reach, so the hub refuses a host-mode
+	// dispatch it asked to confine and names the upgrade, or the opt-out. See
+	// MinProjectConfinementVersion.
+	ProtocolVersion = 30
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -585,6 +600,15 @@ const MinEphemeralVersion = 28
 // SupportsEphemeral reports whether an agent speaking this protocol version
 // honours the welcome's ephemeral flag and the bye's retired flag.
 func SupportsEphemeral(version int) bool { return version >= MinEphemeralVersion }
+
+// MinProjectConfinementVersion is the first protocol whose agents keep a
+// host-process workload to its own project when the hub asks
+// (Spec.ConfineToProject, Task 20500). An older agent ignores the field.
+const MinProjectConfinementVersion = 30
+
+// SupportsProjectConfinement reports whether an agent speaking this protocol
+// version honours Spec.ConfineToProject.
+func SupportsProjectConfinement(version int) bool { return version >= MinProjectConfinementVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.

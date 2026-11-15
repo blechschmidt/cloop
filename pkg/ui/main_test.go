@@ -48,6 +48,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	defaultSelfExe = stub
+	// Every test here shares one isolated home, whose project registry fills
+	// up as the tests register projects, so whether the hub's host "serves a
+	// second project" (Task 20500) would depend on which tests ran first. The
+	// fixtures run their stub CLI on the host unconfined, as a hub with one
+	// project does; the tests of the rule pin the answer themselves
+	// (withHostSharing), and TestHostSharingCountsEveryRegisteredProjectButFeatures
+	// and tests/security's TestProjectsOnTheHubsHostCannotReachEachOther
+	// cover the real one.
+	setHostSharing(func(string) bool { return false })
 
 	code := hometest.Isolate(m)
 	cleanup()

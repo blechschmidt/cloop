@@ -41,6 +41,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -245,11 +246,28 @@ func provisionBranch(ctx context.Context, r Request) error {
 // (pkg/featureops), applied to the copy a sandbox works in.
 func HideControlDir(ctx context.Context, dir string) error {
 	gitDir := filepath.Join(dir, ".git")
+	// Never through a link: the tree was last written by a run, and a link
+	// left at .git/info or its exclude file would carry this append into
+	// whatever it points at — another project's .git/config, say.
+	if fi, err := os.Lstat(gitDir); err != nil || !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory of the checkout's own", gitDir)
+	}
 	info := filepath.Join(gitDir, "info")
-	if err := os.MkdirAll(info, 0o755); err != nil {
+	if fi, err := os.Lstat(info); err == nil && !fi.IsDir() {
+		if err := os.Remove(info); err != nil {
+			return fmt.Errorf("cannot replace %s, which is not a directory: %v", info, err)
+		}
+	}
+	if err := os.Mkdir(info, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("cannot create %s: %v", info, err)
 	}
-	f, err := os.OpenFile(filepath.Join(info, "exclude"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	exclude := filepath.Join(info, "exclude")
+	if fi, err := os.Lstat(exclude); err == nil && !fi.Mode().IsRegular() {
+		if err := os.Remove(exclude); err != nil {
+			return fmt.Errorf("cannot replace %s, which is not a regular file: %v", exclude, err)
+		}
+	}
+	f, err := os.OpenFile(exclude, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		return fmt.Errorf("cannot open the repository's exclude file: %v", err)
 	}

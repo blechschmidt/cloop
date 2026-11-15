@@ -1308,10 +1308,12 @@ see [Web UI](#web-ui-cloop-ui).
 ### The host sandbox
 
 On a hub with single sign-on that still allows host execution, the people it
-serves run on one machine as one operating-system user. The host sandbox keeps
-each person's runs and model calls there to their own project and Claude login;
-see [the host sandbox](../security/model.md#the-host-sandbox) for exactly what
-a sandboxed run can open and how Linux enforces it.
+serves run on one machine as one operating-system user, and every project the
+hub serves has its directory on that machine. The host sandbox keeps each
+person's runs and model calls there to their own project and Claude login, and,
+once the hub serves more than one project, every run to its own project; see
+[the host sandbox](../security/model.md#the-host-sandbox) for exactly what a
+sandboxed run can open and how Linux enforces it.
 
 ```yaml
 executors:
@@ -1321,11 +1323,14 @@ executors:
       - /srv/toolchains/jdk-21
     pass_env:           # optional: more of the hub's environment to pass on
       - PIP_INDEX_URL
+    opt_out:            # optional: projects whose runs stay unconfined
+      - /srv/projects/infra
 ```
 
 | Key | Meaning |
 | --- | --- |
-| `mode` | `auto`: on a hub with sign-in, every run on the hub's host for a person who is not a hub administrator is sandboxed, and an administrator's run too on a project such a person may write. `all`: every administrator's run and the hub's own login's too. `off`: none, which `cloop hub doctor` fails on a hub with sign-in. Unset is `auto`; any other value stops the hub from starting. |
+| `mode` | `auto`: on a hub with sign-in, every run on the hub's host for a person who is not a hub administrator is sandboxed, and an administrator's run too on a project such a person may write; and on any hub that serves more than one project, every run on its host, and every host-mode payload on a device that serves more than one, is kept to its own project. `all`: every administrator's run and the hub's own login's too, whatever the hub serves. `off`: none, which `cloop hub doctor` fails on a hub with sign-in. Unset is `auto`; any other value stops the hub from starting. |
+| `opt_out` | Absolute paths of projects whose runs `auto` leaves unconfined although the host serves other projects: a project that needs the Docker socket or the hub user's SSH key, say. Such a project's runs can open, list and write every other project on the host, and `cloop hub doctor` warns about each. It does not free a person who is not a hub administrator on a hub with sign-in, and `all` ignores it. The hub's own directory, which can never be sandboxed, runs on a hub that serves other projects only once it is listed here, and never where the projects root lies inside it. |
 | `read_only` | Absolute paths every sandboxed run may read and execute, for a toolchain installed outside `/usr` (`/opt` and `/snap` are not granted by default). A path that would expose the hub's files or another person's (the filesystem's root, the hub's directory, the identity root, another project, or a directory above one of them) is left out at dispatch, and the doctor names it. |
 | `pass_env` | Names of variables in the hub's own environment that a sandboxed run inherits as well as the default allow-list (`PATH`, the locale, the proxies and CA bundles, the Go toolchain's and the harness's settings). A name here is passed even if it holds a credential, so list only what every sandboxed run may have. |
 

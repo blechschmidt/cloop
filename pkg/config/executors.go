@@ -1236,6 +1236,18 @@ type HostSandboxConfig struct {
 	// passed even if it holds a credential: the operator chose to share it
 	// with every sandboxed run.
 	PassEnv []string `yaml:"pass_env,omitempty"`
+	// OptOut are projects, by directory, whose runs on a host stay
+	// unconfined although the host serves other projects (Task 20500). Under
+	// mode auto every run a host forks for anyone is kept to its own project
+	// once a second project shares that host — the hub's own host, or a
+	// device running its projects as host processes — and a project listed
+	// here is left out of that rule: its runs can read every other project on
+	// the host, which `cloop hub doctor` says. It takes nothing else away: a
+	// person who is not a hub administrator is sandboxed on a hub with sign-in
+	// whatever this says, and mode all sandboxes everyone. The hub's own
+	// directory, whose runs need the control plane and so can never be
+	// confined, runs on a shared host only when it is listed here.
+	OptOut []string `yaml:"opt_out,omitempty"`
 }
 
 // EffectiveMode is Mode normalised: unset is auto.
@@ -1267,5 +1279,28 @@ func (h HostSandboxConfig) Validate() error {
 			return fmt.Errorf("executors.host_sandbox.pass_env: %q is not a variable name", n)
 		}
 	}
+	for _, p := range h.OptOut {
+		p = strings.TrimSpace(p)
+		if !filepath.IsAbs(p) || filepath.Clean(p) == "/" {
+			return fmt.Errorf("executors.host_sandbox.opt_out: %q is not a project directory; name each "+
+				"project whose runs stay unconfined by its absolute path", p)
+		}
+	}
 	return nil
+}
+
+// OptedOut reports whether project — a cleaned absolute directory — is in
+// OptOut, compared lexically. Callers that resolve links compare the
+// resolved forms themselves (see pkg/ui).
+func (h HostSandboxConfig) OptedOut(project string) bool {
+	project = filepath.Clean(strings.TrimSpace(project))
+	if project == "" || project == "." {
+		return false
+	}
+	for _, p := range h.OptOut {
+		if filepath.Clean(strings.TrimSpace(p)) == project {
+			return true
+		}
+	}
+	return false
 }

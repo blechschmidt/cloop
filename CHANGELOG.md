@@ -12,6 +12,33 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A run of one project can no longer open, list or write another project
+  on the same executor, whoever starts it.** The host sandbox used to confine
+  only a person's runs on a hub with sign-in: an administrator's run, the
+  hub's own automatic work and every run on a hub without sign-in forked on
+  the hub's host with every registered project in reach, and a device ran
+  every project's host-mode payload beneath one root as one user. Under
+  `executors.host_sandbox.mode: auto`, once a host serves a second project,
+  every run there is kept to its own project: on the hub's host by the host
+  sandbox, administrators included, and on a device by its agent (protocol
+  30; an older agent is refused such a dispatch). A project that needs more
+  of the host can be listed in `executors.host_sandbox.opt_out`, which
+  `cloop hub doctor` reports as a warning; the hub's own directory, which
+  cannot be confined, runs on a shared host only once it is listed. On a
+  device each project's directory is now one level below the agent's root,
+  mode 0700 and never a link, a payload naming no directory gets a private
+  one instead of the root, and the package caches are per project. A
+  container sandbox never binds the hub's own directory, and a derived image
+  built from `setup:` is the project's own. A dispatch of the hub's own
+  directory is refused when the projects root, and every project in it, lies
+  inside it. A run kept to its project needs Linux 6.2 or later with
+  Landlock: on an older kernel a hub that serves several projects refuses its
+  host runs until each is opted out, and `cloop hub doctor` fails it. A
+  device's own git, which provisions the next run outside that confinement,
+  now vets a kept checkout on a shared device before it trusts it, and the
+  device records which project each directory belongs to, refusing another
+  whose path the hub happens to name the same way (Task 20500).
+
 - **A run's credentials now reach its own project and nothing else, and the
   one way across is a read the other project's readers list allows.** A
   credential the hub mints for a run (a knowledge session, a model relay, git

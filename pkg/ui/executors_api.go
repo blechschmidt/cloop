@@ -2030,6 +2030,7 @@ var executorRefusals = []error{
 	remote.ErrSecretFilesUnsupported,
 	remote.ErrProjectSeedUnsupported,
 	remote.ErrSandboxModeUnsupported,
+	remote.ErrProjectConfinementUnsupported,
 	remote.ErrVirtualExecutorUnsupported,
 	remote.ErrForwardedDevicesUnsupported,
 }

@@ -150,16 +150,20 @@ func setProjectListSource(fn func() []multiui.ProjectEntry) {
 // registeredProjectDirs returns every registered project's directory,
 // canonical, features excluded: a feature lives in its project's tree.
 func registeredProjectDirs() []string {
+	return projectDirsOf(registeredProjectEntries())
+}
+
+// registeredProjectEntries returns every project this hub serves, features
+// included, as registered.
+func registeredProjectEntries() []multiui.ProjectEntry {
 	projectListSource.mu.RLock()
 	fn := projectListSource.fn
 	projectListSource.mu.RUnlock()
-	var entries []multiui.ProjectEntry
 	if fn != nil {
-		entries = fn()
-	} else {
-		entries, _ = multiui.Load()
+		return fn()
 	}
-	return projectDirsOf(entries)
+	entries, _ := multiui.Load()
+	return entries
 }
 
 func projectDirsOf(entries []multiui.ProjectEntry) []string {
@@ -232,6 +236,11 @@ func confinementReason(v *projectconfine.Violation) string {
 		return "its directory is inside a hub's control plane (" + v.Other + ")"
 	case projectconfine.RuleProject:
 		if v.Relation == projectconfine.Contains {
+			if v.Reason != "" {
+				// The hub's own directory holding the projects root: the
+				// root is the operator's configuration, not a tenant's.
+				return v.Reason
+			}
 			return "its directory contains another registered project"
 		}
 		return "its directory is inside another registered project"

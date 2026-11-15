@@ -300,6 +300,13 @@ type workload struct {
 	mu       sync.Mutex
 	status   executor.Status
 	finished bool
+	// scratch is the private directory a workload that named no project
+	// directory runs in (Task 20500), removed when the workload is forgotten.
+	scratch string
+	// confined is the spec a host-mode workload kept to its project was
+	// started with (Task 20500), so that an attach terminal beside it is kept
+	// to the same reach; nil for a workload that is not.
+	confined *executor.Spec
 	// workDir is where an interactive session starts (Task 20265). Recorded
 	// once the control-plane-supplied path has been resolved and confined by
 	// Agent.resolveWorkDir, so a terminal can never be opened at a path that
@@ -367,6 +374,40 @@ func (w *workload) takeSecrets() *placedSecrets {
 	p := w.secrets
 	w.secrets = nil
 	return p
+}
+
+// setScratch records the private directory a workload with no project runs in.
+func (w *workload) setScratch(dir string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.scratch = dir
+}
+
+// setConfined records the spec a confined workload was started with.
+func (w *workload) setConfined(spec executor.Spec) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.confined = &spec
+}
+
+// confinedSpec returns a copy of that spec, or nil.
+func (w *workload) confinedSpec() *executor.Spec {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.confined == nil {
+		return nil
+	}
+	spec := *w.confined
+	return &spec
+}
+
+// takeScratch removes and returns that directory, so it is removed once.
+func (w *workload) takeScratch() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	dir := w.scratch
+	w.scratch = ""
+	return dir
 }
 
 // writeBackSpec returns the workload's write-back plan, or false when there is

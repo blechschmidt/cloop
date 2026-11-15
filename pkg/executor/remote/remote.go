@@ -850,6 +850,22 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 			"Or set this executor's sandbox mode back to host, if running on the device's host is acceptable."))
 	}
 
+	// A workload the hub asked to keep to its project (Task 20500), on a
+	// device that serves other projects too. Only a host-process payload needs
+	// the agent's help — a container or a virtual executor's sandbox sees only
+	// its bind mount — and an older agent ignores the field, running it with
+	// every other project's tree beneath the agent's root in reach. Refused,
+	// not degraded, for the reason the sandbox mode above is.
+	if spec.ConfineToProject && virtual == nil && sandbox.Mode != executor.SandboxModeContainer &&
+		!SupportsProjectConfinement(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf("%w: %s", ErrProjectConfinementUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinProjectConfinementVersion,
+			"to keep this project's run, which runs as a process on the device's host, out of the other "+
+				"projects the device serves",
+			"Or run the device's payloads in containers (its sandbox mode), or opt the project out with "+
+				"executors.host_sandbox.opt_out if it may read the other projects on the device."))
+	}
+
 	// The disk limit (Task 20405): a stated one the device cannot hold is
 	// refused, and the ceilings the device cannot read are filled in — the
 	// disk one only where the device will hold it. See disklimit.go.

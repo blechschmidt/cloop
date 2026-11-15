@@ -597,6 +597,18 @@ type Spec struct {
 	// honour a non-nil one refuses the workload. See HostSandbox.
 	HostSandbox *HostSandbox `json:"-"`
 
+	// ConfineToProject asks a remote device that runs the workload as a host
+	// process to keep it to its own project's directories (Task 20500): the
+	// hub sets it when the device serves more than one project and the
+	// operator has not opted the project out (executors.host_sandbox.opt_out).
+	// The device builds the confinement itself, from its own paths — its
+	// layout means nothing on the hub — and refuses the workload when it
+	// cannot give it. A container or virtual executor's workload on the device
+	// is already confined to its bind mount, and the field changes nothing
+	// there. Unlike HostSandbox it travels: it carries no path and no
+	// credential, only the decision.
+	ConfineToProject bool `json:"confine_to_project,omitempty"`
+
 	// WriteBack says how the file changes the workload produces get back to
 	// the hub. It carries no credential either — a push reuses the grant
 	// Workspace named — for the reasons set out in writeback.go. The zero

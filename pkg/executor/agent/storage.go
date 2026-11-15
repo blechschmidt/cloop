@@ -147,7 +147,12 @@ func (a *Agent) payloadHome(workDir string) (home, root string) {
 // homes are in memory — the caches that would grow there, as this agent's
 // own environment names them (its controller points them at disk scratch). A
 // nil environment inherits the agent's.
-func (a *Agent) withCacheEnv(env []string) ([]string, error) {
+//
+// The caches are the project's own, beneath the cache directory by the name
+// of the payload's tree (Task 20500): one Go build cache shared by every
+// project a device serves would let one project's run plant an object that
+// another project's build links.
+func (a *Agent) withCacheEnv(env []string, workDir string) ([]string, error) {
 	if env == nil || (a.cacheDir == "" && a.homeRoot == "") {
 		return env, nil
 	}
@@ -165,10 +170,19 @@ func (a *Agent) withCacheEnv(env []string) ([]string, error) {
 			}
 		}
 	}
-	if a.cacheDir == "" {
+	cache := a.projectCacheDir(workDir)
+	if cache == "" {
 		return out, nil
 	}
-	for _, kv := range executor.CacheEnv(a.cacheDir) {
+	if err := os.MkdirAll(a.cacheDir, 0o700); err != nil {
+		return env, fmt.Errorf("agent: create the cache directory %s: %w", a.cacheDir, err)
+	}
+	// A real directory of the project's own, 0700: a link an earlier run left
+	// where it goes is replaced, never followed into another project's.
+	if err := ensurePayloadHome(cache); err != nil {
+		return env, fmt.Errorf("agent: prepare the project's cache directory %s: %w", cache, err)
+	}
+	for _, kv := range executor.CacheEnv(cache) {
 		k, dir, _ := strings.Cut(kv, "=")
 		if set[k] {
 			continue

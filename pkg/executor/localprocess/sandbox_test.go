@@ -202,3 +202,60 @@ func TestASandboxedWorkloadInheritsNoCredentialOfTheHubs(t *testing.T) {
 		}
 	}
 }
+
+// TestTwoProjectsOnOneHostCannotOpenListOrWriteEachOther is the host driver's
+// half of keeping the projects a host serves apart (Task 20500): a run of one
+// project — here one acting for nobody, with the hub's own login named the
+// way the hub names it — can neither open, list nor write the other project's
+// tree, nor plant a file beside it, while its own tree and login stay usable.
+func TestTwoProjectsOnOneHostCannotOpenListOrWriteEachOther(t *testing.T) {
+	if err := hostsandbox.Available(); err != nil {
+		t.Skipf("no host sandbox here: %v", err)
+	}
+	root := t.TempDir()
+	web, api, login := filepath.Join(root, "web"), filepath.Join(root, "api"), filepath.Join(root, "hub-claude")
+	for _, d := range []string{web, api, login} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(api, "secret.go"), []byte("package api // api-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(name, cmd string) string {
+		return "if ( " + cmd + " ) >/dev/null 2>&1; then echo " + name + ":ok; else echo " + name + ":denied; fi\n"
+	}
+	script := probe("own-write", "echo built > out.txt") +
+		probe("login-write", "echo {} > $CLAUDE_CONFIG_DIR/.claude.json") +
+		probe("other-open", "cat "+filepath.Join(api, "secret.go")) +
+		probe("other-list", "ls "+api) +
+		probe("other-write", "touch "+filepath.Join(api, "planted")) +
+		probe("beside-other", "touch "+filepath.Join(root, "planted")) +
+		probe("other-named", "ls "+root+" | grep -q '^api$'")
+	out, st := runToEnd(t, executor.Spec{
+		WorkDir: web,
+		Argv:    []string{"/bin/sh", "-c", script},
+		HostSandbox: &executor.HostSandbox{ReadWrite: []string{login},
+			Env: []string{"CLAUDE_CONFIG_DIR=" + login}},
+	})
+	if st.ExitCode != 0 {
+		t.Fatalf("the confined run exited %d:\n%s", st.ExitCode, out)
+	}
+	for _, want := range []string{"own-write:ok", "login-write:ok", "other-open:denied", "other-list:denied",
+		"other-write:denied", "other-named:denied"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %s from the run of web:\n%s", want, out)
+		}
+	}
+	// A file planted beside the other project is judged by what the host
+	// sees: under namespaces the run's /tmp is its own, and a write there
+	// succeeds into a directory that goes with the run.
+	for _, p := range []string{filepath.Join(api, "planted"), filepath.Join(root, "planted")} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("the run of web wrote %s", p)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(web, "out.txt")); err != nil {
+		t.Errorf("the run of web could not write its own tree: %v", err)
+	}
+}
