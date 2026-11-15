@@ -301,12 +301,18 @@ var requirementsTraceSource string
 //go:embed knowledge_push.go
 var knowledgePushSource string
 
+// projectMoveViewSource is pkg/ui/projectmove_view.go (Task 20496): the
+// project_move push the Move dialog draws a move's steps on.
+//
+//go:embed projectmove_view.go
+var projectMoveViewSource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
 // new //go:embed directive above.
 func allUISources() string {
-	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource +
+	return serverSource + "\n" + providerCallsSource + "\n" + executorsAPISource + "\n" + projectMoveViewSource +
 		"\n" + auditAPISource + "\n" + secretsAPISource + "\n" + installScriptSource +
 		"\n" + tokensAPISource + "\n" + sessionsAPISource + "\n" + quotasAPISource +
 		"\n" + offboardAPISource +

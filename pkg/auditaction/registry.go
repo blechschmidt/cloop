@@ -2907,12 +2907,15 @@ var registry = []Entry{
 		Action:    ActionProjectMoveCleanup,
 		Home:      HomeControlPlane,
 		Entity:    "project_move",
-		Trigger:   "A person cleans up after an ended move — POST /api/projects/{idx}/moves/{id}/cleanup, or `cloop remote move cleanup`.",
-		Payload:   append(append([]string{}, projectMovePayload...), "refs"),
+		Trigger:   "A person cleans up after an ended move, having confirmed it — POST /api/projects/{idx}/move/{id}/cleanup, or `cloop executor move cleanup`.",
+		Payload:   append(append([]string{}, projectMovePayload...), "refs", "source_removed", "source_kept", "outcome"),
 		Stability: StabilityBeta,
 		Read:      authz.PermAuditRead,
-		Note: "Removes the move's hidden refs from the project's repository and its directory in the move store. " +
-			"The project's directory on the hub is never removed.",
+		Note: "Removes the move's hidden refs from the project's repository and its directory in the move store, and after a " +
+			"verified move from a device the working copy the device kept (source_removed names it; source_kept says the " +
+			"caller asked to leave it). A row with outcome source_removed is written as soon as the device's copy is gone; " +
+			"one with outcome refused records a device copy that was not removed, and why (error). The project's directory " +
+			"on the hub is never removed.",
 	},
 
 	// ── project.member ─────────────────────────────────────────────────────

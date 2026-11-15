@@ -869,6 +869,7 @@ function applyPermissionGating(root) {
       el.title = '';
     }
   });
+  moveGate();
 }
 
 // refreshPermissions re-reads /api/me for the currently selected project and

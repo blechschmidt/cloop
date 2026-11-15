@@ -113,11 +113,29 @@ func (d *fakeMoveDevice) Start(_ context.Context, spec executor.Spec) (executor.
 				return
 			}
 		}
-		if len(spec.Argv) != 5 || spec.Argv[0] != "cloop" || spec.Argv[1] != "workspace" || spec.Argv[3] != "--move" {
+		// Every step is `cloop workspace <step> --move <id>`; the discard
+		// also names what it checks the copy against (Task 20496).
+		discard := len(spec.Argv) > 5 && spec.Argv[2] == "move-discard"
+		if (len(spec.Argv) != 5 && !discard) || spec.Argv[0] != "cloop" || spec.Argv[1] != "workspace" || spec.Argv[3] != "--move" {
 			r.out, r.code = fmt.Sprintf("fake device: unexpected argv %q\n", spec.Argv), 2
 			return
 		}
 		step, moveID := spec.Argv[2], spec.Argv[4]
+		var opts projectmove.DiscardOptions
+		if discard {
+			opts.MoveID = moveID
+			for i := 5; i < len(spec.Argv); i++ {
+				switch spec.Argv[i] {
+				case "--discard-ignored":
+					opts.DiscardIgnored = true
+				case "--snapshot", "--refs", "--files":
+					if i+1 < len(spec.Argv) {
+						*map[string]*string{"--snapshot": &opts.Snapshot, "--refs": &opts.Refs, "--files": &opts.Files}[spec.Argv[i]] = spec.Argv[i+1]
+						i++
+					}
+				}
+			}
+		}
 		if step == fail {
 			r.out, r.code = "fake device: "+step+" failed\n", 1
 			return
@@ -133,6 +151,12 @@ func (d *fakeMoveDevice) Start(_ context.Context, spec executor.Spec) (executor.
 			rep, err = projectmove.SeedWorkingCopy(ctx, dir, moveID)
 		case "move-verify":
 			rep, err = projectmove.ReportWorkingCopy(ctx, dir, moveID)
+		case "move-discard":
+			if !discard {
+				err = errors.New("move-discard needs what the move captured")
+				break
+			}
+			rep, err = projectmove.DiscardWorkingCopy(ctx, dir, opts)
 		default:
 			err = fmt.Errorf("unknown command %q", step)
 		}
@@ -338,7 +362,7 @@ func TestAProjectMovesOntoAnExecutorSharingItsTree(t *testing.T) {
 	if v := m.Detail.Verify; v == nil || v.Checked == 0 || len(v.Mismatches) > 0 {
 		t.Errorf("verify = %+v", v)
 	}
-	if r := m.Detail.Retained; r == nil || !strings.Contains(r.Command, "cloop remote move cleanup") || r.Store != c.Store {
+	if r := m.Detail.Retained; r == nil || r.Command != "cloop executor move cleanup "+m.ID || r.Store != c.Store {
 		t.Errorf("retained = %+v", r)
 	}
 	want := []string{auditaction.ActionProjectMoveDone.String(), auditaction.ActionProjectMoveStart.String(), auditaction.ActionProjectMoveSwitch.String()}
@@ -362,7 +386,7 @@ func TestAProjectMovesOntoAnExecutorSharingItsTree(t *testing.T) {
 
 	// Cleaning up removes the refs and the store, and says so, once.
 	for i := 0; i < 2; i++ {
-		req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/projects/0/moves/%s/cleanup", ts.URL, m.ID), strings.NewReader("{}"))
+		req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/projects/0/move/%s/cleanup", ts.URL, m.ID), strings.NewReader(`{"confirm":true}`))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

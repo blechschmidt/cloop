@@ -335,6 +335,8 @@
   .stat-value { font-size:20px; font-weight:700; }
   .stat-value.accent { color:var(--accent); }
   .stat-sub { font-size:11px; color:var(--muted); margin-top:1px; }
+  .mv-btn { margin-top:6px; padding:2px 8px; font-size:11px; }
+  #executorCard > div:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:4px; }
   .token-bar { margin-top:6px; }
   .token-bar-track { height:3px; background:var(--border); border-radius:2px; overflow:hidden; }
   .token-bar-fill { height:100%; background:var(--accent); border-radius:2px; transition:width .5s; }

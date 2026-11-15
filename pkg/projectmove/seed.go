@@ -93,8 +93,16 @@ type WorkingCopyReport struct {
 	// Git is the repository as it is; Files the delivered files' digests.
 	Git   movegit.Observed          `json:"git"`
 	Files map[string]movegit.Digest `json:"files,omitempty"`
-	// Problems are files that could not be read.
+	// Problems are files that could not be read, and for a discard, why the
+	// copy was kept.
 	Problems []string `json:"problems,omitempty"`
+	// Kept says why a discard left the working copy where it is (Task
+	// 20496): KeptChanged or KeptIgnored. Empty when it removed it, or when
+	// the report is not a discard's.
+	Kept string `json:"kept,omitempty"`
+	// Ignored counts the files and directories git ignores that kept the
+	// copy; Examples names the first few.
+	Ignored int `json:"ignored,omitempty"`
 }
 
 // SeedWorkingCopy turns dir — provisioned from the move's carrier branch —

@@ -224,7 +224,7 @@ func (d *fakeDriver) RollBack(ctx context.Context, m Move) (Move, error) {
 }
 
 func (d *fakeDriver) Retain(_ context.Context, m Move) *Retained {
-	return &Retained{Source: "the hub's directory", Store: "/store/" + m.ID, Command: "cloop remote move cleanup app " + m.ID}
+	return &Retained{Source: "the hub's directory", Store: "/store/" + m.ID, Command: "cloop executor move cleanup " + m.ID}
 }
 
 // recordingHooks keeps every transition.

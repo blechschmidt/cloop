@@ -9,6 +9,11 @@ package cmd
 // (projectmove.ReportMarker + JSON), which the hub compares with what it
 // captured.
 //
+// `cloop workspace move-discard` (Task 20496) runs on the source instead: once
+// a verified move's cleanup is confirmed, it removes the working copy the move
+// left on the device — and nothing at all unless the copy is still the one the
+// move captured (projectmove.DiscardWorkingCopy).
+//
 // None of them opens or creates a state database: a probe must find an empty
 // directory empty, and the copy a seed builds is the project's working copy,
 // not a place for the root command to reconcile executors into
@@ -25,7 +30,11 @@ import (
 	"github.com/blechschmidt/cloop/pkg/projectmove"
 )
 
-var workspaceMoveID string
+var (
+	workspaceMoveID string
+	// What move-discard checks the copy against (Task 20496).
+	workspaceMoveDiscard projectmove.DiscardOptions
+)
 
 var workspaceMoveSeedCmd = &cobra.Command{
 	Use:    "move-seed",
@@ -54,6 +63,23 @@ var workspaceMoveProbeCmd = &cobra.Command{
 	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runWorkspaceMove(cmd, projectmove.ProbeWorkingCopy)
+	},
+}
+
+var workspaceMoveDiscardCmd = &cobra.Command{
+	Use:    "move-discard",
+	Short:  "Remove the working copy a verified project move left on this device, if it is unchanged since the capture",
+	Hidden: true,
+	Args:   cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		if workspaceMoveDiscard.Snapshot == "" || workspaceMoveDiscard.Refs == "" || workspaceMoveDiscard.Files == "" {
+			return errors.New("--snapshot, --refs and --files name what the move captured")
+		}
+		return runWorkspaceMove(cmd, func(ctx context.Context, dir, id string) (projectmove.WorkingCopyReport, error) {
+			opts := workspaceMoveDiscard
+			opts.MoveID = id
+			return projectmove.DiscardWorkingCopy(ctx, dir, opts)
+		})
 	},
 }
 
@@ -86,15 +112,20 @@ func runWorkspaceMove(cmd *cobra.Command, step func(context.Context, string, str
 // seedsAMove reports whether cmd is one of the move's steps on a target.
 func seedsAMove(cmd *cobra.Command) bool {
 	switch cmd {
-	case workspaceMoveSeedCmd, workspaceMoveVerifyCmd, workspaceMoveProbeCmd:
+	case workspaceMoveSeedCmd, workspaceMoveVerifyCmd, workspaceMoveProbeCmd, workspaceMoveDiscardCmd:
 		return true
 	}
 	return false
 }
 
 func init() {
-	for _, c := range []*cobra.Command{workspaceMoveSeedCmd, workspaceMoveVerifyCmd, workspaceMoveProbeCmd} {
+	for _, c := range []*cobra.Command{workspaceMoveSeedCmd, workspaceMoveVerifyCmd, workspaceMoveProbeCmd, workspaceMoveDiscardCmd} {
 		c.Flags().StringVar(&workspaceMoveID, "move", "", "the move's id")
 		workspaceCmd.AddCommand(c)
 	}
+	f := workspaceMoveDiscardCmd.Flags()
+	f.StringVar(&workspaceMoveDiscard.Snapshot, "snapshot", "", "the snapshot commit the move recorded")
+	f.StringVar(&workspaceMoveDiscard.Refs, "refs", "", "the digest of the branches, tags and stash the move captured")
+	f.StringVar(&workspaceMoveDiscard.Files, "files", "", "the digest of the .cloop files the move delivered")
+	f.BoolVar(&workspaceMoveDiscard.DiscardIgnored, "discard-ignored", false, "remove the files git ignores too")
 }

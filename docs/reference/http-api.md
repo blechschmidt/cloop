@@ -93,7 +93,7 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-376 endpoints, by the permission each one requires:
+377 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
@@ -102,7 +102,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `config.write` | 19 |
 | `executor.manage` | 50 |
 | `executor.read` | 6 |
-| `project.read` | 67 |
+| `project.read` | 68 |
 | `project.share` | 3 |
 | `project.write` | 17 |
 | `run.start` | 6 |
@@ -331,8 +331,9 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | PUT | `/api/projects/{idx}/model-relay` | `project.write` | project-index |
 | POST | `/api/projects/{idx}/move` | `executor.manage` | project-index |
 | GET | `/api/projects/{idx}/move/preflight` | `project.write` | project-index |
+| GET | `/api/projects/{idx}/move/{id}` | `project.read` | project-index |
+| POST | `/api/projects/{idx}/move/{id}/cleanup` | `executor.manage` | project-index |
 | GET | `/api/projects/{idx}/moves` | `project.read` | project-index |
-| POST | `/api/projects/{idx}/moves/{id}/cleanup` | `executor.manage` | project-index |
 | GET | `/api/projects/{idx}/repositories` | `project.read` | project-index |
 | POST | `/api/projects/{idx}/repositories` | `secret.grant` | project-index |
 | DELETE | `/api/projects/{idx}/repositories` | `secret.revoke` | project-index |

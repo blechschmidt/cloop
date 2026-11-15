@@ -821,6 +821,15 @@ async function openPoolDialog() {
   await type('#poolName', 'observability-ingest-pipeline-gpu-runners-' + (++poolDialogs));
 }
 
+// openMoveDialog presses the Overview executor card's Move to… (Task 20496)
+// and waits for the targets it offers.
+async function openMoveDialog() {
+  await openTab('overview');
+  await waitFor(`${visible('#moveBtn')} && !document.getElementById('moveBtn').disabled`, 'the Move to… button');
+  await click('#moveBtn');
+  await waitFor(visible('#pm-body input[name="pmTarget"]'), 'the targets of a move');
+}
+
 const OPENERS = {
   'loginOverlay': {
     // Only a token hub shows it, and a token hub cannot serve its own bundle
@@ -1137,6 +1146,32 @@ const OPENERS = {
       await click('[data-req-approve]');
     },
     ready: visible('#request-decide-overlay [data-act="submitDecision"]'),
+  },
+  // The Move dialog (Task 20496): the targets with the devices' long names
+  // and the notice of the fixture's last move; the preflight's findings for a
+  // move onto the hub's host — blockers, a warning to accept and what is
+  // carried, with the forwarded device's long names; and that last move's
+  // result, with its steps and its cleanup.
+  'pm-overlay': {
+    open: async () => { await openMoveDialog(); },
+    ready: `${hasText('#pm-body', F.virtualName)} && ${hasText('#pm-body', 'Review it')}`,
+  },
+  'pm-overlay#review': {
+    open: async () => {
+      await openMoveDialog();
+      await cdp.eval(`(() => { const r = [...document.querySelectorAll('#pm-body input[name="pmTarget"]')]
+        .find(i => !i.disabled && i.closest('label').innerText.includes('host')); r.click(); return true; })()`);
+      await waitFor(`!document.getElementById('pmCheck').disabled`, 'the Review button');
+      await click('#pmCheck');
+    },
+    ready: `${hasText('#pm-body', 'Blocks the move')} && ${hasText('#pm-body', 'I accept this')} && ${hasText('#pm-body', 'Carried by the move')}`,
+  },
+  'pm-overlay#result': {
+    open: async () => {
+      await openMoveDialog();
+      await click('#pm-body [data-act="review"]');
+    },
+    ready: `${hasText('#pm-body', 'Clean up')} && ${hasText('#pm-body', F.deviceName)}`,
   },
   'harness-cred-overlay': {
     open: async () => {

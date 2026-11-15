@@ -1259,6 +1259,157 @@ func Inspect(ctx context.Context, dir string, opts InspectOptions) (Observed, er
 	return o, nil
 }
 
+// ValidObject reports whether s is a full object id, SHA-1 or SHA-256: what a
+// caller passing one on to git as a revision checks first.
+func ValidObject(s string) bool { return validObject(s) }
+
+// ReadSnapshot reads back the snapshot move moveID's capture recorded as
+// commit in the repository at dir (Task 20496): the commit HEAD was on (Base,
+// "" while it was unborn) and its tree, and the trees of the index and of the
+// files on disk. Only a commit of a snapshot's shape is read as one — the
+// working-tree commit's parents Base and the index commit, whose own parent is
+// Base, each saying in its message which move wrote it — so a copy holding
+// some other commit under the snapshot's ref is never mistaken for the copy
+// that was captured.
+func ReadSnapshot(ctx context.Context, dir, moveID, commit string) (Snapshot, error) {
+	s := Snapshot{Commit: commit, BaseTree: EmptyTree}
+	if !ValidMoveID(moveID) {
+		return s, fmt.Errorf("movegit: %q is not a move id", moveID)
+	}
+	if !validObject(commit) {
+		return s, fmt.Errorf("movegit: %q is not a commit id", commit)
+	}
+	dir, err := checkDir(dir)
+	if err != nil {
+		return s, err
+	}
+	present, err := hasDotGit(dir)
+	if err != nil {
+		return s, err
+	}
+	if !present {
+		return s, fmt.Errorf("%w: %s has no .git", ErrNotARepository, dir)
+	}
+	g, err := newRunner(ctx, dir, 0)
+	if err != nil {
+		return s, err
+	}
+	g.isolate(nil)
+	if err := g.checkTop(ctx, dir); err != nil {
+		return s, err
+	}
+	parents := func(c string) ([]string, error) {
+		out, err := g.run(ctx, dir, nil, "rev-list", "--parents", "--max-count=1", c)
+		if err != nil {
+			return nil, fmt.Errorf("movegit: read commit %s in %s: %w", c, dir, err)
+		}
+		f := strings.Fields(out)
+		if len(f) == 0 || f[0] != c {
+			return nil, fmt.Errorf("movegit: %s in %s is not a commit", c, dir)
+		}
+		return f[1:], nil
+	}
+	ps, err := parents(commit)
+	if err != nil {
+		return s, err
+	}
+	var index string
+	switch len(ps) {
+	case 1:
+		index = ps[0]
+	case 2:
+		s.Base, index = ps[0], ps[1]
+	default:
+		return s, fmt.Errorf("movegit: %s in %s has %d parents, which no snapshot has", commit, dir, len(ps))
+	}
+	ips, err := parents(index)
+	if err != nil {
+		return s, err
+	}
+	if (s.Base == "" && len(ips) != 0) || (s.Base != "" && (len(ips) != 1 || ips[0] != s.Base)) {
+		return s, fmt.Errorf("movegit: %s in %s is not a snapshot: its index commit does not stand on its base", commit, dir)
+	}
+	// The messages snapshotCommit writes.
+	for c, says := range map[string]string{commit: "the working tree of ", index: "the index of "} {
+		subject, err := g.run(ctx, dir, nil, "log", "--max-count=1", "--format=%s", c)
+		if err != nil {
+			return s, fmt.Errorf("movegit: read commit %s in %s: %w", c, dir, err)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(subject), "cloop move "+moveID+": "+says) {
+			return s, fmt.Errorf("movegit: %s in %s is not a snapshot move %s wrote", commit, dir, moveID)
+		}
+	}
+	tree := func(c string) (string, error) {
+		out, err := g.run(ctx, dir, nil, "rev-parse", "--verify", c+"^{tree}")
+		if err != nil {
+			return "", fmt.Errorf("movegit: read the tree of %s in %s: %w", c, dir, err)
+		}
+		return strings.TrimSpace(out), nil
+	}
+	if s.WorktreeTree, err = tree(commit); err != nil {
+		return s, err
+	}
+	if s.IndexTree, err = tree(index); err != nil {
+		return s, err
+	}
+	if s.Base != "" {
+		if s.BaseTree, err = tree(s.Base); err != nil {
+			return s, err
+		}
+	}
+	s.Dirty = s.IndexTree != s.BaseTree || s.WorktreeTree != s.BaseTree
+	return s, nil
+}
+
+// IgnoredPaths lists what the working tree at dir holds that git ignores —
+// files and, collapsed, whole directories — outside the excluded paths (nil
+// means ".cloop"), at most max of them (Task 20496). A capture never carries
+// these: they are what a cleanup that removes the working copy would lose
+// without anyone having moved them. more reports that there were more than
+// max.
+func IgnoredPaths(ctx context.Context, dir string, exclude []string, max int) (paths []string, more bool, err error) {
+	dir, err = checkDir(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	present, err := hasDotGit(dir)
+	if err != nil || !present {
+		return nil, false, err
+	}
+	g, err := newRunner(ctx, dir, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	g.isolate(nil)
+	if err := g.checkTop(ctx, dir); err != nil {
+		return nil, false, err
+	}
+	if exclude == nil {
+		exclude = []string{".cloop"}
+	}
+	args := []string{"ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "--", "."}
+	for _, ex := range exclude {
+		ex = strings.Trim(filepath.ToSlash(ex), "/")
+		if ex != "" {
+			args = append(args, ":(top,exclude,literal)"+ex)
+		}
+	}
+	out, err := g.run(ctx, dir, nil, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("movegit: list the ignored files of %s: %w", dir, err)
+	}
+	for _, p := range strings.Split(out, "\x00") {
+		if p == "" {
+			continue
+		}
+		if len(paths) == max {
+			return paths, true, nil
+		}
+		paths = append(paths, p)
+	}
+	return paths, false, nil
+}
+
 // Mismatch is one way a working copy differs from a manifest.
 type Mismatch struct {
 	What string `json:"what"`

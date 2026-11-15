@@ -1081,7 +1081,7 @@ Payload keys:
 
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
-| `project.move.cleanup` | `project_move` | control-plane | beta | A person cleans up after an ended move — POST /api/projects/{idx}/moves/{id}/cleanup, or `cloop remote move cleanup`. |
+| `project.move.cleanup` | `project_move` | control-plane | beta | A person cleans up after an ended move, having confirmed it — POST /api/projects/{idx}/move/{id}/cleanup, or `cloop executor move cleanup`. |
 | `project.move.done` | `project_move` | control-plane | beta | A move's verification finds the target holds what was captured: each branch's commit and tree, the snapshot, the index, the working tree and every delivered file. |
 | `project.move.fail` | `project_move` | control-plane | beta | A move's preflight, quiesce, capture or switch fails; the binding never changed. |
 | `project.move.rollback` | `project_move` | control-plane | beta | A move's seed or verification fails after the switch, and the move puts the previous binding back. |
@@ -1090,14 +1090,14 @@ Payload keys:
 
 Payload keys:
 
-- `project.move.cleanup` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`, `refs`
+- `project.move.cleanup` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`, `refs`, `source_removed`, `source_kept`, `outcome`
 - `project.move.done` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`
 - `project.move.fail` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`
 - `project.move.rollback` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`
 - `project.move.start` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`
 - `project.move.switch` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`, `previous_binding`
 
-- `project.move.cleanup` — Removes the move's hidden refs from the project's repository and its directory in the move store. The project's directory on the hub is never removed.
+- `project.move.cleanup` — Removes the move's hidden refs from the project's repository and its directory in the move store, and after a verified move from a device the working copy the device kept (source_removed names it; source_kept says the caller asked to leave it). A row with outcome source_removed is written as soon as the device's copy is gone; one with outcome refused records a device copy that was not removed, and why (error). The project's directory on the hub is never removed.
 - `project.move.done` — The source is never removed: the move's record names what it kept and the command that cleans it up.
 - `project.move.fail` — `failed_phase` is the phase that failed and `error` why.
 - `project.move.rollback` — The binding and the firewall rules the switch replaced are restored in one transaction with the move's journal. The bundle is kept.

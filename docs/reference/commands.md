@@ -2507,6 +2507,60 @@ cluster.
 Role rules the controller's ServiceAccount needs, which are exactly what the
 chart's Role holds.
 
+## Moving a project
+
+A move takes a project from the executor it runs on to another executor or
+executor pool, and takes along what the old side holds: uncommitted changes and
+untracked files, commits no remote has, its features' branches, and the files
+under `.cloop` that no database holds. The dashboard does the same from the
+**Move to…** button on the Overview's executor card.
+
+### `cloop executor move`
+
+```text
+cloop executor move <project> --to <executor-id|pool:<id>|local> [--dry-run] [--abandon-source] [--yes] [--no-wait] [--json]
+cloop executor move status <move-id> [--project <project>] [--json]
+cloop executor move cleanup <move-id> [--project <project>] [--yes] [--keep-source] [--discard-ignored] [--json]
+```
+
+All three take `--hub` and `--token`. With neither, the command uses the hub
+`cloop login` made the default, and without one the hub on this machine,
+`http://127.0.0.1:8080`, which answers without a sign-in when it has none.
+The project is named by its name, its index or its path, as
+`cloop remote projects` lists them.
+
+The move first prints its preflight: what blocks it, what it would lose or
+change, and what it carries, each with what to do about it. It stops there with
+`--dry-run`, and when anything blocks the move. Warnings have to be accepted:
+you are asked at a terminal, and elsewhere you pass `--yes`. The hub then stops
+the project's runs (a task in progress goes back to pending), captures the
+source, points the project at the new executor, seeds it and checks that it
+holds what was captured. The command prints each step as it finishes and ends
+with the result. Interrupting it does not stop the move; `status` picks it up
+again. No run of the project starts while the move is in progress.
+
+`--abandon-source` moves without capturing the source, for a device that is gone
+for good. The preflight then lists exactly what is lost.
+
+A move never removes its source. `cleanup` removes what an ended move kept: its
+bundle and files in the hub's move store and the hidden refs its capture wrote.
+After a verified move from a device it also removes the working copy the device
+kept. The device checks the copy first and keeps it if anything in it differs
+from what the move captured: the working tree, the index, a branch, tag, note or
+stash entry, or a file under `.cloop`. It also keeps a copy that holds files git
+ignores, such as an `.env` file or build output, because no move carries those;
+copy off what you need and run `cleanup` again with `--discard-ignored`. The
+project's directory on the hub is never removed. `cleanup` lists what it
+removes and asks first unless you pass `--yes`. `--keep-source` leaves the
+device's copy in place, which is the way to clean up after a move from a device
+that is offline; once it is back, `cleanup` can remove the copy.
+
+| Command | Hub calls | Needs |
+| --- | --- | --- |
+| `move` | `GET /api/projects/{idx}/move/preflight`, `POST /api/projects/{idx}/move`, then `GET /api/projects/{idx}/move/{id}` until it ends | `executor.manage` on the project, a place on the target's access list, and on a hub with single sign-on a recent sign-in |
+| `status` | `GET /api/projects/{idx}/move/{id}` | `project.read` |
+| `cleanup` | `GET /api/projects/{idx}/move/{id}`, `POST /api/projects/{idx}/move/{id}/cleanup` | `executor.manage`, a recent sign-in, and to remove a device's copy a place on that device's access list |
+
 ## Device forwarders
 
 A device forwarder carries one on-premises USB device or network segment to the

@@ -52,7 +52,8 @@ func TestTheHubCommandsCreateNoDatabase(t *testing.T) {
 		remoteKubeShareCmd, remoteKubeListCmd, remoteKubeRenewCmd, remoteKubeRevokeCmd,
 		remoteInitCmd, remoteExecutorsCmd, remoteReposListCmd, remoteReposAddCmd, remoteReposRemoveCmd,
 		remoteGrantsRequestCmd, remoteGrantsListCmd, remoteGrantsWithdrawCmd,
-		remoteFeaturesStartCmd, remoteFeaturesListCmd, remoteFeaturesPRCmd} {
+		remoteFeaturesStartCmd, remoteFeaturesListCmd, remoteFeaturesPRCmd,
+		executorMoveCmd, executorMoveStatusCmd, executorMoveCleanupCmd} {
 		t.Run(c.CommandPath(), func(t *testing.T) {
 			dir := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(dir, ".cloop"), 0o700); err != nil {

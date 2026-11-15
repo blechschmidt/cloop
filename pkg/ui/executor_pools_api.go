@@ -45,6 +45,10 @@ type poolView struct {
 	// Health is what the hub knows of the pool's controllers and makes of it
 	// (Task 20486); absent for a revoked pool and where it cannot be read.
 	Health *poolHealthView `json:"health,omitempty"`
+	// Admitted says, in the list, whether the caller is on the pool's access
+	// list, or it has none (Task 20496): the Move dialog offers a project
+	// only the pools its mover may use. Absent elsewhere.
+	Admitted *bool `json:"admitted,omitempty"`
 }
 
 // poolDetail is one pool with everything an administrator looks at.
@@ -155,6 +159,12 @@ func (s *Server) handleExecutorPoolsList(w http.ResponseWriter, r *http.Request)
 		if snap, _, err := store.Snapshot(p, access); err == nil {
 			v.Snapshot = &snap
 		}
+		admitted := false
+		if entries, err := store.Audience(p.ID); err == nil {
+			members := audienceMembers(entries)
+			admitted = len(members) == 0 || authz.Admits(members, s.callerSubject(r))
+		}
+		v.Admitted = &admitted
 		out = append(out, v)
 	}
 	// What an upgrade of a controller behind this hub installs (Task 20486).

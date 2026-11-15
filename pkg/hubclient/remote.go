@@ -56,6 +56,17 @@ type Project struct {
 	FailedTasks int    `json:"failed_tasks"`
 	ActiveTasks int    `json:"active_tasks"`
 	Hidden      bool   `json:"hidden"`
+	// Moving is the project's move in progress, when it has one (Task
+	// 20496).
+	Moving *ProjectMoving `json:"moving,omitempty"`
+}
+
+// ProjectMoving is what the project list says of a project's open move.
+type ProjectMoving struct {
+	ID     string `json:"id"`
+	Phase  string `json:"phase"`
+	Target string `json:"target"`
+	To     string `json:"to"`
 }
 
 // Projects lists the projects this session can see, in index order.

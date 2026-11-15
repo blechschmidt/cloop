@@ -853,6 +853,24 @@ type ProjectStatus struct {
 	// repository — the precondition for creating features of it, which the
 	// dashboard checks before offering the button.
 	HasGit bool `json:"has_git,omitempty"`
+
+	// Moving is the project's move in progress, when it has one (Task
+	// 20496): no run of it — nor of its features, which move with it —
+	// starts until the move ends, so the dashboard shows the card as moving
+	// and its Run as unavailable. The hub fills it in; GetStatus leaves it
+	// nil.
+	Moving *MovingStatus `json:"moving,omitempty"`
+}
+
+// MovingStatus is what a project's list entry says of its open move.
+type MovingStatus struct {
+	// ID is the move's; Phase the phase it is in.
+	ID    string `json:"id"`
+	Phase string `json:"phase"`
+	// Target is the binding the project is moving to, and To names it for a
+	// reader: the executor's or the pool's name.
+	Target string `json:"target"`
+	To     string `json:"to"`
 }
 
 // FeatureStatus is what the dashboard shows about a feature beyond its

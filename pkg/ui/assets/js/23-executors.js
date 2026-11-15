@@ -80,7 +80,7 @@ function _execDetailErrText(e) {
 function _renderExecutorCard(d) {
   const valueEl = document.getElementById('statExecutor');
   const subEl = document.getElementById('statExecutorSub');
-  const card = document.getElementById('executorCard');
+  const card = (document.getElementById('executorCard') || {}).firstElementChild;
   if (!valueEl || !subEl) return;
 
   const proj = (d && d.project) || null;
@@ -117,6 +117,8 @@ act('openExecutorPickerModal', function() {
   if (isFeatureSelected()) { toast('A feature runs on its project\'s executor — change it on the project', 'err'); return; }
   panelAct('execpicker', 'open');
 });
+// Moving the project and its work (Task 20496): deferred/projectmove.js.
+ACTIONS.openMoveDialog = () => isFeatureSelected() ? toast('A feature moves with its project', 'err') : panelAct('projectmove', 'open');
 
 // ── Claude Code per-project caps (overview panel) ──────────────────────────
 //

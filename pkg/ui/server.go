@@ -1006,6 +1006,8 @@ type Server struct {
 	// drives (Task 20494). See projectmove_engine.go.
 	moveRunnerOnce  sync.Once
 	moveRunnerState *moveRunner
+	// moving caches the open moves for the projects list (Task 20496).
+	moving movingIndex
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -6757,6 +6759,7 @@ func (s *Server) broadcastProjectsUpdate() {
 			return p
 		}
 		visible, stats := s.filterStatusesForRecipient(user, tok, entries, statuses)
+		visible = s.withMoving(visible)
 		p, err := json.Marshal(map[string]interface{}{
 			"projects": visible,
 			"stats":    stats,
@@ -7191,6 +7194,8 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	// snapshot as the statuses they describe.
 	entries, statuses := s.cachedProjectView()
 	statuses, stats := s.filterStatusesForRecipient(s.recipientIdentity(r), tokenFromRequest(r), entries, statuses)
+	// Which of them a move holds (Task 20496).
+	statuses = s.withMoving(statuses)
 	// multi_project is true when there are multiple registered projects so the
 	// frontend can enable the scoped-tabs experience.
 	//

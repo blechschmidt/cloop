@@ -247,6 +247,37 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **You can now move a project from the dashboard and from a terminal: review
+  the preflight first, watch the move as it runs, and clean up the old copy
+  after.** The executor card on a project's Overview has a **Move to…**
+  button. Its dialog lists the executors and pools you may use, shows the
+  preflight's findings grouped as blockers, warnings and what the move
+  carries, each with what to do about it, and keeps **Move** disabled until
+  you tick every warning. It then shows each phase of the move as the hub
+  pushes it over the dashboard's WebSocket (a new `project_move` message,
+  relayed to every hub member's dashboards) and ends with the verified
+  result and a cleanup button. While a move is open the project's card says
+  it is moving and its Run buttons are disabled. `cloop executor move
+  <project> --to <executor-id|pool:<id>|local>` does the same from a
+  terminal, with `--dry-run`, `--abandon-source`, `--yes` and `--json`;
+  `cloop executor move status <move-id>` and `cloop executor move cleanup
+  <move-id>` follow and clean up a move. The commands work against a hub on
+  the same machine without a sign-in, and through `cloop login` against a
+  hub with single sign-on. `GET /api/projects/{idx}/move/{id}` returns a move
+  with what cleaning up after it removes, and the executor pools list now
+  says whether you are on each pool's access list. `POST
+  /api/projects/{idx}/move/{id}/cleanup` replaces `/moves/{id}/cleanup` and
+  `cloop remote move cleanup`. It needs `{"confirm": true}`, and after a
+  verified move from a device it also removes the working copy the device
+  kept. A step on the device removes nothing unless the copy still holds
+  exactly what the move captured (the same working tree, index, branches,
+  tags, notes, stash and `.cloop` files) and nothing a move does not carry: a
+  copy holding files git ignores is kept unless the request also says
+  `{"discard_ignored": true}`. A removal cut off part-way is finished by the
+  next cleanup. `{"keep_source": true}` leaves the copy in place, and a later
+  cleanup can still remove it. The project's directory on the hub is never
+  removed (Task 20496).
+
 - **A project can now be moved off a remote device, a virtual executor on
   one, or an executor pool's runner volume, with what the device holds
   captured on the way.** The hub could capture only its own tree, so a move
@@ -308,8 +339,8 @@ schema and the hub's HTTP API may change in any release.
   compares each branch's commit and tree, the index, the files on disk and
   every delivered file's digest, and only a verified move is done. A failure
   before the switch leaves the binding alone; one after it puts the binding
-  back and keeps the bundle. The source is never deleted; `cloop remote move
-  cleanup` removes what a move kept. Each move runs on the one hub process
+  back and keeps the bundle. The source is never deleted; `cloop executor
+  move cleanup` removes what a move kept. Each move runs on the one hub process
   holding its lease and resumes after a restart. `config.yaml` never leaves
   the hub, and a device directory holding someone else's work is never
   overwritten (Task 20494).

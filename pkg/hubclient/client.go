@@ -316,6 +316,13 @@ func (c *Client) doLong(ctx context.Context, method, path string, query url.Valu
 	return c.do(ctx, longRequestTimeout, method, path, query, body, out)
 }
 
+// DoLong is Do for a call the hub answers only after work of its own — on a
+// device, say — which may take minutes: it waits as long as the hub's own
+// bound for such work, rather than Do's minute.
+func (c *Client) DoLong(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.doLong(ctx, method, path, query, body, out)
+}
+
 func (c *Client) do(ctx context.Context, timeout time.Duration, method, path string, query url.Values, body, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

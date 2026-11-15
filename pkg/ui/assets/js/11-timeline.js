@@ -32,6 +32,7 @@ function updateRunButtonState(running) {
     status.className = 'badge ' + p.cls;
     status.innerHTML = '<span class="badge-dot"></span>' + esc(p.label);
   }
+  moveGate();
 }
 
 // runBarStatus is what the Tasks tab's run bar says beside its button: the
@@ -44,6 +45,7 @@ function updateRunButtonState(running) {
 // that died without saying so) is only "Not running".
 function runBarStatus(running) {
   const st = appState ? appState.status : '';
+  if (!running && movingNow()) return {cls: 'paused', label: 'Moving'};
   if (running && runWaits(appState)) return statusParts(st, appState.pause_reason);
   if (running) return statusParts(isActiveRunStatus(st) ? st : 'running');
   if (!st || isActiveRunStatus(st)) return {cls: 'unknown', label: 'Not running'};

@@ -350,40 +350,9 @@ function _tdLoadReproductions(id) {
     .catch(() => {});
 }
 
-act('taskDetailsReproduce', function() {
-  const id = _tdCurrentId;
-  if (!id) return;
-  const btn = document.getElementById('td-reproduce-btn');
-  const host = document.getElementById('td-repro-list');
-  if (btn) { btn.disabled = true; btn.textContent = 'Reproducing…'; }
-  if (host) {
-    host.innerHTML = '<div class="td-empty">Running the task again in a fresh sandbox and comparing the '+
-      'commit. This takes as long as the original run did.</div>';
-  }
-  // No timeout on the client: the server bounds this at 20 minutes and a
-  // client-side abort would orphan the sandbox without releasing its quota.
-  fetch(pUrl('/api/tasks/'+id+'/reproduce'), {
-    method:'POST', credentials:'same-origin',
-    headers:{'Content-Type':'application/json'}, body:'{}'
-  })
-    .then(r => r.json())
-    .then(d => {
-      if (btn) { btn.textContent = 'Reproduce'; btn.disabled = false; }
-      if (!d || !d.ok) {
-        const msg = (d && (d.message || d.error)) || 'The reproduction could not be run';
-        if (host) host.innerHTML = '<div class="td-empty">'+esc(msg)+'</div>';
-        if (!harnessRefused(d)) toast(msg, false);
-        return;
-      }
-      if (_tdCurrentId === id) _tdLoadReproductions(id);
-      toast('Verdict: '+String(d.reproduction && d.reproduction.verdict || '').toUpperCase(),
-            !!(d.reproduction && (d.reproduction.verdict === 'identical' || d.reproduction.verdict === 'equivalent')));
-    })
-    .catch(() => {
-      if (btn) { btn.textContent = 'Reproduce'; btn.disabled = false; }
-      if (host) host.innerHTML = '<div class="td-empty">Request failed</div>';
-    });
-});
+// Reproducing a task is deferred/reproduce.js (Task 20496), fetched on the
+// first press: opening a task's details fetches no script.
+ACTIONS.taskDetailsReproduce = () => panelAct('reproduce', 'run', _tdCurrentId, _tdLoadReproductions);
 
 function _fmtDateTime(s) {
   if (!s) return '';
@@ -404,29 +373,6 @@ function _fmtDuration(start, end) {
   if (m < 60) return m + 'm ' + rs + 's';
   const h = Math.floor(m/60), rm = m%60;
   return h + 'h ' + rm + 'm';
-}
-
-function _tdReviewSection(r) {
-  const labels = {approved: 'approved', changes_requested: 'changes requested', unavailable: 'no verdict', no_changes: 'nothing to review'};
-  const cls = r.blocked ? 'fail' : (r.verdict === 'approved' || r.verdict === 'no_changes' ? 'done' : 'warn');
-  const who = r.model || r.provider || '';
-  const meta = (who ? 'Reviewer ' + who + ' · ' : '') + r.rounds + ' review(s)' +
-    (r.fix_rounds ? ', sent back ' + r.fix_rounds + '×' : '') + ' · mode ' + r.mode +
-    (r.blocked ? ' — nothing was pushed or merged.' : '');
-  let h = '<div class="td-section ' + cls + '"><h3>Review gate: ' + esc(labels[r.verdict] || r.verdict) + '</h3>' +
-    '<div class="td-text">' + esc(meta) + '</div>';
-  if (r.error) h += '<div class="td-text">' + esc(r.error) + '</div>';
-  if (r.summary) h += '<div class="td-text">' + esc(r.summary) + '</div>';
-  if (r.findings && r.findings.length) {
-    h += '<ul style="margin:6px 0 0 18px">' + r.findings.map(f => '<li><strong>' + esc(f.severity) + '</strong> ' +
-      (f.file ? '<code>' + esc(f.file + (f.line ? ':' + f.line : '')) + '</code> ' : '') + esc(f.title) +
-      (f.detail ? ' — ' + esc(f.detail) : '') + '</li>').join('') + '</ul>';
-  }
-  if (r.published && r.published.length) {
-    h += '<div class="td-text">Held pushes: ' + r.published.map(p => esc(p.remote + ' ' + p.ref + ': ' + p.outcome +
-      (p.detail ? ' (' + p.detail + ')' : ''))).join('; ') + '</div>';
-  }
-  return h + '</div>';
 }
 
 function _resultSectionLabel(status) {
@@ -544,7 +490,8 @@ function _renderTaskDetails(d) {
 
   // The review gate's verdict (Task 20357). Above the result, like background
   // work: it says whether what the result describes ever left this machine.
-  if (t.review && t.review.verdict) html += _tdReviewSection(t.review);
+  // Drawn by deferred/tdreview.js since Task 20496.
+  if (t.review && t.review.verdict) html += '<div class="td-section" id="td-review"></div>';
 
   if (t.description) {
     html += '<div class="td-section"><h3>Description</h3>'+
@@ -625,6 +572,7 @@ function _renderTaskDetails(d) {
   if (t.attachment_count) panelAct('attachments', 'show', t.id);
   if (d.network) panelAct('network', 'task', t.id);
   if (t.requirements_check) panelAct('reqgate', 'show', t.requirements_check);
+  if (t.review && t.review.verdict) panelAct('tdreview', 'show', t.review);
   if (cites.length) panelAct('citations', 'show', cites);
 }
 

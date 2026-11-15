@@ -6,7 +6,8 @@ package ui
 //
 //	POST /api/projects/{idx}/move                  start a move
 //	GET  /api/projects/{idx}/moves                 the project's moves
-//	POST /api/projects/{idx}/moves/{id}/cleanup    clean up what a move kept
+//
+// A move's own view and its cleanup are projectmove_view.go's (Task 20496).
 //
 // Each open move is driven by the one hub process holding its lease — a
 // hublease row scoped "projectmove:<id>" — and every member looks for open
@@ -408,9 +409,11 @@ func (h moveHooks) Transitioned(_ context.Context, from, to projectmove.Move) {
 	if action != "" {
 		h.s.auditMove(action, to, nil)
 	}
+	// Every write is a step the dashboards watching the move draw, and moves
+	// the projects list's word for the project (Task 20496).
+	h.s.moveChanged(to)
 	if !to.Open() || action == auditaction.ActionProjectMoveSwitch {
 		h.s.broadcastExecutorUpdate("moved", to.Target)
-		h.s.broadcastProjectsUpdate()
 	}
 }
 
@@ -974,7 +977,7 @@ func (d *moveDriver) buildCarrier(ctx context.Context, m projectmove.Move, c *pr
 // runOnTarget runs one `cloop workspace <command>` of the move on the target
 // and returns the report it printed. The workload runs no harness and is
 // leased nothing: it only rebuilds or reads the project's working copy.
-func (d *moveDriver) runOnTarget(ctx context.Context, ex executor.Executor, m projectmove.Move, command string, ws executor.Workspace, bundle string) (projectmove.WorkingCopyReport, error) {
+func (d *moveDriver) runOnTarget(ctx context.Context, ex executor.Executor, m projectmove.Move, command string, ws executor.Workspace, bundle string, extra ...string) (projectmove.WorkingCopyReport, error) {
 	path := m.Project.Path
 	clear := newLeaseClearance(path, harnessWho{})
 	if _, err := clear.settle(ex, path); err != nil {
@@ -982,7 +985,7 @@ func (d *moveDriver) runOnTarget(ctx context.Context, ex executor.Executor, m pr
 	}
 	spec := executor.Spec{
 		WorkDir: path,
-		Argv:    []string{d.s.selfExe(), "workspace", command, "--move", m.ID},
+		Argv:    append([]string{d.s.selfExe(), "workspace", command, "--move", m.ID}, extra...),
 		Labels: map[string]string{
 			"project": path, "handler": "project-move", "move": m.ID, "move_step": command,
 		},
@@ -1164,9 +1167,7 @@ func (d *moveDriver) RollBack(ctx context.Context, m projectmove.Move) (projectm
 // Retain says what a verified move keeps, and how to clean it up.
 func (d *moveDriver) Retain(_ context.Context, m projectmove.Move) *projectmove.Retained {
 	c := m.Detail.Capture
-	r := &projectmove.Retained{
-		Command: fmt.Sprintf("cloop remote move cleanup %s %s", strconv.Quote(m.Project.Name), m.ID),
-	}
+	r := &projectmove.Retained{Command: moveCleanupCommand(m)}
 	if c != nil {
 		r.Store = c.Store
 		if c.Git.Snapshot != nil && c.Git.Snapshot.Ref != "" {
@@ -1204,33 +1205,20 @@ func (d *moveDriver) Retain(_ context.Context, m projectmove.Move) *projectmove.
 	return r
 }
 
-// cleanupMove removes what a move kept: its hidden refs in the source
-// repository and its directory in the move store. The project's directory on
-// the hub is its home — its state and its features — and is never removed.
-func (s *Server) cleanupMove(ctx context.Context, m projectmove.Move, actor string) (projectmove.Move, error) {
+// cleanupMove removes what a move kept on the hub: its hidden refs in the
+// project's repository and its directory in the move store. The project's
+// directory on the hub is its home — its state and its features — and is never
+// removed; a device's copy is removed before this, by discardSourceCopy, and
+// only for a verified move (Task 20496). keptSource records that the caller
+// asked to leave a removable source copy where it is.
+func (s *Server) cleanupMove(ctx context.Context, m projectmove.Move, actor string, keptSource bool) (projectmove.Move, error) {
 	if m.Open() {
 		return m, projectmove.ErrStillOpen
 	}
 	if m.Detail.Retained != nil && !m.Detail.Retained.CleanedAt.IsZero() {
 		return m, nil
 	}
-	var refs []string
-	if c := m.Detail.Capture; c != nil {
-		if c.Git.Snapshot != nil && c.Git.Snapshot.Ref != "" {
-			refs = append(refs, c.Git.Snapshot.Ref)
-		}
-		for _, w := range c.Git.Worktrees {
-			if w.Ref != "" {
-				refs = append(refs, w.Ref)
-			}
-		}
-		for _, st := range c.Git.Stash {
-			refs = append(refs, st.Name)
-		}
-		for _, cr := range c.Git.Carried {
-			refs = append(refs, cr.Name)
-		}
-	}
+	refs := moveRefs(m)
 	if len(refs) > 0 {
 		if info, err := os.Stat(m.Project.Path); err == nil && info.IsDir() {
 			for _, ref := range refs {
@@ -1250,15 +1238,23 @@ func (s *Server) cleanupMove(ctx context.Context, m projectmove.Move, actor stri
 		}
 	}
 	if m.Detail.Retained == nil {
-		m.Detail.Retained = &projectmove.Retained{}
+		m.Detail.Retained = &projectmove.Retained{Command: moveCleanupCommand(m)}
 	}
 	m.Detail.Retained.CleanedAt = time.Now().UTC()
 	m.Detail.Retained.CleanedBy = actor
+	m.Detail.Retained.SourceKept = keptSource
 	out, err := (projectmove.DBStore{Open: s.controlPlaneDB}).Advance(ctx, m, m.Phase)
 	if err != nil {
 		return m, err
 	}
-	s.auditMove(auditaction.ActionProjectMoveCleanup, out, map[string]any{"actor": actor, "refs": refs})
+	extra := map[string]any{"actor": actor, "refs": refs}
+	if r := out.Detail.Retained; r != nil && r.SourceRemoved != "" {
+		extra["source_removed"] = r.SourceRemoved
+	}
+	if keptSource {
+		extra["source_kept"] = true
+	}
+	s.auditMove(auditaction.ActionProjectMoveCleanup, out, extra)
 	return out, nil
 }
 
@@ -1352,39 +1348,4 @@ func (s *Server) handleProjectMoves(w http.ResponseWriter, r *http.Request) {
 		moves = []projectmove.Move{}
 	}
 	jsonOK(w, map[string]any{"moves": moves})
-}
-
-// handleProjectMoveCleanup serves POST /api/projects/{idx}/moves/{id}/cleanup.
-func (s *Server) handleProjectMoveCleanup(w http.ResponseWriter, r *http.Request) {
-	entry, ok := s.projectAtIdx(w, r)
-	if !ok {
-		return
-	}
-	id := strings.TrimSpace(r.PathValue("id"))
-	if !movegit.ValidMoveID(id) {
-		jsonErr(w, "not a move id", http.StatusBadRequest)
-		return
-	}
-	m, err := (projectmove.DBStore{Open: s.controlPlaneDB}).Get(r.Context(), id)
-	if errors.Is(err, projectmove.ErrNotFound) || (err == nil && m.Project.Path != entry.Path) {
-		jsonErr(w, "this project has no move "+id, http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	out, err := s.cleanupMove(r.Context(), m, s.auditActor(r))
-	switch {
-	case errors.Is(err, projectmove.ErrStillOpen):
-		jsonErr(w, "move "+id+" has not ended; clean up after it once it has", http.StatusConflict)
-		return
-	case errors.Is(err, projectmove.ErrChanged):
-		jsonErr(w, "move "+id+" changed while it was being cleaned up; try again", http.StatusConflict)
-		return
-	case err != nil:
-		jsonErr(w, "clean up after move "+id+": "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	jsonOK(w, map[string]any{"move": out})
 }

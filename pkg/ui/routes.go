@@ -1018,11 +1018,16 @@ func (s *Server) routeTable() []routeSpec {
 		// captured, its binding switched and its target seeded and checked.
 		// It changes where the project's code runs, so it takes what binding
 		// does — and a recent sign-in — and the handler also requires the
-		// target's access list. Cleaning up what a move kept takes the same.
-		// See projectmove_engine.go.
+		// target's access list. See projectmove_engine.go.
 		{Pattern: "POST /api/projects/{idx}/move", Handler: s.handleProjectMoveStart, Perm: execMgmt, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		{Pattern: "GET /api/projects/{idx}/moves", Handler: s.handleProjectMoves, Perm: read, Scope: scopeProjectIdx},
-		{Pattern: "POST /api/projects/{idx}/moves/{id}/cleanup", Handler: s.handleProjectMoveCleanup, Perm: execMgmt, Scope: scopeProjectIdx, Sudo: sudoWrites},
+		// One move, with what cleaning up after it removes, is the project's
+		// to read; cleaning up takes what moving does, since after a
+		// verified move it removes the source's own copy — and the handler
+		// also requires that executor's access list and the caller's
+		// confirmation (Task 20496). See projectmove_view.go.
+		{Pattern: "GET /api/projects/{idx}/move/{id}", Handler: s.handleProjectMove, Perm: read, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/move/{id}/cleanup", Handler: s.handleProjectMoveCleanup, Perm: execMgmt, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		// Which repositories a project may work on (Task 20306). Reading the
 		// list needs only project.read — it names repositories, not
 		// credentials — while granting and withdrawing carry the same

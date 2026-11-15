@@ -151,7 +151,7 @@ if (!_clientID) {
 const PROJECT_SCOPED_EVENTS = new Set([
   'task_update', 'state_diff', 'task_added', 'task_deleted', 'task_mutation',
   'step_output', 'run_state', 'suggest_status', 'provider_call', 'history_append', 'requirements_update',
-  'requirements_coverage',
+  'requirements_coverage', 'project_move',
 ]);
 
 // _streamScope captures what the current selection is, to be frozen into a
@@ -322,6 +322,11 @@ function handleRealtimeMsg(type, data, scope) {
     case 'requirements_update':
       // A requirement was written, or a check moved on (Task 20458).
       panelIf('requirements', 'pushed', data);
+      break;
+    case 'project_move':
+      // A move of this project took a step (Task 20496): the Move dialog
+      // draws it where it is open. The card's word comes with 'projects'.
+      panelIf('projectmove', 'pushed', data);
       break;
     case 'requirements_coverage':
       // The traceability matrix changed (Task 20465): the coverage, and the
@@ -623,7 +628,7 @@ function connectSSE() {
   };
   // Named SSE events carry the WebSocket message of the same type; 'log' is
   // step_output's older name.
-  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health', 'requirements_update', 'requirements_coverage', 'knowledge_source']) {
+  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health', 'requirements_update', 'requirements_coverage', 'knowledge_source', 'project_move']) {
     evtSource.addEventListener(t, (e) => {
       try { handleRealtimeMsg(t === 'log' ? 'step_output' : t, JSON.parse(e.data), scope); } catch(_) {}
     });

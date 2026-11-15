@@ -435,6 +435,17 @@ import (
 // by building both Claude pickers from one list of IDs, with each label spelled
 // out from its ID, and by writing the price table without column padding:
 // 114,728 B after. The ceiling stays: 72 B of slack.
+//
+// Task 20496 put a Move to… button on the Overview's executor card, a moving
+// line and a held Run on a project's card, the Run gate on the Overview and
+// the Tasks run bar, the project_move case and the dialog's <meta>: 398 B on a
+// set that measured 114,656 B. The dialog itself is deferred/projectmove.js.
+// It paid with two pieces of a task's details that only some tasks show, each
+// now a deferred script fetched when it is needed: the review gate's verdict
+// (deferred/tdreview.js, fetched for a task that has one) and the Reproduce
+// press (deferred/reproduce.js, fetched when the button is pressed). Opening a
+// task's details fetches nothing new. 114,380 B after. The ceiling stays: 420 B
+// of slack.
 const eagerWireBudgetBytes = 114_800
 
 // eagerAsset is one member of the first-paint set.

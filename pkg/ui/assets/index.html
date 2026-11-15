@@ -73,6 +73,9 @@
 <meta name="cloop-provider-calls-src" content="{{asset:provider-calls.js}}">
 <meta name="cloop-executors-src" content="{{asset:executors.js}}">
 <meta name="cloop-execpicker-src" content="{{asset:execpicker.js}}">
+<meta name="cloop-projectmove-src" content="{{asset:projectmove.js}}">
+<meta name="cloop-reproduce-src" content="{{asset:reproduce.js}}">
+<meta name="cloop-tdreview-src" content="{{asset:tdreview.js}}">
 </head>
 <body>
 
@@ -377,10 +380,11 @@
               <div class="stat-value" id="statProvider" style="font-size:13px;margin-top:4px">—</div>
               <div class="stat-sub" id="statModel"></div>
             </div>
-            <div class="stat-card stat-card-clickable" id="executorCard" data-action="openExecutorPickerModal" title="Click to change where this project's harness runs" tabindex="0" role="button">
+            <div class="stat-card" id="executorCard"><div class="stat-card-clickable" data-action="openExecutorPickerModal" title="Click to change where this project's harness runs" tabindex="0" role="button">
               <div class="stat-label">Executor <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>
               <div class="stat-value" id="statExecutor" style="font-size:13px;margin-top:4px">—</div>
               <div class="stat-sub" id="statExecutorSub"></div>
+              </div><button class="btn mv-btn" id="moveBtn" data-perm="executor.manage" data-action="openMoveDialog" title="Move the project and its work to another executor">Move to…</button>
             </div>
             <div class="stat-card stat-card-clickable" id="reviewGateCard" data-action="openReviewGateModal" title="Click to set up the review gate: a reviewer model that checks each task's changes before they are pushed or merged" tabindex="0" role="button">
               <div class="stat-label">Review gate <span style="font-size:10px;opacity:.6;margin-left:4px">✎</span></div>

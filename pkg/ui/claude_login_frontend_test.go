@@ -42,7 +42,9 @@ var rawJSONFetch = regexp.MustCompile(`r\.json\(\)|resp\.json\(\)|pr\.json\(\)`)
 // fragments belong to another task's uncommitted work, and each conversion
 // needs its own check of what the caller does with the decoded body.
 var knownRawJSONFetches = map[string]int{
-	"assets/js/12-task-crud.js": 5,
+	// The Reproduce press went to deferred/reproduce.js, through api(), with
+	// Task 20496.
+	"assets/js/12-task-crud.js": 4,
 	"assets/js/15-voice.js":     2, // multipart audio upload
 	"assets/js/18-shortcuts.js": 2,
 	"assets/js/26-sessions.js":  1,

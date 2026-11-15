@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/movegit"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/executorpool"
 	"github.com/blechschmidt/cloop/pkg/feature"
@@ -53,6 +54,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/knowledge"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/projectmove"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -430,6 +432,7 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		"events": []map[string]any{{"kind": "error", "seq": 1, "message": s.URL, "view": s.TaskTitle}}}))
 	fileLayoutRequest(t, primary, s)
 	seedLayoutPool(t, ts, s)
+	seedLayoutMove(t, primary, s)
 
 	return ts, srv, layoutFixture{
 		Project: s.Project, HiddenProject: s.HiddenProject, Goal: goal, Instructions: instructions,
@@ -445,6 +448,51 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 			{"role": "user", "content": layoutLong("what blocks", s.TaskTitle+"?")},
 			{"role": "assistant", "content": layoutLong("Nothing — it finished; the test is at", s.URL)},
 		},
+	}
+}
+
+// seedLayoutMove records a verified move of the project from another device
+// onto the fixture's (Task 20496), whose copy on that device is still kept:
+// the Move dialog offers to review it, and its result face draws the steps,
+// what the move kept and the cleanup, with the fixture's long names.
+func seedLayoutMove(t *testing.T, primary string, s sweepStrings) {
+	t.Helper()
+	const id = "5eed5eed5eed5eed"
+	at := time.Now().Add(-3 * time.Hour).UTC()
+	step := func(p projectmove.Phase, i int) projectmove.Step {
+		return projectmove.Step{Phase: p, Started: at.Add(time.Duration(i) * time.Minute), Ended: at.Add(time.Duration(i)*time.Minute + 40*time.Second)}
+	}
+	work := "/var/lib/cloop/work/" + s.Project + "-1a2b3c4d"
+	detail := projectmove.Detail{
+		Timeline: []projectmove.Step{step(projectmove.PhasePreflight, 0), step(projectmove.PhaseQuiesce, 1),
+			step(projectmove.PhaseCapture, 2), step(projectmove.PhaseSwitch, 3), step(projectmove.PhaseSeed, 4),
+			step(projectmove.PhaseVerify, 5)},
+		Capture: &projectmove.CaptureRecord{Delivery: projectmove.DeliverDevice, Bytes: 734003200,
+			From: "device " + s.Device, WorkDir: work,
+			Git: movegit.Manifest{Repository: true, Snapshot: &movegit.Snapshot{Ref: movegit.SnapshotRefPrefix + id,
+				Commit: strings.Repeat("ab", 20)}}},
+		Verify: &projectmove.VerifyRecord{Delivery: projectmove.DeliverDevice, Checked: 42},
+		Retained: &projectmove.Retained{Command: "cloop executor move cleanup " + id,
+			Source: layoutLong(s.Device, "keeps its working copy as it was, at", work+", with the move's hidden refs in its repository; runs now work on executor", s.Device)},
+	}
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := statedb.Open(state.DBPath(primary))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	row, err := db.CreateProjectMove(statedb.ProjectMoveRow{ID: id, ProjectPath: primary, ProjectName: s.Project,
+		SourceBinding: "layout-sweep-old-device", TargetBinding: "layout-sweep-device", Phase: "verify",
+		StartedBy: s.Email, CreatedAt: at, DetailJSON: string(raw)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AdvanceProjectMove(statedb.ProjectMoveUpdate{ID: id, FromPhase: "verify", FromVersion: row.Version,
+		Phase: "done", DetailJSON: string(raw), At: at.Add(6 * time.Minute)}); err != nil {
+		t.Fatal(err)
 	}
 }
 

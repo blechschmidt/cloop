@@ -101,6 +101,9 @@ const (
 	// (Task 20446); each makes its next report soon rather than at its
 	// cadence.
 	invalidateHubHealth = "hub_health"
+	// invalidateMoves: a project move took a step on a member (Task 20496);
+	// each reads the open moves again for the projects list it pushes.
+	invalidateMoves = "project_moves"
 )
 
 // clusterNode returns this hub's cluster membership, or nil when standalone.
@@ -675,6 +678,11 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		}
 	case invalidateProjects:
 		s.refreshProjectStatuses()
+		s.broadcastProjectsUpdate()
+	case invalidateMoves:
+		// A project's move took a step on the member driving it (Task
+		// 20496): this member's dashboards hear which projects are moving.
+		s.dropMovingIndex()
 		s.broadcastProjectsUpdate()
 	case invalidateCIConfig:
 		go func() {

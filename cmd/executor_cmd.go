@@ -498,7 +498,7 @@ func recoversItsDatabase(cmd *cobra.Command) bool {
 func talksOnlyToAHub(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		switch c {
-		case loginCmd, logoutCmd, whoamiCmd, remoteCmd, knowledgeCmd:
+		case loginCmd, logoutCmd, whoamiCmd, remoteCmd, knowledgeCmd, executorMoveCmd:
 			return true
 		}
 	}

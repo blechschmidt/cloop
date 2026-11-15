@@ -298,6 +298,15 @@ type Retained struct {
 	Command   string    `json:"command"`
 	CleanedAt time.Time `json:"cleaned_at,omitempty"`
 	CleanedBy string    `json:"cleaned_by,omitempty"`
+	// SourceRemovedAt is when cleanup removed the copy of the project the
+	// source kept apart from the hub — a device's working copy — which it
+	// does only for a verified move, and only once the person cleaning up
+	// confirmed it (Task 20496). Zero while that copy is kept.
+	SourceRemovedAt time.Time `json:"source_removed_at,omitempty"`
+	// SourceRemoved names where that copy was: "<executor> at <dir>".
+	SourceRemoved string `json:"source_removed,omitempty"`
+	// SourceKept reports a cleanup asked to leave that copy where it is.
+	SourceKept bool `json:"source_kept,omitempty"`
 }
 
 // RollbackRecord is a rollback in progress, or done.

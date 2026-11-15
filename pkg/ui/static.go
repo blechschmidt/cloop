@@ -220,6 +220,18 @@ var deferredScripts = []struct{ token, path string }{
 	// The Overview's execution-target picker, fetched on the first press of
 	// the executor card (Task 20456).
 	{"execpicker.js", "assets/js/deferred/execpicker.js"},
+	// The Move dialog the executor card's Move to… opens (Task 20496): a
+	// move's preflight review, its progress as the hub pushes it, and the
+	// cleanup of what it kept.
+	{"projectmove.js", "assets/js/deferred/projectmove.js"},
+	// The Reproduce button's press in a task's details (Task 20221), fetched
+	// on the first press: deferred by Task 20496 to pay for the Move dialog's
+	// button. Opening a task's details still fetches nothing.
+	{"reproduce.js", "assets/js/deferred/reproduce.js"},
+	// The review gate's verdict in a task's details (Task 20357), fetched the
+	// first time a task with one is opened: deferred by Task 20496, with
+	// reproduce.js, to pay for the Move dialog's button.
+	{"tdreview.js", "assets/js/deferred/tdreview.js"},
 }
 
 // pageScripts are scripts a page loads with a script element of its own

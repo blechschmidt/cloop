@@ -167,8 +167,20 @@ function renderProjectFaults(projects) {
   banner.style.display = '';
 }
 
+// The open move of the project on screen (Task 20496): while one holds it the
+// hub starts no run of it, so its Run buttons wait too.
+function movingNow() {
+  const p = ((window._lastProjectsData || {}).projects || [])[_overviewIdx()];
+  return p && p.moving;
+}
+function moveGate() {
+  const mv = movingNow();
+  ['ctrlRun', 'tasksCtrlRun'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = !!mv || b.classList.contains('perm-denied'); });
+}
+
 function renderProjects(projects, stats) {
   window._lastProjectsData = {projects, stats};
+  moveGate();
   // Projects this viewer hid are still delivered — the server keeps them in
   // the list so every index-addressed call keeps pointing at the same
   // project — so the grid drops them here while carrying the original index
@@ -264,6 +276,7 @@ function renderProjects(projects, stats) {
         <div class="proj-goal" title="${esc(p.goal || '')}">${goal}</div>
         ${pauseWhy ? `<div class="proj-pause" title="${esc(pauseWhy)}">&#9208; Paused: ${esc(pauseWhy)}</div>` : ''}
         ${p.confinement ? `<div class="proj-pause">&#9888; ${esc(p.confinement)}</div>` : ''}
+        ${p.moving ? `<div class="proj-pause">&#8644; Moving to ${esc(p.moving.to)} &middot; ${esc(p.moving.phase)}</div>` : ''}
         <div class="proj-meta">
           <span class="badge ${health}" style="font-size:10px">${health}</span>
           <div class="proj-progress-wrap"><div class="proj-progress-bar"><div class="proj-progress-fill" style="width:${pct}%"></div></div><span>${pct}%</span></div>
@@ -275,7 +288,7 @@ function renderProjects(projects, stats) {
         <div class="proj-actions" data-action="">
           ${p.running
             ? '<button class="btn danger" data-action="projectStop" data-arg="'+idx+'" title="Stop">&#9632; Stop</button>'
-            : '<button class="btn success" data-action="projectRun" data-arg="'+idx+'" title="Run">&#9654; Run</button>'
+            : '<button class="btn success" data-action="projectRun" data-arg="'+idx+'" title="Run"'+(p.moving ? ' disabled' : '')+'>&#9654; Run</button>'
           }
           <button class="btn" data-action="projectHide" data-arg="${idx}" data-arg-name="${esc(p.name)}" title="Hide from your dashboard (restore under Settings)">Hide</button>
           <button class="btn danger" data-action="projectDelete" data-arg="${idx}" data-arg-name="${esc(p.name)}" data-arg-path="${esc(p.path || '')}" title="Remove project">&#10005; Delete</button>
