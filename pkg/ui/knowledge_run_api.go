@@ -43,6 +43,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/knowledge"
 	"github.com/blechschmidt/cloop/pkg/knowledgerun"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/projectreaders"
 	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -120,9 +121,20 @@ func allowRunKnowledge(id string, now time.Time) bool {
 type runKnowledgeCall struct {
 	s       *Server
 	db      *statedb.DB
+	svc     *knowledge.Service
 	row     statedb.ProxySessionRow
 	project knowledge.Project
 	access  *knowledge.Access
+	// workDir is the directory the session's run was dispatched to: the
+	// project's own, or a feature's (Task 20499). The project the session
+	// reads is that directory's project; what the run may read beyond it is
+	// asked of the readers list as this directory, so a feature's run reads
+	// no other project on its parent's account. Empty when the session does
+	// not record it, which reads no other project.
+	workDir string
+	// readableCache is what readable found, once per request.
+	readableDone  bool
+	readableCache []readableAccess
 }
 
 // errRunKnowledgeToken is the one answer for every token that does not open
@@ -164,10 +176,67 @@ func (s *Server) openRunKnowledgeCall(w http.ResponseWriter, r *http.Request) (*
 	}
 	project := knowledge.Project{Path: row.ProjectID, Name: s.projectNameForPath(row.ProjectID)}
 	svc := knowledge.New(db, knowledge.WithEmbeddings(s.knowledgeEmbeddings()))
+	// The directory the run was dispatched to, which the session records. A
+	// session that does not record it reads no other project: its project
+	// is a feature's parent as readily as the run's own.
+	workDir := ""
+	var scope knowledgeScope
+	if json.Unmarshal([]byte(row.Scope), &scope) == nil {
+		workDir = strings.TrimSpace(scope.WorkDir)
+	}
 	return &runKnowledgeCall{
-		s: s, db: db, row: row, project: project,
+		s: s, db: db, svc: svc, row: row, project: project, workDir: workDir,
 		access: svc.For(knowledge.RunPrincipal(project, runKnowledgeActor(row))),
 	}, true
+}
+
+// target resolves the project a request reads (Task 20499): the session's
+// own, unless requested names another — which is read only while that
+// project's readers list names the run's project. For another project it
+// returns access as knowledge.RunPrincipal of that project and of nothing
+// else, so its bindings and narrowing apply exactly as they do to its own
+// runs. A refusal is written — 404, worded the same whether the path names
+// no project or one the run may not read — and audited, with the reason the
+// run is not told.
+func (c *runKnowledgeCall) target(w http.ResponseWriter, action auditaction.Action, fields map[string]any,
+	requested string) (knowledge.Project, *knowledge.Access, bool) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return c.project, c.access, true
+	}
+	path, err := projectreaders.ParsePath(requested)
+	if err != nil {
+		c.audit(action, "refused", "the project it named is not a path: "+err.Error(),
+			withField(fields, "read_project", auditQuery(requested)))
+		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput,
+			"project must be the absolute path of a project on this hub"))
+		return knowledge.Project{}, nil, false
+	}
+	path = projectreaders.NormalizePath(path)
+	// The run's own project, named by its path or — for a feature's run —
+	// by the directory the run works in.
+	if path == projectreaders.NormalizePath(c.project.Path) ||
+		(c.workDir != "" && path == projectreaders.NormalizePath(c.workDir)) {
+		return c.project, c.access, true
+	}
+	fields["read_project"], fields["reader"] = path, c.workDir
+	if err := runMayRead(c.db, c.workDir, path); err != nil {
+		c.audit(action, "refused", strings.TrimPrefix(err.Error(), errRunRead.Error()+": "), fields)
+		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, runReadNotFound))
+		return knowledge.Project{}, nil, false
+	}
+	other := knowledge.Project{Path: path, Name: c.s.projectNameForPath(path)}
+	return other, c.svc.For(knowledge.RunPrincipal(other, runKnowledgeActor(c.row))), true
+}
+
+// withField is fields with one more, for a row written before fields is.
+func withField(fields map[string]any, k string, v any) map[string]any {
+	out := make(map[string]any, len(fields)+1)
+	for key, val := range fields {
+		out[key] = val
+	}
+	out[k] = v
+	return out
 }
 
 // close releases the call's database.
@@ -266,6 +335,9 @@ func (c *runKnowledgeCall) fail(w http.ResponseWriter, action auditaction.Action
 		c.audit(action, "refused", reason, fields)
 	case errors.Is(err, knowledge.ErrNotFound):
 		reason = "the project is not this run's"
+		if read, _ := fields["read_project"].(string); read != "" {
+			reason = "nothing by that name in " + read + "'s knowledge"
+		}
 		c.audit(action, "refused", reason, fields)
 	default:
 		msg, _ := clipText(redact.Scrub(err.Error()), 512)
@@ -320,7 +392,11 @@ func (s *Server) handleRunKnowledgeSearch(w http.ResponseWriter, r *http.Request
 	}
 	k = min(k, knowledgerun.MaxK)
 	fields["k"] = k
-	res, err := call.access.Retrieve(r.Context(), call.project, req.Query, k)
+	project, access, ok := call.target(w, action, fields, req.Project)
+	if !ok {
+		return
+	}
+	res, err := access.Retrieve(r.Context(), project, req.Query, k)
 	if err != nil {
 		call.fail(w, action, err, fields)
 		return
@@ -329,7 +405,7 @@ func (s *Server) handleRunKnowledgeSearch(w http.ResponseWriter, r *http.Request
 	for _, h := range res.Hits {
 		ids = append(ids, h.ChunkID)
 	}
-	passages, err := call.access.Passages(r.Context(), call.project, ids)
+	passages, err := access.Passages(r.Context(), project, ids)
 	if err != nil {
 		call.fail(w, action, err, fields)
 		return
@@ -403,7 +479,11 @@ func (s *Server) handleRunKnowledgeGet(w http.ResponseWriter, r *http.Request) {
 		maxBytes = knowledgerun.DefaultGetBytes
 	}
 	maxBytes = min(maxBytes, knowledgerun.MaxGetBytes)
-	docs, err := call.access.Documents(r.Context(), call.project,
+	project, access, ok := call.target(w, action, fields, req.Project)
+	if !ok {
+		return
+	}
+	docs, err := access.Documents(r.Context(), project,
 		knowledge.DocumentRef{ID: req.DocumentID, URL: req.URL, Key: req.Key}, maxBytes, false)
 	if err != nil {
 		call.fail(w, action, err, fields)
@@ -429,6 +509,20 @@ func (s *Server) handleRunKnowledgeGet(w http.ResponseWriter, r *http.Request) {
 	}
 	fields["documents"] = ids
 	call.recordReads(req.Task, req.Purpose, ids)
+	// Nothing by that name in the project read: the run is told so, and the
+	// trail whether the name was another project's (Task 20499) — a run
+	// asking for something its project's knowledge does not hold, whose
+	// answer must not say whose it is. Not for the orchestrator's own
+	// lookups, which try every key and link a task's text names.
+	if len(ids) == 0 && len(lookup) > 0 && req.Purpose != knowledgerun.PurposeInject {
+		if other, err := call.db.KnowledgeDocumentIndexedElsewhere(r.Context(), project.Path,
+			statedb.KnowledgeDocumentLookup{ID: req.DocumentID, URL: req.URL, Key: req.Key}); err == nil && other {
+			call.audit(action, "refused", "the name is a document of knowledge not bound to "+project.Path+
+				": the run was told there is nothing by that name", fields)
+			jsonOK(w, out)
+			return
+		}
+	}
 	call.audit(action, "ok", "", fields)
 	jsonOK(w, out)
 }
@@ -451,6 +545,17 @@ func (s *Server) handleRunKnowledgeCitations(w http.ResponseWriter, r *http.Requ
 		apierror.WriteError(w, apierror.New(apierror.CodeRateLimited, "this run's knowledge session asks too often"))
 		return
 	}
+	// A run's citations are its own: taking them is a write, and a write
+	// crosses to no other project whatever its readers list says (Task
+	// 20499).
+	if p := strings.TrimSpace(req.Project); p != "" &&
+		projectreaders.NormalizePath(p) != projectreaders.NormalizePath(call.project.Path) {
+		call.audit(auditaction.ActionKnowledgeRunCitations, "refused",
+			"citations are the run's own: they are taken from its session, and taking another project's would be a write",
+			map[string]any{"task": max(req.Task, 0), "read_project": auditQuery(p)})
+		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, runReadNotFound))
+		return
+	}
 	ids, err := call.db.TakeKnowledgeRunReads(call.row.SessionID, max(req.Task, 0))
 	if err != nil {
 		s.writeKnowledgeError(w, err, "read the run's citations")
@@ -461,12 +566,12 @@ func (s *Server) handleRunKnowledgeCitations(w http.ResponseWriter, r *http.Requ
 		if len(out.Citations) == pm.MaxTaskCitations {
 			break
 		}
-		docs, err := call.access.Documents(r.Context(), call.project, knowledge.DocumentRef{ID: id}, 0, true)
-		if err != nil || len(docs) == 0 {
-			// Gone, or no longer the project's, since it was read.
+		d, ok := call.citedDocument(r.Context(), id)
+		if !ok {
+			// Gone, or no longer the project's — nor one it may read —
+			// since it was read.
 			continue
 		}
-		d := docs[0]
 		if c, ok := pm.CleanCitation(pm.Citation{
 			Kind: pm.CitationFetched, Title: d.Title, URL: d.URL, Source: d.Source.Name, SourceKind: d.Source.Kind,
 			DocumentID: d.ID, RunID: call.row.RunID,
@@ -475,6 +580,47 @@ func (s *Server) handleRunKnowledgeCitations(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	jsonOK(w, out)
+}
+
+// citedDocument finds a document the run read, as it may still read it: in
+// its own project's knowledge, else in that of a project whose readers list
+// names the run's — asked again for this request (Task 20499), so a document
+// of a project that has taken the run off its list since is not cited.
+func (c *runKnowledgeCall) citedDocument(ctx context.Context, id int64) (knowledge.DocumentText, bool) {
+	if docs, err := c.access.Documents(ctx, c.project, knowledge.DocumentRef{ID: id}, 0, true); err == nil && len(docs) > 0 {
+		return docs[0], true
+	}
+	for _, other := range c.readable() {
+		if docs, err := other.access.Documents(ctx, other.project, knowledge.DocumentRef{ID: id}, 0, true); err == nil &&
+			len(docs) > 0 {
+			return docs[0], true
+		}
+	}
+	return knowledge.DocumentText{}, false
+}
+
+// readableAccess is another project's knowledge as a run may read it.
+type readableAccess struct {
+	project knowledge.Project
+	access  *knowledge.Access
+}
+
+// readable returns, once per request, every other project the run may read
+// now, each as knowledge.RunPrincipal of that project.
+func (c *runKnowledgeCall) readable() []readableAccess {
+	if c.readableDone {
+		return c.readableCache
+	}
+	c.readableDone = true
+	if c.workDir == "" {
+		return nil
+	}
+	for _, path := range readableProjects(c.db, c.workDir) {
+		other := knowledge.Project{Path: path, Name: c.s.projectNameForPath(path)}
+		c.readableCache = append(c.readableCache, readableAccess{project: other,
+			access: c.svc.For(knowledge.RunPrincipal(other, runKnowledgeActor(c.row)))})
+	}
+	return c.readableCache
 }
 
 // scrubAll scrubs each of ss.

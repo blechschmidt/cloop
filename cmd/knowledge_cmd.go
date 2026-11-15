@@ -37,6 +37,9 @@ var (
 	knowledgeWait     bool
 	knowledgeK        int
 	knowledgeMaxBytes int
+	// knowledgeReadProject is --project inside a run (Task 20499): another
+	// project's knowledge, read while its readers list names the run's.
+	knowledgeReadProject string
 )
 
 // knowledgePoll is how often `cloop knowledge sync --wait` reads the source.
@@ -161,11 +164,17 @@ use meaning says why on stderr.
 Inside a run of a project with knowledge sources bound to it — the run's
 sandbox holds CLOOP_KNOWLEDGE_URL and CLOOP_KNOWLEDGE_TOKEN — the project is the
 run's own and is not named: ` + "`cloop knowledge search <query...>`" + ` searches it with
-the run's knowledge session, and what it finds is cited on the task.`,
+the run's knowledge session, and what it finds is cited on the task. With
+--project <path> it searches another project on the hub instead, which works
+only while that project's readers list names the run's project.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if rc, ok := runKnowledgeClient(); ok {
 			return runKnowledgeSearch(cmd, rc, strings.Join(args, " "))
+		}
+		if strings.TrimSpace(knowledgeReadProject) != "" {
+			return fmt.Errorf("--project reads another project from inside a run; outside one, name the project " +
+				"to search first: cloop knowledge search <project> <query...>")
 		}
 		if len(args) < 2 {
 			return fmt.Errorf("name a project and a query: cloop knowledge search <project> <query...>")
@@ -224,7 +233,9 @@ this command runs in, whole: by the document id a search printed, the URL a
 person reads it at, or its issue key (ENG-42). It uses the run's knowledge
 session — CLOOP_KNOWLEDGE_URL and CLOOP_KNOWLEDGE_TOKEN, which a run of a
 project with knowledge sources bound to it is given — and what it reads is
-cited on the task. What it prints is untrusted reference material.`,
+cited on the task. With --project <path> it reads from another project on the
+hub, whose readers list must name the run's project. What it prints is
+untrusted reference material.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		rc, ok := runKnowledgeClient()
@@ -232,7 +243,8 @@ cited on the task. What it prints is untrusted reference material.`,
 			return knowledgerun.ErrNotConfigured
 		}
 		ref := strings.TrimSpace(args[0])
-		req := knowledgerun.GetRequest{MaxBytes: knowledgeMaxBytes, Task: knowledgerun.TaskFromEnv(os.Getenv)}
+		req := knowledgerun.GetRequest{MaxBytes: knowledgeMaxBytes, Task: knowledgerun.TaskFromEnv(os.Getenv),
+			Project: strings.TrimSpace(knowledgeReadProject)}
 		what := ""
 		if id, err := strconv.ParseInt(ref, 10, 64); err == nil && id > 0 {
 			req.DocumentID, what = id, fmt.Sprintf("with id %d", id)
@@ -348,6 +360,7 @@ func runKnowledgeSearch(cmd *cobra.Command, c *knowledgerun.Client, query string
 	query = strings.TrimSpace(query)
 	resp, err := c.Search(remoteContext(cmd), knowledgerun.SearchRequest{
 		Query: query, K: knowledgeK, Task: knowledgerun.TaskFromEnv(os.Getenv),
+		Project: strings.TrimSpace(knowledgeReadProject),
 	})
 	if err != nil {
 		return err
@@ -511,6 +524,10 @@ func init() {
 	knowledgeSearchCmd.Flags().BoolVar(&knowledgeJSON, "json", false, "Print JSON")
 	knowledgeGetCmd.Flags().IntVar(&knowledgeMaxBytes, "max-bytes", 0, "How much of the document's text to print (default 32768, at most 65536)")
 	knowledgeGetCmd.Flags().BoolVar(&knowledgeJSON, "json", false, "Print JSON")
+	knowledgeSearchCmd.Flags().StringVar(&knowledgeReadProject, "project", "",
+		"Inside a run: search another project on the hub, by its path, whose readers list names the run's project")
+	knowledgeGetCmd.Flags().StringVar(&knowledgeReadProject, "project", "",
+		"Inside a run: read from another project on the hub, by its path, whose readers list names the run's project")
 	knowledgeRetrievalCmd.Flags().BoolVar(&knowledgeRetrievalOn, "on", false, "Put reference material in the project's task prompts")
 	knowledgeRetrievalCmd.Flags().BoolVar(&knowledgeRetrievalOff, "off", false, "Keep reference material out of the project's task prompts")
 	knowledgeRetrievalCmd.Flags().IntVar(&knowledgeRetrievalK, "k", 0, "Passages per prompt (0 for the default)")

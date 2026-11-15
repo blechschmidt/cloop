@@ -2108,6 +2108,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// A credential the hub minted for a run or a pool opens the entry
+		// point it was minted for, which is served above, and no route
+		// below: refused for what it is, and recorded, on every hub —
+		// before the hub's own credentials are looked at, so a hub with no
+		// sign-in does not serve the run as its operator (Task 20499).
+		if c, ok := runCredentialIn(r); ok {
+			s.refuseRunCredential(w, r, c)
+			return
+		}
 		if s.oidcEnabled() {
 			s.oidcGate(next, w, r)
 			return

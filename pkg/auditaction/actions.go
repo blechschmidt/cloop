@@ -52,6 +52,10 @@ const (
 	// ActionRunReexecuted records a run replacing its own image with a newer
 	// build at a task boundary, keeping its process (Task 20389).
 	ActionRunReexecuted Action = "run.reexecuted"
+	// ActionRunCredentialRefused records a credential the hub minted for a
+	// run or a pool presented to a route of the dashboard's API, which takes
+	// none of them (Task 20499).
+	ActionRunCredentialRefused Action = "run.credential_refused"
 	// ActionRunFirewallDenied records, when a run ends, what one deny path of
 	// its sandbox's firewall refused in all (Task 20437): one row per run and
 	// rule, never one per packet.
@@ -128,6 +132,9 @@ const (
 	// ActionKnowledgeRunGet records a run reading one document of its
 	// project's knowledge.
 	ActionKnowledgeRunGet Action = "knowledge.run.get"
+	// ActionKnowledgeRunCitations records a run asking for another
+	// project's citations, which are refused (Task 20499).
+	ActionKnowledgeRunCitations Action = "knowledge.run.citations"
 
 	// ── step ───────────────────────────────────────────────────────────────
 
@@ -279,6 +286,9 @@ const (
 	// ActionExecutorPoolRunnerRetire records a runner being retired: its run
 	// settled, it left before it was given one, or its pool was revoked.
 	ActionExecutorPoolRunnerRetire Action = "executor_pool.runner_retire"
+	// ActionExecutorPoolRunnerRetireRefused records a pool controller naming,
+	// for retirement, a runner another pool holds (Task 20499).
+	ActionExecutorPoolRunnerRetireRefused Action = "executor_pool.runner_retire_refused"
 	// ActionExecutorPoolRunQueue records a project's run entering, leaving or
 	// being handed on from a pool's queue.
 	ActionExecutorPoolRunQueue Action = "executor_pool.run_queue"

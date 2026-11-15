@@ -240,13 +240,28 @@ func knowledgeRecordDB() (*statedb.DB, error) {
 }
 
 // projectHasKnowledge reports whether knowledge sources are bound to the
-// project workDir belongs to — a feature reads its parent's.
+// project workDir belongs to — a feature reads its parent's — or to a project
+// whose readers list names it (Task 20499), which its run may search too.
 func projectHasKnowledge(db *statedb.DB, workDir string) (bool, error) {
 	rows, err := db.ListKnowledgeBindings(statedb.KnowledgeBindingFilter{ProjectPath: policyProjectPath(workDir)})
 	if err != nil {
 		return false, err
 	}
-	return len(rows) > 0, nil
+	if len(rows) > 0 {
+		return true, nil
+	}
+	// The dispatched directory, not its project: a feature's run reads no
+	// other project, so it gets no session for one.
+	for _, other := range readableProjects(db, workDir) {
+		rows, err := db.ListKnowledgeBindings(statedb.KnowledgeBindingFilter{ProjectPath: other})
+		if err != nil {
+			return false, err
+		}
+		if len(rows) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // newKnowledgeToken mints a session's id and token.

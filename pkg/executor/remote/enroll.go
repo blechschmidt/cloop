@@ -70,6 +70,15 @@ const (
 	runnerCredentialPrefix = "clrc1"
 )
 
+// RunnerTokenMarker and RunnerCredentialMarker are how an executor pool
+// runner's token and credential begin, for the hub's dashboard to recognise one
+// presented where it is not accepted (Task 20499): it refuses them, and records
+// the refusal, rather than reading them as a failed sign-in.
+const (
+	RunnerTokenMarker      = runnerTokenPrefix + "."
+	RunnerCredentialMarker = runnerCredentialPrefix + "."
+)
+
 // Secret sizing. 32 bytes is well beyond brute-force reach; the 16-byte ID is
 // a public lookup key, not a secret, and only needs to avoid collisions.
 const (

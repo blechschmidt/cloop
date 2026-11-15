@@ -12,6 +12,28 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **A run's credentials now reach its own project and nothing else, and the
+  one way across is a read the other project's readers list allows.** A
+  credential the hub mints for a run (a knowledge session, a model relay, git
+  proxy, Kubernetes monitor or egress session) or for a pool or CI job
+  presented to the dashboard's API was answered like a mistyped password: a
+  401 recorded nowhere, or on a hub without sign-in a request served as the
+  hub's operator, whatever project it named. Every dashboard route now refuses
+  such a credential with 403 before the hub looks at its own, on every kind of
+  hub, and records `run.credential_refused` with the run and project of a live
+  session. A hub without sign-in still serves a request that carries no
+  credential at all. A run may read another project only where that project's
+  readers list names its own, asked at every request: a knowledge search or
+  lookup may name another project by its path (`project`, `cloop knowledge
+  search --project`, the MCP tools' `project`), and a git proxy session lent to
+  read another project's repository fetches and never pushes. Citations stay
+  the run's own, a feature's run reads only its project, and a pool controller
+  naming another pool's runner is recorded. A lookup of another project's
+  document is still answered "nothing by that name", and its audit row now
+  says whose it was. A tests/arch gate classifies every entry point a run's
+  credential reaches as own-project, readers-gated read or refused, so a new
+  one fails CI until it is classified (Task 20499).
+
 - **cloop is built with Go 1.26.11**, for GO-2026-6859 ("HTTP/1 server crash
   due to MaxBytesReader header race in net/http"). The hub's HTTP server
   reads request bodies through `http.MaxBytesReader`, as does the git proxy,

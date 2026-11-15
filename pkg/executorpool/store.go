@@ -731,6 +731,15 @@ func (s *Store) AuditRunnerRetired(poolID, executorID, reason string) {
 	})
 }
 
+// AuditRetireRefused records a controller of pool poolID, presenting
+// credential credentialID, asking to retire a runner that runnerPool holds
+// (Task 20499).
+func (s *Store) AuditRetireRefused(poolID, credentialID, enrollmentID, runnerPool string) {
+	s.audit(auditaction.ActionExecutorPoolRunnerRetireRefused, poolID, CredentialActor(poolID, credentialID),
+		map[string]any{"enrollment_id": enrollmentID, "runner_pool_id": runnerPool,
+			"reason": "the runner is another pool's; a controller retires its own pool's runners only"})
+}
+
 // AuditControllerStatus records a pool's controller reporting what keeps it
 // from starting runners, or that nothing does (Task 20484).
 func (s *Store) AuditControllerStatus(poolID, credentialID string, healthy bool, reason, message string) {

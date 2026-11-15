@@ -190,6 +190,28 @@ var registry = []Entry{
 			"task\": a run's tasks before this row ran on `from`, after it on `to`.",
 	},
 	{
+		Action:  ActionRunCredentialRefused,
+		Home:    HomeControlPlane,
+		Entity:  "request",
+		Trigger: "A request to the dashboard's API presents a credential the hub minted for a run or an executor pool — a knowledge session, model relay, CI relay, git proxy, Kubernetes monitor or egress token, a pool controller's credential, a runner's token or credential — which no dashboard route takes: 403 (Task 20499).",
+		Payload: []string{"kind", "via", "method", "path", "ip", "opens", "session_id", "project_idx",
+			"user_agent", "verified", "project", "run_id", "executor_id", "suppressed", "untracked"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`kind` names the credential: knowledge_session, model_relay_session, ci_relay_session, " +
+			"git_proxy_session, kube_guard_session, egress_session, pool_controller, runner_token or " +
+			"runner_credential; `via` where the request carried it. " +
+			"Recognised by its documented prefix, so a made-up value is refused and recorded the same way; " +
+			"`verified` is true, and `project`, `run_id` and `executor_id` name its run, only for a live session " +
+			"whose recorded hash the value matches — a knowledge session, a model relay session or a Kubernetes " +
+			"monitor session, whose values name their session. The value itself is never written. A run " +
+			"presenting its credential to the dashboard is a run asking for something its credential was never " +
+			"for. Each credential gets a burst of 64 rows and one a second after it, and the hub process writes 600 " +
+			"a minute for live sessions and 120 for every other value; `suppressed` counts that credential's " +
+			"refusals since its previous row that were not written, `untracked` the refusals of credentials the " +
+			"limiter kept no count for.",
+	},
+	{
 		Action:  ActionRunFirewallDenied,
 		Home:    HomeProject,
 		Entity:  "plan",
@@ -481,7 +503,7 @@ var registry = []Entry{
 			"sandbox — POST /api/run/knowledge/search.",
 		Payload: []string{
 			"session_id", "run_id", "project", "executor_id", "task", "purpose", "query", "k", "hits", "documents",
-			"mode", "outcome", "reason",
+			"mode", "outcome", "reason", "read_project", "reader",
 		},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
@@ -490,7 +512,9 @@ var registry = []Entry{
 			"held. `purpose` is `inject` for the orchestrator's own retrieval, whose documents the task cites as " +
 			"injected; otherwise they are recorded as the agent's reads. `outcome` is `ok`, or `refused` with " +
 			"`reason` for a request the session's rate limit or a malformed query refused. A token that is not a " +
-			"live session's is refused before anything is read, and writes no row.",
+			"live session's is refused before anything is read, and writes no row. A search of another project " +
+			"(Task 20499) names it as `read_project`, and `reader` the directory the run was dispatched to, whose " +
+			"project that project's readers list has to name: refused, with why in `reason`, when it does not.",
 	},
 	{
 		Action: ActionKnowledgeRunGet,
@@ -501,13 +525,28 @@ var registry = []Entry{
 			"tool — POST /api/run/knowledge/get.",
 		Payload: []string{
 			"session_id", "run_id", "project", "executor_id", "task", "purpose", "lookup", "documents", "outcome",
-			"reason",
+			"reason", "read_project", "reader",
 		},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
 		Note: "`lookup` says how the document was named (`id`, `url` or `key`) with the value, scrubbed and cut at " +
 			"512 bytes. `documents` are the ids returned: none when the project's knowledge holds nothing by that " +
-			"name, which is also the answer for another project's document.",
+			"name, which is also the answer for another project's document — whose row says so, `refused`, though " +
+			"the run is told only that there is nothing by that name. A read from another project's " +
+			"knowledge carries `read_project` and `reader`, as a search's does.",
+	},
+	{
+		Action: ActionKnowledgeRunCitations,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_session",
+		Trigger: "A run asks for the citations of a project other than its own — POST /api/run/knowledge/citations " +
+			"naming one — and is refused (Task 20499).",
+		Payload:   []string{"session_id", "run_id", "project", "executor_id", "task", "read_project", "outcome", "reason"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Written only for refusals: a run taking its own task's citations is bookkeeping, recorded on the " +
+			"task. Citations are taken from the run's session, so another project's would be a write, which no " +
+			"readers list allows.",
 	},
 
 	// ── step ───────────────────────────────────────────────────────────────
@@ -972,6 +1011,19 @@ var registry = []Entry{
 		Payload:   []string{"pool_id", "executor_id", "reason", "queue_id", "project_path"},
 		Stability: StabilityBeta,
 		Read:      authz.PermAuditRead,
+	},
+	{
+		Action:    ActionExecutorPoolRunnerRetireRefused,
+		Home:      HomeControlPlane,
+		Entity:    "executor_pool",
+		Trigger:   "A pool's controller asks to retire a runner another pool holds (Task 20499): the controller is told the runner is unknown, and nothing changes.",
+		Payload:   []string{"pool_id", "enrollment_id", "runner_pool_id", "reason"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`pool_id` is the pool whose credential asked and the row's entity; `runner_pool_id` the pool that " +
+			"holds the runner. A controller credential reaches its own pool's runners and nothing else, so this " +
+			"row is a controller asking past its pool — a misconfigured controller watching the wrong pool, or a " +
+			"leaked credential.",
 	},
 	{
 		Action:    ActionExecutorPoolRunQueue,
@@ -3159,13 +3211,13 @@ var (
 		"bytes_down", "expires_at",
 	}
 
-	gitProxyPayload = []string{"kind", "session_id", "repo", "project_id", "task_id", "refs", "detail"}
+	gitProxyPayload = []string{"kind", "session_id", "repo", "project_id", "task_id", "refs", "detail", "reads_project"}
 
 	// gitProxyScanPayload is a push the scan refused (Task 20436): the run it
 	// came from, what the scan found and where — objects, paths, commits and
 	// the grant and secret each value was delivered through, never a value.
 	gitProxyScanPayload = []string{"kind", "session_id", "repo", "project_id", "task_id", "refs", "detail",
-		"scan", "run_id", "findings"}
+		"reads_project", "scan", "run_id", "findings"}
 
 	kubeGuardPayload = []string{
 		"kind", "session_id", "cluster", "context", "verb", "resource", "namespace",

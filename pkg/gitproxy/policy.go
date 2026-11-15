@@ -216,6 +216,12 @@ func WriteBackPolicy() Policy {
 	}
 }
 
+// FetchOnlyPolicy returns a policy that fetches and never pushes: what a
+// foreign read is held to (Task 20499), whatever its caller asked for.
+func FetchOnlyPolicy() Policy {
+	return Policy{AllowedRefs: []string{DefaultAllowedRef}, AllowFetch: true}
+}
+
 // Normalize fills defaults and canonicalises patterns. It is idempotent.
 func (p *Policy) Normalize() {
 	if len(p.AllowedRefs) == 0 {

@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 264 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 267 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 231 |
+| `control-plane` | the hub's own state.db | 234 |
 | `project` | the project's .cloop/state.db | 29 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-264 actions in 55 families. Every action is listed: this section is the whole
+267 actions in 55 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.move.*`](#projectmove) (6) · [`project.member.*`](#projectmember) (4) · [`project.reader.*`](#projectreader) (2) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (9) · [`run.*`](#run) (6) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (13) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.move.*`](#projectmove) (6) · [`project.member.*`](#projectmember) (4) · [`project.reader.*`](#projectreader) (2) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -134,6 +134,7 @@ Payload keys:
 | `run.adopt_requested` | `plan` | project | stable | Somebody asks a project's running host-process run to adopt the hub's build at its next task boundary. |
 | `run.cap_paused` | `plan` | project | stable | A Claude Code subscription cap stops the run before it dispatches its next task — a configured cap, or a window used up while budget.block_extra_usage holds the run out of extra usage (`cap` 100). |
 | `run.cap_resumed` | `plan` | project | stable | The hub restarts a cap-paused run after its window rolled over, without a human — or, for the extra-usage pause an older build recorded as a spent budget, once the usage API shows the window open (no `resumes_at`). |
+| `run.credential_refused` | `request` | control-plane | beta | A request to the dashboard's API presents a credential the hub minted for a run or an executor pool — a knowledge session, model relay, CI relay, git proxy, Kubernetes monitor or egress token, a pool controller's credential, a runner's token or credential — which no dashboard route takes: 403 (Task 20499). |
 | `run.firewall_denied` | `plan` | project | stable | A run ends whose sandbox firewall refused connections: one row per deny path that refused any, with the totals. |
 | `run.reexecuted` | `plan` | project | stable | A run replaces its own image with a newer build at a task boundary, keeping its process. |
 
@@ -142,12 +143,14 @@ Payload keys:
 - `run.adopt_requested` — `project`, `request_id`, `pid`, `run_build`, `hub_build`, `behind`
 - `run.cap_paused` — `project`, `windows`, `utilization`, `cap`, `resumes_at`, `detail`
 - `run.cap_resumed` — `project`, `paused_detail`, `resumes_at`, `resumed_at`, `acted_for`, `acted_for_basis`
+- `run.credential_refused` — `kind`, `via`, `method`, `path`, `ip`, `opens`, `session_id`, `project_idx`, `user_agent`, `verified`, `project`, `run_id`, `executor_id`, `suppressed`, `untracked`
 - `run.firewall_denied` — `project`, `run_id`, `executor_id`, `rule`, `why`, `count`, `destinations`, `top`, `first_seen`, `last_seen`, `fingerprint`
 - `run.reexecuted` — `project`, `run_id`, `pid`, `from`, `to`, `reason`, `reexecs`
 
 - `run.adopt_requested` — Gated like starting a run. The request names the run's process, so it is acted on by that run or by none; what the run then did is its run.reexecuted row, or a refusal in the project's journal.
 - `run.cap_paused` — Distinct from state.save's bare "paused" status because a cap is the one pause that ends by itself: `resumes_at` is the window's reset from the OAuth usage API, and it is what run.cap_resumed is later matched against.
 - `run.cap_resumed` — The only action recording work that a machine started on its own initiative, so "who restarted this project" stays answerable from the trail alone. On a hub with single sign-on `acted_for` names whom the run acts for, on their own Claude account, and `acted_for_basis` how that was decided: `starter`, the person the resumed run was started for as recorded at its dispatch (no `acted_for` when it was started acting for no one), `owner`, the project's owner, for a run older than that record, or `unknown`, nobody nameable, on an executor that needs no Claude home. A resume that could not act for them is not restarted, and leaves no row.
+- `run.credential_refused` — `kind` names the credential: knowledge_session, model_relay_session, ci_relay_session, git_proxy_session, kube_guard_session, egress_session, pool_controller, runner_token or runner_credential; `via` where the request carried it. Recognised by its documented prefix, so a made-up value is refused and recorded the same way; `verified` is true, and `project`, `run_id` and `executor_id` name its run, only for a live session whose recorded hash the value matches — a knowledge session, a model relay session or a Kubernetes monitor session, whose values name their session. The value itself is never written. A run presenting its credential to the dashboard is a run asking for something its credential was never for. Each credential gets a burst of 64 rows and one a second after it, and the hub process writes 600 a minute for live sessions and 120 for every other value; `suppressed` counts that credential's refusals since its previous row that were not written, `untracked` the refusals of credentials the limiter kept no count for.
 - `run.firewall_denied` — Aggregated per run and rule (Task 20437), never per packet: `count` is the refusals the sandbox's packet log reported — rate-limited to ten a second per deny path, so a flood is at least this many — `destinations` how many distinct destinations, `top` up to eight of them as `dst:port/proto`. `rule` is the deny path's tag (`default`, `deny:<prefix>`, `meta:<prefix>`, `block:<prefix>`, `xlat:<prefix>`), or `unitemised` for what the run's capped aggregate counted without itemising; `why` is the hub's sentence for it. Each destination is also a `network_blocked` row in the run's history. Absent for a run on Kubernetes, whose NetworkPolicy has no portable log, and for one on a device whose agent predates protocol v24.
 - `run.reexecuted` — Written by the new image. Together with task.dispatch it answers "which build ran this task": a run's tasks before this row ran on `from`, after it on `to`.
 
@@ -237,16 +240,19 @@ Payload keys:
 
 | Action | Entity | Home | Stability | Fires when |
 | --- | --- | --- | --- | --- |
+| `knowledge.run.citations` | `knowledge_session` | control-plane | beta | A run asks for the citations of a project other than its own — POST /api/run/knowledge/citations naming one — and is refused (Task 20499). |
 | `knowledge.run.get` | `knowledge_session` | control-plane | stable | A run reads one document of its project's knowledge with its knowledge session — by its id, its URL or its issue key: the orchestrator reading a document the task names, or the agent's knowledge_get tool — POST /api/run/knowledge/get. |
 | `knowledge.run.search` | `knowledge_session` | control-plane | stable | A run searches its project's knowledge with its knowledge session: the orchestrator assembling a task's reference material, or the agent's knowledge_search tool or `cloop knowledge search` in its sandbox — POST /api/run/knowledge/search. |
 
 Payload keys:
 
-- `knowledge.run.get` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `purpose`, `lookup`, `documents`, `outcome`, `reason`
-- `knowledge.run.search` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `purpose`, `query`, `k`, `hits`, `documents`, `mode`, `outcome`, `reason`
+- `knowledge.run.citations` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `read_project`, `outcome`, `reason`
+- `knowledge.run.get` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `purpose`, `lookup`, `documents`, `outcome`, `reason`, `read_project`, `reader`
+- `knowledge.run.search` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `purpose`, `query`, `k`, `hits`, `documents`, `mode`, `outcome`, `reason`, `read_project`, `reader`
 
-- `knowledge.run.get` — `lookup` says how the document was named (`id`, `url` or `key`) with the value, scrubbed and cut at 512 bytes. `documents` are the ids returned: none when the project's knowledge holds nothing by that name, which is also the answer for another project's document.
-- `knowledge.run.search` — The entity id is the knowledge session's. `query` is what the run searched for, scrubbed of anything shaped like a credential and cut at 512 bytes; `documents` are the ids of the documents the answer held. `purpose` is `inject` for the orchestrator's own retrieval, whose documents the task cites as injected; otherwise they are recorded as the agent's reads. `outcome` is `ok`, or `refused` with `reason` for a request the session's rate limit or a malformed query refused. A token that is not a live session's is refused before anything is read, and writes no row.
+- `knowledge.run.citations` — Written only for refusals: a run taking its own task's citations is bookkeeping, recorded on the task. Citations are taken from the run's session, so another project's would be a write, which no readers list allows.
+- `knowledge.run.get` — `lookup` says how the document was named (`id`, `url` or `key`) with the value, scrubbed and cut at 512 bytes. `documents` are the ids returned: none when the project's knowledge holds nothing by that name, which is also the answer for another project's document — whose row says so, `refused`, though the run is told only that there is nothing by that name. A read from another project's knowledge carries `read_project` and `reader`, as a search's does.
+- `knowledge.run.search` — The entity id is the knowledge session's. `query` is what the run searched for, scrubbed of anything shaped like a credential and cut at 512 bytes; `documents` are the ids of the documents the answer held. `purpose` is `inject` for the orchestrator's own retrieval, whose documents the task cites as injected; otherwise they are recorded as the agent's reads. `outcome` is `ok`, or `refused` with `reason` for a request the session's rate limit or a malformed query refused. A token that is not a live session's is refused before anything is read, and writes no row. A search of another project (Task 20499) names it as `read_project`, and `reader` the directory the run was dispatched to, whose project that project's readers list has to name: refused, with why in `reason`, when it does not.
 
 ### step.*
 
@@ -383,6 +389,7 @@ Payload keys:
 | `executor_pool.run_queue` | `executor_pool` | control-plane | beta | A project's run is queued for a pool, handed to a runner, or leaves the queue cancelled or failed. |
 | `executor_pool.runner_enroll` | `executor_pool` | control-plane | beta | A runner redeems its runner token and joins its pool as an ephemeral executor. |
 | `executor_pool.runner_retire` | `executor_pool` | control-plane | beta | A runner is retired: its one run settled, it left before it was given a run, or its pool was revoked. |
+| `executor_pool.runner_retire_refused` | `executor_pool` | control-plane | beta | A pool's controller asks to retire a runner another pool holds (Task 20499): the controller is told the runner is unknown, and nothing changes. |
 | `executor_pool.token_mint` | `executor_pool` | control-plane | beta | A pool's controller is issued runner tokens: single-use, bound to the pool, valid for ten minutes at most. |
 | `executor_pool.update` | `executor_pool` | control-plane | beta | An administrator changes a pool's labels, capabilities, max_runners, owner or workdir root. |
 
@@ -398,6 +405,7 @@ Payload keys:
 - `executor_pool.run_queue` — `pool_id`, `queue_id`, `action`, `project_path`, `starter`, `executor_id`, `reason`
 - `executor_pool.runner_enroll` — `pool_id`, `enrollment_id`, `executor_id`, `name`, `member`
 - `executor_pool.runner_retire` — `pool_id`, `executor_id`, `reason`, `queue_id`, `project_path`
+- `executor_pool.runner_retire_refused` — `pool_id`, `enrollment_id`, `runner_pool_id`, `reason`
 - `executor_pool.token_mint` — `pool_id`, `credential_id`, `count`, `enrollment_ids`, `holding`, `expires_at`, `runners`, `max_runners`
 - `executor_pool.update` — `pool_id`, `name`, `changed`, `labels`, `capabilities`, `max_runners`, `owner`, `workdir_root`
 
@@ -406,6 +414,7 @@ Payload keys:
 - `executor_pool.credential_mint` — The credential itself is shown once to the administrator and never recorded; the row names its public ID.
 - `executor_pool.revoke` — `runners` lists the executor IDs whose credentials were revoked; each is also recorded as executor_pool.runner_retire when its hub member ends its connection.
 - `executor_pool.run_queue` — `action` is queued, assigned, dispatched, cancelled or failed.
+- `executor_pool.runner_retire_refused` — `pool_id` is the pool whose credential asked and the row's entity; `runner_pool_id` the pool that holds the runner. A controller credential reaches its own pool's runners and nothing else, so this row is a controller asking past its pool — a misconfigured controller watching the wrong pool, or a leaked credential.
 - `executor_pool.token_mint` — A refused request — the pool at max_runners, or revoked — is counted in cloop_executor_pool_mint_refusals_total rather than recorded here.
 
 ### workspace.*
@@ -553,15 +562,15 @@ Payload keys, on every action above: `decision`, `subject`, `secret_id`, `secret
 
 Payload keys:
 
-- `gitproxy.fetch` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`
-- `gitproxy.push_allowed` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`
-- `gitproxy.push_denied` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `scan`, `run_id`, `findings`
-- `gitproxy.push_secret_refused` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `scan`, `run_id`, `findings`
-- `gitproxy.rejected` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`
-- `gitproxy.session_closed` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`
-- `gitproxy.session_minted` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`
-- `gitproxy.session_renewed` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`
-- `gitproxy.session_restored` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`
+- `gitproxy.fetch` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`
+- `gitproxy.push_allowed` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`
+- `gitproxy.push_denied` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`, `scan`, `run_id`, `findings`
+- `gitproxy.push_secret_refused` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`, `scan`, `run_id`, `findings`
+- `gitproxy.rejected` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`
+- `gitproxy.session_closed` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`
+- `gitproxy.session_minted` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`
+- `gitproxy.session_renewed` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`
+- `gitproxy.session_restored` — `kind`, `session_id`, `repo`, `project_id`, `task_id`, `refs`, `detail`, `reads_project`
 
 - `gitproxy.push_denied` — The row that matters in this family: it is the only place a sandbox's attempt to write outside its lane is recorded. `refs` names what it tried to push. A push the scan could not finish carries `scan` (`limit` or `unreadable`) and `run_id`, and `detail` names the limit and its setting (Task 20436).
 - `gitproxy.push_secret_refused` — `findings` name each object, its path and commit where the pack says, and the grant and secret the value came from; nothing records the value. The forge got no complete pack and no ref moved. A push refused because it could not be scanned — past a `push_scan_*` limit, or a pack the proxy cannot read — is a `gitproxy.push_denied` row with `scan` set (Task 20436).

@@ -85,23 +85,9 @@ func (d *DB) KnowledgeProjectDocuments(ctx context.Context, projectPath string, 
 	if strings.TrimSpace(projectPath) == "" {
 		return nil, errors.New("statedb: a knowledge document lookup needs a project")
 	}
-	var (
-		match string
-		args  []any
-	)
-	switch {
-	case lookup.ID > 0:
-		match, args = "d.id = ?", []any{lookup.ID}
-	case strings.TrimSpace(lookup.URL) != "":
-		match, args = "d.url = ?", []any{strings.TrimSpace(lookup.URL)}
-	case strings.TrimSpace(lookup.Key) != "":
-		key := strings.TrimSpace(lookup.Key)
-		// substr comparisons rather than LIKE: a key's underscore is a LIKE
-		// wildcard, and "ENG-4" must not find "ENG-42".
-		match = `(d.title = ? OR substr(d.title, 1, ?) = ? OR substr(d.url, -?) = ?)`
-		args = []any{key, len(key) + 1, key + " ", len(key) + len("/browse/"), "/browse/" + key}
-	default:
-		return nil, errors.New("statedb: a knowledge document lookup names an id, a URL or a key")
+	match, args, err := knowledgeLookupMatch(lookup)
+	if err != nil {
+		return nil, err
 	}
 	q := `SELECT DISTINCT d.id, d.source_id, s.name, s.kind, d.external_id, d.title, d.url, d.space_key,
 	             d.ancestors, d.remote_updated_at, d.truncated, d.chunk_count
@@ -141,6 +127,50 @@ func (d *DB) KnowledgeProjectDocuments(ctx context.Context, projectPath string, 
 		return nil, fmt.Errorf("statedb: look up knowledge documents: %w", classifyDriverErr(err))
 	}
 	return out, nil
+}
+
+// knowledgeLookupMatch is the condition on knowledge_documents AS d that
+// lookup names, with its arguments.
+func knowledgeLookupMatch(lookup KnowledgeDocumentLookup) (string, []any, error) {
+	switch {
+	case lookup.ID > 0:
+		return "d.id = ?", []any{lookup.ID}, nil
+	case strings.TrimSpace(lookup.URL) != "":
+		return "d.url = ?", []any{strings.TrimSpace(lookup.URL)}, nil
+	case strings.TrimSpace(lookup.Key) != "":
+		key := strings.TrimSpace(lookup.Key)
+		// substr comparisons rather than LIKE: a key's underscore is a LIKE
+		// wildcard, and "ENG-4" must not find "ENG-42".
+		return `(d.title = ? OR substr(d.title, 1, ?) = ? OR substr(d.url, -?) = ?)`,
+			[]any{key, len(key) + 1, key + " ", len(key) + len("/browse/"), "/browse/" + key}, nil
+	}
+	return "", nil, errors.New("statedb: a knowledge document lookup names an id, a URL or a key")
+}
+
+// KnowledgeDocumentIndexedElsewhere reports whether a source that is not
+// bound to projectPath holds a live document lookup names (Task 20499). It is
+// for the audit trail alone: a run asking for a document its project cannot
+// read is told there is nothing by that name — the answer
+// KnowledgeProjectDocuments gives — and the trail is told whether the name was
+// another project's. The documents are counted rather than looked for, so the
+// time an answer takes does not depend on whether there is one.
+func (d *DB) KnowledgeDocumentIndexedElsewhere(ctx context.Context, projectPath string, lookup KnowledgeDocumentLookup) (bool, error) {
+	match, args, err := knowledgeLookupMatch(lookup)
+	if err != nil {
+		return false, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var n int
+	err = d.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_documents AS d WHERE `+match+
+		` AND d.deleted_ns = 0
+		  AND NOT EXISTS (SELECT 1 FROM knowledge_bindings AS b
+		                   WHERE b.source_id = d.source_id AND b.project_path = ?)`,
+		append(args, projectPath)...).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("statedb: look up a knowledge document: %w", classifyDriverErr(err))
+	}
+	return n > 0, nil
 }
 
 // KnowledgeProjectDocumentChunks returns the chunks of document docID, in

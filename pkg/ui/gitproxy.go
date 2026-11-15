@@ -247,6 +247,10 @@ func startGitProxy(cfg *config.Config, dir string) (*gitProxyService, error) {
 		// proxy so a sandbox reaches both at one address, over one
 		// certificate, through one firewall rule.
 		Routes: []gitproxy.Route{{Prefix: modelRelayMount, Handler: http.HandlerFunc(serveModelRelayOnGitProxy)}},
+		// A foreign read — a run fetching another project's repository — is
+		// served only while that project's readers list names the run's,
+		// asked at every request (Task 20499).
+		Readers: gitProxyReaders(auditDB),
 	})
 	if err != nil {
 		certs.close()
@@ -456,6 +460,11 @@ func gitProxyAuditSink(db *statedb.DB) func(gitproxy.Event) {
 			"task_id":    e.TaskID,
 			"refs":       e.Refs,
 			"detail":     e.Detail,
+		}
+		// A foreign read names the project whose repository it reads for
+		// project_id's run (Task 20499).
+		if e.ReadsProject != "" {
+			fields["reads_project"] = e.ReadsProject
 		}
 		// A refusal by the push scan says which run, and where the push
 		// carries what — objects and provenance, never the value (Task

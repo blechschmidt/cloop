@@ -145,6 +145,30 @@ type Options struct {
 	// within the default limits. Whatever it returns, the session's upstream
 	// token is matched too.
 	PushScan PushScanFunc
+
+	// Readers answers whether a foreign read may be served (Task 20499):
+	// nil when the read project's readers list names the reader and the
+	// repository asked for is that project's own, else an error saying why
+	// not, which is the refusal the sandbox and the audit trail get. Asked
+	// before every request of a session minted with ReadsProject — never of
+	// any other — so a project taken off the list is refused at the next
+	// fetch. Nil refuses every foreign read.
+	Readers func(ForeignRead) error
+}
+
+// ForeignRead is one request through a foreign read, as Options.Readers is
+// asked about it.
+type ForeignRead struct {
+	// Reader is the project whose run the session serves: the session's
+	// ProjectID, which the hub sets to the directory the run was dispatched
+	// to — a feature's own path for a feature's run.
+	Reader string
+	// Project is the project whose repository the session reads.
+	Project string
+	// ForgeHost and Repo are the repository the request is for: the
+	// session's forge host and the request's owner/name.
+	ForgeHost string
+	Repo      string
 }
 
 // Route is a path prefix on the proxy's listener served by another handler.
@@ -294,6 +318,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("session is scoped to %s, not %s", sess.scopeDescription(), repoPath))
 		return
 	}
+	// A foreign read is another project's repository, lent to read only and
+	// only while that project's readers list names the run's (Task 20499):
+	// asked on every request, before anything reaches the forge.
+	if why := p.foreignReadRefusal(r, sess, endpoint, repoPath); why != "" {
+		p.rejectSession(w, r, sess, http.StatusForbidden, why)
+		return
+	}
 
 	switch {
 	case endpoint == "info/refs" && r.Method == http.MethodGet:
@@ -306,6 +337,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.rejectSession(w, r, sess, http.StatusNotFound,
 			fmt.Sprintf("%s %s is not a route this proxy serves", r.Method, endpoint))
 	}
+}
+
+// foreignReadRefusal says why a request through a foreign read may not be
+// served, or "" when it may — and for any other session, always "". A push is
+// refused whatever the list says; a fetch is served only while
+// Options.Readers answers that the project read still lists the reader, and a
+// proxy with no readers list to ask serves no foreign read at all.
+func (p *Proxy) foreignReadRefusal(r *http.Request, sess *Session, endpoint, repoPath string) string {
+	if sess.ReadsProject == "" {
+		return ""
+	}
+	if endpoint == receivePackService || r.URL.Query().Get("service") == receivePackService {
+		return fmt.Sprintf("a foreign read fetches and never pushes: this session reads %s's repository for %s",
+			sess.ReadsProject, sess.ProjectID)
+	}
+	if p.opts.Readers == nil {
+		return fmt.Sprintf("no readers list to ask, so no other project's repository is served: this session "+
+			"reads %s's repository for %s", sess.ReadsProject, sess.ProjectID)
+	}
+	if err := p.opts.Readers(ForeignRead{Reader: sess.ProjectID, Project: sess.ReadsProject,
+		ForgeHost: sess.ForgeHost, Repo: repoPath}); err != nil {
+		return oneLine(err.Error())
+	}
+	return ""
 }
 
 // splitGitPath splits "/owner/name/info/refs" into "owner/name" and
@@ -535,7 +590,7 @@ func (p *Proxy) handleUploadPack(w http.ResponseWriter, r *http.Request, sess *S
 	sess.fetches.Add(1)
 	p.reg.emit(Event{
 		Kind: EventFetch, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
-		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor,
+		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor, ReadsProject: sess.ReadsProject,
 		At: p.reg.now(),
 	})
 	p.forward(w, r, sess, up, fmt.Sprintf(resultContentType, uploadPackService))
@@ -861,7 +916,7 @@ func (p *Proxy) reject(w http.ResponseWriter, r *http.Request, status int, repoP
 func (p *Proxy) rejectSession(w http.ResponseWriter, r *http.Request, sess *Session, status int, detail string) {
 	p.reg.emit(Event{
 		Kind: EventRejected, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
-		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor,
+		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor, ReadsProject: sess.ReadsProject,
 		Detail: detail, At: p.reg.now(),
 	})
 	http.Error(w, "cloop git proxy: "+oneLine(detail), status)
@@ -872,7 +927,7 @@ func (p *Proxy) rejectSession(w http.ResponseWriter, r *http.Request, sess *Sess
 func (p *Proxy) emitPush(r *http.Request, sess *Session, kind EventKind, refs []string, detail string) {
 	p.reg.emit(Event{
 		Kind: kind, SessionID: sess.ID, RepoPath: requestRepo(r, sess),
-		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor,
+		ProjectID: sess.ProjectID, TaskID: sess.TaskID, Actor: sess.Actor, ReadsProject: sess.ReadsProject,
 		Refs: refs, Detail: detail, At: p.reg.now(),
 	})
 }

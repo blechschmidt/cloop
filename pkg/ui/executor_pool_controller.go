@@ -475,6 +475,11 @@ func (s *Server) handlePoolControllerRetire(w http.ResponseWriter, r *http.Reque
 		res := poolRetireResult{EnrollmentID: id, Outcome: poolRetireUnknown}
 		row, err := store.RunnerOf(id)
 		if err != nil || row.PoolID != pool.ID {
+			if err == nil {
+				// Another pool's: answered as unknown, like an id that does
+				// not exist, and recorded (Task 20499).
+				store.AuditRetireRefused(pool.ID, cred.ID, id, row.PoolID)
+			}
 			results = append(results, res)
 			continue
 		}

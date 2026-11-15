@@ -1630,6 +1630,114 @@ any new near-miss as a negative in `pkg/redact/redacttest`; and
 
 ---
 
+## What a run's credentials reach
+
+A run never holds a hub session or an API token. It holds credentials the hub
+mints for it alone, and each one is good at one entry point of the hub. That
+entry point authenticates the credential and reads the run's project off it.
+No project index, path, task id or attachment id in a request decides whose
+data the request reaches.
+
+| Credential | Shape | Minted for | Accepted at | Its project comes from | Another project |
+| --- | --- | --- | --- | --- | --- |
+| Knowledge session | `cloop_know1_<id>.<secret>` | A run of a project with knowledge sources bound to it, or to a project it may read | `POST /api/run/knowledge/search`, `/get` and `/citations` | The session's record | A search or a lookup may name one whose readers list names the run's project. Citations never |
+| Model relay session | `cloop_relay_<id>.<secret>` | A sandboxed run, on its secret lease | `/_anthropic/` | The lease the session stands on | No request names one |
+| Git proxy session, a workspace's included | `cloop_git1_…` password | The repositories the run's grants name, or its workspace's remote | The git proxy | The lease or workspace it was minted for | A repository outside its scope gets 403. A foreign read fetches, and only while the readers list allows it |
+| Kubernetes monitor session | `cloop_kube1_<id>.<secret>` | The run's kubeconfig grant | The access monitor | The grant | A namespace or verb outside the grant gets 403 |
+| Egress session | `cloop_egress1_…` password | A grant aimed at the run's project | The egress proxy | The grant's subject | A host outside the grant gets 403, and nothing is dialled |
+| CI relay session | `cloop_ci_<id>.<secret>` | A CI job a rule admits | `/api/ci/anthropic/` | The rule | No request names one |
+| Pool controller credential | `cloop_pool1_<id>.<secret>` | An executor pool's controller | `/api/pool-controller/` | The pool | Another pool's runner is unknown to it |
+| Runner token and credential | `clrt1.…`, `clrc1.…` | One pool runner, which takes one run | `/api/executors/connect` | The runner | A frame for a handle the runner does not hold is refused |
+
+The run's secret lease delivers its grants' material into the sandbox and is
+never presented back to the hub. The MCP server an agent may start,
+`cloop mcp --knowledge`, reaches the hub only with the run's knowledge session,
+so it reaches what that session reaches.
+
+**The dashboard takes none of them.** A request to any route of the
+dashboard's API that carries one of these credentials is refused with 403
+before the hub looks at its own credentials, whether the credential is a bearer
+token, either half of a basic credential, an `X-Api-Key` header or a `?token=`
+parameter. The answer says which credential it was and where it is good, and
+the refusal is recorded as
+[`run.credential_refused`](../reference/audit-events.md#run), naming the run
+and project for a live session the hub recorded and never the value. This is
+the same on a hub with single sign-on, on one with a static token, and on one
+with neither, where the request would otherwise have been served as the hub's
+operator. The test sends every route of the API one of a run's credentials
+aimed at another project, by its index and by its task and attachment ids,
+and checks that both projects' databases and the control plane are unchanged
+and that each refusal has its row (`TestARunsCredentialsOpenNoRouteOfTheDashboard`,
+`TestARunsCredentialIsRefusedOnEveryKindOfHub`). A credential is recognised by
+its documented prefix, so a made-up value gets the same answer as a real one.
+Rows are limited to a burst of 64 per credential and one a second after it.
+Each hub process writes at most 600 a minute for live sessions and 120 for
+every other value, so values made up to look like a credential can't use up
+what a real run's refusals are written from. The next row written says how
+many were not (`TestAFloodOfMadeUpCredentialsDoesNotHideARunsRefusal`).
+
+**Reading another project.** The one way across is a read, and only of a
+project whose [readers list](#project-readers) names the run's project. A
+knowledge search or lookup may name another project by its path on the hub
+(`project`, `cloop knowledge search --project`, the `project` argument of the
+MCP tools). The hub asks the list at every such request, so a project that
+takes the run's off its list is refused at the next one. A refusal is a 404
+worded the same whether the path names no project or one the run may not read,
+so a run can't map the hub's projects by asking; the row says which it was. A
+feature's run reads only its own project: a list names projects, never their
+features. Citations are taken from the session, which is a write, so they are
+the run's own whatever a list says. A run of a project with no knowledge of
+its own gets a session when a project that lists it has some
+(`TestARunsKnowledgeSessionReachesAnotherProjectOnlyThroughItsReadersList`,
+`TestARunGetsAKnowledgeSessionForWhatItMayRead`). Through the git proxy, a
+foreign read is a session minted for one project's run on another project's
+repository. It fetches and never pushes, whatever its policy asked for. Before
+every request the proxy asks the list, and the hub also checks that the
+repository asked for is the read project's own, the origin its checkout names.
+A proxy with no list to ask serves no foreign read at all
+(`TestForeignReadIsFetchOnlyAndNeverDurable`,
+`TestForeignReadFetchesOnlyWhileTheReadersListNamesTheReader`,
+`TestAProxyWithNoReadersListServesNoForeignRead`,
+`TestARunsGitSessionsReachAnotherProjectsRepositoryOnlyToRead`). No dispatch
+mints one today; the proxy holds the rule for when a run is handed another
+project's source.
+
+**Everything else a run names is its own.** A lookup of another project's
+document by its id, URL or issue key is told there is nothing by that name,
+the answer for a name nothing holds, and the row records that it was another
+project's (`TestRemoteRunTokenReachesOnlyItsOwnProject`). A git session asking
+for a repository outside its scope, a monitor session for another namespace,
+an egress session for a host its grant does not name, and a pool controller
+for another pool's runner are each refused and recorded with the project or
+pool the credential names (`TestARunsKubernetesSessionReachesOnlyItsGrantsNamespaces`,
+`TestARunsEgressSessionCarriesOnlyItsOwnProjectsGrant`,
+`TestAPoolControllersCredentialReachesOnlyItsOwnPoolsRunners`).
+
+**What a run writes back.** A run on the hub's own host writes its project's
+database and files itself: its task updates, outcomes, verdicts, events and
+attachments. There the boundary is the filesystem, which
+[the host sandbox](#the-host-sandbox) draws. A run on an isolating executor
+sends its outcome over its executor's connection, and the hub merges it into
+the project it dispatched, which it finds by the run's handle; a device can't
+name another. Its attachments land only on tasks the run worked on, and a
+frame for a handle the executor does not hold is refused
+(`TestRunEndedMergesARemoteRunsResults`, `TestApplyChecksWhatADeviceSends`,
+`TestWriteBackChunkForAnUnknownHandleIsRefused`).
+
+**A gate keeps the list complete.** Every route the dashboard serves before its
+own authentication is classified as own-project, readers-gated read or
+refused. An own-project or readers-gated handler must authenticate its
+credential with the function its classification names and read no project out
+of the request, and a readers-gated one must ask the readers list. Every layer
+of the dashboard's handler chain, everything let past its authentication, every
+listener the hub serves, and every credential shape it mints is classified too,
+so a new entry point fails CI until somebody decides what a run's credential
+reaches there (`TestEveryRouteARunCredentialReachesIsClassified`,
+`TestTheDashboardRefusesRunCredentialsBeforeItsOwn`,
+`TestEveryOtherEntryPointARunReachesIsClassified`).
+
+---
+
 ## Workspace provisioning
 
 > A `git` workspace is fetched with a short-lived brokered credential that
@@ -3654,9 +3762,11 @@ executor gives no access either. A feature is never on a list on either side: it
 has no list of its own, and it reads nothing because its project is listed
 (`TestCanReadIsDenyByDefault`, `TestReaders_FeaturesAreNeverListed`).
 
-Today the list is only kept: no run reads another project through it yet. It is
-what the hub will check before it gives a run read access to another project's
-source.
+The hub asks the list at every request a run makes to read another project: a
+knowledge search or lookup naming that project, and a fetch through the git
+proxy on a session lent to read its repository. Nothing else reads another
+project through it, and no write crosses, whatever a list says
+([what a run's credentials reach](#what-a-runs-credentials-reach)).
 
 **Who may see and change it.** Everyone who can see a project may see its list,
 and the projects it may read, with `GET /api/projects/{idx}/readers` or
@@ -4169,8 +4279,8 @@ the first also to the issue tracker. Each run's task gets its own project's
 documents in its prompt. The second project's run finds none of the first's
 through its tools, whether it searches for their words or asks for one by its
 id, its URL or its issue key, while the same tools find its own. Its token is
-refused by the dashboard's API, and every document the hub served it, request
-by request on the trail, is its own
+refused by the dashboard's API, with a 403 that says what it is, and every
+document the hub served it, request by request on the trail, is its own
 (`TestE2EKnowledgeSourcesReachOnlyTheirProjectsRuns`,
 `TestRemoteRunTokenReachesOnlyItsOwnProject`).
 
@@ -4412,8 +4522,12 @@ gets the same 401 (`TestRunKnowledgeSessionIsMintedForTheRunAlone`,
 session names one project and is answered as a viewer of that project and
 nothing else, through its bindings and narrowing: a device run's token finds
 none of another project's documents, by search, by id or by URL
-(`TestRemoteRunTokenReachesOnlyItsOwnProject`). Each session is rate-limited (a
-burst of 30, then one request a second), and every answer is limited in size.
+(`TestRemoteRunTokenReachesOnlyItsOwnProject`). A search or a lookup may name
+another project instead, which is answered only while that project's readers
+list names the run's
+([reading another project](#what-a-runs-credentials-reach)). Each session is
+rate-limited (a burst of 30, then one request a second), and every answer is
+limited in size.
 Its text passes through pkg/redact once more on the way out, so a credential
 pasted into a page is scrubbed even from an index written before its pattern
 was known. Every search and lookup is on the trail with its run, its task and
@@ -4447,8 +4561,12 @@ for a sync a person asked for,
 A run's searches and lookups have rows of their own,
 [`knowledge.run.search`](../reference/audit-events.md#knowledge) and
 [`knowledge.run.get`](../reference/audit-events.md#knowledge), each with its
-run, task, query or lookup and the documents served, and every connection test
-is recorded as [`knowledge.source.test`](../reference/audit-events.md#knowledgesource).
+run, task, query or lookup and the documents served, and a read of another
+project names that project and the run's. A run asking for another project's
+citations is refused and recorded as
+[`knowledge.run.citations`](../reference/audit-events.md#knowledge). Every
+connection test is recorded as
+[`knowledge.source.test`](../reference/audit-events.md#knowledgesource).
 
 ---
 
@@ -5757,6 +5875,21 @@ in CI's flagship job.
 | Cleanup removes a device's copy only after a verified, confirmed move and only while it is what the move captured; never the hub's directory | `pkg/ui: TestCleanupRemovesAVerifiedDevicesCopyOnlyWhileItIsUnchanged`, `TestAMovesViewAndItsConfirmedCleanup`; `pkg/projectmove: TestDiscardRemovesOnlyTheCopyTheMoveCaptured` |
 | A run on a device after a move starts from the working copy the move built, which the device fetches into and checks nothing out over, except where the run's work is pushed back or the project was bound away and back by hand | `pkg/ui: TestARunKeepsTheWorkingCopyAMovePlacedOnItsDevice`, `TestKeepingAMovedCopyFollowsTheProjectNotJustItsLastMove`; `pkg/executor/gitprovision: TestProvisionKeepsAMovedWorkingCopy` |
 
+### Run credentials — `runcredentials_test.go` (tests/arch) and the package suites
+
+A run's credentials are the ones a compromised agent holds. These tests turn
+each of them, minted for one project's run, on another project, and hold the
+hub to [what a run's credentials reach](#what-a-runs-credentials-reach).
+
+| Guarantee | Test |
+| --- | --- |
+| Every route of the dashboard's API refuses every kind of run and pool credential, however it is presented, with 403 and a `run.credential_refused` row, on hubs with and without sign-in, and nothing in either project or the control plane changes; a flood of made-up values does not keep a live session's refusal off the trail | `pkg/ui: TestARunsCredentialsOpenNoRouteOfTheDashboard`, `TestARunsCredentialIsRefusedOnEveryKindOfHub`, `TestAFloodOfMadeUpCredentialsDoesNotHideARunsRefusal` |
+| A knowledge session reads another project only while that project's readers list names the run's, asked at every request, never for a feature's run and never its citations, and every refusal is recorded | `pkg/ui: TestARunsKnowledgeSessionReachesAnotherProjectOnlyThroughItsReadersList`, `TestARunGetsAKnowledgeSessionForWhatItMayRead`, `TestRemoteRunTokenReachesOnlyItsOwnProject` |
+| A git proxy session reaches only its own scope; a foreign read fetches and never pushes, only while the readers list allows it, is never durable, and is refused by a proxy with no list to ask | `pkg/gitproxy: TestForeignReadIsFetchOnlyAndNeverDurable`, `TestForeignReadFetchesOnlyWhileTheReadersListNamesTheReader`, `TestAProxyWithNoReadersListServesNoForeignRead`; `pkg/ui: TestARunsGitSessionsReachAnotherProjectsRepositoryOnlyToRead` |
+| A Kubernetes monitor session, an egress session and a pool controller credential reach only what their own grant or pool names, and each refusal is recorded | `pkg/ui: TestARunsKubernetesSessionReachesOnlyItsGrantsNamespaces`, `TestAPoolControllersCredentialReachesOnlyItsOwnPoolsRunners`; `pkg/egressbroker: TestARunsEgressSessionCarriesOnlyItsOwnProjectsGrant` |
+| A run's outcome and attachments land only in the project the hub dispatched and on the tasks the run worked on | `pkg/ui: TestRunEndedMergesARemoteRunsResults`; `pkg/executor/projectseed: TestApplyChecksWhatADeviceSends`; `pkg/executor/remote: TestWriteBackChunkForAnUnknownHandleIsRefused` |
+| Every entry point a run's credential can reach is classified as own-project, readers-gated read or refused, and the classification is held to the code | `tests/arch: TestEveryRouteARunCredentialReachesIsClassified`, `TestTheDashboardRefusesRunCredentialsBeforeItsOwn`, `TestEveryOtherEntryPointARunReachesIsClassified` |
+
 ### When a check fails
 
 Read a failure as a statement about the system, not about the test. Three of
@@ -6340,6 +6473,21 @@ grants its lease delivered, so a hook or build script somebody else left in a
 shared project runs with the credentials of the next person, administrator or
 not, who starts a run of it (`pkg/ui/host_sandbox.go`). This is the same for a
 container. Share a project only with people you would let act as you there.
+
+**A run that reaches a hub without sign-in needs no credential.** The dashboard
+refuses a run's credential on every hub, but a hub with neither single sign-on
+nor a static token serves whoever reaches it as its operator, and a run on the
+hub's own host shares its network. Such a hub listens on loopback unless an
+operator opened it, and the host sandbox confines the files a person's run
+reaches; a run on an isolating executor never shares the hub's loopback
+(`TestARunsCredentialIsRefusedOnEveryKindOfHub`,
+`TestAnOpenHubNeverListensBeyondLoopback`).
+
+**A foreign read does not survive a hub restart.** A git proxy session lent to
+read another project's repository is never recorded, because a hub process
+restoring it, one built before foreign reads existed above all, would serve it
+without asking the readers list. After a restart its fetches are refused until
+the session is minted again (`TestForeignReadIsFetchOnlyAndNeverDurable`).
 
 **Whether an administrator's run is sandboxed is decided when it starts.** A
 run already going when its project is first shared with somebody whose runs

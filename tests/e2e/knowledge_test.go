@@ -1145,8 +1145,11 @@ func TestE2EKnowledgeSourcesReachOnlyTheirProjectsRuns(t *testing.T) {
 		!strings.Contains(a.text, incident.URL) || !strings.Contains(a.text, "(untrusted)") {
 		t.Errorf("the harness's knowledge_search answered %+v", a)
 	}
-	if code := strings.TrimSpace(k.stubFile("alpha-first", "dashboard.code")); code != "401" {
-		t.Errorf("alpha's run token opened the dashboard's source list: %s %s", code,
+	// Refused for what it is: a run's credential, which no dashboard route
+	// takes (Task 20499).
+	if code := strings.TrimSpace(k.stubFile("alpha-first", "dashboard.code")); code != "403" ||
+		!strings.Contains(k.stubFile("alpha-first", "dashboard.body"), "run_credential") {
+		t.Errorf("alpha's run token at the dashboard's source list: %s %s, want 403 run_credential", code,
 			k.stubFile("alpha-first", "dashboard.body"))
 	}
 
@@ -1223,8 +1226,10 @@ func TestE2EKnowledgeSourcesReachOnlyTheirProjectsRuns(t *testing.T) {
 		!strings.Contains(a.text, fmt.Sprintf("[document %d]", escalation.DocumentID)) {
 		t.Errorf("beta's run could not find its own page, so its refusals prove nothing: %+v", a)
 	}
-	if code := strings.TrimSpace(k.stubFile("beta-first", "dashboard.code")); code != "401" {
-		t.Errorf("beta's run token opened the dashboard's source list: %s", code)
+	if code := strings.TrimSpace(k.stubFile("beta-first", "dashboard.code")); code != "403" ||
+		!strings.Contains(k.stubFile("beta-first", "dashboard.body"), "run_credential") {
+		t.Errorf("beta's run token at the dashboard's source list: %s %s, want 403 run_credential", code,
+			k.stubFile("beta-first", "dashboard.body"))
 	}
 	betaCites := k.citations(k.beta, 1)
 	if docs := citedDocs(betaCites); len(docs) != 1 || !docs[escalation.DocumentID] {

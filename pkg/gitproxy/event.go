@@ -53,6 +53,9 @@ type Event struct {
 	ProjectID string    `json:"project_id,omitempty"`
 	TaskID    string    `json:"task_id,omitempty"`
 	Actor     string    `json:"actor,omitempty"`
+	// ReadsProject is the project whose repository a foreign read fetches
+	// for ProjectID's run (Task 20499); empty for every other session.
+	ReadsProject string `json:"reads_project,omitempty"`
 	// RunID is the run the session serves, on a push_secret_refused row: what
 	// the hub files the refusal in the run's history by.
 	RunID string `json:"run_id,omitempty"`
@@ -85,6 +88,9 @@ func (e Event) String() string {
 	}
 	if e.TaskID != "" {
 		fmt.Fprintf(&b, " task=%s", e.TaskID)
+	}
+	if e.ReadsProject != "" {
+		fmt.Fprintf(&b, " reads=%s", e.ReadsProject)
 	}
 	if len(e.Refs) > 0 {
 		fmt.Fprintf(&b, " refs=%s", strings.Join(e.Refs, ","))

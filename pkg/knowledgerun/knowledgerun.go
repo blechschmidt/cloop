@@ -100,6 +100,12 @@ type SearchRequest struct {
 	// Task is the task the agent works on, for its citations.
 	Task    int    `json:"task,omitempty"`
 	Purpose string `json:"purpose,omitempty"`
+	// Project, when set, searches another project's knowledge instead of
+	// the run's own: the project's path on the hub. The hub answers only
+	// while that project's readers list names the run's project (Task
+	// 20499), and refuses any other with the 404 a path that names no
+	// project gets. Empty, or the run's own path, is the run's own project.
+	Project string `json:"project,omitempty"`
 }
 
 // Hit is one passage a search found.
@@ -149,6 +155,9 @@ type GetRequest struct {
 	MaxBytes int    `json:"max_bytes,omitempty"`
 	Task     int    `json:"task,omitempty"`
 	Purpose  string `json:"purpose,omitempty"`
+	// Project reads the document from another project's knowledge, as
+	// SearchRequest.Project does.
+	Project string `json:"project,omitempty"`
 }
 
 // Document is one document as a get returns it.
@@ -179,6 +188,10 @@ type GetResponse struct {
 // Task, and forgets them: the run keeps them on the task from then on.
 type CitationsRequest struct {
 	Task int `json:"task"`
+	// Project may only name the run's own project, or nothing: citations
+	// are taken from the session, so another project's would be a write
+	// (Task 20499), and the hub refuses one.
+	Project string `json:"project,omitempty"`
 }
 
 // CitationsResponse is what the agent read for a task, as citations of kind

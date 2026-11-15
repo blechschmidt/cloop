@@ -445,7 +445,8 @@ hub's run-scoped knowledge search, passed in the run's environment as
 project alone, through its bindings. It is renewed while the run's workload runs
 and closed when the run ends, after which the token is refused. The hub stores
 only the token's hash, and the executor scrubs the token from everything the run
-prints.
+prints. The token opens the run-scoped search and nothing else: any route of the
+dashboard's API answers it with 403 and records the attempt.
 
 ### Reference material in each task's prompt
 
@@ -507,8 +508,8 @@ else:
 
 | Tool | Arguments |
 | --- | --- |
-| `knowledge_search` | `query`; `k`, how many passages (default 5, at most 20) |
-| `knowledge_get` | one of `id` (a search's document id), `url` or `key` (`PAY-7`); `max_bytes` |
+| `knowledge_search` | `query`; `k`, how many passages (default 5, at most 20); `project`, another project to read |
+| `knowledge_get` | one of `id` (a search's document id), `url` or `key` (`PAY-7`); `max_bytes`; `project` |
 
 Any agent can do the same from its shell: `cloop knowledge search <words>` and
 `cloop knowledge get <id|URL|ISSUE-KEY>` read the session from the environment,
@@ -517,6 +518,27 @@ burst of 30 requests, then one a second), every answer is size-limited and
 scrubbed of credentials again, and every search and lookup is audited as
 `knowledge.run.search` or `knowledge.run.get`, with its run, task, query and
 the documents served.
+
+### Reading another project's knowledge
+
+A run may also read the knowledge of another project on the hub, when that
+project's [readers list](../security/model.md#project-readers) names the run's
+project. Name the other project by its path on the hub: the `project` argument
+of both tools, or `--project`:
+
+```bash
+cloop knowledge search --project /srv/projects/billing invoice retries
+cloop knowledge get --project /srv/projects/billing PAY-7
+```
+
+The hub checks the list at every request, so taking a project off the list
+stops its readers at their next search. A project the run may not read is
+answered as if nothing were there, the same answer as for a path that names no
+project, and the refusal is on the trail with why. A feature's run reads only
+its own project: a readers list names projects, never their features. What the
+agent reads of another project is cited on its task like its own reads. A
+project with no knowledge of its own still gets a session for its runs when a
+project that lists it has some.
 
 ### Citations
 

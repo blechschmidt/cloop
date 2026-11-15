@@ -386,6 +386,25 @@ git's transport, so a clone's `origin` still reads `https://github.com/acme/tool
 A workload that changed it to point anywhere else would bypass the rewrite and
 find no credential.
 
+### Foreign reads
+
+A session can also be a **foreign read**: one project's run fetching another
+project's repository (`MintRequest.ReadsProject`). Its policy is fetch and
+nothing else, whatever the caller asked for, and it is never durable: a record
+names no readers list to ask, so a hub process that restored one, a build that
+predates foreign reads above all, would serve it without asking. Before every
+request, after the session's own repository check, the proxy refuses a push
+outright and asks `Options.Readers` whether the read project's readers list
+still names the reader. The hub answers from its control plane each time, and
+refuses a repository that is not the read project's own origin
+(`gitProxyReaders` in `pkg/ui/run_reads.go`). A proxy built without a readers
+list serves no foreign read. Every refusal is a `gitproxy.rejected` row
+carrying both projects, as `project_id` and `reads_project`
+(`TestForeignReadFetchesOnlyWhileTheReadersListNamesTheReader`,
+`TestARunsGitSessionsReachAnotherProjectsRepositoryOnlyToRead`). No dispatch
+mints a foreign read today; the proxy holds the rule for when a run is handed
+another project's source.
+
 ---
 
 ## The push scan

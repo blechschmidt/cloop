@@ -89,3 +89,50 @@ func TestKnowledgeToolsSearchThroughTheRunSession(t *testing.T) {
 		t.Errorf("a knowledge-only server ran get_plan: %+v", responses[3])
 	}
 }
+
+// TestKnowledgeToolsNameAnotherProjectOnlyWhenAsked: the tools pass a project
+// the agent names on to the hub, which answers only while that project's
+// readers list names the run's (Task 20499), and name none otherwise, so the
+// run's own project is what the hub reads.
+func TestKnowledgeToolsNameAnotherProjectOnlyWhenAsked(t *testing.T) {
+	var projects []string
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Project string `json:"project"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		projects = append(projects, r.URL.Path+" "+req.Project)
+		switch r.URL.Path {
+		case knowledgerun.MountPath + knowledgerun.PathSearch:
+			_ = json.NewEncoder(w).Encode(knowledgerun.SearchResponse{Hits: []knowledgerun.Hit{}})
+		case knowledgerun.MountPath + knowledgerun.PathGet:
+			_ = json.NewEncoder(w).Encode(knowledgerun.GetResponse{Documents: []knowledgerun.Document{}})
+		}
+	}))
+	defer hub.Close()
+	client, err := knowledgerun.New(hub.URL+knowledgerun.MountPath, testToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"invoice","project":" /srv/billing "}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"knowledge_get","arguments":{"key":"PAY-7","project":"/srv/billing"}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"invoice"}}}`,
+	}, "\n") + "\n"
+	var out strings.Builder
+	if err := New(t.TempDir(), nil, strings.NewReader(in), &out).WithKnowledge(client, 3, true).Serve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"project"`) {
+		t.Errorf("tools/list does not offer the project argument: %s", out.String())
+	}
+	want := []string{
+		knowledgerun.MountPath + knowledgerun.PathSearch + " /srv/billing",
+		knowledgerun.MountPath + knowledgerun.PathGet + " /srv/billing",
+		knowledgerun.MountPath + knowledgerun.PathSearch + " ",
+	}
+	if strings.Join(projects, "|") != strings.Join(want, "|") {
+		t.Errorf("the hub was asked %q, want %q", projects, want)
+	}
+}

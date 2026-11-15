@@ -121,6 +121,13 @@ type Session struct {
 	GrantID string
 	LeaseID string
 
+	// ReadsProject is set on a foreign read (Task 20499): a session through
+	// which ProjectID's run fetches the repository of the project at this
+	// path, another one. Such a session only ever fetches, and the proxy asks
+	// Options.Readers before every request whether that project's readers
+	// list still names ProjectID. Empty for a session of the run's own.
+	ReadsProject string
+
 	IssuedAt time.Time
 
 	// expiresAt is when the session stops authenticating, and renewedAt
@@ -298,6 +305,19 @@ type MintRequest struct {
 	// RunID names the run the session is for, recorded with it.
 	RunID string
 
+	// ReadsProject makes the session a foreign read (Task 20499): ProjectID's
+	// run fetching the repository of another project, the one at this path,
+	// which that project's readers list (pkg/projectreaders) has to name
+	// ProjectID for. ProjectID must then be the directory the run was
+	// dispatched to — a feature's own path for a feature's run, which no
+	// list names — and Upstream that project's own repository, which the
+	// hub's Readers checks again at every request. Whatever Policy says, such a session only fetches; it is
+	// never Durable, because a hub process that restored it without knowing
+	// what it is would serve it without asking the list; and the proxy asks
+	// Options.Readers before every request, so a project taken off the list
+	// is refused at the next fetch rather than when the session ends.
+	ReadsProject string
+
 	// Durable records the session in the registry's Store (Task 20383), so
 	// that the hub process adopting its run after this one stops can restore
 	// it under the same id and token. The lease path sets it: its sessions
@@ -414,6 +434,16 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 	if pol.IsZero() {
 		pol = WriteBackPolicy()
 	}
+	reads, err := foreignRead(req)
+	if err != nil {
+		return nil, err
+	}
+	if reads != "" {
+		// Read-only whatever the caller asked for: the readers list lends
+		// another project's repository to read, and nothing it says can
+		// make that a write.
+		pol = FetchOnlyPolicy()
+	}
 	pol.Normalize()
 	if err := pol.Validate(); err != nil {
 		return nil, fmt.Errorf("gitproxy: %w", err)
@@ -463,6 +493,7 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		RunID:        strings.TrimSpace(req.RunID),
 		GrantID:      strings.TrimSpace(req.Credential.GrantID),
 		LeaseID:      strings.TrimSpace(req.Credential.LeaseID),
+		ReadsProject: reads,
 		IssuedAt:     now,
 		expiresAt:    now.Add(ttl),
 		tokenHash:    sha256.Sum256([]byte(token)),
@@ -497,14 +528,15 @@ func (r *Registry) Mint(req MintRequest) (*Minted, error) {
 		scope = strings.Join(patterns, ",")
 	}
 	r.emit(Event{
-		Kind:      EventSessionMinted,
-		SessionID: id,
-		RepoPath:  scope,
-		ProjectID: req.ProjectID,
-		TaskID:    req.TaskID,
-		Actor:     req.Actor,
-		At:        now,
-		Detail:    mintDetail(pol, s.ExpiresAt(), recordErr) + forgeDetail(forge),
+		Kind:         EventSessionMinted,
+		SessionID:    id,
+		RepoPath:     scope,
+		ProjectID:    req.ProjectID,
+		TaskID:       req.TaskID,
+		Actor:        req.Actor,
+		ReadsProject: reads,
+		At:           now,
+		Detail:       mintDetail(pol, s.ExpiresAt(), recordErr) + forgeDetail(forge),
 	})
 
 	// A pinned session hands back the one remote URL the sandbox clones. A
@@ -528,6 +560,35 @@ func forgeDetail(host string) string {
 		return ""
 	}
 	return "; presented to " + host
+}
+
+// ErrForeignRead refuses a foreign read that could not be what it claims to
+// be (Task 20499).
+var ErrForeignRead = errors.New("gitproxy: invalid foreign read")
+
+// foreignRead returns the project a session request reads on another
+// project's behalf, "" for a session of the run's own, and refuses one that
+// could not be served as a foreign read: one naming no reader, or the reader
+// itself, and one asked to be durable.
+func foreignRead(req MintRequest) (string, error) {
+	reads := strings.TrimSpace(req.ReadsProject)
+	if reads == "" {
+		return "", nil
+	}
+	reader := strings.TrimSpace(req.ProjectID)
+	switch {
+	case reader == "":
+		return "", fmt.Errorf("%w: a session reading %s names no project to read it for", ErrForeignRead, reads)
+	case reader == reads:
+		return "", fmt.Errorf("%w: %s reads its own repository through a session of its own, not a foreign read",
+			ErrForeignRead, reads)
+	case req.Durable:
+		// A record names no readers list to ask: a hub process restoring it
+		// — one built before foreign reads existed, above all — would serve
+		// another project's repository without asking whether it still may.
+		return "", fmt.Errorf("%w: a foreign read is never durable", ErrForeignRead)
+	}
+	return reads, nil
 }
 
 // Authenticate resolves a session from the basic credential a sandbox
@@ -643,14 +704,15 @@ func (r *Registry) Renew(id string, ttl time.Duration) (time.Time, error) {
 		}
 	}
 	r.emit(Event{
-		Kind:      EventSessionRenewed,
-		SessionID: s.ID,
-		RepoPath:  s.scopeDescription(),
-		ProjectID: s.ProjectID,
-		TaskID:    s.TaskID,
-		Actor:     s.Actor,
-		At:        now,
-		Detail:    detail,
+		Kind:         EventSessionRenewed,
+		SessionID:    s.ID,
+		RepoPath:     s.scopeDescription(),
+		ProjectID:    s.ProjectID,
+		TaskID:       s.TaskID,
+		Actor:        s.Actor,
+		ReadsProject: s.ReadsProject,
+		At:           now,
+		Detail:       detail,
 	})
 	return next, nil
 }
@@ -748,11 +810,12 @@ func (r *Registry) Close(id, reason string) {
 		// The allowlist for a scoped session, as the mint row names it: its
 		// RepoPath is empty, and a closing row that named nothing could not
 		// be matched to the session it ends by anyone reading repositories.
-		RepoPath:  s.scopeDescription(),
-		ProjectID: s.ProjectID,
-		TaskID:    s.TaskID,
-		Actor:     s.Actor,
-		At:        r.now(),
+		RepoPath:     s.scopeDescription(),
+		ProjectID:    s.ProjectID,
+		TaskID:       s.TaskID,
+		Actor:        s.Actor,
+		ReadsProject: s.ReadsProject,
+		At:           r.now(),
 		Detail: fmt.Sprintf("%s (pushes=%d fetches=%d denied=%d)",
 			reason, st.Pushes, st.Fetches, st.Denied),
 	})
@@ -779,14 +842,15 @@ func (r *Registry) ReapExpired() int {
 			s.reason.Store("expired")
 			r.closeRecord(s, "expired")
 			r.emit(Event{
-				Kind:      EventSessionClosed,
-				SessionID: s.ID,
-				RepoPath:  s.scopeDescription(),
-				ProjectID: s.ProjectID,
-				TaskID:    s.TaskID,
-				Actor:     s.Actor,
-				At:        now,
-				Detail:    "expired",
+				Kind:         EventSessionClosed,
+				SessionID:    s.ID,
+				RepoPath:     s.scopeDescription(),
+				ProjectID:    s.ProjectID,
+				TaskID:       s.TaskID,
+				Actor:        s.Actor,
+				ReadsProject: s.ReadsProject,
+				At:           now,
+				Detail:       "expired",
 			})
 			s.end()
 		}

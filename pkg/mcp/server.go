@@ -207,6 +207,12 @@ func (s *Server) handleInitialize(req *Request) {
 	s.sendResult(req.ID, result)
 }
 
+// projectArgDescription is the knowledge tools' project argument (Task
+// 20499).
+const projectArgDescription = "Leave out to use this run's own project. Otherwise the path on the hub of another " +
+	"project whose readers list names this run's project: its knowledge is read instead. Any other project is " +
+	"refused, with the answer a path that names no project gets."
+
 // knowledgeTools are the tools over a run's knowledge session.
 func knowledgeTools() []Tool {
 	return []Tool{
@@ -221,6 +227,7 @@ func knowledgeTools() []Tool {
 					"type":        "integer",
 					"description": fmt.Sprintf("How many passages to return (default %d, at most %d).", knowledgerun.DefaultK, knowledgerun.MaxK),
 				},
+				"project": propString(projectArgDescription),
 			}, "query"),
 		},
 		{
@@ -236,6 +243,7 @@ func knowledgeTools() []Tool {
 					"type":        "integer",
 					"description": fmt.Sprintf("How much of its text to return (default %d, at most %d).", knowledgerun.DefaultGetBytes, knowledgerun.MaxGetBytes),
 				},
+				"project": propString(projectArgDescription),
 			}),
 		},
 	}
@@ -359,8 +367,9 @@ func (s *Server) sendToolResult(id json.RawMessage, result ToolResult, toolErr e
 // toolKnowledgeSearch searches the run's project's knowledge.
 func (s *Server) toolKnowledgeSearch(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
 	var args struct {
-		Query string `json:"query"`
-		K     int    `json:"k"`
+		Query   string `json:"query"`
+		K       int    `json:"k"`
+		Project string `json:"project"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return ToolResult{}, fmt.Errorf("invalid arguments: %w", err)
@@ -368,7 +377,8 @@ func (s *Server) toolKnowledgeSearch(ctx context.Context, raw json.RawMessage) (
 	if strings.TrimSpace(args.Query) == "" {
 		return ToolResult{}, fmt.Errorf("query is required")
 	}
-	resp, err := s.knowledge.Search(ctx, knowledgerun.SearchRequest{Query: args.Query, K: args.K, Task: s.task})
+	resp, err := s.knowledge.Search(ctx, knowledgerun.SearchRequest{Query: args.Query, K: args.K, Task: s.task,
+		Project: strings.TrimSpace(args.Project)})
 	if err != nil {
 		return ToolResult{}, err
 	}
@@ -382,11 +392,13 @@ func (s *Server) toolKnowledgeGet(ctx context.Context, raw json.RawMessage) (Too
 		URL      string `json:"url"`
 		Key      string `json:"key"`
 		MaxBytes int    `json:"max_bytes"`
+		Project  string `json:"project"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return ToolResult{}, fmt.Errorf("invalid arguments: %w", err)
 	}
-	req := knowledgerun.GetRequest{DocumentID: args.ID, URL: args.URL, Key: args.Key, MaxBytes: args.MaxBytes, Task: s.task}
+	req := knowledgerun.GetRequest{DocumentID: args.ID, URL: args.URL, Key: args.Key, MaxBytes: args.MaxBytes, Task: s.task,
+		Project: strings.TrimSpace(args.Project)}
 	what := ""
 	switch {
 	case args.ID > 0:
