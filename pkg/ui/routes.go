@@ -1006,6 +1006,14 @@ func (s *Server) routeTable() []routeSpec {
 		// Choosing where a project's code runs is a fleet decision, not a
 		// project one.
 		{Pattern: "POST /api/projects/{idx}/executor", Handler: s.handleProjectExecutorBind, Perm: execMgmt, Scope: scopeProjectIdx, Sudo: sudoWrites},
+		// What moving the project onto another executor or pool would lose
+		// or break (Task 20493). It changes nothing, but it is a
+		// maintainer's question: it reads the project's trees, grants and
+		// policy, and describes where its code would run. The handler also
+		// requires the caller to be on the target's access list, as a bind
+		// does, so it cannot be used to look into an executor the caller may
+		// not use. See projectmove_api.go.
+		{Pattern: "GET /api/projects/{idx}/move/preflight", Handler: s.handleProjectMovePreflight, Perm: write, Scope: scopeProjectIdx},
 		// Which repositories a project may work on (Task 20306). Reading the
 		// list needs only project.read — it names repositories, not
 		// credentials — while granting and withdrawing carry the same

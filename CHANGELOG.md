@@ -247,6 +247,23 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **You can see what moving a project to another executor would lose or
+  break before anything moves.** Changing a project's binding only changes
+  where its next run goes, and work on the old side was left behind without
+  a word: uncommitted changes in the hub's tree, commits no remote has, files
+  under `.cloop`, a device's working copy. `GET
+  /api/projects/{idx}/move/preflight?target=<binding>` now lists each of
+  these, with a severity (blocker, will-carry or warning) and a remedy. It
+  covers runs that are executing, queued, paused or waiting at a review
+  gate, the hub tree's worktrees and branches (features included), whether
+  the source answers, and whether the target can run the project: your
+  access, a harness credential, secret grants, firewall rules, devices,
+  isolation and the project's source. `abandon_source=1` shows what leaving
+  an unreachable device behind would lose. The preflight needs
+  `project.write` and a place on the target's access list, and it changes
+  nothing: the hub's tree is read with git that takes no lock and fetches
+  nothing (Task 20493).
+
 - **The Claude Code usage views show Fable's weekly limit.** Claude plans now
   limit Fable on its own each week. The usage API reports that window only
   as a model-scoped row of its `limits` list, where Opus and Sonnet each have

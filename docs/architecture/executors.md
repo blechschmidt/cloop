@@ -888,6 +888,52 @@ Managing an executor and being allowed to use it are separate rights. An admin
 can restrict a device they can't run work on themselves, and the panel tells
 them so.
 
+### Before a project moves
+
+Changing a binding only changes where the project's next run goes. Work on the
+old side stays where it is: in the hub's own tree, in a device's working copy, or
+on a pool's runner volume. To see what a move would lose or break before anything
+moves, ask the hub:
+
+```
+GET /api/projects/{idx}/move/preflight?target=<binding>
+```
+
+The target is an executor ID, `pool:<id>`, or `local` for the hub's own host,
+which is refused when `executors.allow_host_process` is off. You need
+`project.write` on the project, and you must be on the target's access list, the
+same as for a binding. Add `abandon_source=1` to see what a move that does not
+capture the source would lose; that is how you would leave a device that is gone
+for good. `pkg/projectmove` builds the report and changes nothing while doing it.
+
+Every finding has a severity and a remedy. A blocker means the move has to wait:
+a run is going, the source can't be reached, or the target can't run the project.
+A will-carry finding is something the move takes along, or that stays valid where
+the project goes. A warning means the move can go ahead and something is lost,
+changed or could not be checked.
+
+The report covers:
+
+- runs that are executing, queued for a pool, paused, or waiting at a review
+  gate, for the project and for each of its features;
+- uncommitted changes and untracked files in the hub tree's worktrees, the
+  features' included, and commits on local branches that no remote-tracking
+  branch holds. The hub reads the tree with hardened git that takes no lock and
+  fetches nothing (`pkg/executor/gitstate`);
+- files under `.cloop` that no database holds: artifacts, the attachment outbox,
+  checkpoints, `sandbox.yaml` and the requirements spec;
+- whether the source answers. The hub can't read a device's working copy yet, so
+  the report says where it is and that a move leaves it there;
+- whether the target can run the project: your access, a harness credential for
+  a sandboxed target, the project's secret grants, its firewall rules against
+  the target's, its devices, the isolation its sandbox spec asks for, and whether
+  the hub can hand the target the project's source;
+- the records keyed by the project's path, such as knowledge bindings, members,
+  grants and firewall rules. A move keeps the path, so they stay valid.
+
+The JSON response is the report as `pkg/projectmove` defines it, and
+`Report.WriteText` renders the same report for a terminal.
+
 ### How much one workload may be given
 
 Three ceilings apply, from the widest scope to the narrowest, and each can only

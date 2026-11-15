@@ -1083,8 +1083,10 @@ calls helpers that use a model: `pkg/clarify`, `pkg/coach`, `pkg/diagnosis`,
 | `pkg/executor/projectseed` | carrying a project into a sandbox that fetched its own source |
 | `pkg/executor/resultframe` | carrying a seeded run's outcome out through its output stream |
 | `pkg/executor/featurehub` | the hub's half of a feature on an isolating executor |
+| `pkg/executor/gitstate` | what a project's tree on the hub holds that no remote has, read with hardened git that writes nothing |
 | `pkg/executorstore` | enrollment, agent credentials and handles in the database |
 | `pkg/executorpool` | executor pools: their controllers' credentials, runner tokens, and which queued runs a pool may see and take |
+| `pkg/projectmove` | what moving a project to another executor or pool would lose or break, checked before anything moves |
 | `pkg/kubecontroller` | `cloop executor controller`: the in-cluster controller that keeps an ExecutorPool's ephemeral runner Pods, scaled by the hub's demand feed, and the commands that install it |
 | `deploy/helm` | the executor controller's Helm chart, compiled into the binary so a hub serves its own build's chart to `helm install` |
 | `pkg/sandbox` | parsing and validating `.cloop/sandbox.yaml` |
