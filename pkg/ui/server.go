@@ -1001,6 +1001,11 @@ type Server struct {
 	// failure each share last reported, and which renewal each live monitor
 	// session last took up (Task 20416). See kubeshare.go.
 	kubeShares kubeShareState
+
+	// moveRunnerState is this process's record of the project moves it
+	// drives (Task 20494). See projectmove_engine.go.
+	moveRunnerOnce  sync.Once
+	moveRunnerState *moveRunner
 }
 
 // log returns s.Log, falling back to a default text logger if the field
@@ -1569,6 +1574,10 @@ func (s *Server) Run(ctx context.Context) error {
 	// pushes the summary to the dashboards that may read it (Tasks 20434,
 	// 20446). See hubhealth.go.
 	go s.watchHubHealth(watcherCtx)
+	// Every member drives the project moves it holds the lease of, and takes
+	// up open moves no process drives — a move this process was driving when
+	// it stopped resumes here (Task 20494). See projectmove_engine.go.
+	go s.watchProjectMoves(watcherCtx)
 	// Every member re-reads the project memberships on its own, so a removed
 	// member's streams close here too when the change came from somewhere the
 	// bus does not reach (Task 20366).
@@ -3914,6 +3923,14 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	exe := s.selfExe()
 	workDir := s.resolveWorkDir(r)
+
+	// A project a move is moving (Task 20494) starts no run until the move
+	// ends — refused here as well as at dispatch, so a pool-bound project's
+	// run is not queued for a runner meanwhile.
+	if s.refuseWhileMoving(w, workDir) {
+		releaseSlot()
+		return
+	}
 
 	// A project bound to an executor pool (Task 20482): its run waits in the
 	// pool's queue for a runner rather than being dispatched now, holding the

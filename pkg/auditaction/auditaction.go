@@ -124,6 +124,7 @@ var multiSegmentFamilies = []string{
 	"stt.credential",
 	"secret.lease",
 	"project.member",
+	"project.move",
 	"audit.forward",
 }
 

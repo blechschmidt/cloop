@@ -247,6 +247,30 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A project can now be moved to another executor without losing what the
+  old side holds.** `POST /api/projects/{idx}/move` with a target binding
+  runs the move as a journal of phases, one row per move in the new
+  `project_moves` table. The preflight runs first, and its blockers end the
+  move before anything changes. Quiesce stops the project's run the way Stop
+  does, so the task it was on goes back to pending, and no run of the project
+  or its features starts while the move is open. Capture writes the working
+  tree's uncommitted state, untracked files included, onto
+  `refs/cloop/move/<id>` without touching the branch or the index, a bundle
+  of every branch, tag and stash entry, and a tar of the project's own
+  `.cloop` files into the hub's move store, checked against the free-space
+  floor. The switch changes the binding and narrows the firewall rules in one
+  transaction with the journal. A device target is seeded through the shipped
+  branch a feature travels in and rebuilds the working copy there, with the
+  uncommitted state back as uncommitted changes on the original branch. Verify
+  compares each branch's commit and tree, the index, the files on disk and
+  every delivered file's digest, and only a verified move is done. A failure
+  before the switch leaves the binding alone; one after it puts the binding
+  back and keeps the bundle. The source is never deleted; `cloop remote move
+  cleanup` removes what a move kept. Each move runs on the one hub process
+  holding its lease and resumes after a restart. `config.yaml` never leaves
+  the hub, and a device directory holding someone else's work is never
+  overwritten (Task 20494).
+
 - **You can see what moving a project to another executor would lose or
   break before anything moves.** Changing a project's binding only changes
   where its next run goes, and work on the old side was left behind without

@@ -218,7 +218,7 @@ func init() {
 				// also saves a redundant SQLite open and key derivation on
 				// every server start.
 				if !hostsControlPlane(cmd.Name()) && !recoversItsDatabase(cmd) && !talksOnlyToAHub(cmd) &&
-					!readsOnlyItsFiles(cmd) {
+					!readsOnlyItsFiles(cmd) && !seedsAMove(cmd) {
 					reconcileExecutors(cwd, cfg, wantsPodReconcile(cmd.Name()))
 				}
 			}

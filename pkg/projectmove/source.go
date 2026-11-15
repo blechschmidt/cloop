@@ -131,8 +131,11 @@ func (p *preflight) carryMode() carry {
 	switch {
 	case p.targetEx != nil:
 		caps = p.targetEx.Capabilities()
-	case p.targetPool != nil && p.targetPool.Template != nil:
-		caps = p.targetPool.Template.Capabilities()
+	case p.targetPool != nil:
+		// A pool's runner takes its run from the queue and builds the tree
+		// from the forge (or a kept checkout it resets to the forge's
+		// commit): there is no runner to hand a bundle to ahead of the run.
+		return carryUndeliverable
 	default:
 		// No usable target: say what the move would do with a target that
 		// can take it; the target's own finding blocks the move.

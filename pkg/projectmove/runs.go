@@ -42,8 +42,8 @@ type QueuedRun struct {
 }
 
 // checkRuns turns one project's run facts into findings. who names the project
-// or feature they are about.
-func checkRuns(who string, f RunFacts) []Finding {
+// or feature they are about; quiesce says the move stops runs itself.
+func checkRuns(who string, f RunFacts, quiesce bool) []Finding {
 	if f.Error != "" {
 		return []Finding{{
 			Kind: KindRun, Severity: SeverityBlocker, Side: SideSource,
@@ -55,6 +55,35 @@ func checkRuns(who string, f RunFacts) []Finding {
 	var out []Finding
 	live := f.Executing || f.Pause.RunWaits()
 	switch {
+	case live && quiesce:
+		detail := f.ExecutingDetail
+		if detail == "" && f.Pause.RunWaits() {
+			detail = "the run is alive, waiting for disk space (" + f.Pause.Label() + ")"
+		}
+		msg := who + " has a run executing"
+		if detail != "" {
+			msg += ": " + detail
+		}
+		out = append(out, Finding{
+			Kind: KindRun, Severity: SeverityWillCarry, Side: SideSource,
+			Title: "The move stops the run in " + who,
+			Message: msg + ". The move stops it the way Stop does before it captures anything: the task it is on goes back to pending, " +
+				"and no run of the project starts until the move ends. Start the project on the target afterwards; it picks that task up again.",
+		})
+	case f.Queued != nil && quiesce && f.Queued.State != "assigned":
+		out = append(out, Finding{
+			Kind: KindRun, Severity: SeverityWillCarry, Side: SideSource,
+			Title: "The move takes " + who + "'s run out of a pool's queue",
+			Message: fmt.Sprintf("%s has a run waiting in executor pool %s's queue. The move takes it out before it captures anything; "+
+				"start the project on the target afterwards.", who, f.Queued.PoolID),
+		})
+	case f.Status == "paused" && quiesce && f.Pause != nil && f.Pause.Code == pausereason.CodeUsageCap && f.Pause.ResumesAt != nil:
+		out = append(out, Finding{
+			Kind: KindRun, Severity: SeverityWillCarry, Side: SideSource,
+			Title: "The hub's scheduled restart of " + who + " waits for the move",
+			Message: fmt.Sprintf("%s's run is paused (%s) and the hub restarts it at %s. No run of the project starts while the move is in progress, "+
+				"so a restart that falls due during it waits, and then starts on the target.", who, f.Pause.Label(), f.Pause.ResumesAt.UTC().Format(time.RFC3339)),
+		})
 	case live:
 		detail := f.ExecutingDetail
 		if detail == "" && f.Pause.RunWaits() {

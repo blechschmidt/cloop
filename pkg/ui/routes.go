@@ -1014,6 +1014,15 @@ func (s *Server) routeTable() []routeSpec {
 		// does, so it cannot be used to look into an executor the caller may
 		// not use. See projectmove_api.go.
 		{Pattern: "GET /api/projects/{idx}/move/preflight", Handler: s.handleProjectMovePreflight, Perm: write, Scope: scopeProjectIdx},
+		// Moving the project (Task 20494): its runs stopped, its source
+		// captured, its binding switched and its target seeded and checked.
+		// It changes where the project's code runs, so it takes what binding
+		// does — and a recent sign-in — and the handler also requires the
+		// target's access list. Cleaning up what a move kept takes the same.
+		// See projectmove_engine.go.
+		{Pattern: "POST /api/projects/{idx}/move", Handler: s.handleProjectMoveStart, Perm: execMgmt, Scope: scopeProjectIdx, Sudo: sudoWrites},
+		{Pattern: "GET /api/projects/{idx}/moves", Handler: s.handleProjectMoves, Perm: read, Scope: scopeProjectIdx},
+		{Pattern: "POST /api/projects/{idx}/moves/{id}/cleanup", Handler: s.handleProjectMoveCleanup, Perm: execMgmt, Scope: scopeProjectIdx, Sudo: sudoWrites},
 		// Which repositories a project may work on (Task 20306). Reading the
 		// list needs only project.read — it names repositories, not
 		// credentials — while granting and withdrawing carry the same

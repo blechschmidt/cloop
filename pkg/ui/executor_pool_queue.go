@@ -467,6 +467,13 @@ func (s *Server) settleClosedPoolRun(q statedb.PoolQueueRow, action, reason, act
 // reports a run already being handed to a runner, which Stop reaches once it
 // runs.
 func (s *Server) cancelQueuedPoolRun(r *http.Request, workDir string) (cancelled, starting bool) {
+	return s.cancelQueuedPoolRunAs(s.auditActor(r), workDir)
+}
+
+// cancelQueuedPoolRunAs is cancelQueuedPoolRun for a caller with no request in
+// hand — a project move quiescing the project (Task 20494) — naming the actor
+// itself.
+func (s *Server) cancelQueuedPoolRunAs(actor, workDir string) (cancelled, starting bool) {
 	store, err := s.poolStore()
 	if err != nil {
 		return false, false
@@ -497,7 +504,7 @@ func (s *Server) cancelQueuedPoolRun(r *http.Request, workDir string) (cancelled
 	if q.State == statedb.PoolQueueAssigned && q.ExecutorID != "" {
 		s.retirePoolRunnerIf(q.ExecutorID, "its run could not be started on it", statedb.PoolRunnerBusy)
 	}
-	s.settleClosedPoolRun(q, "cancelled", "stopped before a runner took it", s.auditActor(r))
+	s.settleClosedPoolRun(q, "cancelled", "stopped before a runner took it", actor)
 	return true, false
 }
 

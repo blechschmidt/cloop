@@ -421,6 +421,9 @@ var remoteCommandGroups = map[string]string{
 	"init":      groupRemoteSetup,
 	"executors": groupRemoteSetup,
 	"repos":     groupRemoteSetup,
+	// Where a project runs, after a move: cleaning up what one kept (Task
+	// 20494).
+	"move": groupRemoteSetup,
 
 	"projects": groupRemoteProjects,
 	"tasks":    groupRemoteProjects,

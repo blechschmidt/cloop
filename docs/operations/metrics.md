@@ -1460,6 +1460,37 @@ A source that keeps failing shows the reason on the source itself:
 `cloop knowledge sources` prints each source's status and last error, with
 credentials removed.
 
+## Project moves
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `cloop_project_moves_total` | counter | `outcome` |
+| `cloop_project_move_phase_duration_seconds` | histogram | `phase`, `outcome` |
+| `cloop_project_move_captured_bytes_total` | counter | (none) |
+
+A project move takes a project from the executor it is bound to onto another
+one in phases: it stops the project's run, captures the source into the hub's
+move store, switches the binding, seeds the target and checks that the target
+holds what was captured. Each move runs on the one hub process holding its
+lease, so these counters are per process, and their sum is the cluster's.
+
+`cloop_project_moves_total` counts moves that ended, by `outcome`: `done` (the
+target was checked and holds what was captured), `failed` (a phase before the
+switch failed and the binding never changed) or `rolled_back` (the seed or the
+check failed after the switch, and the binding was put back; the bundle is
+kept).
+
+`cloop_project_move_phase_duration_seconds` times each phase a process ran,
+by `phase` (`quiesce`, `capture`, `switch`, `seed`, `verify`) and `outcome`
+(`ok` or `failed`). A phase that ran again after a restart is timed again.
+
+`cloop_project_move_captured_bytes_total` counts the bytes moves wrote into the
+move store: each source's repository bundle and the tar of its `.cloop` files.
+
+```promql
+increase(cloop_project_moves_total{outcome!="done"}[1d]) > 0
+```
+
 ## Knowledge search and embeddings
 
 | Metric | Type | Labels |

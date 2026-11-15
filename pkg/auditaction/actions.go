@@ -814,6 +814,27 @@ const (
 	// narrow the executor's.
 	ActionProjectFirewall Action = "project.firewall"
 
+	// ── project.move ───────────────────────────────────────────────────────
+
+	// ActionProjectMoveStart records a person starting a project move from
+	// one executor to another (Task 20494).
+	ActionProjectMoveStart Action = "project.move.start"
+	// ActionProjectMoveSwitch records a move switching the project's binding
+	// to its target, with the path-keyed rows that go with it.
+	ActionProjectMoveSwitch Action = "project.move.switch"
+	// ActionProjectMoveDone records a move ending verified: the target holds
+	// what was captured.
+	ActionProjectMoveDone Action = "project.move.done"
+	// ActionProjectMoveFail records a move ending failed before its switch,
+	// the binding unchanged.
+	ActionProjectMoveFail Action = "project.move.fail"
+	// ActionProjectMoveRollback records a move whose seed or verification
+	// failed after the switch putting the binding back.
+	ActionProjectMoveRollback Action = "project.move.rollback"
+	// ActionProjectMoveCleanup records a person removing what a move kept:
+	// its hidden refs and its bundle.
+	ActionProjectMoveCleanup Action = "project.move.cleanup"
+
 	// ── project.member ─────────────────────────────────────────────────────
 
 	// ActionProjectMemberGrant records an identity joining a project's roster.

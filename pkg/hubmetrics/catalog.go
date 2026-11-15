@@ -1180,6 +1180,37 @@ const (
 	KnowledgeEmbedChunkFailed   = "failed"
 )
 
+// Project moves (Task 20494): a move stops a project's run, captures its
+// source into the hub's move store, switches its binding and seeds and checks
+// the target, one phase at a time (pkg/projectmove). A cluster runs each move
+// on the one member holding its lease, so the counters are per process and
+// their sum is the cluster's. `outcome` on the totals is the phase a move
+// ended in (done, failed, rolled_back); `phase` is one of the open phases
+// (preflight's time is the request's, and is not timed) and `outcome` on the
+// histogram ok or failed.
+var (
+	ProjectMoves = Default.MustRegister(Definition{
+		Name:   "cloop_project_moves_total",
+		Help:   "Project moves that ended, by outcome: done (the target was verified to hold what was captured), failed (a phase before the switch failed; the binding never changed), rolled_back (the seed or the verification failed after the switch, and the binding was put back).",
+		Type:   TypeCounter,
+		Labels: []string{"outcome"},
+	})
+
+	ProjectMovePhaseDuration = Default.MustRegister(Definition{
+		Name:    "cloop_project_move_phase_duration_seconds",
+		Help:    "How long each phase of a project move ran on this hub process, by phase (quiesce, capture, switch, seed, verify) and outcome (ok or failed). A phase run again after a hub restart is timed again.",
+		Type:    TypeHistogram,
+		Labels:  []string{"phase", "outcome"},
+		Buckets: []float64{0.1, 0.5, 1, 5, 15, 60, 300, 900, 1800},
+	})
+
+	ProjectMoveCapturedBytes = Default.MustRegister(Definition{
+		Name: "cloop_project_move_captured_bytes_total",
+		Help: "Bytes project moves wrote into the hub's move store: the bundle of each source's repository and the tar of its .cloop files.",
+		Type: TypeCounter,
+	})
+)
+
 // What a knowledge sync did with one document, and the kind of a source this
 // build has no connector for.
 const (

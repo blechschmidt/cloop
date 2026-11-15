@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 256 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 262 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 223 |
+| `control-plane` | the hub's own state.db | 229 |
 | `project` | the project's .cloop/state.db | 29 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-256 actions in 53 families. Every action is listed: this section is the whole
+262 actions in 54 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.member.*`](#projectmember) (4) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (9) · [`run.*`](#run) (5) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (2) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (12) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.move.*`](#projectmove) (6) · [`project.member.*`](#projectmember) (4) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -1076,6 +1076,33 @@ Payload keys:
 - `project.create` — `outcome` is "created" or "refused". `path` is the canonical directory and `requested` what the caller sent. `hub_made` says this hub made the directory itself under `projects_root` — the only directories ?delete_root=true may remove. A refusal carries the `rule` it broke (pkg/projectconfine: control_plane, hub, project, projects_root, outside_projects_root, relocated, unsafe, unverifiable, unresolvable, or taken for a path another creation holds) and the full `reason`, which the caller may have been answered more vaguely than this: what exists at a path they cannot see is not theirs to learn.
 - `project.delete` — `outcome` is "removed" or "refused". `delete_root` is what the caller asked for and `root_deleted` what happened; a refused one names its `reason` — a directory the hub did not make, or one that now overlaps something it must not touch — and the project stays registered.
 - `project.firewall` — `action` is "set", "clear" or "constrain". A constrain row is written by the save that tightened a device or a virtual executor, against the identity that saved it, and `reason` names the executor and what had to be taken away. Stored in the control plane, where the rule set is.
+
+### project.move.*
+
+| Action | Entity | Home | Stability | Fires when |
+| --- | --- | --- | --- | --- |
+| `project.move.cleanup` | `project_move` | control-plane | beta | A person cleans up after an ended move — POST /api/projects/{idx}/moves/{id}/cleanup, or `cloop remote move cleanup`. |
+| `project.move.done` | `project_move` | control-plane | beta | A move's verification finds the target holds what was captured: each branch's commit and tree, the snapshot, the index, the working tree and every delivered file. |
+| `project.move.fail` | `project_move` | control-plane | beta | A move's preflight, quiesce, capture or switch fails; the binding never changed. |
+| `project.move.rollback` | `project_move` | control-plane | beta | A move's seed or verification fails after the switch, and the move puts the previous binding back. |
+| `project.move.start` | `project_move` | control-plane | beta | A person starts a project move — POST /api/projects/{idx}/move — and the hub records it, before its preflight runs. |
+| `project.move.switch` | `project_move` | control-plane | beta | A move, having stopped the project's runs and captured its source, binds the project to its target. |
+
+Payload keys:
+
+- `project.move.cleanup` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`, `refs`
+- `project.move.done` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`
+- `project.move.fail` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`
+- `project.move.rollback` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`
+- `project.move.start` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`
+- `project.move.switch` — `move`, `project`, `project_path`, `source`, `target`, `phase`, `abandon_source`, `failed_phase`, `error`, `delivery`, `captured_bytes`, `previous_binding`
+
+- `project.move.cleanup` — Removes the move's hidden refs from the project's repository and its directory in the move store. The project's directory on the hub is never removed.
+- `project.move.done` — The source is never removed: the move's record names what it kept and the command that cleans it up.
+- `project.move.fail` — `failed_phase` is the phase that failed and `error` why.
+- `project.move.rollback` — The binding and the firewall rules the switch replaced are restored in one transaction with the move's journal. The bundle is kept.
+- `project.move.start` — The actor is who started the move. A move whose preflight blocks it ends at once with a project.move.fail row naming the blockers. While a move is open no run of the project starts.
+- `project.move.switch` — The binding, the firewall rules a bind narrows and the move's own journal change in one transaction. A narrowed rule set is recorded as project.firewall rows with action constrain.
 
 ### project.member.*
 

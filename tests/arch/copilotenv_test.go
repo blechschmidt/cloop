@@ -45,6 +45,9 @@ import (
 var copilotPinExempt = map[string]string{
 	"(*reproduceRunner).run": "a reproduction runs only on an isolating executor (resolveIsolatingExecutor) — never " +
 		"on the hub's own host, the one place a Copilot run is pinned to its person",
+	"(*moveDriver).runOnTarget": "a project move's probe, seed and verification run only on a target the move ships " +
+		"a branch to (deliveryFor: an executor that shares no filesystem with the hub) — never on the hub's own " +
+		"host — and run `cloop workspace move-*`, which calls no model",
 }
 
 // specShapers are the dispatch steps that rewrite a spec's environment, or

@@ -447,6 +447,11 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	if err := checkDispatchConfinement(workDir); err != nil {
 		return nil, executor.Handle{}, err
 	}
+	// No run of a project starts while a move is moving it (Task 20494):
+	// the move stopped its runs, and owns its binding until it ends.
+	if err := checkNoOpenMove(workDir); err != nil {
+		return nil, executor.Handle{}, err
+	}
 	var opts dispatchOptions
 	for _, o := range options {
 		if o != nil {
@@ -1024,6 +1029,11 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	registerBuiltinExecutors()
 	// Same re-check as startWorkloadAs, for the same reason (Task 20418).
 	if err := checkDispatchConfinement(workDir); err != nil {
+		return nil, err
+	}
+	// And the same gate (Task 20494): a helper dispatched to the project's
+	// executor mid-move would run in the working copy the move is seeding.
+	if err := checkNoOpenMove(workDir); err != nil {
 		return nil, err
 	}
 	ex, err := executor.Resolve(workDir)

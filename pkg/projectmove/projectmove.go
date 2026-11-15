@@ -84,6 +84,12 @@ type Options struct {
 	// source is then a warning rather than a blocker, and everything the
 	// source holds is reported as lost rather than carried.
 	AbandonSource bool
+	// Quiesce describes a move that stops the project's runs itself, as Move
+	// does (Task 20494): a run executing, one waiting in a pool's queue and a
+	// restart the hub has scheduled are then what the move resolves rather
+	// than blockers. A run a pool's runner was just handed still blocks: it
+	// cannot be taken back.
+	Quiesce bool
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 	// ProbeTimeout bounds each reachability probe; zero means
@@ -417,11 +423,11 @@ func (p *preflight) probeCtx() (context.Context, context.CancelFunc) {
 
 // checkRuns is (a), for the project and each of its features.
 func (p *preflight) checkRuns() {
-	for _, f := range checkRuns("the project", p.env.Runs(p.ctx, p.project.Path)) {
+	for _, f := range checkRuns("the project", p.env.Runs(p.ctx, p.project.Path), p.opts.Quiesce) {
 		p.add(f)
 	}
 	for _, ft := range p.features {
-		for _, f := range checkRuns("feature "+ft.Slug, p.env.Runs(p.ctx, ft.Path)) {
+		for _, f := range checkRuns("feature "+ft.Slug, p.env.Runs(p.ctx, ft.Path), p.opts.Quiesce) {
 			p.add(f)
 		}
 	}

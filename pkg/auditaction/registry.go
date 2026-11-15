@@ -2846,6 +2846,75 @@ var registry = []Entry{
 			"the executor and what had to be taken away. Stored in the control plane, where the rule set is.",
 	},
 
+	// ── project.move ───────────────────────────────────────────────────────
+	// A project moving from one executor to another (Task 20494). The move's
+	// own journal is the project_moves row named by entity_id; these rows
+	// are the trail of who started it and how it ended.
+	{
+		Action:    ActionProjectMoveStart,
+		Home:      HomeControlPlane,
+		Entity:    "project_move",
+		Trigger:   "A person starts a project move — POST /api/projects/{idx}/move — and the hub records it, before its preflight runs.",
+		Payload:   projectMovePayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "The actor is who started the move. A move whose preflight blocks it ends at once with a " +
+			"project.move.fail row naming the blockers. While a move is open no run of the project starts.",
+	},
+	{
+		Action:    ActionProjectMoveSwitch,
+		Home:      HomeControlPlane,
+		Entity:    "project_move",
+		Trigger:   "A move, having stopped the project's runs and captured its source, binds the project to its target.",
+		Payload:   append(append([]string{}, projectMovePayload...), "previous_binding"),
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "The binding, the firewall rules a bind narrows and the move's own journal change in one transaction. " +
+			"A narrowed rule set is recorded as project.firewall rows with action constrain.",
+	},
+	{
+		Action:    ActionProjectMoveDone,
+		Home:      HomeControlPlane,
+		Entity:    "project_move",
+		Trigger:   "A move's verification finds the target holds what was captured: each branch's commit and tree, the snapshot, the index, the working tree and every delivered file.",
+		Payload:   projectMovePayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "The source is never removed: the move's record names what it kept and the command that cleans it up.",
+	},
+	{
+		Action:    ActionProjectMoveFail,
+		Home:      HomeControlPlane,
+		Entity:    "project_move",
+		Trigger:   "A move's preflight, quiesce, capture or switch fails; the binding never changed.",
+		Payload:   projectMovePayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note:      "`failed_phase` is the phase that failed and `error` why.",
+	},
+	{
+		Action:    ActionProjectMoveRollback,
+		Home:      HomeControlPlane,
+		Entity:    "project_move",
+		Trigger:   "A move's seed or verification fails after the switch, and the move puts the previous binding back.",
+		Payload:   projectMovePayload,
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "The binding and the firewall rules the switch replaced are restored in one transaction with the move's " +
+			"journal. The bundle is kept.",
+	},
+	{
+		Action:    ActionProjectMoveCleanup,
+		Home:      HomeControlPlane,
+		Entity:    "project_move",
+		Trigger:   "A person cleans up after an ended move — POST /api/projects/{idx}/moves/{id}/cleanup, or `cloop remote move cleanup`.",
+		Payload:   append(append([]string{}, projectMovePayload...), "refs"),
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Removes the move's hidden refs from the project's repository and its directory in the move store. " +
+			"The project's directory on the hub is never removed.",
+	},
+
 	// ── project.member ─────────────────────────────────────────────────────
 	// Who besides its owner may reach a project (Task 20366). Each row is
 	// committed in the same transaction as the membership change it records,
@@ -3147,5 +3216,9 @@ var (
 	offboardPayload = []string{"identity", "identity_input", "subjects", "emails", "reason", "via"}
 
 	projectMemberPayload = []string{"project", "project_path", "identity", "team", "role", "previous_role", "reason", "via", "left"}
-	teamPayload          = []string{"team", "name", "idp_group", "scim_group", "previous", "identity", "members", "shares", "via", "reason", "os_user"}
+
+	// projectMovePayload is what every project.move row carries.
+	projectMovePayload = []string{"move", "project", "project_path", "source", "target", "phase", "abandon_source",
+		"failed_phase", "error", "delivery", "captured_bytes"}
+	teamPayload = []string{"team", "name", "idp_group", "scim_group", "previous", "identity", "members", "shares", "via", "reason", "os_user"}
 )

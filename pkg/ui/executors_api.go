@@ -1567,6 +1567,10 @@ func (s *Server) handleProjectExecutorBind(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id := strings.TrimSpace(req.ExecutorID)
+	// A move owns the project's binding until it ends (Task 20494).
+	if s.refuseWhileMoving(w, entry.Path) {
+		return
+	}
 
 	db, err := s.controlPlaneDB()
 	if err != nil {
@@ -1850,6 +1854,15 @@ func jsonWorkloadErr(w http.ResponseWriter, err error) {
 	// A device forwarder bound to the project is offline, or the executor
 	// cannot give its device to a sandbox (Task 20430). 409s: the binding and
 	// the executor disagree, and the refusal names which forwarder or why.
+	// A move is moving the project (Task 20494): no run starts until it ends.
+	var moving *projectMovingError
+	if errors.As(err, &moving) {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{
+			"error": moving.Error(), "code": "project_moving", "remediation": moving.Remediation(),
+			"move": moving.Move.ID, "phase": moving.Move.Phase,
+		})
+		return
+	}
 	var fwdOffline *forwarderOfflineError
 	if errors.As(err, &fwdOffline) {
 		writeSandboxDenied(w, "forwarder_offline", fwdOffline.Error(), fwdOffline.Remediation(), nil)

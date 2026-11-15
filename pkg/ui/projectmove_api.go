@@ -68,6 +68,15 @@ func (s *Server) handleProjectMovePreflight(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
+	// quiesce=1 asks what a move would find (Task 20494): a move stops the
+	// project's runs itself, so a run in progress is not a blocker then.
+	quiesce := false
+	if raw := strings.TrimSpace(q.Get("quiesce")); raw != "" {
+		if quiesce, err = strconv.ParseBool(raw); err != nil {
+			jsonErr(w, "quiesce must be true or false", http.StatusBadRequest)
+			return
+		}
+	}
 	// The access list, as for a bind: a preflight describes the target —
 	// where it keeps working copies, whether it answers, what it can run — and
 	// that is not for someone who may not use it.
@@ -85,7 +94,7 @@ func (s *Server) handleProjectMovePreflight(w http.ResponseWriter, r *http.Reque
 	env := &moveEnv{s: s, r: r, now: time.Now()}
 	defer env.close()
 	rep, err := projectmove.Preflight(r.Context(), env, projectmove.Project{Name: entry.Name, Path: entry.Path},
-		target.Binding, projectmove.Options{AbandonSource: abandon})
+		target.Binding, projectmove.Options{AbandonSource: abandon, Quiesce: quiesce})
 	switch {
 	case errors.Is(err, projectmove.ErrInvalidTarget), errors.Is(err, projectmove.ErrInvalidProject):
 		jsonErr(w, err.Error(), http.StatusBadRequest)
