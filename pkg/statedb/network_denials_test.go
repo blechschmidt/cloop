@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-var d0 = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+// d0 is a day ago, on the hour. Not a fixed date: the write that adds a row
+// trims rows older than denialMaxAge by the wall clock, so a fixed one turned
+// these tests red 30 days after it (2026-11-15, d0 was 2026-10-16).
+var d0 = time.Now().UTC().Truncate(time.Hour).Add(-24 * time.Hour)
 
 func denialEntry(dst string, port int, rule string, n int64, at time.Time) DenialRow {
 	return DenialRow{Dst: dst, Port: port, Proto: "tcp", Rule: rule, Why: "not in the project's allow list",
