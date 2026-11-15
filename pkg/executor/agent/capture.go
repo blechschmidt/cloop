@@ -73,7 +73,26 @@ func (s *captureSlot) stop(id string) bool {
 // handle's traffic.
 func (a *Agent) handleCaptureReq(ctx context.Context, sess *deviceSession, frame remote.Frame) {
 	id := frame.Handle
+	slot := &a.capture
+	// The slot and this capture's scratch are given back before its answer
+	// goes out, not once this returns: the hub may ask for the next capture
+	// the moment it reads this one's answer, and a request that arrived
+	// before a deferred release was told the device was still answering this
+	// one. held says this capture has them; only this goroutine touches it.
+	var scratch string // set once the request has been read and checked
+	held := false
+	release := func() {
+		if !held {
+			return
+		}
+		held = false
+		if scratch != "" {
+			_ = os.RemoveAll(scratch)
+		}
+		slot.end(id)
+	}
 	answer := func(code, msg string) {
+		release()
 		a.reply(ctx, sess, remote.TypeCaptureResult, frame.ID, id,
 			remote.CaptureResultPayload{CaptureID: id, Code: code, Error: msg})
 	}
@@ -93,20 +112,19 @@ func (a *Agent) handleCaptureReq(ctx context.Context, sess *deviceSession, frame
 	}
 	cctx, cancel := context.WithTimeout(ctx, remote.CaptureTimeout)
 	defer cancel()
-	slot := &a.capture
 	if !slot.begin(id, cancel) {
 		answer(remote.CaptureCodeBusy, deviceName()+" is answering another capture; ask again once it has")
 		return
 	}
-	defer slot.end(id)
+	held = true
+	defer release()
+	scratch = filepath.Join(a.root, ".cloop-capture-"+id)
 	if refusal := a.admitCaptureTenant(req.Tenant); refusal != "" {
 		a.cfg.logf("capture %s refused: %s", id, refusal)
 		answer(remote.CaptureCodeRefused, refusal)
 		return
 	}
 
-	scratch := filepath.Join(a.root, ".cloop-capture-"+id)
-	defer os.RemoveAll(scratch)
 	mreq := movecapture.Request{
 		Root: a.treesRoot(), WorkDir: req.WorkDir, Mode: req.Mode, MoveID: req.MoveID,
 		Exclude: a.captureExcludes(req.WorkDir), Scratch: scratch,
@@ -178,7 +196,7 @@ func (a *Agent) handleCaptureReq(ctx context.Context, sess *deviceSession, frame
 	}
 	var digests []remote.CapturePartDigest
 	for _, p := range parts {
-		d, err := a.sendCapturePart(cctx, sess, id, p.name, p.path)
+		d, err := a.sendCapturePart(ctx, cctx, sess, id, p.name, p.path)
 		if err != nil {
 			a.cfg.logf("capture %s: sending the %s: %v", id, p.name, err)
 			answer(remote.CaptureCodeFailed, fmt.Sprintf("the %s could not be sent: %v", p.name, err))
@@ -187,6 +205,7 @@ func (a *Agent) handleCaptureReq(ctx context.Context, sess *deviceSession, frame
 		digests = append(digests, d)
 	}
 	a.cfg.logf("capture %s: sent %d part(s)", id, len(digests))
+	release()
 	a.reply(ctx, sess, remote.TypeCaptureResult, frame.ID, id, remote.CaptureResultPayload{CaptureID: id, Parts: digests})
 }
 
@@ -211,8 +230,12 @@ func captureLimit(l remote.CaptureLimits, part string) int64 {
 }
 
 // sendCapturePart streams one part as capture_chunk frames and returns its
-// size and digest.
-func (a *Agent) sendCapturePart(ctx context.Context, sess *deviceSession, id, part, path string) (remote.CapturePartDigest, error) {
+// size and digest. Each chunk is written under ctx, the session's; stop, the
+// capture's own, which the hub's cancel ends, is checked between chunks.
+// Ending a write's context before the write has returned closes the whole
+// connection (coder/websocket), so the hub's cancel arriving mid-chunk must
+// not end the context the chunk is being written under.
+func (a *Agent) sendCapturePart(ctx, stop context.Context, sess *deviceSession, id, part, path string) (remote.CapturePartDigest, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return remote.CapturePartDigest{}, err
@@ -222,7 +245,7 @@ func (a *Agent) sendCapturePart(ctx context.Context, sess *deviceSession, id, pa
 	buf := make([]byte, remote.MaxCaptureChunkBytes)
 	var offset int64
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := stop.Err(); err != nil {
 			return remote.CapturePartDigest{}, err
 		}
 		n, readErr := f.Read(buf)

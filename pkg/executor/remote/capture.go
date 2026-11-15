@@ -395,7 +395,14 @@ func (e *Executor) captureProject(ctx context.Context, req CaptureRequest, subje
 	}
 	rctx, cancel := context.WithTimeout(ctx, CaptureTimeout)
 	defer cancel()
-	a := &captureAssembly{id: id, session: sess, limits: req.Limits, parts: map[string]*capturePart{}, abort: cancel}
+	// The read loop wakes this wait once the answer is settled (abort). That
+	// ends wait only, never rctx, which the request is written under: ending
+	// a write's context before the write has returned closes the device's
+	// whole session (requestUntil), and a refusal can be read and handled
+	// before the writer has returned.
+	wait, wake := context.WithCancel(rctx)
+	defer wake()
+	a := &captureAssembly{id: id, session: sess, limits: req.Limits, parts: map[string]*capturePart{}, abort: wake}
 	e.captures.mu.Lock()
 	if e.captures.m == nil {
 		e.captures.m = map[string]*captureAssembly{}
@@ -413,7 +420,7 @@ func (e *Executor) captureProject(ctx context.Context, req CaptureRequest, subje
 	if err != nil {
 		return nil, fmt.Errorf("remote: build capture request for %s: %w", e.id, err)
 	}
-	_, reqErr := sess.request(rctx, frame, TypeCaptureResult)
+	_, reqErr := sess.requestUntil(rctx, wait, frame, TypeCaptureResult)
 	// What the read loop recorded decides, whatever ended the wait: the
 	// result (applied before it was delivered), a failure that aborted the
 	// wait, or neither.

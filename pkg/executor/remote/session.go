@@ -747,6 +747,16 @@ func (s *Session) write(ctx context.Context, f Frame) error {
 // dropped would block for its full context timeout rather than failing
 // immediately with a comprehensible reason.
 func (s *Session) request(ctx context.Context, f Frame, want FrameType) (Frame, error) {
+	return s.requestUntil(ctx, ctx, f, want)
+}
+
+// requestUntil is request with f written under ctx and the wait ended by
+// wait as well. A waiter something else wakes, such as the read loop once a
+// capture's answer is settled, is woken through wait and never by cancelling
+// ctx: coder/websocket closes the whole connection when a write's context
+// ends before the write has returned, and a device can answer in less time
+// than the hub's writer takes to return.
+func (s *Session) requestUntil(ctx, wait context.Context, f Frame, want FrameType) (Frame, error) {
 	if f.ID == "" {
 		return Frame{}, fmt.Errorf("remote: request frame has no correlation ID")
 	}
@@ -794,6 +804,8 @@ func (s *Session) request(ctx context.Context, f Frame, want FrameType) (Frame, 
 		return Frame{}, fmt.Errorf("%w: %s", ErrSessionClosed, s.closeMsg)
 	case <-ctx.Done():
 		return Frame{}, ctx.Err()
+	case <-wait.Done():
+		return Frame{}, wait.Err()
 	}
 }
 
