@@ -1204,6 +1204,7 @@ run the real code:
 | `tests/hermetic` | that no test reads the developer's real home |
 | `tests/e2e` | the real binary end to end: hub restarts that adopt runs, features, the review gate, the model relay, egress and firewall denials in containers, terminal sign-in, requirement gates and proofs, knowledge sources against fake Atlassian servers |
 | `tests/flagship` | the main end-to-end scenario: hub bootstrap, a container executor, a repository-scoped lease, write-back |
+| `tests/projectmove` | moving a project with work in flight, end to end: hub to a container executor, the container to a second agent over the real protocol, that device back to the hub, and a hub killed mid-seed that must resume; each move checked byte for byte against the source, its interrupted task run on the target, and the source kept until cleanup |
 | `tests/cluster` | several hub members on one database: failover, revocation after a member dies, adopted credentials, a Pod's workspace session, a KMS and a change of root |
 | `tests/kube` | the Kubernetes driver on a real cluster, with the git proxy, the monitor, image resolution and cluster shares |
 | `tests/kubecontroller` | an executor pool on a real cluster, with the controller its Helm chart installs: scaling from zero and back, runner volumes kept for their project and wiped for any other, refused runner tokens, the controller's leader and runners killed mid-run, and a revoked controller credential |

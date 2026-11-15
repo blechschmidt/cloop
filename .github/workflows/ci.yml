@@ -1625,6 +1625,29 @@ jobs:
             exit 1
           }
 
+      - name: Move a project between the hub, a container and a device
+        timeout-minutes: 12 # observed locally: 25s once the image's git layer is cached
+        env:
+          CLOOP_PROJECTMOVE_BIN: /tmp/cloop-flagship-bin
+        # Task 20497: tests/projectmove moves one project, with uncommitted and
+        # unpushed work and a task in progress, from the hub to the container
+        # executor, on to a second agent over the real protocol and back to
+        # the hub, then kills a hub mid-seed and checks the restarted one
+        # finishes the move. Each move is checked against the suite's own
+        # snapshots of the source. The same assertion on the PASS lines as the
+        # circuit's, for the same reason: the round trip skips without docker.
+        # Its image adds git to the pinned base, which the step above built.
+        run: |
+          set -euo pipefail
+          make test-projectmove 2>&1 | tee /tmp/projectmove.log
+          for t in TestMoveRoundTrip TestMoveResumesAfterTheHubDiesMidSeed; do
+            grep -qE "^--- PASS: $t \(" /tmp/projectmove.log || {
+              echo "::error::make test-projectmove succeeded but $t did not pass — it was" \
+                   "skipped (docker unavailable, or CLOOP_PROJECTMOVE_E2E lost); see the log."
+              exit 1
+            }
+          done
+
       - name: Reach an origin through the hub's egress proxy from a container
         timeout-minutes: 10 # observed locally: 16s once the image layer is cached
         env:

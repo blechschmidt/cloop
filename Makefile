@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-update e2e-stack fuzz bench lint lint-tool lint-version clean \
+.PHONY: build test test-unit test-e2e test-e2e-update test-projectmove e2e-stack fuzz bench lint lint-tool lint-version clean \
         docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve docs-freshness \
         release-dist changelog-check requirements-check \
         terraform-test terraform-validate
@@ -81,6 +81,14 @@ test-e2e: build
 ## test-e2e-update: regenerate golden files from current binary output
 test-e2e-update: build
 	$(GO) test -v -timeout 120s ./tests/e2e/ -update
+
+## test-projectmove: move a project with work in flight from the hub to a
+##                   container executor, on to a device and back, and kill the
+##                   hub mid-seed (tests/projectmove; needs git, and docker for
+##                   the round trip). Builds a static cloop unless
+##                   CLOOP_PROJECTMOVE_BIN names one.
+test-projectmove:
+	CLOOP_PROJECTMOVE_E2E=1 $(GO) test ./tests/projectmove/ -count=1 -v -timeout 20m
 
 ## e2e-stack: bring up the docker-compose evaluation stack, run one real task
 ##            through a remote executor, and tear it down.

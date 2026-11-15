@@ -773,3 +773,37 @@ requirements:
         command: go test ./pkg/executor/agent -run '^(TestARunnerHoldingAProjectsVolumeTakesOnlyThatProjectsRun|TestStorageRootsRefuseALayoutThatPutsACredentialOnTheVolume)$'
       - name: a kept checkout is vetted before reuse
         command: go test ./pkg/executor/gitprovision -run '^(TestAKeptCheckoutsConfigurationIsRewritten|TestAHookTheLastRunPlantedNeverRuns)$'
+  - id: R-38
+    title: A verified project move shall leave the target holding the project's uncommitted and unpushed work exactly as the source held it.
+    status: approved
+    priority: must
+    tags: [correctness, project-moves, executors]
+    details: |-
+      Moving a project between the hub's own tree, a container executor and a
+      remote device, in either direction, carries the working tree's uncommitted
+      state (modified, deleted, renamed, untracked and binary files, and what was
+      staged apart from what was not), every local branch and tag with the
+      commits no remote has, the features' branches, and the .cloop files no
+      database holds. The task the move interrupted goes back to pending and runs
+      to done on the target, from the moved working copy; task attachments are
+      kept; and the source keeps its copy until the move is cleaned up. A move
+      only ends done once the target, read back, holds what was captured, and the
+      end-to-end suite checks each result against snapshots of its own. A hub
+      killed while a device is being seeded is succeeded by a process that
+      resumes the move and verifies it. The round trip needs Docker for its
+      container executor and skips without it; the package tests below carry the
+      guarantee there. Promised in docs/guides/moving-projects.md and
+      docs/security/model.md, "Moving a project".
+    tests:
+      - name: end to end, the hub to a container to a device and back, and a hub killed mid-seed
+        command: make test-projectmove
+        timeout: 25m
+      - name: a capture is rebuilt byte for byte, in a new repository or the copy left behind
+        command: go test ./pkg/executor/movegit -run '^(TestCaptureLeavesTheBranchAndIndexAloneAndRestoresByteIdentical|TestRestoreIntoTheCopyLeftBehind|TestRestoreIntoRefusesWhatWouldLoseWork|TestRestoreIntoLosesNothingTheCaptureDidNotRecord)$'
+      - name: the seed and the engine
+        command: go test ./pkg/projectmove -run '^(TestTheSeedRebuildsADirtyWorkingCopyByteIdentical|TestTheHubTreeSeedRebuildsADevicesCopy|TestCrashAndResumeAtEveryPhaseBoundary|TestEachPhaseFailing)$'
+      - name: the next run on a device starts from the moved working copy
+        command: go test ./pkg/executor/gitprovision -run '^TestProvisionKeepsAMovedWorkingCopy$'
+      - name: the hub's move driver
+        command: go test ./pkg/ui -run '^(TestAMoveToADeviceSeedsAndVerifiesItsWorkingCopy|TestAMoveFromADeviceRebuildsTheHubsTree|TestARunKeepsTheWorkingCopyAMovePlacedOnItsDevice|TestKeepingAMovedCopyFollowsTheProjectNotJustItsLastMove|TestASweepLeavesAMoveBeingStartedAlone|TestAMoveStepWaitsForItsDevicesAgent)$'
+        timeout: 20m

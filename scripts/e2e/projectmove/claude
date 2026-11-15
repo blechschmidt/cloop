@@ -1,0 +1,23 @@
+#!/bin/sh
+# The stand-in harness, the same as tests/projectmove's: a task whose title
+# says HOLD-UNTIL-MOVED waits while .cloop/e2e-hold exists, so a move finds
+# it in progress; every task then writes ran-<id>.txt, files a report as its
+# attachment and ends the turn with TASK_DONE.
+prompt=$(cat)
+current=$(printf '%s\n' "$prompt" | sed -n '/^\*\*Task [0-9]/{p;q;}')
+id=$(printf '%s\n' "$current" | sed -n 's/^\*\*Task \([0-9][0-9]*\):.*/\1/p')
+[ -n "$id" ] || id=unknown
+case "$current" in
+*HOLD-UNTIL-MOVED*)
+  if [ -e .cloop/e2e-hold ]; then
+    echo "$$ $id" > .cloop/e2e-holding
+    while [ -e .cloop/e2e-hold ]; do sleep 1; done
+  fi ;;
+esac
+printf 'task %s ran in %s\n' "$id" "$(pwd)" > "ran-$id.txt"
+if [ -n "$CLOOP_TASK_ATTACHMENTS" ]; then
+  mkdir -p "$CLOOP_TASK_ATTACHMENTS" &&
+    printf 'report of task %s\n' "$id" > "$CLOOP_TASK_ATTACHMENTS/report-$id.txt"
+fi
+echo "Wrote ran-$id.txt."
+echo TASK_DONE
