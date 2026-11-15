@@ -51,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/provider/claudecode"
@@ -281,6 +282,14 @@ func applyHostSandbox(spec executor.Spec, ex executor.Executor, workDir string, 
 		return spec, err
 	}
 	sb.PassEnv = append([]string(nil), settings.PassEnv...)
+	// The run's home is its own, so the commit identity the hub's account
+	// carries no longer reaches it: handed over as two values, and only where
+	// neither the run's environment nor its home names one (Task 20500).
+	base := spec.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	sb.Env = append(sb.Env, hostsandbox.IdentityEnv(base, sb.Home)...)
 	spec.HostSandbox = sb
 	labels := make(map[string]string, len(spec.Labels)+1)
 	for k, v := range spec.Labels {

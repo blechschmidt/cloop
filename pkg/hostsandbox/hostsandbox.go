@@ -51,10 +51,13 @@
 package hostsandbox
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -317,6 +320,10 @@ var inheritable = map[string]bool{
 	"CURL_CA_BUNDLE": true, "GOPROXY": true, "GOSUMDB": true, "GONOSUMDB": true, "GONOPROXY": true,
 	"GOPRIVATE": true, "GOFLAGS": true, "GOTOOLCHAIN": true, "GO111MODULE": true, "GOAMD64": true,
 	"CGO_ENABLED": true, "ANTHROPIC_BASE_URL": true, "ANTHROPIC_MODEL": true, "ANTHROPIC_SMALL_FAST_MODEL": true,
+	// Who a commit is by: a name and an address, which a run whose home is
+	// its own would otherwise not have (Task 20500).
+	"GIT_AUTHOR_NAME": true, "GIT_AUTHOR_EMAIL": true, "GIT_COMMITTER_NAME": true, "GIT_COMMITTER_EMAIL": true,
+	"EMAIL": true,
 }
 
 // inheritablePrefixes are families of such settings.
@@ -429,4 +436,150 @@ func underAny(path string, dirs []string) bool {
 		}
 	}
 	return false
+}
+
+// GitIdentity reads the commit identity — user.name and user.email — that git
+// would find in the global configuration of the user whose home is home: the
+// first of $XDG_CONFIG_HOME/git/config (xdgConfig, "" for home/.config) and
+// home/.gitconfig that sets each, read as files and never run, includes not
+// followed. Either may be "".
+//
+// A run kept to its project has a home of its own (Task 20500), so the
+// identity its operator gave the hub's or the device's account no longer
+// reaches its commits; the driver hands it these two values, and nothing
+// else of that configuration — which can hold credential helpers, URL
+// rewrites with tokens in them and the like.
+func GitIdentity(home, xdgConfig string) (name, email string) {
+	if strings.TrimSpace(home) == "" {
+		return "", ""
+	}
+	if strings.TrimSpace(xdgConfig) == "" {
+		xdgConfig = filepath.Join(home, ".config")
+	}
+	for _, path := range []string{filepath.Join(xdgConfig, "git", "config"), filepath.Join(home, ".gitconfig")} {
+		n, e := gitUserFrom(path)
+		if name == "" {
+			name = n
+		}
+		if email == "" {
+			email = e
+		}
+	}
+	return name, email
+}
+
+// gitUserFrom reads [user] name and email from one git configuration file;
+// the last setting of each wins, as git's does. A value with a newline or a
+// NUL in it, or one longer than a person's name and address could be, is
+// ignored.
+func gitUserFrom(path string) (name, email string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(io.LimitReader(f, 1<<20))
+	section := ""
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		if line[0] == '[' {
+			end := strings.IndexByte(line, ']')
+			if end < 0 {
+				section = ""
+				continue
+			}
+			section = strings.ToLower(strings.TrimSpace(line[1:end]))
+			line = strings.TrimSpace(line[end+1:])
+			if line == "" {
+				continue
+			}
+		}
+		if section != "user" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		if strings.HasPrefix(value, "\"") {
+			// A quoted value runs to its closing quote; a comment may follow.
+			if end := strings.IndexByte(value[1:], '"'); end >= 0 {
+				value = value[1 : 1+end]
+			} else {
+				value = value[1:]
+			}
+		} else if i := strings.IndexAny(value, "#;"); i >= 0 {
+			value = strings.TrimSpace(value[:i])
+		}
+		if value == "" || len(value) > 256 || strings.ContainsAny(value, "\n\x00") {
+			continue
+		}
+		switch key {
+		case "name":
+			name = value
+		case "email":
+			email = value
+		}
+	}
+	return name, email
+}
+
+// WithGitIdentity adds GIT_AUTHOR_* and GIT_COMMITTER_* naming name and email
+// to env, for each of the two that env does not already set and that is not
+// empty. env is never modified in place.
+func WithGitIdentity(env []string, name, email string) []string {
+	set := map[string]bool{}
+	for _, kv := range env {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			set[k] = true
+		}
+	}
+	out := append([]string(nil), env...)
+	for _, kv := range [][2]string{
+		{"GIT_AUTHOR_NAME", name}, {"GIT_COMMITTER_NAME", name},
+		{"GIT_AUTHOR_EMAIL", email}, {"GIT_COMMITTER_EMAIL", email},
+	} {
+		if kv[1] != "" && !set[kv[0]] {
+			out = append(out, kv[0]+"="+kv[1])
+		}
+	}
+	return out
+}
+
+// IdentityEnv returns the GIT_AUTHOR_* and GIT_COMMITTER_* assignments a
+// workload the sandbox confines needs to commit as the account that runs it
+// did before it had a home of its own (Task 20500): this process's user's
+// global identity, for each of name and email that neither base — the
+// workload's environment — nor the sandbox's own home (sandboxHome, "" for a
+// fresh one) already gives. The system's /etc/gitconfig the sandbox lets it
+// read anyway.
+func IdentityEnv(base []string, sandboxHome string) []string {
+	ownName, ownEmail := "", ""
+	if strings.TrimSpace(sandboxHome) != "" {
+		ownName, ownEmail = GitIdentity(sandboxHome, "")
+	}
+	var name, email string
+	if global := strings.TrimSpace(os.Getenv("GIT_CONFIG_GLOBAL")); filepath.IsAbs(global) {
+		// The file git reads in place of the user's own, when one is named.
+		name, email = gitUserFrom(global)
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		name, email = GitIdentity(home, os.Getenv("XDG_CONFIG_HOME"))
+	}
+	if ownName != "" {
+		name = ""
+	}
+	if ownEmail != "" {
+		email = ""
+	}
+	full := WithGitIdentity(base, name, email)
+	return full[len(base):]
 }

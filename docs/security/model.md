@@ -900,7 +900,11 @@ key variables, `CREDENTIALS_DIRECTORY`, `CLOOP_UI_TOKEN`,
 workload inherits from the hub's environment only an allow-list: `PATH`, the
 locale, the terminal, who it runs as, the proxies and CA bundles, and the Go
 toolchain's and the harness's settings that hold no credential
-(`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_*`). Anything else the hub was started
+(`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_*`), and the git commit identity
+(`GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `EMAIL`). A run whose environment and home
+name no commit identity is given the `user.name` and `user.email` of the
+account that runs it, read from that account's git configuration as a file;
+nothing else of that configuration reaches it. Anything else the hub was started
 with, such as its own `OPENAI_API_KEY`, a `GITHUB_TOKEN`, a webhook URL or a
 database DSN, stays with the hub unless `executors.host_sandbox.pass_env`
 names it. What the hub set for the run and what a lease delivered are not

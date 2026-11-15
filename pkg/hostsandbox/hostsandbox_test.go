@@ -2,9 +2,12 @@ package hostsandbox
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/blechschmidt/cloop/internal/hometest"
 )
 
 func TestMain(m *testing.M) {
@@ -15,7 +18,8 @@ func TestMain(m *testing.M) {
 		// filters: this binary must never reach m.Run there.
 		os.Exit(openByHandle(os.Args[2], os.Args[3]))
 	}
-	os.Exit(m.Run())
+	// IdentityEnv reads the account's git configuration from its home.
+	os.Exit(hometest.Isolate(m))
 }
 
 // byHandleArg makes this test binary try to open a file by its handle.
@@ -149,5 +153,68 @@ func TestOnlyHarmlessSettingsAreInheritedByDefault(t *testing.T) {
 		if Inheritable(name) {
 			t.Errorf("%s is inherited", name)
 		}
+	}
+}
+
+// TestAConfinedRunCommitsAsTheAccountThatRunsIt (Task 20500): a run kept to
+// its project has a home of its own, so the commit identity of the account
+// that runs it reaches it as two values — read from that account's git
+// configuration as files, nothing else of it — wherever neither the run's
+// environment nor its own home names one; and git identity variables are
+// inherited like the locale.
+func TestAConfinedRunCommitsAsTheAccountThatRunsIt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(
+		"[credential]\n\thelper = store\n[user]\n\tname = \"Hub Operator\" # who runs the hub\n\temail = hub@example.com\n"+
+			"[url \"https://token@example.com/\"]\n\tinsteadOf = https://example.com/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if name, email := GitIdentity(home, ""); name != "Hub Operator" || email != "hub@example.com" {
+		t.Fatalf("GitIdentity = %q %q", name, email)
+	}
+	got := IdentityEnv([]string{"PATH=/bin"}, "")
+	want := []string{"GIT_AUTHOR_NAME=Hub Operator", "GIT_COMMITTER_NAME=Hub Operator",
+		"GIT_AUTHOR_EMAIL=hub@example.com", "GIT_COMMITTER_EMAIL=hub@example.com"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("IdentityEnv = %v, want %v", got, want)
+	}
+	for _, kv := range got {
+		if strings.Contains(kv, "token") || strings.Contains(kv, "store") {
+			t.Fatalf("more than the identity was handed over: %v", got)
+		}
+	}
+	// The run's own environment wins, and so does its own home's identity.
+	if got := IdentityEnv([]string{"GIT_AUTHOR_NAME=Run", "GIT_COMMITTER_NAME=Run"}, ""); len(got) != 2 ||
+		!strings.HasPrefix(got[0], "GIT_AUTHOR_EMAIL=") {
+		t.Fatalf("with the run's own name: %v", got)
+	}
+	own := t.TempDir()
+	if err := os.WriteFile(filepath.Join(own, ".gitconfig"), []byte("[user]\nname = Alice\nemail = alice@example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := IdentityEnv(nil, own); len(got) != 0 {
+		t.Fatalf("a home with its own identity was handed the account's: %v", got)
+	}
+	for _, name := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"} {
+		if !Inheritable(name) {
+			t.Errorf("%s is not inherited", name)
+		}
+	}
+	// GIT_CONFIG_GLOBAL names the file git reads in place of the home's.
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[user]\n\tname = CI\n\temail = ci@example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	if got := IdentityEnv(nil, ""); len(got) != 4 || got[0] != "GIT_AUTHOR_NAME=CI" {
+		t.Fatalf("with GIT_CONFIG_GLOBAL: %v", got)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+	// No identity anywhere: nothing to hand over.
+	t.Setenv("HOME", t.TempDir())
+	if got := IdentityEnv(nil, ""); len(got) != 0 {
+		t.Fatalf("an account with no identity: %v", got)
 	}
 }

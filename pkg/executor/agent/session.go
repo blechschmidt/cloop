@@ -23,6 +23,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitprovision"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
 )
 
@@ -1011,6 +1012,14 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 			cacheFor = ""
 		}
 		spec.HostSandbox = a.projectSandbox(cacheFor, payloadHome, spec.Env)
+		// The payload's home is its own: the commit identity this agent's
+		// account carries reaches it as two values, where neither its
+		// environment nor its home names one.
+		idBase := spec.Env
+		if idBase == nil {
+			idBase = os.Environ()
+		}
+		spec.HostSandbox.Env = append(spec.HostSandbox.Env, hostsandbox.IdentityEnv(idBase, payloadHome)...)
 		labels := make(map[string]string, len(spec.Labels)+1)
 		for k, v := range spec.Labels {
 			labels[k] = v
