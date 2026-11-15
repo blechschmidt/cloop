@@ -87,8 +87,14 @@ func ensureProjectDir(dir string) error {
 	return nil
 }
 
-// projectMarkerSuffix names the file beside a project's directory that
-// records whose it is: "<dir>" gets ".<dir>.project".
+// projectMarkerDir is the directory under the agent's scratch root that holds
+// one record per project directory of whose it is: "<dir>" gets
+// "<projectMarkerDir>/<dir>.project". Under the scratch root rather than
+// beside the trees: on a runner's persistent volume the trees root holds the
+// project's tree and nothing else.
+const projectMarkerDir = ".cloop-projects"
+
+// projectMarkerSuffix ends a record's name.
 const projectMarkerSuffix = ".project"
 
 // claimProjectDir checks that dir, which the hub named after a project's path
@@ -96,19 +102,23 @@ const projectMarkerSuffix = ".project"
 // project's and no other's (Task 20500). Thirty-two bits are few enough that
 // someone able to choose a project's path could find one whose name is
 // another project's, and be handed that project's tree; so the first run in a
-// directory records the full path's digest beside it, and a run of any other
-// project there is refused. project is the hub's path, as the spec's
-// "project" label carries it; "" — a hub too old to send one — checks
-// nothing. The record sits beside the directory, beneath the trees root,
-// where no workload may write.
-func claimProjectDir(dir, project string) error {
+// directory records the full path's digest, and a run of any other project
+// there is refused. project is the hub's path, as the spec's "project" label
+// carries it; "" — a hub too old to send one — checks nothing. The record is
+// kept under the agent's scratch root, where no workload may write. A
+// runner's scratch goes with its Pod, and its volume is one project's anyway.
+func (a *Agent) claimProjectDir(dir, project string) error {
 	project = strings.TrimSpace(project)
 	if project == "" || strings.TrimSpace(dir) == "" {
 		return nil
 	}
 	sum := sha256.Sum256([]byte("cloop.dev/device-project/v1\x00" + filepath.Clean(project)))
 	want := hex.EncodeToString(sum[:])
-	marker := filepath.Join(filepath.Dir(dir), "."+filepath.Base(dir)+projectMarkerSuffix)
+	records := filepath.Join(a.root, projectMarkerDir)
+	if err := ensureProjectDir(records); err != nil {
+		return err
+	}
+	marker := filepath.Join(records, filepath.Base(dir)+projectMarkerSuffix)
 	info, err := os.Lstat(marker)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):

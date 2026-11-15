@@ -273,7 +273,8 @@ func TestLoopbackADirectoryNamedForTwoProjectsServesTheFirstOnly(t *testing.T) {
 	if _, err := executor.Run(ctx, ex, executor.Spec{WorkDir: "api-1a2b3c4d", Argv: []string{"/bin/true"}}); err != nil {
 		t.Fatalf("a run with no project label: %v", err)
 	}
-	if fi, err := os.Lstat(filepath.Join(lb.root, ".api-1a2b3c4d.project")); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Lstat(filepath.Join(lb.root, ".cloop-projects", "api-1a2b3c4d.project")); err != nil ||
+		fi.Mode().Perm() != 0o600 {
 		t.Errorf("the record of whose the directory is: %v %v", fi, err)
 	}
 }

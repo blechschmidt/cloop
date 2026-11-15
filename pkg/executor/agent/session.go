@@ -760,7 +760,7 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		if err == nil {
 			// The directory is the project's the hub names it for, and no
 			// other's whose name happens to be the same.
-			err = claimProjectDir(workDir, spec.Labels["project"])
+			err = a.claimProjectDir(workDir, spec.Labels["project"])
 		}
 	}
 	if err != nil {
@@ -1448,9 +1448,10 @@ func (a *Agent) resolveWorkDir(requested string) (string, error) {
 			remote.ErrPathOutsideRoot, candidate, root)
 	}
 	if strings.HasPrefix(filepath.Base(candidate), ".") {
-		// The agent's own: a project's home (.<dir>.home) and the private
-		// directories of workloads with no project. The hub never names one
-		// (executor.DeviceWorkDir cannot make a leading dot).
+		// The agent's own: a project's home (.<dir>.home), the private
+		// directories of workloads with no project and the record of whose
+		// each directory is. The hub never names one (executor.DeviceWorkDir
+		// cannot make a leading dot).
 		return "", fmt.Errorf("%w: %s begins with a dot, which names this agent's own directories beside "+
 			"the projects' — their homes and private directories", remote.ErrPathOutsideRoot, candidate)
 	}
