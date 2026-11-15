@@ -209,14 +209,15 @@ func newRestartSceneWith(t *testing.T, opt restartOptions) *restartScene {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The stand-in harness keeps its start log and release FIFO beside the
-	// project, and the device it runs on is the strict hub's default, so the
-	// hub's own directory could run there too: the device counts as shared,
-	// and would keep the harness to its project (Task 20500). These scenes
-	// are about restarts; keeping projects apart on a device is tested in
-	// pkg/executor/remote, so the project is opted out here.
-	optOut := "    host_sandbox:\n        opt_out:\n            - " + s.proj + "\n"
-	if _, err := f.WriteString("\nexecutors:\n    allow_host_process: false\n" + optOut + opt.executors); err != nil {
+	// Every project a scene hosts runs a stand-in harness that keeps its
+	// start log, its release FIFO and its results beside the project, and
+	// the device it runs on is the strict hub's default, so the hub's own
+	// directory could run there too: the device counts as shared, and would
+	// keep each harness to its project (Task 20500). These scenes are about
+	// restarts; keeping projects apart on a device is tested in
+	// pkg/executor/remote and tests/security, so the sandbox is off here.
+	sandboxOff := "    host_sandbox:\n        mode: \"off\"\n"
+	if _, err := f.WriteString("\nexecutors:\n    allow_host_process: false\n" + sandboxOff + opt.executors); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.Close()

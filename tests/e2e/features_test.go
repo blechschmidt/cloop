@@ -187,6 +187,18 @@ func TestE2EFeatures_ParallelDevelopmentAndPullRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	cloop(hubDir, "init", "--provider", "mock", "--skip-clarify", "hub")
+	// The project's remote is a bare repository beside it, reached by a
+	// local path, which a run kept to its project (Task 20500) could not push
+	// to — a real remote is reached over the network, or granted as a
+	// local_repo. This test is about features, so the project is opted out.
+	hubCfg, err := os.OpenFile(filepath.Join(hubDir, ".cloop", "config.yaml"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hubCfg.WriteString("\nexecutors:\n    host_sandbox:\n        opt_out:\n            - " + proj + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = hubCfg.Close()
 	port := freePort(t)
 	hub := exec.Command(bin, "ui", "--port", fmt.Sprint(port), "--no-browser", "--projects", proj)
 	hub.Dir = hubDir
