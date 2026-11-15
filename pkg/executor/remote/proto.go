@@ -306,7 +306,25 @@ const (
 	// reads the retiring bye as a permanent refusal, so it exits all the same —
 	// with an error — and the hub retires its executor either way. See
 	// MinEphemeralVersion.
-	ProtocolVersion = 28
+	//
+	// v29 adds the capture frames (Task 20495, captureproto.go): capture_req,
+	// capture_chunk, capture_result and capture_cancel. A project move whose
+	// project runs on a device — or on a virtual executor of one, or on an
+	// executor pool's runner with a persistent volume — asks the device's
+	// agent for what the hub would capture from its own tree: the uncommitted
+	// state on a hidden ref, one git bundle of the local branches and the
+	// features' working copies, and a tar of the .cloop files a move delivers;
+	// or, for the move's preflight, only what the working copy holds. The
+	// agent reads only the working copies the request names, under its trees
+	// root and through an os.Root, and streams the answer in capture_chunk
+	// frames the hub assembles like write-back's: per-part caps the request
+	// set, the executor's and the process's budget, nothing accepted late,
+	// everything let go of on cancel, session end or revocation. Gated on the
+	// hub side and refused, not degraded: an older agent would never answer,
+	// and a move that went on without the device's working copy would lose
+	// it, so the preflight blocks the move and names the upgrade. See
+	// MinProjectCaptureVersion.
+	ProtocolVersion = 29
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the

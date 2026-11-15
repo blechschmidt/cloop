@@ -1085,6 +1085,7 @@ calls helpers that use a model: `pkg/clarify`, `pkg/coach`, `pkg/diagnosis`,
 | `pkg/executor/featurehub` | the hub's half of a feature on an isolating executor |
 | `pkg/executor/gitstate` | what a project's tree on the hub holds that no remote has, read with hardened git that writes nothing |
 | `pkg/executor/movegit` | a project move's git: the working tree's state on a hidden ref and every branch in one bundle, rebuilt elsewhere and read back |
+| `pkg/executor/movecapture` | the device's half of a project move: reading or capturing a working copy an agent keeps, confined to it through an `os.Root`, and the hub's check of what comes back |
 | `pkg/executorstore` | enrollment, agent credentials and handles in the database |
 | `pkg/executorpool` | executor pools: their controllers' credentials, runner tokens, and which queued runs a pool may see and take |
 | `pkg/projectmove` | moving a project to another executor or pool: the preflight that says what would be lost or broken, and the journalled move that stops its runs, captures its source, switches its binding and seeds and checks the target |

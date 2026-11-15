@@ -837,6 +837,15 @@ func (s *Server) dispatchPool(poolID string) {
 			holds[i] = h.row.Holds
 		}
 		pick := pickPoolRunner(holds, project.Tenant, project.Tenant != "" && executorpool.RunMayUseHeld(q, access))
+		if isMoveCapture(q) {
+			// A project move's capture of the project's volume (Task 20495):
+			// only a runner on that volume has anything of it.
+			project.Strict = true
+			pick = -1
+			if executorpool.RunMayUseHeld(q, access) {
+				pick = pickCaptureRunner(holds, project.Tenant)
+			}
+		}
 		if pick < 0 {
 			continue
 		}
@@ -859,6 +868,11 @@ func (s *Server) dispatchPool(poolID string) {
 		q.State, q.ExecutorID, q.Member = statedb.PoolQueueAssigned, h.row.ExecutorID, member
 		store.AuditQueue(q, "assigned", "system", "")
 		assigned = true
+		if isMoveCapture(q) {
+			// The move driving the capture sees the hand-over and captures
+			// from the runner; nothing runs on it.
+			continue
+		}
 		go s.startQueuedPoolRun(q, h.ex, project.Tenant)
 	}
 }
@@ -907,6 +921,7 @@ func (s *Server) poolJanitorPass(now time.Time) {
 			}
 		}
 	}
+	s.settleMoveCaptureEntries(store, now)
 	s.reclaimStuckPoolRuns(store, now)
 	s.retireFinishedPoolRunners(store, now)
 	if _, err := db.PrunePoolQueue(now.Add(-poolQueueRetention)); err != nil && !s.poolsClosed() {
@@ -989,6 +1004,8 @@ func (s *Server) retireFinishedPoolRunners(store *executorpool.Store, now time.T
 		}
 		if q, err := db.GetPoolQueueEntry(r.QueueID); err == nil && q.Open() {
 			continue // still being handed over: reclaimStuckPoolRuns' to decide
+		} else if err == nil && isMoveCapture(q) && s.moveCapturing(q) {
+			continue // a move's capture reads it, and retires it when it is done
 		}
 		if n, err := db.CountRunningExecutorSessions(r.ExecutorID); err != nil || n > 0 {
 			continue

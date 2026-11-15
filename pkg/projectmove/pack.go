@@ -68,49 +68,98 @@ var tarEpoch = time.Unix(0, 0).UTC()
 // digest. Nothing is followed through a symbolic link, and a file that is not
 // regular is not packed.
 func PackFiles(projectDir, tarPath string, maxBytes int64) ([]File, []Item, movegit.Digest, error) {
-	root := filepath.Join(projectDir, ".cloop")
-	var (
-		files []File
-		paths []string
-	)
-	kept := map[string]*Item{}
-	keep := func(category, rel string, size int64) {
-		it := kept[category]
-		if it == nil {
-			it = &Item{Name: category, Path: root, Detail: keptReasons[category]}
-			kept[category] = it
-		}
-		it.Count++
-		it.Bytes += size
-		if len(it.Examples) < maxExamples {
-			it.Examples = append(it.Examples, ".cloop/"+rel)
-		}
-	}
-	info, err := os.Lstat(root)
+	dir := filepath.Join(projectDir, ".cloop")
+	root, err := os.OpenRoot(projectDir)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
+		root = nil
 	case err != nil:
 		return nil, nil, movegit.Digest{}, fmt.Errorf("projectmove: %w", err)
-	case !info.IsDir():
-		return nil, nil, movegit.Digest{}, fmt.Errorf("projectmove: %s is not a directory", root)
 	default:
+		defer root.Close()
+	}
+	return PackFilesIn(root, dir, tarPath, maxBytes)
+}
+
+// PackFilesIn is PackFiles for the project whose directory root opens; dir is
+// how the result names its .cloop directory. Every name goes through root, and
+// each file is opened only once its own entry is known to be a regular file —
+// and checked to be that same file once open — so a link planted beside it, or
+// swapped in for it, is never read: how a device packs a working copy a
+// workload wrote (Task 20495). A nil root packs nothing.
+func PackFilesIn(root *os.Root, dir, tarPath string, maxBytes int64) ([]File, []Item, movegit.Digest, error) {
+	return PackFileSets(tarPath, maxBytes, FileSet{Root: root, Dir: dir})
+}
+
+// FileSet is one .cloop directory PackFileSets packs.
+type FileSet struct {
+	// Root opens the directory that holds the .cloop directory; nil packs
+	// nothing.
+	Root *os.Root
+	// Dir is how the result names the .cloop directory.
+	Dir string
+	// Prefix goes before each file's path in the tar and the result: empty
+	// for the project's own files, features/<slug>/.cloop/ for a feature's
+	// kept beside the project's (a device keeps each feature's working copy
+	// in a directory of its own), so they land in the feature's .cloop under
+	// the project's.
+	Prefix string
+}
+
+// PackFileSets is PackFilesIn for several .cloop directories in one tar, each
+// under its prefix; maxBytes bounds them together.
+func PackFileSets(tarPath string, maxBytes int64, sets ...FileSet) ([]File, []Item, movegit.Digest, error) {
+	type entry struct {
+		set int
+		rel string
+	}
+	var (
+		files   []File
+		entries []entry
+	)
+	kept := map[string]*Item{}
+	for i, set := range sets {
+		if set.Prefix != "" && (!cleanRel(strings.TrimSuffix(set.Prefix, "/")) || !strings.HasSuffix(set.Prefix, "/")) {
+			return nil, nil, movegit.Digest{}, fmt.Errorf("projectmove: %q is not a plain relative prefix", set.Prefix)
+		}
+		keep := func(category, rel string, size int64) {
+			it := kept[category]
+			if it == nil {
+				it = &Item{Name: category, Path: set.Dir, Detail: keptReasons[category]}
+				kept[category] = it
+			}
+			it.Count++
+			it.Bytes += size
+			if len(it.Examples) < maxExamples {
+				it.Examples = append(it.Examples, ".cloop/"+set.Prefix+rel)
+			}
+		}
+		var info os.FileInfo
+		err := os.ErrNotExist
+		if set.Root != nil {
+			info, err = set.Root.Lstat(".cloop")
+		}
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case err != nil:
+			return nil, nil, movegit.Digest{}, fmt.Errorf("projectmove: %w", err)
+		case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+			return nil, nil, movegit.Digest{}, fmt.Errorf("projectmove: %s is not a directory (a link is not followed)", set.Dir)
+		}
 		seen := 0
-		walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		walkErr := fs.WalkDir(set.Root.FS(), ".cloop", func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			if p == root {
+			if p == ".cloop" {
 				return nil
 			}
 			seen++
 			if seen > maxInventoryEntries {
-				return fmt.Errorf("projectmove: %s holds more than %d entries", root, maxInventoryEntries)
+				return fmt.Errorf("projectmove: %s holds more than %d entries", set.Dir, maxInventoryEntries)
 			}
-			rel, err := filepath.Rel(root, p)
-			if err != nil {
-				return err
-			}
-			rel = filepath.ToSlash(rel)
+			rel := strings.TrimPrefix(p, ".cloop/")
 			if !strings.Contains(rel, "/") && (inDatabase[rel] || notFiles[rel] || notPacked[rel]) {
 				if d.IsDir() {
 					return fs.SkipDir
@@ -131,14 +180,16 @@ func PackFiles(projectDir, tarPath string, maxBytes int64) ([]File, []Item, move
 				keep(cat, rel, fi.Size())
 				return nil
 			}
-			paths = append(paths, rel)
+			entries = append(entries, entry{set: i, rel: rel})
 			return nil
 		})
 		if walkErr != nil {
-			return nil, nil, movegit.Digest{}, fmt.Errorf("projectmove: walk %s: %w", root, walkErr)
+			return nil, nil, movegit.Digest{}, fmt.Errorf("projectmove: walk %s: %w", set.Dir, walkErr)
 		}
 	}
-	sort.Strings(paths)
+	sort.Slice(entries, func(a, b int) bool {
+		return sets[entries[a].set].Prefix+entries[a].rel < sets[entries[b].set].Prefix+entries[b].rel
+	})
 
 	part := tarPath + ".part"
 	out, err := os.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -154,8 +205,8 @@ func PackFiles(projectDir, tarPath string, maxBytes int64) ([]File, []Item, move
 	}()
 	tw := tar.NewWriter(out)
 	var total int64
-	for _, rel := range paths {
-		f, err := packOne(tw, root, rel)
+	for _, e := range entries {
+		f, err := packOne(tw, sets[e.set].Root, e.rel, sets[e.set].Prefix)
 		if err != nil {
 			return nil, nil, movegit.Digest{}, err
 		}
@@ -192,9 +243,19 @@ func PackFiles(projectDir, tarPath string, maxBytes int64) ([]File, []Item, move
 	return files, keptItems, digest, nil
 }
 
-// packOne adds one file to the tar, read without following a link.
-func packOne(tw *tar.Writer, root, rel string) (File, error) {
-	f, err := openNoFollow(filepath.Join(root, filepath.FromSlash(rel)))
+// packOne adds one file to the tar, read through root without following a
+// link: its entry must be a regular file, and the file opened must be that
+// entry.
+func packOne(tw *tar.Writer, root *os.Root, rel, prefix string) (File, error) {
+	name := ".cloop/" + rel
+	li, err := root.Lstat(name)
+	if err != nil {
+		return File{}, fmt.Errorf("projectmove: read .cloop/%s: %w", rel, err)
+	}
+	if !li.Mode().IsRegular() {
+		return File{}, fmt.Errorf("projectmove: .cloop/%s is not a regular file", rel)
+	}
+	f, err := root.Open(name)
 	if err != nil {
 		return File{}, fmt.Errorf("projectmove: read .cloop/%s: %w", rel, err)
 	}
@@ -203,11 +264,11 @@ func packOne(tw *tar.Writer, root, rel string) (File, error) {
 	if err != nil {
 		return File{}, fmt.Errorf("projectmove: read .cloop/%s: %w", rel, err)
 	}
-	if !fi.Mode().IsRegular() {
-		return File{}, fmt.Errorf("projectmove: .cloop/%s is not a regular file", rel)
+	if !fi.Mode().IsRegular() || !os.SameFile(li, fi) {
+		return File{}, fmt.Errorf("projectmove: .cloop/%s changed while it was packed (a link is not followed)", rel)
 	}
 	mode := uint32(fi.Mode().Perm() & 0o755)
-	hdr := &tar.Header{Name: rel, Mode: int64(mode), Size: fi.Size(), ModTime: tarEpoch, Typeflag: tar.TypeReg, Format: tar.FormatPAX}
+	hdr := &tar.Header{Name: prefix + rel, Mode: int64(mode), Size: fi.Size(), ModTime: tarEpoch, Typeflag: tar.TypeReg, Format: tar.FormatPAX}
 	if err := tw.WriteHeader(hdr); err != nil {
 		return File{}, fmt.Errorf("projectmove: pack .cloop/%s: %w", rel, err)
 	}
@@ -219,7 +280,7 @@ func packOne(tw *tar.Writer, root, rel string) (File, error) {
 	if n != fi.Size() {
 		return File{}, fmt.Errorf("projectmove: .cloop/%s changed while it was packed", rel)
 	}
-	return File{Path: rel, Bytes: n, SHA256: hex.EncodeToString(h.Sum(nil)), Mode: mode}, nil
+	return File{Path: prefix + rel, Bytes: n, SHA256: hex.EncodeToString(h.Sum(nil)), Mode: mode}, nil
 }
 
 // openNoFollow opens a file for reading, refusing a symbolic link in its
@@ -234,6 +295,35 @@ func openNoFollow(p string) (*os.File, error) {
 // differs refuse the whole extraction. No directory or file on the way is
 // written through a symbolic link.
 func ExtractFiles(tarPath, cloopDir string, want []File) error {
+	if err := ensureDir(cloopDir); err != nil {
+		return err
+	}
+	return readFilesTar(tarPath, want, func(rel string, r io.Reader, w File) error {
+		return writeChecked(cloopDir, rel, r, w)
+	})
+}
+
+// VerifyFilesTar holds the tar at tarPath to want as ExtractFiles would,
+// writing nothing: a capture from a device is checked when it arrives, not
+// first when it is delivered (Task 20495).
+func VerifyFilesTar(tarPath string, want []File) error {
+	return readFilesTar(tarPath, want, func(rel string, r io.Reader, w File) error {
+		h := sha256.New()
+		n, err := io.Copy(h, io.LimitReader(r, w.Bytes+1))
+		if err != nil {
+			return fmt.Errorf("projectmove: read .cloop/%s: %w", rel, err)
+		}
+		if n != w.Bytes || hex.EncodeToString(h.Sum(nil)) != w.SHA256 {
+			return fmt.Errorf("projectmove: .cloop/%s does not match what the capture recorded", rel)
+		}
+		return nil
+	})
+}
+
+// readFilesTar hands each entry of the tar at tarPath to each, after holding
+// it to want: recorded, plainly relative, a regular file of the recorded
+// size. Every file want names must be in the tar.
+func readFilesTar(tarPath string, want []File, each func(rel string, r io.Reader, w File) error) error {
 	byPath := make(map[string]File, len(want))
 	for _, f := range want {
 		byPath[f.Path] = f
@@ -243,9 +333,6 @@ func ExtractFiles(tarPath, cloopDir string, want []File) error {
 		return fmt.Errorf("projectmove: %w", err)
 	}
 	defer in.Close()
-	if err := ensureDir(cloopDir); err != nil {
-		return err
-	}
 	tr := tar.NewReader(in)
 	got := map[string]bool{}
 	for {
@@ -264,7 +351,7 @@ func ExtractFiles(tarPath, cloopDir string, want []File) error {
 		if hdr.Size != w.Bytes {
 			return fmt.Errorf("projectmove: .cloop/%s is %d bytes in the tar, the capture recorded %d", rel, hdr.Size, w.Bytes)
 		}
-		if err := writeChecked(cloopDir, rel, tr, w); err != nil {
+		if err := each(rel, tr, w); err != nil {
 			return err
 		}
 		got[rel] = true
@@ -272,6 +359,39 @@ func ExtractFiles(tarPath, cloopDir string, want []File) error {
 	for _, f := range want {
 		if !got[f.Path] {
 			return fmt.Errorf("projectmove: the tar holds no .cloop/%s", f.Path)
+		}
+	}
+	return nil
+}
+
+// ValidateFiles checks a capture's list of delivered files before anything
+// acts on it: each a plain relative path, of a category a move delivers —
+// directly under .cloop, or under a feature's .cloop beside it — listed once,
+// with a size and a SHA-256. A list from a device (Task 20495) decides which
+// tar entries are extracted, and where.
+func ValidateFiles(files []File) error {
+	seen := make(map[string]bool, len(files))
+	for _, f := range files {
+		if !cleanRel(f.Path) {
+			return fmt.Errorf("projectmove: %q is not a plain relative path", f.Path)
+		}
+		rel := f.Path
+		if rest, ok := strings.CutPrefix(rel, "features/"); ok {
+			slug, inner, found := strings.Cut(rest, "/.cloop/")
+			if !found || slug == "" || strings.Contains(slug, "/") {
+				return fmt.Errorf("projectmove: %q is not under a feature's .cloop", f.Path)
+			}
+			rel = inner
+		}
+		if !deliveredCategories[categorize(rel)] {
+			return fmt.Errorf("projectmove: .cloop/%s is not a file a move delivers", f.Path)
+		}
+		if seen[f.Path] {
+			return fmt.Errorf("projectmove: .cloop/%s is listed twice", f.Path)
+		}
+		seen[f.Path] = true
+		if f.Bytes < 0 || len(f.SHA256) != 64 || strings.Trim(f.SHA256, "0123456789abcdef") != "" || f.Mode&^0o777 != 0 {
+			return fmt.Errorf("projectmove: .cloop/%s's size, digest or mode is malformed", f.Path)
 		}
 	}
 	return nil

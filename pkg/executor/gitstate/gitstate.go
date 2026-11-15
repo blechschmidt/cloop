@@ -73,6 +73,13 @@ type Options struct {
 	MaxOutput    int
 	// CommandTimeout overrides DefaultCommandTimeout when positive.
 	CommandTimeout time.Duration
+	// Confine, when set, is asked about every linked worktree inside the
+	// directory before git runs in it, and a worktree it refuses is reported
+	// with the refusal as its error instead of inspected. An inspection of a
+	// tree a workload could write sets it (Task 20495): git's record of a
+	// worktree can name a path inside the project that a symbolic link leads
+	// out of, and git would read the files there.
+	Confine func(dir string) error
 }
 
 func (o Options) maxPaths() int     { return positive(o.MaxPaths, DefaultMaxPaths) }
@@ -266,6 +273,13 @@ func newRunner(ctx context.Context, dir string, opts Options) (*runner, error) {
 		// The status of the tree as it is, not as a refresh would leave it:
 		// git skips every lock it would only take to save work for later.
 		"GIT_OPTIONAL_LOCKS=0",
+		// Nothing an inspection reads may come from anywhere but the
+		// repository itself: a partial clone's promisor remote, which the
+		// tree's own configuration can name — another project's repository
+		// on the same machine — would otherwise be fetched from to answer a
+		// count (Task 20495). git before 2.44 ignores this; the protocol
+		// rule below refuses the fetch there.
+		"GIT_NO_LAZY_FETCH=1",
 		"LC_ALL=C")
 	// Never look above the project for a repository to answer for it. The
 	// variable is a colon-separated list, so a parent whose name holds a colon
@@ -321,7 +335,8 @@ func (g *runner) run(ctx context.Context, dir string, args ...string) (string, e
 func (g *runner) runCapped(ctx context.Context, dir string, args ...string) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
-	full := append([]string{"--no-optional-locks", "-C", dir}, args...)
+	// No transport at all: an inspection reads what is here.
+	full := append([]string{"--no-optional-locks", "-c", "protocol.allow=never", "-C", dir}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Env = g.env
 	cmd.Dir = dir
@@ -469,6 +484,12 @@ func (g *runner) inspectWorktree(ctx context.Context, w *Worktree) {
 	if info, err := os.Lstat(w.Path); err != nil || !info.IsDir() {
 		w.Missing = true
 		return
+	}
+	if g.opts.Confine != nil && w.Rel != "" {
+		if err := g.opts.Confine(w.Path); err != nil {
+			w.Error = "not inspected: " + err.Error()
+			return
+		}
 	}
 	args := []string{"status", "--porcelain=v2", "-z", "--untracked-files=normal", "--ignore-submodules=all",
 		"--", "."}

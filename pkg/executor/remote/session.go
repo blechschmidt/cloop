@@ -389,6 +389,7 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 		// the beat is a clock this executor has whenever its device is
 		// connected, and a device that is not adds nothing new to hold.
 		s.ex.releaseUncollected()
+		s.ex.releaseStaleCaptures()
 		s.flushAcks(ctx)
 		ack, err := s.frame(TypeHeartbeatAck, f.ID, "", HeartbeatAckPayload{
 			Seq:        hb.Seq,
@@ -477,6 +478,43 @@ func (s *Session) handleFrame(ctx context.Context, f Frame) (stop bool) {
 			return false
 		}
 		s.trackHandle(f.Handle)
+		return false
+
+	case TypeCaptureChunk:
+		// A slice of a project's working copy (Task 20495). Refused before
+		// anything is kept unless this session asked for it; the first
+		// refusal fails the capture and tells the device to stop.
+		if !SupportsProjectCapture(s.version) {
+			writeError(ctx, s.conn, f.ID, CodeProtocol, "capture_chunk on a session below protocol v29")
+			return false
+		}
+		chunk, err := DecodeCaptureChunk(f)
+		if err != nil {
+			writeError(ctx, s.conn, f.ID, CodeProtocol, err.Error())
+			return false
+		}
+		if err := s.ex.appendCaptureChunk(s, f.Handle, chunk); err != nil {
+			writeError(ctx, s.conn, f.ID, CodeWriteBackFailed, err.Error())
+			go s.failedCapture(f.Handle, err.Error())
+		}
+		return false
+
+	case TypeCaptureResult:
+		if !SupportsProjectCapture(s.version) {
+			writeError(ctx, s.conn, f.ID, CodeProtocol, "capture_result on a session below protocol v29")
+			return false
+		}
+		payload, err := DecodeCaptureResult(f)
+		if err != nil {
+			writeError(ctx, s.conn, f.ID, CodeProtocol, err.Error())
+			return false
+		}
+		if err := s.ex.applyCaptureResult(s, f.Handle, payload); err != nil {
+			writeError(ctx, s.conn, f.ID, CodeWriteBackFailed, err.Error())
+		}
+		// Delivered either way: the waiter reads what the assembly recorded,
+		// and one waiting on a capture that already failed must not wait on.
+		s.deliver(f)
 		return false
 
 	case TypeDenials:

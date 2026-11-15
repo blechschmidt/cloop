@@ -133,6 +133,11 @@ type fakeEnv struct {
 	workspace    []WorkspaceIssue
 	paths        []PathBinding
 	pathsErr     error
+	// deviceTree answers SourceTree for a device source; nil keeps the
+	// answer ErrUnseen. upgrade answers it with an agent too old to ask.
+	deviceTree *Tree
+	upgrade    *AgentUpgradeError
+	hubEntries []string
 
 	// reachableAsked records which executors were probed.
 	reachableAsked []string
@@ -190,11 +195,21 @@ func (f *fakeEnv) Runs(_ context.Context, path string) RunFacts { return f.runs[
 
 func (f *fakeEnv) SourceTree(_ context.Context, _ Project, _ []Feature, src Endpoint) (Tree, error) {
 	f.treeAsked++
+	if src.Workspace == WorkspaceDevice {
+		switch {
+		case f.upgrade != nil:
+			return Tree{}, f.upgrade
+		case f.deviceTree != nil:
+			return *f.deviceTree, f.treeErr
+		}
+	}
 	if src.Workspace != WorkspaceHubTree {
 		return Tree{}, ErrUnseen
 	}
 	return f.tree, f.treeErr
 }
+
+func (f *fakeEnv) HubDirEntries(context.Context, Project) ([]string, error) { return f.hubEntries, nil }
 
 func (f *fakeEnv) Pool(_ context.Context, id string, _ Project) (PoolFacts, error) {
 	if f.poolErr != nil {

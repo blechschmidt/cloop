@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -193,6 +194,185 @@ func SeedWorkingCopy(ctx context.Context, dir, moveID string) (WorkingCopyReport
 		return WorkingCopyReport{}, fmt.Errorf("projectmove: %w", err)
 	}
 	return ReportWorkingCopy(ctx, dir, moveID)
+}
+
+// ErrHubDirOccupied refuses to seed the hub's directory for a project that
+// already holds files besides .cloop.
+var ErrHubDirOccupied = errors.New("projectmove: the hub's directory for the project holds files a move never overwrites")
+
+// HubDirEntries lists what dir holds besides the hub's own bookkeeping — its
+// .cloop directory, and a .gitignore naming nothing but paths under .cloop,
+// which `cloop init` writes — sorted: the entries a seed of the hub's own
+// directory would have to overwrite.
+func HubDirEntries(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("projectmove: %w", err)
+	}
+	var out []string
+	for _, e := range entries {
+		switch e.Name() {
+		case ".cloop":
+			continue
+		case ".gitignore":
+			if _, own := cloopOwnGitignore(dir); own {
+				continue
+			}
+		}
+		out = append(out, e.Name())
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// maxOwnGitignore bounds the .gitignore cloopOwnGitignore reads.
+const maxOwnGitignore = 64 << 10
+
+// cloopOwnGitignore reports whether dir's .gitignore is the hub's own — a
+// regular file whose every pattern names a path under .cloop — and returns
+// its patterns.
+func cloopOwnGitignore(dir string) ([]string, bool) {
+	f, err := openNoFollow(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxOwnGitignore {
+		return nil, false
+	}
+	raw := make([]byte, fi.Size())
+	if n, _ := io.ReadFull(f, raw); int64(n) != fi.Size() {
+		return nil, false
+	}
+	var patterns []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		p := strings.TrimPrefix(t, "/")
+		if p != ".cloop" && p != ".cloop/" && !strings.HasPrefix(p, ".cloop/") {
+			return nil, false
+		}
+		patterns = append(patterns, t)
+	}
+	return patterns, true
+}
+
+// HubTreeReserved is what a working copy built in the hub's own directory for
+// a project may hold of .cloop: the requirements spec and the sandbox spec,
+// which a project commits by design, and nothing else — never the project's
+// database or configuration, which the hub keeps there. A capture from a
+// device is held to it before it is accepted, and again before it is restored.
+var HubTreeReserved = movegit.Reserved{Dir: ".cloop", Allow: []string{"requirements.yaml", "sandbox.yaml"}}
+
+// SeedHubTree builds the working copy a capture recorded in dir, the hub's own
+// directory for the project, for a move from a device's working copy or a
+// pool runner's volume onto an executor that works in the hub's tree (Task
+// 20495): the repository rebuilt from the capture's bundle — every ref, HEAD
+// on its branch, the uncommitted state put back as it was — and the .cloop
+// files extracted beside the hub's own. The capture's bundle and tar are read
+// from c.Store and checked against their digests first.
+//
+// A directory holding anything besides .cloop is refused with
+// ErrHubDirOccupied, unless it is this move's own seed, stopped part-way;
+// one this move already finished seeding is left as it is.
+func SeedHubTree(ctx context.Context, dir, moveID string, c *CaptureRecord, upstream string) error {
+	if c == nil {
+		return errors.New("projectmove: no capture to seed the hub's directory with")
+	}
+	if rec, ok := readMovedIn(dir); ok && rec.MoveID == moveID {
+		return nil
+	}
+	entries, err := HubDirEntries(dir)
+	if err != nil {
+		return err
+	}
+	if seeding, _ := readMovingIn(dir); len(entries) > 0 && seeding != moveID {
+		shown := entries
+		if len(shown) > maxExamples {
+			shown = shown[:maxExamples]
+		}
+		return fmt.Errorf("%w: %s holds %s", ErrHubDirOccupied, dir, strings.Join(shown, ", "))
+	}
+	cloopDir := filepath.Join(dir, ".cloop")
+	if err := ensureDir(cloopDir); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(cloopDir, MovingInFile), []byte(moveID)); err != nil {
+		return err
+	}
+	if c.Git.Repository {
+		// The hub's own .gitignore names only paths under .cloop, which the
+		// rebuilt repository excludes whole (below): it makes way for the
+		// source's tree, which may hold a .gitignore of its own.
+		if _, isOwn := cloopOwnGitignore(dir); isOwn {
+			if err := os.Remove(filepath.Join(dir, ".gitignore")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("projectmove: %w", err)
+			}
+		}
+		if err := movegit.Restore(ctx, movegit.RestoreOptions{Dir: dir, BundlePath: filepath.Join(c.Store, c.Bundle),
+			Manifest: c.Git, Upstream: upstream, Reserve: &HubTreeReserved}); err != nil {
+			return err
+		}
+		// The hub's bookkeeping is not the project's work: a run committing
+		// everything in the tree must not commit the project's database.
+		if err := excludeCloop(dir); err != nil {
+			return err
+		}
+	}
+	if c.FilesTar != "" {
+		tarPath := filepath.Join(c.Store, c.FilesTar)
+		if c.TarSum != nil {
+			if err := movegit.VerifyFile(tarPath, *c.TarSum); err != nil {
+				return err
+			}
+		}
+		if err := ExtractFiles(tarPath, cloopDir, c.Files); err != nil {
+			return err
+		}
+	}
+	rec, err := json.Marshal(movedIn{MoveID: moveID, Files: c.Files})
+	if err != nil {
+		return fmt.Errorf("projectmove: %w", err)
+	}
+	if err := writeFileAtomic(filepath.Join(cloopDir, MovedInFile), rec); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(cloopDir, MovingInFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("projectmove: %w", err)
+	}
+	return nil
+}
+
+// excludeCloop adds .cloop to a repository's info/exclude, once.
+func excludeCloop(dir string) error {
+	info := filepath.Join(dir, ".git", "info")
+	if err := ensureDir(info); err != nil {
+		return err
+	}
+	p := filepath.Join(info, "exclude")
+	if li, err := os.Lstat(p); err == nil && !li.Mode().IsRegular() {
+		return fmt.Errorf("projectmove: %s is not a regular file", p)
+	}
+	old, err := os.ReadFile(p)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("projectmove: %w", err)
+	}
+	for _, line := range strings.Split(string(old), "\n") {
+		if t := strings.TrimSpace(line); t == "/.cloop/" || t == ".cloop/" || t == "/.cloop" || t == ".cloop" {
+			return nil
+		}
+	}
+	text := string(old)
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return writeFileAtomic(p, []byte(text+"/.cloop/\n"))
 }
 
 // ReportWorkingCopy reports a working copy a move seeded, as it stands.

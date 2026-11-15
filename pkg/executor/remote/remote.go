@@ -342,6 +342,11 @@ type Executor struct {
 	// would be no budget at all. See resultbudget.go.
 	budget *ResultBudget
 
+	// captures are the capture requests this executor's device is answering,
+	// and the answers held for their callers (Task 20495). Counted against
+	// budget like returned work. See capture.go.
+	captures captureSet
+
 	// spent is set once an ephemeral runner has been handed its one workload
 	// (Task 20482). Guarded by mu.
 	spent bool
@@ -1628,6 +1633,9 @@ func (e *Executor) attach(sess *Session) {
 // it, or a reconnected agent would be marked offline by its predecessor's
 // cleanup goroutine.
 func (e *Executor) detach(sess *Session, status string) {
+	// A capture asked on this session is never answered on another: what it
+	// sent so far is let go of now (Task 20495).
+	e.dropSessionCaptures(sess, "the device's session ended before it answered")
 	e.mu.Lock()
 	if e.session != sess {
 		e.mu.Unlock()
@@ -1973,6 +1981,9 @@ func (e *Executor) LogGapped(handleID string) bool {
 // HandleRecord.Driver is for, since a cross-driver sweep can act on rows whose
 // executor is no longer registered and nothing else can.
 func (e *Executor) failAllHandles(reason string) {
+	// A capture's answer goes too (Task 20495): a revoked device's is not
+	// landed, and nothing reaches a deregistered executor's.
+	e.dropCaptures(reason)
 	e.mu.RLock()
 	tracked := make([]*handleState, 0, len(e.handles))
 	for _, hs := range e.handles {

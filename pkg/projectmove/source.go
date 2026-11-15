@@ -183,16 +183,33 @@ func (p *preflight) checkSource() {
 	}
 
 	tree, err := p.env.SourceTree(p.ctx, p.project, p.features, *src)
+	var upgrade *AgentUpgradeError
 	switch {
+	case errors.As(err, &upgrade):
+		p.agentTooOld(upgrade)
+		p.abandoned(nil)
 	case errors.Is(err, ErrUnseen):
 		p.sourceUnseen()
 		p.abandoned(nil)
+		if !p.opts.AbandonSource {
+			// What the source holds is read when the move captures it; where
+			// it goes can be checked now.
+			p.checkHubDir(p.carryMode())
+		}
 	case err != nil:
+		where := src.WorkDir
+		if where == "" {
+			where = "the source's working copy"
+		}
 		f := Finding{
 			Kind: KindWorkingTree, Severity: SeverityBlocker, Side: SideSource,
 			Title:   "Could not read what the source holds",
-			Message: "Reading " + src.WorkDir + " failed: " + err.Error() + ". Nothing can say what a move would leave behind.",
+			Message: "Reading " + where + " failed: " + err.Error() + ". Nothing can say what a move would leave behind.",
 			Remedy:  "Fix what stops the hub reading the project's directory, then run the preflight again.",
+		}
+		if src.Workspace == WorkspaceDevice {
+			f.Remedy = "Fix what the device refused (its answer is above) on the device, then run the preflight again; " +
+				"a working copy that reaches outside itself is never read."
 		}
 		if p.opts.AbandonSource {
 			f.Severity = SeverityWarning
@@ -200,6 +217,13 @@ func (p *preflight) checkSource() {
 		}
 		p.add(f)
 		p.abandoned(nil)
+	case tree.Absent:
+		p.add(Finding{
+			Kind: KindWorkingTree, Severity: SeverityWillCarry, Side: SideSource,
+			Title: "The source holds no working copy of the project",
+			Message: "There is nothing at " + src.WorkDir + ": no run of the project has worked there, " +
+				"so nothing is captured and nothing is lost.",
+		})
 	default:
 		if p.opts.AbandonSource {
 			p.abandoned(&tree)
@@ -209,7 +233,65 @@ func (p *preflight) checkSource() {
 		p.checkWorkingTrees(tree.Git, mode)
 		p.checkLocalCommits(tree.Git, mode)
 		p.checkFiles(tree, mode)
+		p.checkHubDir(mode)
 	}
+}
+
+// agentTooOld is (e) for a device whose agent cannot capture: the move needs
+// the capture, and nothing short of the agent's upgrade gives it one.
+func (p *preflight) agentTooOld(e *AgentUpgradeError) {
+	f := Finding{
+		Kind: KindSourceAgent, Severity: SeverityBlocker, Side: SideSource,
+		Title: "The device's agent is too old to capture the project",
+		Message: e.Message + " A move captures the device's working copy before anything switches, " +
+			"and an agent this old cannot be asked for it: a move now would leave the working copy behind unseen.",
+		Remedy: e.Remedy,
+	}
+	if strings.TrimSpace(f.Remedy) == "" {
+		f.Remedy = "Upgrade the device's agent (the Executors panel's Upgrade), then run the preflight again."
+	}
+	if p.opts.AbandonSource {
+		f.Severity = SeverityWarning
+		f.Remedy = "Abandoning the source: the move goes ahead without the device's working copy. Upgrade the agent first to capture it instead."
+	}
+	p.add(f)
+}
+
+// checkHubDir is (f) for a move from a device, or a pool's volume, onto an
+// executor that works in the hub's own directory for the project: the seed
+// builds the working copy there, and never over files the hub already holds.
+func (p *preflight) checkHubDir(mode carry) {
+	src := p.report.Source
+	if mode != carryCaptured || (src.Workspace != WorkspaceDevice && src.Workspace != WorkspacePool) ||
+		p.targetEx == nil || !p.targetEx.Capabilities().SharesHostFilesystem {
+		return
+	}
+	entries, err := p.env.HubDirEntries(p.ctx, p.project)
+	if err != nil {
+		p.add(Finding{
+			Kind: KindTarget, Severity: SeverityBlocker, Side: SideTarget,
+			Title:   "Could not read the hub's directory for the project",
+			Message: "The move builds the project's working copy in " + p.project.Path + " and reading it failed: " + err.Error() + ".",
+			Remedy:  "Fix what stops the hub reading the directory, then run the preflight again.",
+		})
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	shown := entries
+	if len(shown) > maxExamples {
+		shown = shown[:maxExamples]
+	}
+	p.add(Finding{
+		Kind: KindTarget, Severity: SeverityBlocker, Side: SideTarget,
+		Title: fmt.Sprintf("The hub's directory for the project already holds %d entr(ies) besides .cloop", len(entries)),
+		Message: "The target works in " + p.project.Path + ", where the move builds the working copy it captures from the source. " +
+			"That directory already holds files the move did not put there, and a move never overwrites them.",
+		Remedy: "Move those entries aside (they are the hub's copy, not the source's), then run the preflight again — " +
+			"or move the project to an executor that keeps a working copy of its own.",
+		Items: []Item{{Name: "entries", Path: p.project.Path, Count: len(entries), Examples: shown}},
+	})
 }
 
 // sourceUnreachable is (e) for a source that cannot be reached.
@@ -242,24 +324,45 @@ func (p *preflight) sourceUnseen() {
 		if p.sourcePool != nil && p.sourcePool.Tenant != "" {
 			tenant = " under tenant " + p.sourcePool.Tenant
 		}
+		if p.sourcePool != nil && p.sourcePool.Volumes == VolumesNone {
+			p.add(Finding{
+				Kind: KindWorkingTree, Severity: SeverityWillCarry, Side: SideSource,
+				Title: "Executor pool " + src.PoolID + " keeps nothing between runs",
+				Message: "Its controller keeps no runner volumes: each run builds its tree in a runner that goes with it, " +
+					"and what a run did reached the hub or the forge when it ended.",
+			})
+			return
+		}
+		if why := poolCannotAttach(p.sourcePool); why != "" {
+			p.add(Finding{
+				Kind: KindSourceUnreachable, Severity: SeverityBlocker, Side: SideSource,
+				Title: "Executor pool " + src.PoolID + " cannot attach the project's volume to a runner",
+				Message: fmt.Sprintf("The move captures the project's working copy from a runner on the volume holding it%s, "+
+					"and %s.", tenant, why),
+				Remedy: "Fix the pool (uncordon it, or what keeps its controller from starting runners), then run the preflight again; " +
+					"to leave the volume behind, move the project with abandon_source.",
+			})
+			return
+		}
 		p.add(Finding{
 			Kind: KindSourceUnseen, Severity: SeverityWarning, Side: SideSource,
-			Title: "The pool's volumes cannot be read from the hub",
-			Message: fmt.Sprintf("When executor pool %s keeps runner volumes, the project's working copy is kept on them%s between runs. "+
-				"The hub cannot read a volume, so it cannot say whether one holds work no remote has. "+
-				"The pool hands a volume to another project only after wiping it.", src.PoolID, tenant),
-			Remedy: "Make sure the work you want is pushed before the move: a run on the pool pushes what it commits through the git proxy when the project's grant allows it.",
+			Title: "The pool's volume is read when the move captures it",
+			Message: fmt.Sprintf("Executor pool %s keeps the project's working copy on a runner volume%s between runs. "+
+				"Only a runner attached to that volume can read it, so this preflight cannot say what it holds. "+
+				"The move asks the pool for a runner on it — the pool hands the project's volume to no other project's runner — "+
+				"and captures the working copy there. If no runner attached to the volume comes up, the move fails at its capture, before anything switches.",
+				src.PoolID, tenant),
+			Remedy: "Nothing needs doing. If the pool has lost the volume, move the project with abandon_source instead.",
 		})
 	case WorkspaceDevice:
 		p.add(Finding{
 			Kind: KindSourceUnseen, Severity: SeverityWarning, Side: SideSource,
-			Title: "The device's working copy cannot be read from the hub",
-			Message: fmt.Sprintf("Device %s keeps the project's working copy at %s between runs, and its runs' home directories beside it. "+
-				"The hub cannot read either, so it cannot say whether they hold uncommitted changes, commits no remote has, "+
-				"or files under .cloop that never came back. A move leaves them on the device.",
+			Title: "The device's working copy is read by the hub member holding its connection",
+			Message: fmt.Sprintf("Device %s keeps the project's working copy at %s between runs. "+
+				"Another member of this hub's cluster holds the device's connection, so this preflight cannot ask it what the copy holds. "+
+				"The move captures it on that member, before anything switches.",
 				deviceOf(p.sourceEx), src.WorkDir),
-			Remedy: "Before the move, push from the device what you want to keep (`git -C " + src.WorkDir + " status` there shows it). " +
-				"Work committed but not pushed stays on the device.",
+			Remedy: "Run the preflight again on the member that holds the device's connection to see what it holds; the move itself needs nothing.",
 		})
 	default:
 		who := "the source"
@@ -273,6 +376,22 @@ func (p *preflight) sourceUnseen() {
 			Remedy:  "Before the move, push what you want to keep from where the runs worked.",
 		})
 	}
+}
+
+// poolCannotAttach says why a pool cannot give a move's capture a runner on
+// the project's volume now; "" when nothing stops it.
+func poolCannotAttach(pf *PoolFacts) string {
+	switch {
+	case pf == nil:
+		return ""
+	case pf.Revoked:
+		return "the pool was revoked"
+	case pf.Cordoned:
+		return "an administrator has cordoned the pool, so its runners are handed nothing"
+	case strings.TrimSpace(pf.Trouble) != "":
+		return "its controller reports it cannot start runners: " + strings.TrimSpace(pf.Trouble)
+	}
+	return ""
 }
 
 // checkWorkingTrees is (b): changes no commit holds yet.
@@ -469,6 +588,10 @@ func (p *preflight) checkFiles(t Tree, mode carry) {
 		f.Message = "These stay in the hub's copy of the project, where the hub reads them: the sandbox spec and the requirements spec still apply to runs on the target, and the dashboard still shows the artifacts."
 	default:
 		f.Message = "The move captures these with the tree. The hub's copy of the project keeps them too: the sandbox spec and the requirements spec go on applying to runs, and the dashboard goes on showing the artifacts."
+		if w := p.report.Source.Workspace; w == WorkspaceDevice || w == WorkspacePool {
+			f.Message = "These are the source's own, written by runs there. The move captures them with the working copy and delivers them to the target, " +
+				"beside the hub's copy of the project, which keeps its own."
+		}
 	}
 	p.add(f)
 	if len(outbox) > 0 && mode != carryStays {

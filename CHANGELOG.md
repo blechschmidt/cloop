@@ -247,6 +247,49 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A project can now be moved off a remote device, a virtual executor on
+  one, or an executor pool's runner volume, with what the device holds
+  captured on the way.** The hub could capture only its own tree, so a move
+  from a device was refused unless it abandoned the device's working copy.
+  Agent protocol v29 adds a capture request: the device's agent records the
+  working copy's uncommitted state on a hidden ref, bundles every local
+  branch and tag and each feature's working copy (a device keeps them in
+  directories of their own), and tars the `.cloop` files a move delivers,
+  then streams them back in chunks. The hub holds them the way it holds a
+  write-back: a cap per part that the request sets, the executor's and the
+  process's budget for returned work, nothing accepted for a capture that
+  has closed or was never asked for, and everything let go of on cancel, on
+  the session's end and on revocation. The agent opens the working copies
+  through an `os.Root` under its own trees root and refuses one that leads
+  outside it: a link in place of the directory or its `.git`, a gitfile,
+  alternates, a configuration key outside a short list (`core.worktree`, an
+  include, a signing program, a remote's `uploadpack`), a worktree record git
+  would read as a repository of its own, a linked worktree whose path a link
+  redirects, or a nested `.git` leading outside. Git runs with no transport,
+  and under a root agent as the working copy's owner. The agent leaves out
+  `config.yaml`, the database, run homes and lease directories. Before
+  anything switches, the hub indexes the bundle into a scratch repository,
+  holds it to its manifest and reads every object back whole, so a value a
+  delta assembles from copied parts is found too. It scans those objects, the
+  files and every string of the capture's record with the git proxy's matcher
+  for every value the project's grants deliver on the source, including grants
+  that lapsed in the last 90 days, and fails closed when it cannot read them.
+  A capture carrying one fails, naming the grant and the file and never the
+  value. A capture whose tree tracks `.cloop` files other than the
+  requirements and sandbox specs is refused, because rebuilding it in the
+  hub's directory would write over the hub's database or configuration. The
+  preflight now reads a
+  device's working copy too, and a device whose agent is older than v29
+  blocks the move with an "upgrade the agent" finding instead of a partial
+  capture. A move onto the hub's own tree rebuilds the working copy there,
+  never over files the hub already holds besides `.cloop`. A pool source is
+  captured from a runner on the volume holding the project: the move queues a
+  request that the pool hands only to a runner holding exactly the project's
+  tenant, and retires the runner afterwards. A capture, the hub's own
+  included, no longer records an index git failed to read as one holding
+  unresolved conflicts: only a real conflict gets that note, and any other
+  failure stops the capture (Task 20495).
+
 - **A project can now be moved to another executor without losing what the
   old side holds.** `POST /api/projects/{idx}/move` with a target binding
   runs the move as a journal of phases, one row per move in the new

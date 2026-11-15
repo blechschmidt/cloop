@@ -72,6 +72,10 @@ const (
 	// KindSourceUnseen: the source can be reached but what its working copy
 	// holds cannot be read from the hub. (b)–(d)
 	KindSourceUnseen Kind = "source_unseen"
+	// KindSourceAgent: the source device's agent is too old to say what its
+	// working copy holds or to capture it (Task 20495): the move must wait
+	// for its upgrade, or abandon the source. (e)
+	KindSourceAgent Kind = "source_agent"
 	// KindAbandoned: what a move that abandons its source loses. (e)
 	KindAbandoned Kind = "abandoned"
 	// KindTarget: the target binding itself — unknown, the binding the

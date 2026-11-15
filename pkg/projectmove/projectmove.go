@@ -134,9 +134,17 @@ type Env interface {
 	Runs(ctx context.Context, path string) RunFacts
 	// SourceTree reads what the source's working copy holds: its git state
 	// and its .cloop files, and its features'. For a source on the hub's own
-	// filesystem ReadHubTree is the implementation; a source whose working
-	// copy the hub cannot read answers ErrUnseen.
+	// filesystem ReadHubTree is the implementation; a device's is asked over
+	// the agent protocol (Task 20495), and a device whose agent is too old to
+	// answer is an *AgentUpgradeError. A source whose working copy the hub
+	// cannot read now — a pool's volume, which only a runner attached to it
+	// can read, or a device whose connection another hub member holds —
+	// answers ErrUnseen.
 	SourceTree(ctx context.Context, project Project, features []Feature, source Endpoint) (Tree, error)
+	// HubDirEntries lists what the project's directory on the hub holds
+	// besides .cloop: a move from a device seeds the hub's own directory
+	// only when it holds nothing else.
+	HubDirEntries(ctx context.Context, project Project) ([]string, error)
 	// Pool returns what the hub knows about an executor pool, for this
 	// project and caller.
 	Pool(ctx context.Context, poolID string, project Project) (PoolFacts, error)
@@ -171,8 +179,12 @@ type Env interface {
 	PathBindings(ctx context.Context, project Project) ([]PathBinding, error)
 }
 
-// Tree is what the project's directory on the hub holds.
+// Tree is what the source's working copy holds.
 type Tree struct {
+	// Absent reports that the source holds no working copy of the project
+	// at all: a device that never ran it. Nothing is lost and nothing
+	// carried.
+	Absent bool
 	// Git is the repository's state: what its working trees hold and which
 	// commits no remote has.
 	Git GitState
@@ -205,7 +217,39 @@ type PoolFacts struct {
 	// Tenant is the tenant the project's runs would hold the pool's volumes
 	// under.
 	Tenant string
+	// Volumes says whether the pool's controller keeps runner volumes:
+	// VolumesKept, VolumesNone, or "" when no controller has said.
+	Volumes string
+	// Cordoned reports an administrator holds the pool: its runners are
+	// handed nothing, a move's capture included.
+	Cordoned bool
+	// Trouble is what the pool's controller last reported keeps it from
+	// starting runners, while that report is recent; "" when nothing does.
+	Trouble string
 }
+
+// What a pool's controller reports of its runners' volumes.
+const (
+	VolumesKept = "kept"
+	VolumesNone = "none"
+)
+
+// AgentUpgradeError is what Env.SourceTree answers for a device whose agent
+// speaks too old a protocol to say what its working copy holds, or to capture
+// it (Task 20495). A move cannot go ahead without the capture, so the
+// preflight reports it as a blocker naming the upgrade.
+type AgentUpgradeError struct {
+	// Device is the device the agent runs on.
+	Device string
+	// Have and Need are the protocol the agent speaks and the one a capture
+	// needs.
+	Have, Need int
+	// Message says so, and Remedy names the upgrade.
+	Message string
+	Remedy  string
+}
+
+func (e *AgentUpgradeError) Error() string { return e.Message }
 
 // HarnessFacts is whether a run on an executor would get its harness's
 // credential.

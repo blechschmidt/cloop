@@ -151,6 +151,10 @@ type Detail struct {
 	// Timeline is one entry per phase run, in order: a phase run twice — a
 	// hub stopped in it — appears twice.
 	Timeline []Step `json:"timeline,omitempty"`
+	// Starter is the owner key of whoever started the move: a pool hands a
+	// runner holding the project's volume only to work started by someone
+	// who may read the project (Task 20495).
+	Starter string `json:"starter,omitempty"`
 }
 
 // PreflightSummary is the preflight the move ran.
@@ -188,6 +192,13 @@ const (
 	DeliverForge = "forge"
 	// DeliverNothing: the source was abandoned, or holds nothing to carry.
 	DeliverNothing = "nothing"
+	// DeliverHubTree: the source was a device's working copy, or a pool
+	// runner's volume, and the target works in the hub's own directory for
+	// the project, which the seed builds from the capture (Task 20495).
+	DeliverHubTree = "hub_tree"
+	// DeliverSameDevice: the source and the target are one device — a device
+	// and its virtual executors keep one working copy — so nothing moves.
+	DeliverSameDevice = "same_device"
 )
 
 // CaptureRecord is what capture wrote.
@@ -217,6 +228,29 @@ type CaptureRecord struct {
 	Abandoned bool `json:"abandoned,omitempty"`
 	// Notes say what the capture could not keep exactly.
 	Notes []string `json:"notes,omitempty"`
+	// From says where the capture was taken: "hub" for the hub's own tree,
+	// "device <id>", or "runner <id> of pool <id>" (Task 20495).
+	From string `json:"from,omitempty"`
+	// WorkDir is where the source's working copy is, when it is not the
+	// hub's tree: on the device, or on the runner's volume.
+	WorkDir string `json:"work_dir,omitempty"`
+	// Scan is what the capture taken from a device was scanned for, and what
+	// the scan found.
+	Scan *ScanRecord `json:"scan,omitempty"`
+}
+
+// ScanRecord is how a capture from a device was scanned for the credentials
+// the project's runs are given (Task 20495). It names no value.
+type ScanRecord struct {
+	// Grants is how many of the project's grants reach the source; Values
+	// how many values they deliver, each matched in its common encodings.
+	Grants int `json:"grants"`
+	Values int `json:"values"`
+	// Mode is the scan's mode: values, or shapes as well.
+	Mode string `json:"mode"`
+	// Result is the bundle's and the files' scan result: clean, secret,
+	// limit or unreadable.
+	Result string `json:"result"`
 }
 
 // SwitchRecord is what the switch changed, for a rollback to change back.

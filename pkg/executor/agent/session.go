@@ -576,6 +576,15 @@ func (a *Agent) frameLoop(ctx context.Context, sess *deviceSession) error {
 			// traffic (Task 20439).
 			go a.handleIsolationProbe(ctx, sess, frame)
 
+		case remote.TypeCaptureReq:
+			// Its own goroutine: a capture reads and bundles a repository,
+			// and the frame loop carries every other handle's traffic (Task
+			// 20495).
+			go a.handleCaptureReq(ctx, sess, frame)
+
+		case remote.TypeCaptureCancel:
+			a.handleCaptureCancel(frame)
+
 		case remote.TypeInstallHarness:
 			// Its own goroutine, and for this frame that is not optional. The
 			// hub sends it from inside a dispatch and blocks on the reply, so

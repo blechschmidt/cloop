@@ -346,6 +346,12 @@ func (s *Server) drivesHere(m projectmove.Move) bool {
 	if m.Phase == projectmove.PhaseQuiesce {
 		return s.runOwnedByPeer(m.Project.Path) == ""
 	}
+	if m.Phase == projectmove.PhaseCapture && !m.AbandonSource {
+		// A device's working copy is asked of the member holding its
+		// connection, and a pool's volume of the member holding the runner
+		// attached to it (Task 20495).
+		return s.capturesHere(m)
+	}
 	if !m.Phase.Switched() || m.Detail.Capture == nil || m.Detail.Capture.Delivery != projectmove.DeliverDevice {
 		return true
 	}
@@ -431,6 +437,9 @@ func (s *Server) auditMove(action auditaction.Action, m projectmove.Move, extra 
 	if c := m.Detail.Capture; c != nil && action != auditaction.ActionProjectMoveStart {
 		payload["delivery"] = c.Delivery
 		payload["captured_bytes"] = c.Bytes
+		if c.From != "" {
+			payload["captured_from"] = c.From
+		}
 	}
 	if sw := m.Detail.Switch; sw != nil && action == auditaction.ActionProjectMoveSwitch {
 		payload["previous_binding"] = sw.PreviousBinding
@@ -564,15 +573,35 @@ func deliveryFor(m projectmove.Move) (string, executor.Executor, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("the target executor %s is not registered on this hub: %w", m.Target, err)
 	}
+	src := sourceEndpoint(m)
+	remoteSource := src.Workspace == projectmove.WorkspaceDevice || src.Workspace == projectmove.WorkspacePool
 	caps := ex.Capabilities()
 	switch {
+	case caps.SharesHostFilesystem && remoteSource:
+		// The source's working copy was on a device or a runner's volume:
+		// the hub's own directory is built from its capture (Task 20495).
+		return projectmove.DeliverHubTree, ex, nil
 	case caps.SharesHostFilesystem:
 		return projectmove.DeliverSameTree, ex, nil
 	case caps.SupportsBranchBundle:
+		if src.Workspace == projectmove.WorkspaceDevice && sameDevice(src, ex) {
+			// A device and its virtual executors keep one working copy.
+			return projectmove.DeliverSameDevice, ex, nil
+		}
 		return projectmove.DeliverDevice, ex, nil
 	default:
 		return projectmove.DeliverForge, ex, nil
 	}
+}
+
+// sameDevice reports whether a device source and the target executor work on
+// one device.
+func sameDevice(src projectmove.Endpoint, target executor.Executor) bool {
+	device := strings.TrimSpace(src.Parent)
+	if device == "" {
+		device = src.ExecutorID
+	}
+	return device != "" && deviceOfExecutor(target).ID() == device
 }
 
 // Capture writes the source's bundle and files into the move store.
@@ -586,10 +615,18 @@ func (d *moveDriver) Capture(ctx context.Context, m projectmove.Move) (*projectm
 		rec.Abandoned = true
 		return rec, nil
 	}
-	if pf := m.Detail.Preflight; pf != nil && pf.Source.Workspace == projectmove.WorkspaceEphemeral {
+	src := sourceEndpoint(m)
+	if src.Workspace == projectmove.WorkspaceEphemeral {
 		// A Pod keeps nothing between runs: there is nothing to capture, and
 		// the hub's own copy of the project stays as it is.
 		rec.Delivery = projectmove.DeliverNothing
+		return rec, nil
+	}
+	if delivery == projectmove.DeliverSameDevice {
+		// The target works in the very working copy the source does.
+		rec.From = "device " + nonEmpty(src.Parent, src.ExecutorID)
+		rec.WorkDir = src.WorkDir
+		rec.Notes = append(rec.Notes, "the target works in the same working copy on the same device; nothing was captured or moved")
 		return rec, nil
 	}
 	dir, err := moveStoreDir(m.ID)
@@ -601,6 +638,28 @@ func (d *moveDriver) Capture(ctx context.Context, m projectmove.Move) (*projectm
 	}
 	rec.Store = dir
 	project := m.Project.Path
+
+	switch src.Workspace {
+	case projectmove.WorkspaceDevice, projectmove.WorkspacePool:
+		// Asked of the device, or of a runner attached to the pool's volume,
+		// over the agent protocol (Task 20495).
+		if src.Workspace == projectmove.WorkspaceDevice {
+			err = d.captureFromDevice(ctx, m, rec)
+		} else {
+			err = d.captureFromPool(ctx, m, rec)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if delivery == projectmove.DeliverForge {
+			if err := forgeHoldsEverything(rec.Git); err != nil {
+				return nil, fmt.Errorf("%s builds every run's tree from the forge, and on %s %w; commit and push it there, then move the project again",
+					projectmove.DescribeTarget(m.Target), rec.From, err)
+			}
+		}
+		return rec, nil
+	}
+	rec.From = "hub"
 
 	// What the capture is about to write, against the hub's free-space floor:
 	// nothing is written that would take the hub below it.
@@ -677,6 +736,24 @@ func forgeHoldsEverything(m movegit.Manifest) error {
 	}
 	if len(m.Stash) > 0 {
 		missing = append(missing, fmt.Sprintf("the stash holds %d entr(ies)", len(m.Stash)))
+	}
+	// A device keeps its features' working copies apart, and the capture
+	// carries their branches and stashes (Task 20495).
+	var branches []string
+	stashed := 0
+	for _, c := range m.UnpushedCarried() {
+		name := m.CarriedName(c)
+		if b, ok := strings.CutPrefix(name, "refs/heads/"); ok {
+			branches = append(branches, b)
+		} else {
+			stashed++
+		}
+	}
+	if len(branches) > 0 {
+		missing = append(missing, "features' branches hold commits no remote has ("+strings.Join(branches, ", ")+")")
+	}
+	if stashed > 0 {
+		missing = append(missing, fmt.Sprintf("features' stashes hold %d entr(ies)", stashed))
 	}
 	if len(missing) == 0 {
 		return nil
@@ -785,6 +862,18 @@ func (d *moveDriver) Seed(ctx context.Context, m projectmove.Move) (*projectmove
 		return rec, nil
 	case projectmove.DeliverForge:
 		rec.Note = "the target builds each run's tree from the forge, which holds every captured branch"
+		return rec, nil
+	case projectmove.DeliverSameDevice:
+		rec.Note = "the target works in the same working copy on the same device"
+		return rec, nil
+	case projectmove.DeliverHubTree:
+		// The capture came from a device or a runner's volume (Task 20495):
+		// the hub's own directory for the project is built from it.
+		if err := projectmove.SeedHubTree(ctx, m.Project.Path, m.ID, c, ""); err != nil {
+			return nil, err
+		}
+		rec.WorkDir, rec.Bytes = m.Project.Path, c.Bytes
+		rec.Note = "the hub's own directory for the project was built from what " + nonEmpty(c.From, "the source") + " held"
 		return rec, nil
 	case projectmove.DeliverDevice:
 	default:
@@ -955,9 +1044,9 @@ func (d *moveDriver) Verify(ctx context.Context, m projectmove.Move) (*projectmo
 	}
 	rec := &projectmove.VerifyRecord{Delivery: c.Delivery}
 	switch c.Delivery {
-	case projectmove.DeliverNothing:
+	case projectmove.DeliverNothing, projectmove.DeliverSameDevice:
 		return rec, nil
-	case projectmove.DeliverSameTree:
+	case projectmove.DeliverSameTree, projectmove.DeliverHubTree:
 		o, err := movegit.Inspect(ctx, m.Project.Path, movegit.InspectOptions{})
 		if err != nil {
 			return nil, err
@@ -1000,7 +1089,7 @@ func (d *moveDriver) Verify(ctx context.Context, m projectmove.Move) (*projectmo
 func checkedCount(c *projectmove.CaptureRecord) int {
 	n := len(c.Files)
 	if c.Git.Repository {
-		n += len(c.Git.Branches) + len(c.Git.Tags) + len(c.Git.Stash) + 3 // HEAD, the index, the working tree
+		n += len(c.Git.Branches) + len(c.Git.Tags) + len(c.Git.Stash) + len(c.Git.Carried) + 3 // HEAD, the index, the working tree
 		for _, w := range c.Git.Worktrees {
 			if w.Ref != "" {
 				n++
@@ -1091,10 +1180,21 @@ func (d *moveDriver) Retain(_ context.Context, m projectmove.Move) *projectmove.
 		for _, st := range c.Git.Stash {
 			r.Refs = append(r.Refs, st.Name)
 		}
+		for _, cr := range c.Git.Carried {
+			r.Refs = append(r.Refs, cr.Name)
+		}
 	}
 	switch {
 	case c == nil || c.Delivery == projectmove.DeliverNothing && c.Abandoned:
 		r.Source = "the source was abandoned: nothing was captured from it, and nothing of it was removed"
+	case c.Delivery == projectmove.DeliverSameDevice:
+		r.Source = "the target works in the same working copy, on " + nonEmpty(c.From, "the same device") + "; nothing was captured or moved"
+	case c.From != "" && c.From != "hub":
+		r.Source = nonEmpty(c.From, "the source") + " keeps its working copy as it was"
+		if c.WorkDir != "" {
+			r.Source += ", at " + c.WorkDir
+		}
+		r.Source += ", with the move's hidden refs in its repository; runs now work on " + projectmove.DescribeTarget(m.Target)
 	case c.Delivery == projectmove.DeliverSameTree:
 		r.Source = "the target works in the same directory on the hub, " + m.Project.Path + ", which is kept as it was"
 	default:
@@ -1127,12 +1227,15 @@ func (s *Server) cleanupMove(ctx context.Context, m projectmove.Move, actor stri
 		for _, st := range c.Git.Stash {
 			refs = append(refs, st.Name)
 		}
+		for _, cr := range c.Git.Carried {
+			refs = append(refs, cr.Name)
+		}
 	}
 	if len(refs) > 0 {
 		if info, err := os.Stat(m.Project.Path); err == nil && info.IsDir() {
 			for _, ref := range refs {
 				if !strings.HasPrefix(ref, movegit.SnapshotRefPrefix+m.ID) && !strings.HasPrefix(ref, movegit.WorktreeRefPrefix+m.ID+"/") &&
-					!strings.HasPrefix(ref, movegit.StashRefPrefix+m.ID+"/") {
+					!strings.HasPrefix(ref, movegit.StashRefPrefix+m.ID+"/") && !strings.HasPrefix(ref, movegit.ExternalRefPrefix+m.ID+"/") {
 					continue
 				}
 				if err := movegit.DeleteRef(ctx, m.Project.Path, ref); err != nil {
@@ -1198,7 +1301,7 @@ func (s *Server) handleProjectMoveStart(w http.ResponseWriter, r *http.Request) 
 	defer env.close()
 	m, rep, err := s.moveEngine().Start(r.Context(), env, projectmove.StartRequest{
 		Project: projectmove.Project{Name: entry.Name, Path: entry.Path}, Target: target.Binding,
-		AbandonSource: req.AbandonSource, StartedBy: s.auditActor(r),
+		AbandonSource: req.AbandonSource, StartedBy: s.auditActor(r), Starter: s.harnessWhoFor(r).identity,
 	})
 	var blocked *projectmove.BlockedError
 	switch {

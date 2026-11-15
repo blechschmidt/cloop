@@ -278,12 +278,21 @@ func (s *Server) executingDetail(path string) string {
 
 func (e *moveEnv) SourceTree(ctx context.Context, p projectmove.Project, features []projectmove.Feature,
 	src projectmove.Endpoint) (projectmove.Tree, error) {
-	if src.Workspace != projectmove.WorkspaceHubTree {
-		// A device's working copy and a pool's volumes are out of the hub's
-		// reach; capturing them is the agent protocol's to add.
-		return projectmove.Tree{}, projectmove.ErrUnseen
+	switch src.Workspace {
+	case projectmove.WorkspaceHubTree:
+		return projectmove.ReadHubTree(ctx, p, features)
+	case projectmove.WorkspaceDevice:
+		// Asked of the device's agent (Task 20495), when this member holds
+		// its connection.
+		return e.s.inspectDevice(ctx, p, src)
 	}
-	return projectmove.ReadHubTree(ctx, p, features)
+	// A pool's volume is read only by a runner attached to it, which the
+	// move asks the pool for when it captures.
+	return projectmove.Tree{}, projectmove.ErrUnseen
+}
+
+func (e *moveEnv) HubDirEntries(_ context.Context, p projectmove.Project) ([]string, error) {
+	return projectmove.HubDirEntries(p.Path)
 }
 
 // Pool answers what bindProjectToPool checks before a bind.
@@ -316,6 +325,11 @@ func (e *moveEnv) Pool(_ context.Context, poolID string, p projectmove.Project) 
 		f.Fits = fmt.Sprintf("its runners fail the %s constraint: %s", rej.Constraint, rej.Detail)
 	}
 	f.Template = pool.Template().Executor
+	f.Volumes = e.s.poolVolumes(pool.ID)
+	f.Cordoned = pool.Cordoned()
+	if trouble, ok := e.s.poolControllerTrouble(store, pool.ID); ok {
+		f.Trouble = trouble
+	}
 	policy := policyProjectPath(p.Path)
 	f.Tenant = executorpool.ProjectTenant(pool.ID, policy, e.s.projectOwnerKey(policy))
 	return f, nil

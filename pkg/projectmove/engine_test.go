@@ -400,14 +400,40 @@ func TestAPreflightThatBlocksEndsTheMoveFailedAtPreflight(t *testing.T) {
 	}
 }
 
-func TestAMoveFromADeviceIsRefusedUnlessItAbandonsTheSource(t *testing.T) {
+// TestAMoveFromADeviceNeedsAnAgentThatCanCapture (Task 20495): a device whose
+// agent captures over the protocol is moved like the hub's tree; one whose
+// agent is too old is refused at the preflight, naming the upgrade, before
+// anything is stopped or captured — never moved with a partial capture —
+// unless the move abandons the source.
+func TestAMoveFromADeviceNeedsAnAgentThatCanCapture(t *testing.T) {
 	w := newWorld()
 	w.env.binding = "dev1"
 	w.store.binding[testProject.Path] = "dev1"
-	w.env.tree = Tree{}
+	w.env.deviceTree = &Tree{Git: GitState{Dir: "/var/lib/cloop-executor/work/app", Repository: true}}
 	m, _, err := w.engine.Start(context.Background(), w.env, StartRequest{Project: testProject, Target: "local"})
-	if !errors.Is(err, ErrSourceUnsupported) || m.Phase != PhaseFailed {
-		t.Fatalf("err = %v, move %s", err, m.Phase)
+	if err != nil || m.Phase != PhaseQuiesce {
+		t.Fatalf("a capable device: err = %v, move %s", err, m.Phase)
+	}
+	if _, err := w.engine.Drive(context.Background(), m.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	w = newWorld()
+	w.env.binding = "dev1"
+	w.store.binding[testProject.Path] = "dev1"
+	w.env.upgrade = &AgentUpgradeError{Device: "dev1", Have: 28, Need: 29,
+		Message: "Device dev1's agent speaks protocol v28, and the hub needs v29 to capture a project's working copy for a move.",
+		Remedy:  "Upgrade the agent from the Executors panel."}
+	m, rep, err := w.engine.Start(context.Background(), w.env, StartRequest{Project: testProject, Target: "local"})
+	var blocked *BlockedError
+	if !errors.As(err, &blocked) || m.Phase != PhaseFailed || m.FailedPhase != PhasePreflight {
+		t.Fatalf("an old agent: err = %v, move %s at %s", err, m.Phase, m.FailedPhase)
+	}
+	if !holds(rep, want{KindSourceAgent, SeverityBlocker, "Upgrade the agent"}) {
+		t.Errorf("no upgrade finding:\n%s", dump(rep))
+	}
+	if calls := w.driver.called(); len(calls) != 0 {
+		t.Errorf("a move refused at its preflight did work: %v", calls)
 	}
 	m, _, err = w.engine.Start(context.Background(), w.env, StartRequest{Project: testProject, Target: "local", AbandonSource: true})
 	if err != nil || m.Phase != PhaseQuiesce || !m.AbandonSource {

@@ -84,8 +84,10 @@ type StartRequest struct {
 	// AbandonSource moves without capturing the source: the way off a
 	// device that is gone for good.
 	AbandonSource bool
-	// StartedBy is who asked.
+	// StartedBy is who asked, as the audit trail names them; Starter their
+	// owner key ("" on a hub without sign-in).
 	StartedBy string
+	Starter   string
 	// ProbeTimeout bounds the preflight's reachability probes.
 	ProbeTimeout time.Duration
 }
@@ -137,7 +139,7 @@ func (e *Engine) Start(ctx context.Context, env Env, req StartRequest) (Move, *R
 		ID: id, Project: project, Source: strings.TrimSpace(source), Target: tgt.Binding,
 		Phase: PhasePreflight, AbandonSource: req.AbandonSource, StartedBy: req.StartedBy,
 		CreatedAt: at, UpdatedAt: at,
-		Detail: Detail{Timeline: []Step{{Phase: PhasePreflight, Started: at, Member: e.Member}}},
+		Detail: Detail{Timeline: []Step{{Phase: PhasePreflight, Started: at, Member: e.Member}}, Starter: req.Starter},
 	}
 	created, err := e.Store.Create(ctx, m)
 	if err != nil {
@@ -170,23 +172,21 @@ func (e *Engine) Start(ctx context.Context, env Env, req StartRequest) (Move, *R
 	return out, rep, err
 }
 
-// sourceSupported refuses a source this hub cannot capture: a device's working
-// copy or a pool runner's volume is out of its reach, and a move that cannot
-// capture must say so before it stops a run, unless it was asked to abandon
-// the source.
+// sourceSupported refuses a source this hub cannot capture. Since Task 20495
+// every source can be: the hub's own tree, a device's working copy over the
+// agent protocol, a pool's volume through a runner attached to it — and a
+// device whose agent is too old to be asked blocks the preflight already. The
+// check stays for a source this build does not know.
 func sourceSupported(rep *Report, abandon bool) error {
 	if abandon {
 		return nil
 	}
 	switch rep.Source.Workspace {
-	case WorkspaceHubTree, WorkspaceEphemeral, "":
+	case WorkspaceHubTree, WorkspaceEphemeral, WorkspaceDevice, WorkspacePool, "":
 		return nil
-	case WorkspaceDevice:
-		return fmt.Errorf("%w: the project's working copy is on device %s, and this hub can capture a project only from its own filesystem; move it with abandon_source to leave the device's copy behind", ErrSourceUnsupported, nonEmpty(rep.Source.Parent, rep.Source.ExecutorID))
-	case WorkspacePool:
-		return fmt.Errorf("%w: the project's working copy is on executor pool %s's volumes, which this hub cannot read; push its work, then move it with abandon_source", ErrSourceUnsupported, rep.Source.PoolID)
 	}
-	return nil
+	return fmt.Errorf("%w: the project's working copy is kept where this hub cannot capture it (%s); move it with abandon_source to leave it behind",
+		ErrSourceUnsupported, rep.Source.Workspace)
 }
 
 // Drive runs the move from the phase it is at until it ends, ctx is

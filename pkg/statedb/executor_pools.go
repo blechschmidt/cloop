@@ -171,6 +171,10 @@ type PoolRunnerProject struct {
 	Tenant string
 	Name   string
 	Owner  string
+	// Strict hands the run only to a runner whose storage holds exactly
+	// Tenant — never one holding nothing: a project move's capture of the
+	// project's volume (Task 20495), which a fresh runner has nothing of.
+	Strict bool
 }
 
 // Live reports whether the runner counts against its pool's max_runners at
@@ -1286,9 +1290,16 @@ func (d *DB) AssignPoolQueueEntryTo(id, executorID, member string, at time.Time,
 		return false, nil
 	}
 	tenant := strings.TrimSpace(p.Tenant)
+	holdsRule := `(holds = '' OR holds = ?)`
+	if p.Strict {
+		if tenant == "" {
+			return false, nil
+		}
+		holdsRule = `holds = ?`
+	}
 	res, err = tx.Exec(`UPDATE executor_pool_runners SET state = ?, queue_id = ?, busy_at = ?, member = ?,
 		project = ?, project_name = ?, project_owner = ?
-		WHERE executor_id = ? AND executor_id != '' AND state = ? AND (holds = '' OR holds = ?)`,
+		WHERE executor_id = ? AND executor_id != '' AND state = ? AND `+holdsRule,
 		PoolRunnerBusy, id, stamp, member, tenant, strings.TrimSpace(p.Name), strings.TrimSpace(p.Owner),
 		executorID, PoolRunnerIdle, tenant)
 	if err != nil {

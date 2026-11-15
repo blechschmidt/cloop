@@ -249,6 +249,10 @@ type Agent struct {
 	branchMu sync.Mutex
 	branches map[string]*branchTransfer
 
+	// capture is the capture request being answered (Task 20495). It locks
+	// itself. See capture.go.
+	capture captureSlot
+
 	mu   sync.Mutex
 	cred Credential
 	// token is the enrollment token, taken out of cfg in New so the one copy

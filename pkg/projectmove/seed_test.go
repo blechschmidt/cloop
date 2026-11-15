@@ -424,13 +424,25 @@ func TestExtractFilesRefusesWhatTheCaptureDidNotRecord(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			_ = os.RemoveAll(cl)
-			if err := ExtractFiles(tarOf(t, tc.entries), cl, tc.want); err == nil {
+			tar := tarOf(t, tc.entries)
+			// The check a capture from a device gets when it arrives
+			// refuses what the extraction would, and writes nothing.
+			if err := VerifyFilesTar(tar, tc.want); err == nil {
+				t.Error("verified")
+			}
+			if _, err := os.Lstat(cl); !errors.Is(err, os.ErrNotExist) {
+				t.Error("the verification wrote something")
+			}
+			if err := ExtractFiles(tar, cl, tc.want); err == nil {
 				t.Error("extracted")
 			}
 			if _, err := os.Lstat(filepath.Join(root, "proj", "escape")); !errors.Is(err, os.ErrNotExist) {
 				t.Error("a traversal entry was written")
 			}
 		})
+	}
+	if err := VerifyFilesTar(tarOf(t, map[string]string{"artifacts/a": "x"}), []File{fileOf("artifacts/a", "x")}); err != nil {
+		t.Errorf("a tar holding what was recorded: %v", err)
 	}
 	// A link standing where a directory should be is never written through.
 	_ = os.RemoveAll(cl)
@@ -620,5 +632,73 @@ func TestAPoolTargetTakesOnlyWhatTheForgeHas(t *testing.T) {
 	f := rep.Of(KindWorkingTree)
 	if len(f) != 1 || f[0].Severity != SeverityBlocker {
 		t.Errorf("dirty work for a pool = %+v", f)
+	}
+}
+
+// TestTheHubTreeSeedRebuildsADevicesCopy (Task 20495): a capture taken from a
+// device rebuilds in the hub's own directory for the project, beside the
+// hub's .cloop and never over anything else, and verifies as the hub's tree.
+func TestTheHubTreeSeedRebuildsADevicesCopy(t *testing.T) {
+	ctx := context.Background()
+	src := dirtyProject(t)
+	rec, _ := capture(t, src, "0123456789abcdef")
+	rec.Delivery = DeliverHubTree
+
+	hub := filepath.Join(t.TempDir(), "app")
+	put(t, filepath.Join(hub, ".cloop", "state.db"), []byte("the hub's database"), 0o600)
+	put(t, filepath.Join(hub, ".cloop", "config.yaml"), []byte("hub: config\n"), 0o600)
+	// What `cloop init` writes beside .cloop is the hub's own, not work.
+	put(t, filepath.Join(hub, ".gitignore"), []byte(".cloop/env.yaml\n"), 0o644)
+	if entries, err := HubDirEntries(hub); err != nil || len(entries) != 0 {
+		t.Fatalf("the hub's own files count as work: %v %v", entries, err)
+	}
+	if err := SeedHubTree(ctx, hub, "0123456789abcdef", rec, "https://hub.example/git/acme/app"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := files(t, hub), files(t, src); len(got) != len(want) {
+		t.Fatalf("the hub's tree holds %d paths, the source %d:\n%v\n%v", len(got), len(want), got, want)
+	} else {
+		for p, w := range want {
+			if got[p] != w {
+				t.Errorf("%s: %q, want %q", p, got[p], w)
+			}
+		}
+	}
+	o, err := movegit.Inspect(ctx, hub, movegit.InspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mm := movegit.Compare(rec.Git, o); len(mm) > 0 {
+		t.Errorf("the rebuilt tree differs from the capture: %v", mm)
+	}
+	if mm := CheckFiles(filepath.Join(hub, ".cloop"), rec.Files); len(mm) > 0 {
+		t.Errorf("the delivered files differ: %v", mm)
+	}
+	if b, _ := os.ReadFile(filepath.Join(hub, ".cloop", "state.db")); string(b) != "the hub's database" {
+		t.Error("the seed touched the hub's database")
+	}
+	if b, _ := os.ReadFile(filepath.Join(hub, ".cloop", "config.yaml")); string(b) != "hub: config\n" {
+		t.Error("the seed touched the hub's configuration")
+	}
+	// .cloop is the hub's bookkeeping, never the project's work.
+	if out := runGit(t, hub, "status", "--porcelain", "--", ".cloop"); out != "" {
+		t.Errorf("git sees .cloop in the rebuilt tree: %s", out)
+	}
+	// Run again, it is a no-op; a directory holding anything else is refused.
+	if err := SeedHubTree(ctx, hub, "0123456789abcdef", rec, ""); err != nil {
+		t.Errorf("the seed run again: %v", err)
+	}
+	occupied := filepath.Join(t.TempDir(), "app")
+	put(t, filepath.Join(occupied, "README.md"), []byte("the hub's own checkout\n"), 0o644)
+	userIgnore := filepath.Join(t.TempDir(), "app")
+	put(t, filepath.Join(userIgnore, ".gitignore"), []byte(".cloop/\nnode_modules/\n"), 0o644)
+	if err := SeedHubTree(ctx, userIgnore, "0123456789abcdef", rec, ""); !errors.Is(err, ErrHubDirOccupied) {
+		t.Errorf("a .gitignore of the user's: err = %v, want ErrHubDirOccupied", err)
+	}
+	if err := SeedHubTree(ctx, occupied, "0123456789abcdef", rec, ""); !errors.Is(err, ErrHubDirOccupied) {
+		t.Errorf("an occupied directory: err = %v, want ErrHubDirOccupied", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(occupied, "README.md")); string(b) != "the hub's own checkout\n" {
+		t.Error("the refused seed changed the occupied directory")
 	}
 }

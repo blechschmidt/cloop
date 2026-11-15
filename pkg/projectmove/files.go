@@ -141,11 +141,29 @@ const maxExamples = 5
 //
 // It only stats: nothing is opened or read, and no symbolic link is followed —
 // the directory may be one a sandbox can write (a container-bound project's),
-// and a planted link must not turn the inventory into a walk of the hub.
+// and a planted link must not turn the inventory into a walk of the hub. The
+// walk goes through an os.Root at projectDir, so nothing it names can resolve
+// outside the project either.
 func InventoryFiles(projectDir string) FileInventory {
-	root := filepath.Join(projectDir, ".cloop")
-	inv := FileInventory{Dir: root}
-	info, err := os.Lstat(root)
+	dir := filepath.Join(projectDir, ".cloop")
+	root, err := os.OpenRoot(projectDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return FileInventory{Dir: dir}
+	}
+	if err != nil {
+		return FileInventory{Dir: dir, Error: err.Error()}
+	}
+	defer root.Close()
+	return InventoryFilesIn(root, dir)
+}
+
+// InventoryFilesIn is InventoryFiles for the project whose directory root
+// opens; dir is how the inventory names its .cloop directory. Every name it
+// resolves goes through root, so a link cannot lead it outside the project:
+// how a device reads a working copy a workload wrote (Task 20495).
+func InventoryFilesIn(root *os.Root, dir string) FileInventory {
+	inv := FileInventory{Dir: dir}
+	info, err := root.Lstat(".cloop")
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return inv
@@ -162,9 +180,9 @@ func InventoryFiles(projectDir string) FileInventory {
 	}
 	tally := map[string]*FileCategory{}
 	seen := 0
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := fs.WalkDir(root.FS(), ".cloop", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if path == root {
+			if p == ".cloop" {
 				return err
 			}
 			// An unreadable subdirectory is skipped, not fatal: what the
@@ -174,7 +192,7 @@ func InventoryFiles(projectDir string) FileInventory {
 			}
 			return nil
 		}
-		if path == root {
+		if p == ".cloop" {
 			return nil
 		}
 		seen++
@@ -182,11 +200,7 @@ func InventoryFiles(projectDir string) FileInventory {
 			inv.Truncated = true
 			return fs.SkipAll
 		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
+		rel := strings.TrimPrefix(p, ".cloop/")
 		if !strings.Contains(rel, "/") {
 			if inDatabase[rel] || notFiles[rel] {
 				if d.IsDir() {

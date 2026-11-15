@@ -499,6 +499,38 @@ func (b *Broker) RedactionValues(leaseID string) []string {
 	return out
 }
 
+// GrantCredentials re-derives every credential the grants grantIDs deliver to
+// a run of req, each with its provenance: the values a project move scans
+// the working copy it captures from a device for (Task 20495), so a value the
+// project's runs were given cannot leave the device in it. It is
+// RedactionCredentials for grants rather than a lease: the runs that held
+// them are over by the time a move captures. Nothing is minted or rendered,
+// and a grant or secret that cannot be read is skipped — the caller compares
+// what it asked for with what came back.
+func (b *Broker) GrantCredentials(grantIDs []string, req Requester) ([]CredentialValue, int) {
+	var (
+		out    []CredentialValue
+		opened int
+	)
+	for _, id := range grantIDs {
+		g, err := b.store.GetGrant(id)
+		if err != nil {
+			continue
+		}
+		s, err := b.store.GetSecret(g.SecretID)
+		if err != nil {
+			continue
+		}
+		mat, err := b.rederiveMaterial(s, g, req, "project-move", "")
+		if err != nil {
+			continue
+		}
+		opened++
+		out = append(out, mat.credentialValues()...)
+	}
+	return dedupeCredentialValues(out), opened
+}
+
 // RedactionCredentials re-derives, for a lease this broker took over, every
 // credential its grants delivered, each with its provenance. These are the
 // values the adopted run's output is scrubbed of and its pushes are scanned

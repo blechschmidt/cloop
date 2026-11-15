@@ -922,8 +922,10 @@ The report covers:
   fetches nothing (`pkg/executor/gitstate`);
 - files under `.cloop` that no database holds: artifacts, the attachment outbox,
   checkpoints, `sandbox.yaml` and the requirements spec;
-- whether the source answers. The hub can't read a device's working copy yet, so
-  the report says where it is and that a move leaves it there;
+- whether the source answers, and for a device, what its working copy holds:
+  the hub asks the device's agent, as described below. A device whose agent
+  speaks a protocol older than v29 blocks the move with a `source_agent`
+  finding that names the upgrade;
 - whether the target can run the project: your access, a harness credential for
   a sandboxed target, the project's secret grants, its firewall rules against
   the target's, its devices, the isolation its sandbox spec asks for, and whether
@@ -933,6 +935,126 @@ The report covers:
 
 The JSON response is the report as `pkg/projectmove` defines it, and
 `Report.WriteText` renders the same report for a terminal.
+
+### Moving a project off a device
+
+The hub can't read a device's working copy, so a move from a device, a virtual
+executor on one, or an executor pool's runner volume asks the agent for it.
+Protocol v29 adds four frames for this:
+
+| Frame | Direction | Carries |
+| --- | --- | --- |
+| `capture_req` | hub to agent | the working copy's directory name, the features' directory names, the move's ID, the pool tenant for a runner, and a cap for each part of the answer |
+| `capture_chunk` | agent to hub | one slice of one part: the JSON document, the git bundle, or the tar of `.cloop` files |
+| `capture_result` | agent to hub | each part's size and SHA-256, or why there is no answer |
+| `capture_cancel` | hub to agent | stop: the hub no longer wants the answer |
+
+The preflight sends an inspection, which returns only the document: the
+working copy's git state and `.cloop` inventory, in the same shape the hub
+reads from its own tree. The move's capture phase sends the full request. The
+agent writes the uncommitted state onto `refs/cloop/move/<id>` the way the hub
+does for its own tree, bundles every local branch and tag, and carries each
+feature's working copy into the same bundle under
+`refs/cloop/move-feature/<id>/`, because a device keeps a feature's working
+copy in a directory of its own beside the project's. The tar holds only what a
+move delivers: artifacts, task output, the attachment outbox, checkpoints and
+the two spec files. `config.yaml`, the database and anything else under
+`.cloop` stay on the device.
+
+The agent reads nothing outside the directories the request names, each one
+path element under its trees root, opened through an `os.Root`
+(`pkg/executor/movecapture`). A working copy is something a workload wrote, and
+the agent often runs as a more privileged user than any workload, so the
+capture refuses a working copy that is a link, a `.git` that is a link or a
+gitfile, any link or special file inside `.git`, alternates or a `commondir`
+naming another repository, and a linked worktree whose recorded path a link
+redirects or whose gitfile points anywhere but the repository's own
+`.git/worktrees`. A worktree's record must name the repository it sits in
+(`commondir` is `../..`) and may hold no configuration or objects of its own,
+because git would read such a record as a separate repository. The
+configuration is read by git with includes off and held to a list of keys: what
+`git init` writes, a remote's URL and refspecs, a branch's upstream, and
+settings for commands a capture never runs. A signing program, a remote's
+`uploadpack`, `core.worktree`, an include, or a filter in a worktree's own
+configuration refuses the capture. The rest of the tree is walked too: a nested
+`.git` that is a link, or a gitfile that leads outside the working copy's own
+`.git`, refuses it, since recording a nested repository makes git read the
+commit it points at.
+
+Git runs with no transport at all (`protocol.allow=never`, and no lazy fetch
+from a promisor remote), so nothing in the repository can make it reach the
+network or another path. A feature's objects are packed in its own repository
+and indexed into the project's, with no fetch between them. When the agent runs
+as root, git runs as the user who owns the working copy, so what it writes
+there stays that user's. Run homes and lease directories are left out if they
+ever lie inside a working copy, which by construction they don't.
+
+The hub treats the answer as it treats a write-back. Each part has the cap the
+request set. Every chunk counts against the executor's and the process's budget
+for returned work (`executors.remote.max_pinned_writeback_bytes` and
+`executors.remote.max_pinned_writeback_total_bytes`). A chunk for a capture that has closed,
+was never asked for, or was asked on another session is refused before
+anything is kept. What the hub holds is released when the move writes it into
+its store, and also when the capture is cancelled, fails, loses its session, or
+the device is revoked or deregistered. One capture carries at most 128 MiB.
+
+Before the move switches anything, the hub checks what came back. It decodes
+the document with `movecapture.DecodeDocument`, which rejects any ref name,
+object ID, path or remote URL that git could read as an option or that a
+capture never writes, and checks each part against its digest. It then scans
+for every value the project's grants deliver to a run on the source, re-derived
+from the grants. Grants that were revoked, expired or suspended in the last 90
+days are included where their secrets can still be opened, because the runs
+they served may have left a value behind. The scan uses the git proxy's
+matcher in values mode at least, whatever `executors.git_proxy.push_scan` says,
+because a value in a capture would travel to an executor its grant may not
+reach. It covers:
+
+- every string in the document, before any of it is recorded or shown;
+- every object in the bundle, read back whole after the bundle is indexed into
+  a scratch repository (`movegit.CheckBundle`), so a value that a delta builds
+  from copied parts is found as well as one written out in full;
+- every file in the tar, and the file names.
+
+The same scratch repository holds the bundle to its manifest: every ref the
+manifest names must be there at its object, and the bundle may hold no other
+ref. The snapshot's trees may carry nothing under `.cloop` except
+`requirements.yaml` and `sandbox.yaml`, the two files a project commits on
+purpose. A tree that tracks the database or `config.yaml` there would write over
+the hub's own copy when it is rebuilt in the hub's directory. The tar must hold
+exactly the files the document lists, at their digests. A capture that fails
+any of this fails at the capture phase and its store is emptied. A scan finding
+names the grant, the secret and the file, never the value. If the hub can't read
+its grants or open a grant's secret, the capture fails rather than going
+through unscanned.
+
+Where the captured copy goes depends on the target:
+
+| Target | What happens |
+| --- | --- |
+| another device | seeded through the move's carrier branch, as from the hub's own tree |
+| the same device, or a virtual executor on it | nothing moves: both work in one working copy |
+| an executor sharing the hub's tree | the hub's own directory for the project is rebuilt from the capture, only if it holds nothing besides `.cloop` and the `.gitignore` that `cloop init` writes |
+| a Pod or a pool | everything must already be on the forge, as for a move from the hub's tree, the features' branches and stashes included |
+
+A pool's volume is read by a runner attached to it, and only the pool's
+controller starts runners. The move queues a request in the pool's queue for
+the project, which the controller's feed shows as the project's demand. The
+dispatcher hands that request only to a runner whose volume holds exactly the
+project's tenant: never a fresh runner, which has nothing of the project, and
+never another project's. The runner checks the tenant again before it answers.
+The member holding the runner's connection captures from it and then retires
+the runner. A controller counts any idle runner as meeting the pool's demand,
+so while a runner holding nothing sits idle it would start none on the
+project's volume. After the request has waited 30 seconds with no other run
+waiting, the hub retires one such idle runner, and the controller starts its
+replacement on the volume the feed names. If no runner on the volume comes up
+within 15 minutes, the capture fails before anything switches. A pool whose
+controller reports no volumes keeps nothing to capture. A capture that ends
+early takes its request back and retires any runner it was handed. If the hub
+stops part-way, the leader's pool janitor does the same once the move is no
+longer capturing. While the move is capturing, the janitor leaves the runner
+alone even after its usual 20 minutes.
 
 ### How much one workload may be given
 

@@ -727,3 +727,127 @@ func TestAPreflightStartsNothingAndAsksOnlyTheEndsOfTheMove(t *testing.T) {
 	}
 	// fakeExec.Start fails loudly; reaching here means nothing started.
 }
+
+// deviceTreeOf is what a device's agent reports of a dirty working copy with
+// a branch no remote holds.
+func deviceTreeOf() *Tree {
+	wd := "/var/lib/cloop-executor/work/" + executor.DeviceWorkDir(testProject.Path)
+	return &Tree{
+		Git: GitState{Dir: wd, Repository: true, Remotes: []string{"origin"},
+			Worktrees: []gitstate.Worktree{{Path: wd, Branch: "main", Changed: 1, ChangedPaths: []string{"app.go"},
+				Untracked: 1, UntrackedPaths: []string{"draft.md"}}},
+			Branches: []gitstate.Branch{{Name: "main", Unpushed: 3}}},
+		Files: FileInventory{Dir: wd + "/.cloop", Categories: []FileCategory{{Name: FilesArtifacts, Files: 2, Bytes: 40}}},
+	}
+}
+
+// TestDeviceSourceFindings (Task 20495): a device's working copy is read over
+// the agent protocol, and the findings are the hub tree's, judged against
+// where the target keeps its work.
+func TestDeviceSourceFindings(t *testing.T) {
+	onDev1 := func(e *fakeEnv) {
+		e.binding = "dev1"
+		e.deviceTree = deviceTreeOf()
+	}
+	runScenarios(t, []scenario{
+		{name: "a device's changes are captured for another device", target: "dev2", setup: onDev1,
+			wants: []want{
+				{KindWorkingTree, SeverityWillCarry, "1 changed and 1 untracked"},
+				{KindLocalCommits, SeverityWillCarry, "3 commit(s)"},
+				{KindProjectFiles, SeverityWillCarry, "source's own"},
+			},
+			none: []Kind{KindSourceUnseen, KindSourceAgent}},
+		{name: "a device's changes are captured for the hub's tree", target: "local", setup: onDev1,
+			wants: []want{{KindWorkingTree, SeverityWillCarry, "captures these changes"}},
+			none:  []Kind{KindTarget}},
+		{name: "the hub's directory holding a working copy blocks", target: "local", blocked: true,
+			setup: func(e *fakeEnv) { onDev1(e); e.hubEntries = []string{".git", "README.md"} },
+			wants: []want{{KindTarget, SeverityBlocker, "already holds 2 entr(ies)"}}},
+		{name: "a Pod would never see a device's changes", target: "k8s", blocked: true, setup: onDev1,
+			wants: []want{
+				{KindWorkingTree, SeverityBlocker, "from the forge"},
+				{KindLocalCommits, SeverityBlocker, "3 commit(s)"},
+			}},
+		{name: "the device's own virtual executor works in the same copy", target: "vx-hsm", setup: onDev1,
+			wants: []want{{KindWorkingTree, SeverityWillCarry, "stay where they are"}}},
+		{name: "a device that never ran the project holds nothing", target: "dev2",
+			setup: func(e *fakeEnv) { e.binding = "dev1"; e.deviceTree = &Tree{Absent: true} },
+			wants: []want{{KindWorkingTree, SeverityWillCarry, "holds no working copy"}},
+			none:  []Kind{KindLocalCommits, KindProjectFiles}},
+		{name: "an agent too old to capture blocks, naming the upgrade", target: "dev2", blocked: true,
+			setup: func(e *fakeEnv) {
+				e.binding = "dev1"
+				e.upgrade = &AgentUpgradeError{Device: "dev1", Have: 28, Need: 29,
+					Message: "Device dev1's agent speaks protocol v28, and the hub needs v29.",
+					Remedy:  "Upgrade the agent from the Executors panel."}
+			},
+			wants: []want{{KindSourceAgent, SeverityBlocker, "Upgrade the agent"}},
+			none:  []Kind{KindWorkingTree, KindLocalCommits}},
+		{name: "abandoning a device whose agent is too old", target: "dev2", opts: Options{AbandonSource: true},
+			setup: func(e *fakeEnv) {
+				e.binding = "dev1"
+				e.upgrade = &AgentUpgradeError{Device: "dev1", Have: 28, Need: 29, Message: "too old", Remedy: "upgrade"}
+			},
+			wants: []want{
+				{KindSourceAgent, SeverityWarning, "Abandoning the source"},
+				{KindAbandoned, SeverityWarning, "loses its working copy"},
+			}},
+		{name: "a pool that keeps no volumes keeps nothing", target: "dev1",
+			setup: func(e *fakeEnv) {
+				e.binding = "pool:pool-a"
+				e.pools["pool-a"] = PoolFacts{Found: true, Name: "ci", Tenant: "prj-1234", Volumes: VolumesNone}
+			},
+			wants: []want{{KindWorkingTree, SeverityWillCarry, "keeps nothing between runs"}},
+			none:  []Kind{KindSourceUnseen}},
+		{name: "a pool's volume is captured through a runner on it", target: "dev1",
+			setup: func(e *fakeEnv) {
+				e.binding = "pool:pool-a"
+				e.pools["pool-a"] = PoolFacts{Found: true, Name: "ci", Tenant: "prj-1234", Volumes: VolumesKept}
+			},
+			wants: []want{{KindSourceUnseen, SeverityWarning, "asks the pool for a runner"}}},
+	})
+}
+
+// TestAPoolSourceChecksTheHubsDirectory: where a pool's volume goes is
+// checked at the preflight even though what the volume holds is read only
+// at the capture.
+func TestAPoolSourceChecksTheHubsDirectory(t *testing.T) {
+	runScenarios(t, []scenario{
+		{name: "an occupied hub directory blocks a pool's move onto the hub", target: "box", blocked: true,
+			setup: func(e *fakeEnv) {
+				e.binding = "pool:pool-a"
+				e.pools["pool-a"] = PoolFacts{Found: true, Name: "ci", Tenant: "prj-1234", Volumes: VolumesKept}
+				e.hubEntries = []string{"README.md"}
+			},
+			wants: []want{{KindTarget, SeverityBlocker, "already holds 1 entr(ies)"}}},
+		{name: "an empty hub directory takes a pool's volume", target: "box",
+			setup: func(e *fakeEnv) {
+				e.binding = "pool:pool-a"
+				e.pools["pool-a"] = PoolFacts{Found: true, Name: "ci", Tenant: "prj-1234", Volumes: VolumesKept}
+			},
+			none: []Kind{KindTarget}},
+	})
+}
+
+// TestAPoolThatCannotAttachTheVolumeBlocks: a pool whose runners are handed
+// nothing, or whose controller cannot start them, cannot give the capture a
+// runner on the project's volume.
+func TestAPoolThatCannotAttachTheVolumeBlocks(t *testing.T) {
+	on := func(pf PoolFacts) func(e *fakeEnv) {
+		return func(e *fakeEnv) {
+			e.binding = "pool:pool-a"
+			pf.Found, pf.Name, pf.Tenant, pf.Volumes = true, "ci", "prj-1234", VolumesKept
+			e.pools["pool-a"] = pf
+		}
+	}
+	runScenarios(t, []scenario{
+		{name: "a cordoned pool", target: "dev1", blocked: true, setup: on(PoolFacts{Cordoned: true}),
+			wants: []want{{KindSourceUnreachable, SeverityBlocker, "cordoned"}}},
+		{name: "a controller that cannot start runners", target: "dev1", blocked: true,
+			setup: on(PoolFacts{Trouble: "StoragePending: no volume could be bound"}),
+			wants: []want{{KindSourceUnreachable, SeverityBlocker, "no volume could be bound"}}},
+		{name: "abandoning it goes ahead", target: "dev1", opts: Options{AbandonSource: true},
+			setup: on(PoolFacts{Cordoned: true}),
+			wants: []want{{KindAbandoned, SeverityWarning, "runner volumes"}}},
+	})
+}
