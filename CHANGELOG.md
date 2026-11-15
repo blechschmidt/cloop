@@ -247,6 +247,22 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A guide to moving projects, and an end-to-end proof that moves lose
+  nothing.** `docs/guides/moving-projects.md` explains what a move carries and
+  what it never carries (credentials, your harness login), how to read the
+  preflight, moving off a machine that is gone with `--abandon-source`,
+  cleaning up, and getting work back from a failed move. `tests/projectmove`
+  (`make test-projectmove`, run in CI's flagship job) moves one project, with
+  a dirty tree, unpushed commits on `main` and on a feature's branch, an
+  attachment and a task in progress, from the hub to a container executor, on
+  to a second agent over the real protocol and back to the hub, and kills a hub
+  mid-seed. After each move it compares the target with the source byte for
+  byte, runs the interrupted task there, and checks that the source keeps its
+  copy until cleanup. `scripts/e2e/projectmove` runs the same moves against a
+  real remote machine through a second hub and a reverse SSH tunnel, and the
+  requirement R-38 in `.cloop/requirements.yaml` holds the guarantee (Task
+  20497).
+
 - **You can now move a project from the dashboard and from a terminal: review
   the preflight first, watch the move as it runs, and clean up the old copy
   after.** The executor card on a project's Overview has a **Move to…**
@@ -1170,6 +1186,56 @@ schema and the hub's HTTP API may change in any release.
   what every other command prints (Task 20452).
 
 ### Fixed
+
+- **A project moved to a remote machine now runs from the working copy the
+  move put there.** The move rebuilt the working copy on the machine with your
+  branch, your unpushed commits and your uncommitted changes, and the next run
+  checked the forge's tip out over it: the run started without that work, or
+  did not start at all when an uncommitted change touched a file the unpushed
+  commits had changed ("Your local changes … would be overwritten by
+  checkout"). After a verified move, runs on that machine fetch the origin and
+  leave the working copy as it is, unless the hub pushes runs' work back or
+  the project was bound away and back by hand since. The machine's agent needs
+  this release for it (Task 20497).
+
+- **A project can move back from a remote machine to the hub without anyone
+  clearing the hub's directory first.** The hub keeps the copy a project leaves
+  in its directory when it moves to a machine, and a move back refused any
+  directory holding more than `.cloop`. The only way past it, moving the old
+  copy aside, also took the repository that the project's feature worktrees
+  are registered in. The move back now recognises the copy an earlier move
+  left there and, while it is unchanged since, restores the machine's working
+  copy into that repository. Feature worktrees stay registered, and a branch
+  the hub moved on while the project was away (a feature's written-back work)
+  keeps the hub's commits. A branch that moved on both sides, or a copy that
+  changed since, still blocks the move, and the preflight says which. The
+  restore reads the machine's bundle with no transport, so the old
+  repository's own configuration cannot redirect it, and it stops before
+  writing anything when an ignored or untracked file or directory is in the
+  way of a file the machine's copy holds. The hub's own `.cloop` files stay
+  where they are even when its repository tracks them. A move's verification
+  now checks HEAD's commit as well as its branch (Task 20497).
+
+- **A move the hub resumes after a restart no longer rolls back because a
+  remote machine's agent has not reconnected yet.** A restarted hub takes an
+  open move up again within seconds, before its agents reconnect, and a seed,
+  verification or capture on a machine then failed straight away; after the
+  switch that rolled the move back. A step on a machine now waits up to two
+  minutes for its agent, and hands the step to the hub member the agent
+  reconnects to in a hub cluster (Task 20497).
+
+- **Starting a move no longer fails with "the move changed under this
+  process".** The hub looks for open moves no process is driving every 30
+  seconds, and one it found while the request starting it was still running
+  the preflight was failed as a move whose start had died. A move at its
+  preflight is now taken up only after five minutes without a change (Task
+  20497).
+
+- **The move preflight says which `.cloop` files never leave.** Its finding on
+  files under `.cloop` listed the configuration, the attachment store and other
+  files with the artifacts and said the move captured them all. It now names
+  the ones that stay where they are, and why: the configuration can hold API
+  keys (Task 20497).
 
 - **The Chat and Assistant tabs fit the window, and the box you type in is
   always on screen.** Both tabs were sized as the window's height less 120

@@ -148,6 +148,11 @@ Seven pages, best read in order. They are also listed on the
   install on an on-premises machine to share one USB device or network
   interface with the hub over a single outbound connection, so that an agent
   in a cloud sandbox can use local hardware.
+- **[Moving a project to another executor](guides/moving-projects.md)**:
+  taking a project from the hub to a container or a remote machine, or back,
+  with its uncommitted changes, unpushed commits and run output. How to read
+  the preflight, what a move never carries, moving off a machine that is gone,
+  cleaning up, and recovering from a failed move.
 - **[Developing features in parallel](guides/features.md)**: several lines of
   work on one repository at once, each in its own git worktree and branch, with
   its own task list and settings, and opened as a GitHub pull request when

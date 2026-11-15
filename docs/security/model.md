@@ -1872,6 +1872,142 @@ Every row above is checked in
 
 ---
 
+## Moving a project
+
+A move takes a project's work from the executor it is bound to onto another:
+the working tree's uncommitted state, every branch and tag, its features' work
+and the `.cloop` files no database holds (see
+[Moving a project to another executor](../guides/moving-projects.md), and
+[Executors](../architecture/executors.md#moving-a-project-off-a-device) for
+how a device's working copy is read). The capture path reads a tree that
+workloads wrote, often on a machine the hub doesn't control, and puts it
+where a different set of grants and firewall rules applies. This section is
+what it guarantees.
+
+### Who may move a project
+
+Starting a move needs `executor.manage` on the project, a recent sign-in on a
+hub with single sign-on, and a place on the target's access list; the
+preflight needs `project.write` and the same place, and refuses a caller off
+the list before it describes the target. Every move route is classified by a
+gate that fails on a new one it doesn't know. Each step is on the control
+plane's trail:
+[`project.move.start`](../reference/audit-events.md#projectmove),
+[`project.move.switch`](../reference/audit-events.md#projectmove),
+[`project.move.done`](../reference/audit-events.md#projectmove),
+[`project.move.fail`](../reference/audit-events.md#projectmove),
+[`project.move.rollback`](../reference/audit-events.md#projectmove) and
+[`project.move.cleanup`](../reference/audit-events.md#projectmove).
+
+### What a move never carries
+
+No credential travels with a move. The project's `.cloop/config.yaml`, which
+can hold API keys, stays where it is, and so do the hub's databases and the
+attachment store: only task output and artifacts, the attachment outbox,
+checkpoints, `sandbox.yaml` and `requirements.yaml` are packed, and a tar
+holding anything else, or anything the capture did not record, is refused on
+arrival. Grants are not copied: runs on the target are leased the project's
+grants as runs on the source were. A person's harness login never leaves the
+hub, so a sandboxed target needs a harness credential granted to the project,
+and the preflight says when it is missing. Remote URLs are recorded without
+the user information an `https` URL can carry a token in.
+
+A capture is scanned before anything switches, for every value the project's
+grants deliver to a run on the source, including grants that lapsed in the
+last 90 days. The scan reads every string of the capture's record, every file
+in the tar and every object in the bundle whole, after the bundle is indexed
+into a scratch repository, so a value a delta builds from copied parts is
+found as well as one written out in full. A capture carrying one fails at the
+capture phase; the refusal names the grant and the file, never the value, and
+a hub that cannot read its grants fails the capture instead of letting it
+through unscanned.
+
+### Reading a device's working copy
+
+The agent reads only the directories the request names, one path element each
+under its trees root, through an `os.Root`, and refuses a working copy that
+leads anywhere else: a link in place of the directory or its `.git`, a
+gitfile, alternates, a configuration key outside a short list, a worktree
+record git would read as a repository of its own, a linked worktree a link
+redirects, or a nested `.git` leading outside. Git runs with no transport, so
+nothing in the repository can make it reach the network, and under a root
+agent it runs as the working copy's owner. A pool's runner answers only for
+the project its volume holds.
+
+The hub holds what comes back as it holds a write-back: a cap per part, the
+executor's and the process's budget for returned work, nothing kept for a
+capture it did not ask for or that has closed, and everything released on
+cancel, on the session's end and on revocation. It decodes the record
+strictly, holds the bundle to its manifest (every ref named, at its object,
+and no other), and refuses a tree that tracks anything under `.cloop` but the
+two spec files, which would otherwise write over the hub's own database or
+configuration when the working copy is rebuilt there.
+
+### What a move never overwrites
+
+A move builds the working copy on a device only in a directory that is empty,
+holds this move's own partial seed, or holds a copy a failed or rolled-back
+move of the same project left. Anything else there is someone's work, and the
+move rolls back instead of writing over it.
+
+The hub's own directory for the project is rebuilt from a device's capture
+only when it holds nothing besides `.cloop`, or still holds the copy an
+earlier move left there when it took the project away, unchanged since: its
+HEAD, its index and its files exactly as that move captured them. The capture
+is then restored into that copy's repository, so the features' worktrees
+registered in it stay. Each branch and tag is settled against the earlier
+capture: one the hub has not moved, or that the device moved on from where
+the hub has it, takes the device's value; one the device has not moved, or
+that the hub is ahead of, keeps the hub's (a feature's work written back
+while the project was away); and one that moved on both sides, or that the
+device moved while a worktree on the hub has it checked out, refuses the move
+before anything is written. So does a HEAD that would land on a branch the
+hub kept or another worktree has checked out, and verification compares
+HEAD's commit as well as its branch. The device's objects are read from the
+bundle file with no transport, so nothing in the old repository's
+configuration (a URL rewrite, say) can change what is read. The files move by
+a two-way merge, and the move refuses, before it writes a file or a branch,
+when anything git does not track is in the way of what the capture writes: an
+ignored file or directory, a linked worktree, an untracked file. The hub's own
+files under `.cloop` stay where they are even where its repository tracks
+them.
+
+Cleanup removes a device's working copy only after a verified move, only once
+the person cleaning up confirmed it, and only while the copy still holds
+exactly what the move captured: the same working tree, index, branches, tags,
+stash, notes and `.cloop` files, and no files git ignores unless they asked
+for those to go too. The hub's directory for the project is never removed.
+
+### While a move is open
+
+No run of the project or of its features starts while its move is open, and
+a manual rebind is refused. The switch writes the binding, the firewall rules
+a bind narrows and the move's own journal in one transaction; a failure after
+it restores the binding and the rules in one transaction too, and keeps the
+bundle. Every journal write is a compare-and-swap on the move's phase and
+version, and each open move is driven by the one hub process holding its
+lease, so a hub that stops part-way leaves the move for the next process to
+take up where its journal says, rather than two processes working on it at
+once. A move still at its preflight belongs to the request that started it,
+and a step on a device waits a bounded time for the device's agent to
+reconnect after a restart, so neither failure mode rolls a sound move back.
+
+### After the move
+
+On a device, a run after a verified move starts from the working copy the move
+built: the hub marks the run's workspace to be kept, and the device fetches
+the origin to bring its remote-tracking branches up to date without checking
+the forge's tip out over the moved work. The fetch is made with the same
+credential, under the same grant checks, as any other. A run whose work is
+pushed back (`executors.write_back: push`) starts from the commit the hub pins
+instead, and so does every run once the project was bound away from the
+device and back by hand after the move.
+
+Every row above is checked in
+[the project moves table](#project-moves--testsprojectmove-and-the-package-suites).
+
+---
+
 ## Identity, roles and permissions
 
 Once a policy is in force, access is denied by default: an identity that
@@ -5535,6 +5671,30 @@ runs on kind in CI's `kube-controller` job.
 | A volume is handed back unwiped only to a runner holding the same project, which takes only that project's runs; every other runner gets a fresh or emptied volume, and one Pod at a time mounts it | `pkg/executorpool: TestARunnerHoldingAProjectIsHandedOnlyThatProjectsRuns`; `pkg/executor/agent: TestARunnerHoldingAProjectsVolumeTakesOnlyThatProjectsRun`; `pkg/kubecontroller: TestAVolumeIsWipedBeforeAnotherProjectUsesIt`, `TestTwoControllersNeverMountOneVolumeTwice` |
 | A runner Pod meets the restricted Pod Security Standard whatever its template says, mounts no API token unless its pool names an account and asks for one, and never runs as the controller's own account; the chart's Role is exactly what the controller calls | `pkg/kubecontroller: TestARunnerPodMeetsTheRestrictedProfileWhateverItsTemplate`, `TestATokenIsMountedOnlyWhenThePoolAsksForItByName`, `TestAPoolTheControllersPolicyRefusesIsInvalid`, `TestHelmChartRoleIsExactlyWhatTheControllerCalls` |
 | End to end, on a real cluster with the controller the chart installs: a reused and an expired runner token are refused, revoking the controller's credential kills the run in progress and stops the controller starting runners, and no volume the pool kept holds a credential the test made or saw, or a value with the prefix of a cloop runner, pool, agent, API or session credential | `tests/kubecontroller: TestExecutorPoolOnARealCluster` |
+
+### Project moves — `tests/projectmove` and the package suites
+
+A move reads a tree workloads wrote, on a machine the hub may not control,
+and rebuilds it where other grants apply. These tests hold the capture path
+to what [Moving a project](#moving-a-project) promises. `tests/projectmove`
+runs the moves an operator makes end to end with the real binary, a stand-in
+harness, a real container executor and a second agent over the real
+protocol, and checks each result against snapshots it takes itself; it runs
+in CI's flagship job.
+
+| Guarantee | Test |
+| --- | --- |
+| A verified move leaves the target holding byte for byte what the source held: every file outside `.cloop` (modified, deleted, renamed, untracked and binary), the index, HEAD, every branch and tag including commits no remote has, and the `.cloop` files a move delivers; the task it interrupted is pending again and runs on the target; attachments are kept; the source keeps its copy until cleanup | `tests/projectmove: TestMoveRoundTrip`; `pkg/projectmove: TestTheSeedRebuildsADirtyWorkingCopyByteIdentical`, `TestTheHubTreeSeedRebuildsADevicesCopy` |
+| A hub killed while a device is being seeded is succeeded by a process that takes the move up at the seed, finishes and verifies it; the seed the dead process started changes nothing; a sweep leaves a move being started alone, and a step on a device waits for its agent to reconnect, or hands the step to the hub member it reconnected to | `tests/projectmove: TestMoveResumesAfterTheHubDiesMidSeed`; `pkg/projectmove: TestCrashAndResumeAtEveryPhaseBoundary`; `pkg/ui: TestAnOpenMoveResumesUnderItsLeaseAfterARestart`, `TestASweepLeavesAMoveBeingStartedAlone`, `TestAMoveStepWaitsForItsDevicesAgent`, `TestAMoveStepOnADeviceAnotherMemberHoldsIsHandedOff` |
+| Only `executor.manage` holders on the target's access list move a project, and every move route is classified | `pkg/ui: TestMoveRoutesRefuseAViewerAndACallerOffTheAccessList`; `tests/arch: TestEveryProjectMoveRouteIsClassified` |
+| The configuration, the databases and the attachment store never travel, and a tar holding anything the capture did not record is refused | `pkg/executor/movecapture: TestExcludedPathsAreNeverCaptured`; `pkg/projectmove: TestExtractFilesRefusesWhatTheCaptureDidNotRecord`, `TestProjectFileFindings` |
+| A capture carrying a value a grant delivers on the source (in a file, an object a delta builds, a remote URL, or a grant that lapsed) is refused, naming the grant and never the value | `pkg/ui: TestACaptureCarryingAGrantedValueIsRefused`, `TestACaptureWithAGrantedValueInARemoteURLIsRefused`, `TestALapsedGrantsValueIsStillScannedFor`, `TestDocumentCarriesLooksEverywhereAndNamesNoValue`; `pkg/executor/movegit: TestCheckBundleHandsOverObjectsWhole`; `tests/e2e: TestE2EMoveCapturesADevicesWorkingCopy` |
+| A device's agent reads nothing outside the working copy it was asked for, runs git with no transport and as the copy's owner, and a pool runner answers only for its own tenant | `pkg/executor/movecapture: TestEscapesAreRefused`, `TestRequestsOutsideTheirShapeAreRefused`, `TestGitRunsAsTheWorkingCopysOwner`; `pkg/executor/remote: TestLoopbackCaptureStaysInsideTheTreesRoot`, `TestLoopbackRunnerCapturesOnlyItsTenant` |
+| The hub keeps nothing of a capture it did not ask for, holds the bundle to its manifest, and refuses a tree tracking the hub's own `.cloop` files | `pkg/executor/remote: TestCaptureRefusesBeforeKeeping`, `TestCaptureDigestMismatchIsRefused`, `TestCaptureEndsWithItsSession`; `pkg/executor/movecapture: TestDecodeDocumentRefusesWhatACaptureNeverWrites`; `pkg/executor/movegit: TestCheckBundleHoldsABundleToItsManifest`, `TestReservedPathsAreRefused`; `pkg/ui: TestACaptureTrackingTheHubsFilesIsRefused` |
+| A move never writes over work it did not capture: a device directory holding someone's work rolls it back, and the copy left in the hub's directory is rebuilt in place only while unchanged, keeping branches the hub moved, refusing branches both sides moved, never writing over an ignored or untracked file or the hub's own `.cloop` files, never landing HEAD on a kept branch, and reading the bundle whatever the old repository's configuration says | `pkg/ui: TestAMoveToADeviceThatAlreadyHoldsWorkRollsBack`; `pkg/executor/movegit: TestRestoreIntoTheCopyLeftBehind`, `TestRestoreIntoRefusesWhatWouldLoseWork`, `TestRestoreIntoLosesNothingTheCaptureDidNotRecord`; `pkg/projectmove: TestDeviceSourceFindings` |
+| No run starts while a move is open, and a failure after the switch restores the binding and the firewall rules | `pkg/ui: TestNoRunStartsWhileAMoveIsOpen`, `TestARollbackToAnExecutorThatIsGoneLeavesTheProjectUnbound`; `pkg/projectmove: TestEachPhaseFailing` |
+| Cleanup removes a device's copy only after a verified, confirmed move and only while it is what the move captured; never the hub's directory | `pkg/ui: TestCleanupRemovesAVerifiedDevicesCopyOnlyWhileItIsUnchanged`, `TestAMovesViewAndItsConfirmedCleanup`; `pkg/projectmove: TestDiscardRemovesOnlyTheCopyTheMoveCaptured` |
+| A run on a device after a move starts from the working copy the move built, which the device fetches into and checks nothing out over, except where the run's work is pushed back or the project was bound away and back by hand | `pkg/ui: TestARunKeepsTheWorkingCopyAMovePlacedOnItsDevice`, `TestKeepingAMovedCopyFollowsTheProjectNotJustItsLastMove`; `pkg/executor/gitprovision: TestProvisionKeepsAMovedWorkingCopy` |
 
 ### When a check fails
 
