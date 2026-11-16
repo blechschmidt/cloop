@@ -502,6 +502,38 @@ jobs:
           go build -o cloop .
           go test -v -timeout 300s ./tests/e2e/
 
+      - name: A hostile run reaches no other project on the hub's host or a device
+        # Task 20504: tests/isolation, whose stand-in harness has turned on the
+        # hub. A real hub serves three projects; one project's run tries to
+        # read, write and delete another's tree and state database and the
+        # hub's control plane, to turn its session and its egress and git
+        # proxy sessions on the other project, and to reach the other's live
+        # run, on the hub's own host and on a device (a second process over
+        # the agent protocol). Every attempt must fail and the victim must be
+        # unchanged; then `cloop project readers add` lets the run read the
+        # victim read-only, `rm` takes that back, and an operator's opt-out
+        # lets the run out again, which shows the refusals were the sandbox's.
+        # The runner is not root, so this is Landlock without namespaces, the
+        # host sandbox's other mode; a root host runs the namespaces. About 30 s
+        # with the cloop the step above built. It is not in the race step
+        # (scripts/race-packages.sh leaves it out, as it does tests/e2e). The
+        # PASS-line assertion, because both tests skip on a kernel without
+        # Landlock and a skip exits 0.
+        env:
+          CLOOP_ISOLATION_BIN: ${{ github.workspace }}/cloop
+        run: |
+          set -euo pipefail
+          go test ./tests/isolation/ -v -count=1 -timeout 15m \
+            -run '^(TestAHostileRunOnTheHubsHostReachesNoOtherProject|TestAHostileRunOnADeviceReachesNoOtherProject)$' \
+            2>&1 | tee /tmp/isolation.log
+          for t in TestAHostileRunOnTheHubsHostReachesNoOtherProject TestAHostileRunOnADeviceReachesNoOtherProject; do
+            grep -qE "^--- PASS: $t \(" /tmp/isolation.log || {
+              echo "::error::go test succeeded but $t did not pass — it was skipped (no Landlock on this" \
+                   "runner's kernel?); see the log."
+              exit 1
+            }
+          done
+
       - name: The seeded home directory was left untouched
         # if: always() so that a suite which fails *because* it polluted the
         # home directory still reports the actual cause.
@@ -1770,6 +1802,34 @@ jobs:
           grep -qE '^--- PASS: TestE2EProjectConfinementInAContainer \(' /tmp/confine-container.log || {
             echo "::error::go test succeeded but TestE2EProjectConfinementInAContainer did not pass — it" \
                  "was skipped (docker unavailable, or CLOOP_CONFINE_CONTAINER_E2E lost); see the log."
+            exit 1
+          }
+
+      - name: A hostile run in a container reaches no other project
+        timeout-minutes: 10 # observed locally: 20s once the image layer is cached
+        env:
+          CLOOP_ISOLATION_CONTAINER_E2E: "1"
+          CLOOP_ISOLATION_BIN: /tmp/cloop-flagship-bin
+          # gVisor is not on GitHub's runners; on a host that has it the test
+          # pins why its phases cannot run there and skips them.
+          CLOOP_ISOLATION_RUNTIMES: runc
+        # Task 20504: tests/isolation on the container executor. Three projects
+        # in containers on one executor: the hostile run's attempts on another
+        # project's tree, state database and the hub's files find nothing in
+        # its sandbox, its session and egress session are refused everywhere
+        # but its own project, and another project's live sandbox is not
+        # reachable from it, while this machine reaches it; `cloop project
+        # readers add` then binds the other project's tree read-only, and `rm`
+        # takes it away. Its image is the feature step's pinned base plus git,
+        # so the layer is cached; same PASS-line assertion, because the test
+        # skips without docker.
+        run: |
+          set -euo pipefail
+          go test ./tests/isolation/ -run '^TestAHostileRunInAContainerReachesNoOtherProject$' -v -count=1 \
+            -timeout 8m 2>&1 | tee /tmp/isolation-container.log
+          grep -qE '^    --- PASS: TestAHostileRunInAContainerReachesNoOtherProject/runc \(' /tmp/isolation-container.log || {
+            echo "::error::go test succeeded but TestAHostileRunInAContainerReachesNoOtherProject/runc did not" \
+                 "pass — it was skipped (docker unavailable, or CLOOP_ISOLATION_CONTAINER_E2E lost); see the log."
             exit 1
           }
 

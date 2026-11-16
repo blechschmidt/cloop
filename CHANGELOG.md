@@ -340,6 +340,39 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A conformance suite now attacks project isolation from a hostile run, on
+  every kind of executor two projects can share.** `tests/isolation` starts a
+  real hub with three projects and replaces the attacking project's `claude`
+  with a harness that has turned on the hub. Given the other project's paths,
+  addresses and routes, it tries to read, list, write, delete, move and link
+  to the other project's files, change their mode, plant a git hook in its
+  repository, read and open its state database and the hub's database,
+  configuration and project registry, turn its own session, egress session and
+  git proxy session on the other project at the hub's run routes, dashboard
+  and proxies, and reach the other project's live run. It does this on the
+  hub's own host, on a device whose agent is a second process, and on a
+  container executor, three times each: with the other project's readers list
+  empty, after `cloop project readers add` (the run then reads the other
+  project read-only, and still cannot write it or reach its `.cloop`, `.git`
+  or `.env`), and after `cloop project readers rm`. After every round the
+  other project's files, plan, canaries and the readers lists must be as they
+  were. Then the operator opts the attacking project out of the host sandbox
+  and the same reads succeed, which shows the refusals were the sandbox's. The
+  tests on the hub's host and on a device run in CI's Build and Test job, and
+  the container test in the flagship job (`CLOOP_ISOLATION_CONTAINER_E2E=1`,
+  `make test-isolation`). It is requirement R-39 in
+  `.cloop/requirements.yaml`, and the security model has a new section,
+  "Isolation between projects". Writing it found three limits, which the
+  security model and the threat model now describe; none is fixed yet. A run
+  on the hub's host or a device can connect to a Unix socket in another
+  project's tree, on a hub running as root too (the model said so only for
+  hubs without namespaces). A run on the hub's host can lock the loopback
+  address out of the dashboard for a minute with five requests that carry no
+  credential. And on the hub's own host, a container under gVisor shares its
+  project's database with the hub without the database's locks, because gVisor
+  keeps them inside the sandbox, so the run fails on it at random with "disk
+  I/O error" and two writes at once could damage it; use runc there, or gVisor
+  on a device (Task 20504).
 - **A project's Overview now shows its readers list, and its administrators
   can change it there.** A new Readers section, after Members, lists the
   other projects whose runs get this project's files read-only, with who added

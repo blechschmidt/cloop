@@ -30,8 +30,8 @@
 # # What it does not change
 #
 # The set is exactly what the step tested before: `go list ./...` without
-# tests/e2e, which needs a built binary and runs in a step of its own. Only the
-# order differs. A package named below that no longer exists fails the script
+# tests/e2e and tests/isolation, which run the cloop binary they need and each
+# run in a step of their own. Only the order differs. A package named below that no longer exists fails the script
 # rather than silently dropping out of the run, and every package not named is
 # still tested, in go list's order, after the named ones.
 #
@@ -75,7 +75,7 @@ while [ $# -gt 0 ]; do
 done
 
 module=$("$go" list -m)
-all=$("$go" list ./... | grep -v 'tests/e2e')
+all=$("$go" list ./... | grep -v -e 'tests/e2e' -e 'tests/isolation')
 
 for rel in "${slow[@]}" "${without[@]}"; do
 	if ! grep -qxF "$module/$rel" <<<"$all"; then

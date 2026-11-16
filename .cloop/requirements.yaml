@@ -807,3 +807,52 @@ requirements:
       - name: the hub's move driver
         command: go test ./pkg/ui -run '^(TestAMoveToADeviceSeedsAndVerifiesItsWorkingCopy|TestAMoveFromADeviceRebuildsTheHubsTree|TestARunKeepsTheWorkingCopyAMovePlacedOnItsDevice|TestKeepingAMovedCopyFollowsTheProjectNotJustItsLastMove|TestASweepLeavesAMoveBeingStartedAlone|TestAMoveStepWaitsForItsDevicesAgent)$'
         timeout: 20m
+  - id: R-39
+    title: A run shall neither modify another project nor read it unless that project's readers list names the run's project.
+    status: approved
+    priority: must
+    tags: [security, isolation, readers]
+    details: |-
+      Whatever its agent tries, a run of one project changes nothing of another
+      project: not its files, its git hooks or its .cloop/state.db, nor the
+      hub's database, configuration or project registry. It reads another
+      project's source only while that project's readers list names its own
+      project, and then read-only, without the other project's .cloop, .git or
+      credential files. The run's session, its egress proxy session and its git
+      proxy session open nothing of another project on the hub's run routes,
+      its dashboard or its proxies, and on a container executor the run cannot
+      reach another project's live sandbox. The end-to-end suite gives a hostile
+      stand-in harness the other project's paths, addresses and routes and lets
+      it attack them on the hub's own host, on a device and on a container
+      executor: with the readers list empty, after `cloop project readers add`
+      and after `rm`. After each round it checks the victim's tree, plan,
+      canaries and the readers rows, and an operator's
+      executors.host_sandbox.opt_out, which lets the run out of the host
+      sandbox, shows that the refusals were the sandbox's. The container test
+      needs Docker (CLOOP_ISOLATION_CONTAINER_E2E=1, as CI's flagship job sets
+      it) and skips without it; the package tests below carry the guarantee
+      there. What the host sandbox does not cover (the network, Unix sockets,
+      and without namespaces a file's mode and signals) and gVisor on the
+      hub's own host are listed as limits. Promised in docs/security/model.md,
+      "Isolation between projects".
+    tests:
+      - name: a hostile run on the hub's host, a device and a container executor
+        command: go test ./tests/isolation -run '^(TestAHostileRunOnTheHubsHostReachesNoOtherProject|TestAHostileRunOnADeviceReachesNoOtherProject|TestAHostileRunInAContainerReachesNoOtherProject)$'
+        timeout: 20m
+      - name: a readers list is deny-by-default
+        command: go test ./pkg/projectreaders -run '^TestCanReadIsDenyByDefault$'
+      - name: what the hub gives a run to read, and what a run's credentials reach
+        command: go test ./pkg/ui -run '^(TestARunIsGivenOnlyTheProjectsWhoseReadersListsNameIt|TestTheHubServesAReadOnlyProjectOnlyWhileItsListNamesTheRun|TestARunsKnowledgeSessionReachesAnotherProjectOnlyThroughItsReadersList|TestARunsCredentialsOpenNoRouteOfTheDashboard|TestHostSandbox_ASecondProjectKeepsEveryRunOnTheHostToItsOwn|TestDeviceConfinement_ASharedDeviceKeepsAHostRunToItsProject|TestRunEndedMergesARemoteRunsResults)$'
+        timeout: 20m
+      - name: a run stops reading a project taken off a list at its next task
+        command: go test ./pkg/orchestrator -run '^TestReadersBoundaryEndsTheRunWhenAProjectStopsListingIt$'
+        timeout: 20m
+      - name: the hub's host keeps a run to its project and gives a listed project read-only
+        command: go test ./pkg/executor/localprocess -run '^(TestTwoProjectsOnOneHostCannotOpenListOrWriteEachOther|TestASandboxedRunReadsAListedProjectWhereItIsAndCannotWriteIt)$'
+      - name: a device does the same
+        command: go test ./pkg/executor/remote -run '^(TestLoopbackHostRunsOfTwoProjectsCannotReachEachOther|TestLoopbackAConfinedHostRunReadsTheSnapshotItWasGivenAndCannotWriteIt)$'
+      - name: a container binds its own project alone, under runc, Kata and gVisor
+        command: go test ./pkg/executor/container -run '^TestTwoProjectsOnOneContainerExecutorShareNothing$'
+      - name: two projects' sandboxes never share a network
+        command: go test ./tests/security -run '^TestTwoProjectsSandboxesNeverShareANetwork$'
+        timeout: 20m

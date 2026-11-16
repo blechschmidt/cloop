@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-update test-projectmove e2e-stack fuzz bench lint lint-tool lint-version clean \
+.PHONY: build test test-unit test-e2e test-e2e-update test-isolation test-projectmove e2e-stack fuzz bench lint lint-tool lint-version clean \
         docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve docs-freshness \
         release-dist changelog-check requirements-check \
         terraform-test terraform-validate
@@ -61,8 +61,8 @@ build:
 icons:
 	@./scripts/build-icons.sh
 
-## test: run all tests (unit + e2e)
-test: test-unit test-e2e
+## test: run all tests (unit + e2e + the hostile-run suite)
+test: test-unit test-e2e test-isolation
 
 ## test-unit: run unit tests with race detector and coverage, the packages
 ##            CI's race step tests in the order it tests them (longest first;
@@ -81,6 +81,14 @@ test-e2e: build
 ## test-e2e-update: regenerate golden files from current binary output
 test-e2e-update: build
 	$(GO) test -v -timeout 120s ./tests/e2e/ -update
+
+## test-isolation: attack one project from another's run on the hub's own
+##                 host, a device and a container executor, with a stand-in
+##                 harness that has turned hostile (tests/isolation; needs git
+##                 and Landlock, and docker for the container). Builds cloop
+##                 unless CLOOP_ISOLATION_BIN names one.
+test-isolation:
+	CLOOP_ISOLATION_CONTAINER_E2E=1 $(GO) test ./tests/isolation/ -count=1 -v -timeout 20m
 
 ## test-projectmove: move a project with work in flight from the hub to a
 ##                   container executor, on to a device and back, and kill the
