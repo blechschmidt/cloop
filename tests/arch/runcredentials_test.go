@@ -99,6 +99,13 @@ var publicRoutes = map[string]runRoute{
 		handlers: []string{"handleRunKnowledgeSearch"}, authenticates: "openRunKnowledgeCall", gate: "target"},
 	"/api/run/knowledge/get": {class: readersGatedRead, scope: "project",
 		handlers: []string{"handleRunKnowledgeGet"}, authenticates: "openRunKnowledgeCall", gate: "target"},
+	// The projects a run was given to read (Task 20501): the session records
+	// what it was given at its dispatch, and each is answered for — or its
+	// snapshot built — only through readOnlyTarget, which asks runMayRead.
+	"/api/run/knowledge/readonly": {class: readersGatedRead, scope: "project",
+		handlers: []string{"handleRunReadOnly"}, authenticates: "openRunKnowledgeCall", gate: "readOnlyTarget"},
+	"/api/run/knowledge/readonly/snapshot": {class: readersGatedRead, scope: "project",
+		handlers: []string{"handleRunReadOnlySnapshot"}, authenticates: "openRunKnowledgeCall", gate: "readOnlyTarget"},
 	// Citations are taken from the session — a write — so they are the
 	// run's own whatever a list says.
 	"/api/run/knowledge/citations": {class: ownProject, scope: "project",

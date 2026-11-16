@@ -37,6 +37,12 @@ import (
 // not read, so a run cannot map the hub's projects by asking.
 var errRunRead = errors.New("refused")
 
+// errRunReadUnavailable marks a refusal the hub gave because it could not read
+// the readers lists at all, rather than because they say no (Task 20501): a
+// caller that reports a list's answer — the run's boundary question — answers
+// it as the hub being unavailable, not as a removal.
+var errRunReadUnavailable = errors.New("the readers lists could not be read")
+
 // runReadNotFound is what a run is told when a read of another project is
 // refused.
 const runReadNotFound = "no project this run may read is at that path: another project is read only when its " +
@@ -61,14 +67,15 @@ func runMayRead(db *statedb.DB, reader, project string) error {
 		// question, and the answer must not be a grant.
 		return fmt.Errorf("%w: %s is the run's own project, which it reads with no list", errRunRead, project)
 	case db == nil:
-		return fmt.Errorf("%w: the hub's database is not available to read %s's readers list", errRunRead, project)
+		return fmt.Errorf("%w: %w: the hub's database is not available to read %s's readers list", errRunRead,
+			errRunReadUnavailable, project)
 	}
 	// The lists first and the registry after, whatever either says, so the
 	// answer takes as long for a path that names no project as for one that
 	// does.
 	lists, err := projectreaders.Load(db)
 	if err != nil {
-		return fmt.Errorf("%w: the readers lists could not be read: %v", errRunRead, err)
+		return fmt.Errorf("%w: %w: %v", errRunRead, errRunReadUnavailable, err)
 	}
 	listed := lists.CanRead(reader, project)
 	if _, ok := registeredProjectAt(project); !ok {

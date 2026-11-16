@@ -586,6 +586,13 @@ type TaskDispatchInput struct {
 	// LeaseIDs are the secret leases handed to this run.
 	LeaseIDs []string
 
+	// ReadOnlyProjects are the other projects the run was given to read,
+	// read-only, because their readers lists name its project (Task 20501).
+	// ReadOnlyKnown says the dispatcher knows: a run the hub dispatched
+	// records an empty list as none, positively, as lease_ids does.
+	ReadOnlyProjects []string
+	ReadOnlyKnown    bool
+
 	// Actor is who asked for the run.
 	Actor string
 
@@ -635,6 +642,12 @@ func AuditTaskDispatch(d *DB, in TaskDispatchInput) {
 	// and audit-relevant fact about the run.
 	if len(in.LeaseIDs) == 0 {
 		payload["lease_ids"] = []string{}
+	}
+	switch {
+	case len(in.ReadOnlyProjects) > 0:
+		payload["read_only_projects"] = in.ReadOnlyProjects
+	case in.ReadOnlyKnown:
+		payload["read_only_projects"] = []string{}
 	}
 	emit(d, &AuditEvent{
 		Actor:      actor,

@@ -122,6 +122,9 @@ func rules(p Policy) []rule {
 	for _, path := range p.ReadOnly {
 		out = append(out, rule{path: path, rights: readRights})
 	}
+	for _, path := range p.ListOnly {
+		out = append(out, rule{path: path, rights: unix.LANDLOCK_ACCESS_FS_READ_DIR})
+	}
 	for _, path := range p.Devices {
 		out = append(out, rule{path: path, rights: deviceRights})
 	}
@@ -153,7 +156,7 @@ func restrict(p Policy) error {
 	ruleset := int(fd)
 	defer unix.Close(ruleset)
 	for _, r := range rules(p) {
-		if err := addRule(ruleset, r, handled, p.ReadWrite); err != nil {
+		if err := addRule(ruleset, r, handled, p.ReadWrite, p.ListOnly); err != nil {
 			return err
 		}
 	}
@@ -166,11 +169,14 @@ func restrict(p Policy) error {
 // addRule grants r beneath its path. A path that does not exist is skipped
 // unless the rule is required: the defaults name directories some
 // distributions do not have. anchors are the writable grants, beneath which a
-// path is opened without following a link out (openGrant).
-func addRule(ruleset int, r rule, handled uint64, anchors []string) error {
-	fd, err := openGrant(r.path, anchors, 0)
+// path is opened without following a link out (openGrant); strict are the
+// roots of other projects the workload may read, beneath which a path is
+// opened following no link at all, and one that is a link is skipped.
+func addRule(ruleset int, r rule, handled uint64, anchors, strict []string) error {
+	fd, err := openGrantIn(r.path, anchors, strict, 0)
 	if err != nil {
-		if !r.required && (errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.EACCES)) {
+		if !r.required && (errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) ||
+			errors.Is(err, unix.EACCES) || errors.Is(err, errLinkInReadOnly)) {
 			return nil
 		}
 		return fmt.Errorf("hostsandbox: open %s for the sandbox: %w", r.path, err)
@@ -203,27 +209,68 @@ func addRule(ruleset int, r rule, handled uint64, anchors []string) error {
 // Anything else, the system's directories and the anchors themselves, is
 // opened by name, links and all: nothing the workload can write leads there.
 func openGrant(path string, anchors []string, flags int) (int, error) {
+	return openGrantIn(path, anchors, nil, flags)
+}
+
+// errLinkInReadOnly is an entry of another project the workload may read that
+// is a link (Task 20501): that project's own runs may have planted it to have
+// this workload granted whatever it names, so it is not granted at all.
+var errLinkInReadOnly = errors.New("a link in a project the workload may read")
+
+// openGrantIn is openGrant with strict anchors as well: the roots of other
+// projects the workload may read, whose own runs can write them. A path
+// beneath one is resolved from it following no link — not even one that stays
+// inside — and the root itself is opened without following a link at its last
+// component, so that what is granted is what the driver listed, whatever those
+// runs did since.
+func openGrantIn(path string, anchors, strict []string, flags int) (int, error) {
 	path = filepath.Clean(path)
-	anchor := ""
+	anchor, isStrict := "", false
 	for _, a := range anchors {
 		a = filepath.Clean(a)
 		if a != path && strings.HasPrefix(path, a+"/") && len(a) > len(anchor) {
-			anchor = a
+			anchor, isStrict = a, false
+		}
+	}
+	for _, a := range strict {
+		a = filepath.Clean(a)
+		if a != path && strings.HasPrefix(path, a+"/") && len(a) > len(anchor) {
+			anchor, isStrict = a, true
 		}
 	}
 	if anchor == "" {
-		return unix.Open(path, unix.O_PATH|unix.O_CLOEXEC|flags, 0)
+		for _, a := range strict {
+			if filepath.Clean(a) == path {
+				flags |= unix.O_NOFOLLOW
+			}
+		}
+		fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC|flags, 0)
+		if err == nil && flags&unix.O_NOFOLLOW != 0 {
+			var st unix.Stat_t
+			if serr := unix.Fstat(fd, &st); serr != nil || st.Mode&unix.S_IFMT == unix.S_IFLNK {
+				_ = unix.Close(fd)
+				return -1, fmt.Errorf("%s: %w", path, errLinkInReadOnly)
+			}
+		}
+		return fd, err
 	}
-	afd, err := openGrant(anchor, anchors, unix.O_DIRECTORY)
+	afd, err := openGrantIn(anchor, anchors, strict, unix.O_DIRECTORY)
 	if err != nil {
 		return -1, err
 	}
 	defer unix.Close(afd)
+	resolve := uint64(unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS)
+	if isStrict {
+		resolve |= unix.RESOLVE_NO_SYMLINKS
+	}
 	fd, err := unix.Openat2(afd, strings.TrimPrefix(path, anchor+"/"), &unix.OpenHow{
 		Flags:   uint64(unix.O_PATH | unix.O_CLOEXEC | flags),
-		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS,
+		Resolve: resolve,
 	})
-	if errors.Is(err, unix.EXDEV) {
+	switch {
+	case isStrict && (errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV)):
+		return -1, fmt.Errorf("%s: %w", path, errLinkInReadOnly)
+	case errors.Is(err, unix.EXDEV):
 		return -1, fmt.Errorf("%s leads out of %s, which the workload can write: %w", path, anchor, err)
 	}
 	return fd, err

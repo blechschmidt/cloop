@@ -199,11 +199,14 @@ var publicRouteAllowlist = map[string]string{
 		"credential is attached only after both. Answers 404 unless executors.model_relay serves on the " +
 		"dashboard's listener",
 
-	// The run-scoped knowledge search (Task 20472): one justification for the
-	// three routes.
-	"POST /api/run/knowledge/search":    knowledgeRunPublicReason,
-	"POST /api/run/knowledge/get":       knowledgeRunPublicReason,
-	"POST /api/run/knowledge/citations": knowledgeRunPublicReason,
+	// The run-scoped knowledge search (Task 20472), and the questions a run
+	// asks with the same session about the projects it reads (Task 20501):
+	// one justification for the five routes.
+	"POST /api/run/knowledge/search":            knowledgeRunPublicReason,
+	"POST /api/run/knowledge/get":               knowledgeRunPublicReason,
+	"POST /api/run/knowledge/citations":         knowledgeRunPublicReason,
+	"POST /api/run/knowledge/readonly":          knowledgeRunPublicReason,
+	"POST /api/run/knowledge/readonly/snapshot": knowledgeRunPublicReason,
 
 	// Executor pool controllers (Task 20482): one justification for both.
 	"GET /api/pool-controller/feed":            poolControllerPublicReason,

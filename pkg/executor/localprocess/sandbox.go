@@ -118,6 +118,44 @@ func sandboxCommand(cmd *exec.Cmd, spec executor.Spec, gitCADir string) (string,
 		readOnly = append(readOnly, target)
 	}
 	readOnly = append(readOnly, sb.ReadOnly...)
+	var listOnly []string
+	// The other projects the run may read (Task 20501), where they are, entry
+	// by entry: the hidden ones — the control directory, the git directory,
+	// the credential files — are left out, and so is an entry a link, which
+	// would grant whatever it names. Read-only, like everything on this list.
+	// The helper opens each beneath its project's root following no link, so
+	// an entry the project's own runs swap for a link meanwhile is not
+	// granted either (hostsandbox.Policy.ListOnly).
+	entries := 0
+	for _, ro := range spec.ReadOnly {
+		if ro.Source == "" {
+			return "", fmt.Errorf("%w: read-only project %s has no directory on this host",
+				executor.ErrInvalidSpec, ro.Project)
+		}
+		src, err := filepath.EvalSymlinks(ro.Source)
+		if err != nil {
+			return "", fmt.Errorf("%w: read-only project %s is not readable on this host: %v",
+				executor.ErrInvalidSpec, ro.Project, err)
+		}
+		if ro.Sealed {
+			// A snapshot this host's agent placed: it holds no hidden entry,
+			// and nothing but the agent writes it.
+			readOnly = append(readOnly, src)
+			continue
+		}
+		visible, _, err := executor.ReadOnlyEntries(src)
+		if err != nil {
+			return "", fmt.Errorf("%w: read-only project %s: %v", executor.ErrInvalidSpec, ro.Project, err)
+		}
+		if entries += len(visible); entries > executor.MaxReadOnlyEntriesTotal {
+			return "", fmt.Errorf("%w: the projects this run may read have more than %d top-level entries "+
+				"between them", executor.ErrInvalidSpec, executor.MaxReadOnlyEntriesTotal)
+		}
+		readOnly = append(readOnly, visible...)
+		// Its root itself may be listed, so `ls` of the path the run was told
+		// works; listing reads no file.
+		listOnly = append(listOnly, src)
+	}
 	// The program by the path it is exec'd at as well as the file that is: in
 	// namespace mode a path under a private directory is bound back by name.
 	readOnly = append(readOnly, helper, resolved, program)
@@ -131,6 +169,7 @@ func sandboxCommand(cmd *exec.Cmd, spec executor.Spec, gitCADir string) (string,
 		readOnly = append(readOnly, b.Files...)
 	}
 	p.ReadOnly = dedupe(readOnly)
+	p.ListOnly = dedupe(listOnly)
 
 	workloadTmp := tmp
 	if namespaces {

@@ -726,7 +726,28 @@ type podRequest struct {
 	// Secret named by LeaseSecretName under hubCAKey; only the URLs are read
 	// here.
 	GitCA *executor.GitCA
+
+	// ReadOnly are the other projects the run may read (Spec.ReadOnly, Task
+	// 20501). The workspace init container fetches a snapshot of each from
+	// the hub, with the run's session token from the lease Secret, into a
+	// volume the harness mounts read-only at executor.ReadOnlyRoot.
+	ReadOnly []executor.ReadOnlyProject
 }
+
+// readOnlyVolume is the volume the read-only projects are placed in.
+const readOnlyVolume = "cloop-readonly"
+
+// readOnlyVolumeSize bounds that volume: twice the largest tree a snapshot
+// unpacks to, for each project. The kubelet measures the disk blocks a tree
+// takes, and tens of thousands of small files take far more blocks than
+// their bytes; a Pod over the bound is evicted mid-run.
+func readOnlyVolumeSize(projects int) string {
+	return strconv.Itoa(projects*2*readonlysnapTreeMiB) + "Mi"
+}
+
+// readonlysnapTreeMiB is readonlysnap.MaxTreeBytes in MiB, repeated so this
+// file needs nothing of that package but the number.
+const readonlysnapTreeMiB = 256
 
 // gitCAPairs is every URL-scoped trust setting both containers' git gets: the
 // operator's bundle, then the hub's own CA for the URLs the bundle leaves.
@@ -953,6 +974,11 @@ func buildPod(req podRequest) (*pod, error) {
 			return nil, fmt.Errorf("%w: sandbox mount target %q would shadow the %s volume",
 				executor.ErrInvalidSpec, target, target)
 		}
+		if len(req.ReadOnly) > 0 && (target == executor.ReadOnlyRoot ||
+			strings.HasPrefix(target, executor.ReadOnlyRoot+"/")) {
+			return nil, fmt.Errorf("%w: sandbox mount target %q would shadow the projects this run reads at %s",
+				executor.ErrInvalidSpec, target, executor.ReadOnlyRoot)
+		}
 		mounts = append(mounts, volumeMount{
 			Name:      workspaceVolume,
 			MountPath: target,
@@ -997,6 +1023,19 @@ func buildPod(req podRequest) (*pod, error) {
 	if req.ProjectSeed {
 		spec.Volumes = append(spec.Volumes, seedVolumes(req.LeaseSecretName)...)
 		mounts = append(mounts, volumeMount{Name: dispatchVolume, MountPath: dispatchMountDir, ReadOnly: true})
+	}
+
+	// The other projects the run may read (Task 20501): a volume the
+	// workspace container fills with their snapshots, mounted read-only here.
+	// The harness runs as the uid that wrote them, so a read-only mount — not
+	// a file mode it could change back — is what keeps it from writing them.
+	if len(req.ReadOnly) > 0 {
+		if err := checkReadOnlyRequest(req); err != nil {
+			return nil, err
+		}
+		spec.Volumes = append(spec.Volumes, volume{Name: readOnlyVolume,
+			EmptyDir: &emptyDirSource{SizeLimit: readOnlyVolumeSize(len(req.ReadOnly))}})
+		mounts = append(mounts, volumeMount{Name: readOnlyVolume, MountPath: executor.ReadOnlyRoot, ReadOnly: true})
 	}
 
 	// The CA bundle, in both containers: the provisioner fetches through the
@@ -1157,6 +1196,16 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 		argv = append(argv, "--seed", seedMountDir+"/"+seedFileName,
 			"--seed-copy", dispatchMountDir+"/"+seedFileName)
 	}
+	// The other projects the run may read (Task 20501): where to fetch each
+	// one's snapshot, and where to place it. The token that authenticates the
+	// fetches is the run's session's, from the lease Secret below.
+	for _, p := range req.ReadOnly {
+		argv = append(argv, "--readonly-snapshot", p.Slug+"="+strings.TrimSpace(p.Snapshot.URL))
+	}
+	if len(req.ReadOnly) > 0 {
+		argv = append(argv, "--readonly-dir", executor.ReadOnlyRoot,
+			"--readonly-token-env", req.ReadOnly[0].Snapshot.TokenEnv)
+	}
 
 	env, err := workspaceCredentialEnv(req)
 	if err != nil {
@@ -1176,6 +1225,15 @@ func buildWorkspaceInitContainer(req podRequest, workDir string, runAsUser, runA
 		mounts = append(mounts,
 			volumeMount{Name: seedVolume, MountPath: seedMountDir, ReadOnly: true},
 			volumeMount{Name: dispatchVolume, MountPath: dispatchMountDir})
+	}
+	if len(req.ReadOnly) > 0 {
+		// The read-only projects' volume, writable here only; and the run's
+		// session token to fetch their snapshots with — the harness has it in
+		// its own environment already, from the same key.
+		mounts = append(mounts, volumeMount{Name: readOnlyVolume, MountPath: executor.ReadOnlyRoot})
+		name := req.ReadOnly[0].Snapshot.TokenEnv
+		env = append(env, envVar{Name: name, ValueFrom: &envVarSource{SecretKeyRef: &secretKeySelector{
+			Name: req.LeaseSecretName, Key: envSecretKeyPrefix + name, Optional: boolPtr(false)}}})
 	}
 	// The fetch is the first thing to reach the git proxy, so it needs the
 	// bundle as much as the harness does. Plain values: a CA path and the URLs
@@ -1611,4 +1669,38 @@ func quantityFromMB(mb int) string {
 		return ""
 	}
 	return strconv.Itoa(mb) + "Mi"
+}
+
+// checkReadOnlyRequest refuses read-only projects a Pod cannot be given: each
+// travels as a snapshot the workspace container fetches, with a token from the
+// run's lease Secret named by one variable.
+func checkReadOnlyRequest(req podRequest) error {
+	if err := executor.ValidateReadOnly(req.ReadOnly); err != nil {
+		return err
+	}
+	if !req.Workspace.NeedsProvisioning() {
+		return fmt.Errorf("%w: the projects this run may read reach a Pod through its workspace container, "+
+			"and this workload fetches no workspace", executor.ErrUnsupported)
+	}
+	if strings.TrimSpace(req.LeaseSecretName) == "" {
+		return fmt.Errorf("%w: the projects this run may read are fetched with a token from the run's lease "+
+			"Secret, and this run has none", executor.ErrInvalidSpec)
+	}
+	// The variable's name, not its value: nothing here holds a credential.
+	varName := ""
+	for _, p := range req.ReadOnly {
+		if p.Snapshot == nil {
+			return fmt.Errorf("%w: read-only project %s has no snapshot to fetch: a Pod shares no filesystem "+
+				"with the hub", executor.ErrInvalidSpec, p.Project)
+		}
+		name := p.Snapshot.TokenEnv
+		if varName == "" {
+			varName = name
+		}
+		if name != varName || !validEnvName(varName) {
+			return fmt.Errorf("%w: the read-only projects' snapshots name no one token variable",
+				executor.ErrInvalidSpec)
+		}
+	}
+	return nil
 }

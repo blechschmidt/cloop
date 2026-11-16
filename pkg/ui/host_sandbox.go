@@ -51,6 +51,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/claudecodeauth"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
@@ -571,7 +572,15 @@ func applyDeviceConfinement(spec executor.Spec, ex executor.Executor, workDir st
 		return spec
 	case config.HostSandboxAll:
 	default:
-		if (project != "" && settings.optedOut(project)) || !deviceSharedWithOtherProjects(ex.ID(), project) {
+		// A run given other projects to read (Task 20501) is confined as one
+		// on a shared device is: on the device's host only the sandbox makes
+		// the snapshots read-only, the payload running as the user who owns
+		// them.
+		if project != "" && settings.optedOut(project) {
+			return spec
+		}
+		readOnly := len(spec.ReadOnly) > 0 && deviceCanSandbox(ex)
+		if !readOnly && !deviceSharedWithOtherProjects(ex.ID(), project) {
 			return spec
 		}
 	}
@@ -792,3 +801,22 @@ var errHostSandboxRefused = errors.New("host sandbox refused")
 
 // Is lets errors.Is find a refusal by errHostSandboxRefused.
 func (e *hostSandboxRefusal) Is(target error) bool { return target == errHostSandboxRefused }
+
+// deviceCanSandbox reports whether the device behind ex says it can keep a
+// host payload in the host sandbox (remote.AgentCapabilities.HostSandbox). A
+// run given another project to read is confined only on a device that can:
+// on one that cannot it runs as before, and the journal says the projects are
+// not read-only to it, rather than every run of the project being refused.
+func deviceCanSandbox(ex executor.Executor) bool {
+	if fn := deviceSandboxFn.Load(); fn != nil {
+		return (*fn)(ex)
+	}
+	if v, ok := ex.(*remote.Virtual); ok {
+		ex = v.Parent()
+	}
+	r, ok := ex.(*remote.Executor)
+	return ok && r.AgentCapabilities().HostSandbox
+}
+
+// deviceSandboxFn answers deviceCanSandbox in tests; nil asks the agent.
+var deviceSandboxFn atomic.Pointer[func(executor.Executor) bool]

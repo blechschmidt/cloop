@@ -307,9 +307,9 @@ func privateMounts(p Policy) error {
 			return nil
 		}
 		seen[path] = true
-		fd, err := openGrant(path, anchors, 0)
+		fd, err := openGrantIn(path, anchors, p.ListOnly, 0)
 		if err != nil {
-			if optional && errors.Is(err, unix.ENOENT) {
+			if optional && (errors.Is(err, unix.ENOENT) || errors.Is(err, errLinkInReadOnly)) {
 				return nil
 			}
 			return fmt.Errorf("hold %s: %w", path, err)
@@ -424,6 +424,25 @@ func privateMounts(p Policy) error {
 		kept = append(kept, k.path)
 		if k.writable {
 			rebind = append(rebind, k.path)
+		}
+	}
+
+	// Another project's root the run may list (Task 20501), when it is
+	// beneath a private directory: its granted entries came back above, one
+	// by one, into a directory of the private one's — writable, as the private
+	// directory is. Bound onto itself, with them, so that it is a mount of its
+	// own and stays read-only below: nothing can be created beside them, and
+	// the entries that were not granted are not there to read.
+	for _, path := range p.ListOnly {
+		path = filepath.Clean(path)
+		if path == "" || !underAny(path, privateDirs) {
+			continue
+		}
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return fmt.Errorf("keep %s: %w", path, err)
+		}
+		if err := unix.Mount(path, path, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+			return fmt.Errorf("keep %s read-only: %w", path, err)
 		}
 	}
 

@@ -135,6 +135,13 @@ const (
 	// ActionKnowledgeRunCitations records a run asking for another
 	// project's citations, which are refused (Task 20499).
 	ActionKnowledgeRunCitations Action = "knowledge.run.citations"
+	// ActionKnowledgeRunReadOnly records a run finding, at a task boundary,
+	// that a project it was given to read no longer lists its project
+	// (Task 20501).
+	ActionKnowledgeRunReadOnly Action = "knowledge.run.readonly"
+	// ActionKnowledgeRunSnapshot records an executor fetching, with a run's
+	// session, a snapshot of a project the run was given to read (Task 20501).
+	ActionKnowledgeRunSnapshot Action = "knowledge.run.snapshot"
 
 	// ── step ───────────────────────────────────────────────────────────────
 

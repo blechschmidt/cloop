@@ -118,6 +118,14 @@ const (
 	// run on the first runner that can take it. The detail names the pool and
 	// says why nothing runs yet. Stop takes the run out of the queue.
 	CodePoolCapacity Code = "pool_capacity"
+	// CodeReadersChanged is a run that stopped at a task boundary because a
+	// project it had been given to read no longer lists its project as a
+	// reader (Task 20501), or the hub could not confirm that it still does.
+	// The project it read is mounted for the whole of a run, so the run ends
+	// rather than start another task with it, and the hub starts it again at
+	// once — that run is given only what the readers lists name now. Like a
+	// usage cap it carries ResumesAt, set to the moment it stopped.
+	CodeReadersChanged Code = "readers_changed"
 )
 
 // ExitStateNotPersisted is the exit status of a `cloop run` that stopped for
@@ -149,6 +157,7 @@ var codeLabels = map[Code]string{
 	CodeDiskLimit:          "workspace over its disk limit",
 	CodeStarterUnavailable: "starter's Claude account unavailable",
 	CodePoolCapacity:       "waiting for pool capacity",
+	CodeReadersChanged:     "a project it reads stopped listing it",
 }
 
 // Known reports whether c is a code this package defines. The persistence
@@ -167,7 +176,7 @@ func Codes() []Code {
 		CodeApproval, CodeAbort, CodeCancelled, CodePlanOnly,
 		CodeIdle, CodeOperator, CodeStale, CodeStateNotPersisted,
 		CodeUncommittedWork, CodeDiskLow, CodeExecutorLost, CodeDiskLimit,
-		CodeStarterUnavailable, CodePoolCapacity,
+		CodeStarterUnavailable, CodePoolCapacity, CodeReadersChanged,
 	}
 }
 
@@ -180,9 +189,10 @@ type Reason struct {
 	// prose for a human; never switch on it.
 	Detail string `json:"detail,omitempty"`
 	// ResumesAt is when the condition lifts on its own, for the pauses where
-	// that instant is actually known. Only CodeUsageCap sets it today: the
-	// OAuth usage API reports each window's reset, so the hub can resume
-	// without a human. Nil means "nobody knows; a human decides".
+	// that instant is actually known: CodeUsageCap, whose window's reset the
+	// OAuth usage API reports, and CodeReadersChanged, which lifts at once.
+	// The hub resumes either without a human. Nil means "nobody knows; a
+	// human decides".
 	ResumesAt *time.Time `json:"resumes_at,omitempty"`
 	// TaskID is the task the pause is about, when it is about one: the human
 	// review gate the run stopped at (Task 20477), or the task whose
@@ -257,15 +267,21 @@ func (r *Reason) Summary(loc *time.Location) string {
 // AutoResumable reports whether this pause has cleared by now and can be
 // restarted without asking a human.
 //
-// Only CodeUsageCap qualifies. Every other code either needs a decision (a
-// declined approval, a raised budget) or describes a run that was not meant
-// to continue at all (plan-only, operator stop) — resuming those on a timer
-// would override the very intent that stopped them.
+// Only CodeUsageCap and CodeReadersChanged qualify. Every other code either
+// needs a decision (a declined approval, a raised budget) or describes a run
+// that was not meant to continue at all (plan-only, operator stop) — resuming
+// those on a timer would override the very intent that stopped them. A
+// readers change stopped the run only so that the next task starts in a run
+// given what the readers lists name now.
 func (r *Reason) AutoResumable(now time.Time) bool {
-	if r == nil || r.Code != CodeUsageCap || r.ResumesAt == nil {
-		return false
-	}
-	return !now.Before(*r.ResumesAt)
+	return r.ResumedByHub() && !now.Before(*r.ResumesAt)
+}
+
+// ResumedByHub reports whether the hub restarts this pause by itself once its
+// ResumesAt has come: a usage cap or a readers change that knows when it
+// lifts.
+func (r *Reason) ResumedByHub() bool {
+	return r != nil && (r.Code == CodeUsageCap || r.Code == CodeReadersChanged) && r.ResumesAt != nil
 }
 
 // RunWaits reports whether the run that recorded this pause is still alive,

@@ -186,13 +186,16 @@ func auditImageDenial(workDir string, err error) {
 // Best-effort by design. A project directory that cannot be written is already
 // a run that will fail on its first artifact, and failing the start here would
 // replace that clear error with a confusing one about provenance.
-func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex executor.Executor, h executor.Handle, identity, runID string, leaseIDs []string) {
+func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex executor.Executor, h executor.Handle, identity, runID string, leaseIDs []string, readOnly ...string) {
 	rec := artifact.SandboxRecord{
 		PinnedImage: h.Image,
 		StartedAt:   h.StartedAt,
 		Identity:    identity,
 		RunID:       runID,
 		LeaseIDs:    leaseIDs,
+		// The other projects the run may read (Task 20501), onto every task
+		// it dispatches.
+		ReadOnlyProjects: readOnly,
 	}
 	// The verdict on one of cloop's own images, and the digest verified (Task
 	// 20453): onto every task artifact and task.dispatch row of the run.
@@ -238,15 +241,16 @@ func recordSandboxProvenance(workDir string, resolved *sandbox.Resolved, ex exec
 // on their task.dispatch rows (Task 20457). The same facts the run's own
 // placement record carries for a run on this filesystem (recordSandboxProvenance).
 func seededProvenance(ex executor.Executor, h executor.Handle, resolved *sandbox.Resolved, runID, payer string,
-	leaseIDs []string) projectseed.Provenance {
+	leaseIDs []string, readOnly ...string) projectseed.Provenance {
 	prov := projectseed.Provenance{
-		ExecutorID:   ex.ID(),
-		ExecutorKind: ex.Kind(),
-		Isolation:    string(ex.Capabilities().Isolation),
-		RunID:        runID,
-		Identity:     payer,
-		PinnedImage:  h.Image,
-		LeaseIDs:     leaseIDs,
+		ExecutorID:       ex.ID(),
+		ExecutorKind:     ex.Kind(),
+		Isolation:        string(ex.Capabilities().Isolation),
+		RunID:            runID,
+		Identity:         payer,
+		PinnedImage:      h.Image,
+		LeaseIDs:         leaseIDs,
+		ReadOnlyProjects: readOnly,
 	}
 	if p := h.ImageProvenance; p != nil {
 		prov.ImageProvenance = string(p.Status)

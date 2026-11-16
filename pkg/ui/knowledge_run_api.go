@@ -57,6 +57,10 @@ func (s *Server) knowledgeRunRoutes() []routeSpec {
 		{Pattern: "POST " + mount + knowledgerun.PathSearch, Handler: s.handleRunKnowledgeSearch, Perm: authz.PermPublic, Scope: scopeGlobal},
 		{Pattern: "POST " + mount + knowledgerun.PathGet, Handler: s.handleRunKnowledgeGet, Perm: authz.PermPublic, Scope: scopeGlobal},
 		{Pattern: "POST " + mount + knowledgerun.PathCitations, Handler: s.handleRunKnowledgeCitations, Perm: authz.PermPublic, Scope: scopeGlobal},
+		// The projects the run was given to read (Task 20501), with the same
+		// session: readonly_run_api.go.
+		{Pattern: "POST " + mount + knowledgerun.PathReadOnly, Handler: s.handleRunReadOnly, Perm: authz.PermPublic, Scope: scopeGlobal},
+		{Pattern: "POST " + mount + knowledgerun.PathReadOnlySnapshot, Handler: s.handleRunReadOnlySnapshot, Perm: authz.PermPublic, Scope: scopeGlobal},
 	}
 }
 

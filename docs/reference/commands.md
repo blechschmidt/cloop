@@ -2063,6 +2063,13 @@ on a list, so name its project. `ls` names only projects you can see and counts
 the others; an administrator also gets those entries' ids, which `rm` takes. See
 [Project readers](../security/model.md#project-readers).
 
+Once `shop`'s list names `billing`, every run of `billing` started after that is
+given `shop`'s source tree, read-only: at `/readonly/<slug>` in a container, a
+Kubernetes Pod or a device, and at `shop`'s own path in the host sandbox. The
+run's prompt says where. Removing the entry stops the hub serving `shop` to the
+run at once, and the run stops before its next task and starts again without it.
+See [reading another project's tree](../security/model.md#reading-another-projects-tree).
+
 | Flag | Applies to | Description |
 |------|-----------|-------------|
 | `--hub` | all | The hub's URL (default: `CLOOP_HUB_URL`, the hub you signed in to, or this machine's) |

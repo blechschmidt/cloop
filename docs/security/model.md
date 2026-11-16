@@ -1729,7 +1729,7 @@ data the request reaches.
 
 | Credential | Shape | Minted for | Accepted at | Its project comes from | Another project |
 | --- | --- | --- | --- | --- | --- |
-| Knowledge session | `cloop_know1_<id>.<secret>` | A run of a project with knowledge sources bound to it, or to a project it may read | `POST /api/run/knowledge/search`, `/get` and `/citations` | The session's record | A search or a lookup may name one whose readers list names the run's project. Citations never |
+| Knowledge session | `cloop_know1_<id>.<secret>` | A run of a project with knowledge sources bound to it, or to a project it may read, or a run given another project's tree to read | `POST /api/run/knowledge/search`, `/get`, `/citations`, `/readonly` and `/readonly/snapshot` | The session's record | A search or a lookup may name one whose readers list names the run's project. A tree the run was given at dispatch is answered for, and served as a snapshot, only while that list still names it. Citations never |
 | Model relay session | `cloop_relay_<id>.<secret>` | A sandboxed run, on its secret lease | `/_anthropic/` | The lease the session stands on | No request names one |
 | Git proxy session, a workspace's included | `cloop_git1_…` password | The repositories the run's grants name, or its workspace's remote | The git proxy | The lease or workspace it was minted for | A repository outside its scope gets 403. A foreign read fetches, and only while the readers list allows it |
 | Kubernetes monitor session | `cloop_kube1_<id>.<secret>` | The run's kubeconfig grant | The access monitor | The grant | A namespace or verb outside the grant gets 403 |
@@ -3852,10 +3852,14 @@ has no list of its own, and it reads nothing because its project is listed
 (`TestCanReadIsDenyByDefault`, `TestReaders_FeaturesAreNeverListed`).
 
 The hub asks the list at every request a run makes to read another project: a
-knowledge search or lookup naming that project, and a fetch through the git
-proxy on a session lent to read its repository. Nothing else reads another
-project through it, and no write crosses, whatever a list says
-([what a run's credentials reach](#what-a-runs-credentials-reach)).
+knowledge search or lookup naming that project, a fetch through the git proxy
+on a session lent to read its repository, the run's question at each task
+boundary about the trees it was given, and an executor's fetch of a snapshot of
+one. When a run is dispatched, the hub also gives it the source tree of every
+project whose list names its project, read-only
+([reading another project's tree](#reading-another-projects-tree)). Nothing
+else reads another project through the list, and no write crosses, whatever a
+list says ([what a run's credentials reach](#what-a-runs-credentials-reach)).
 
 **Who may see and change it.** Everyone who can see a project may see its list,
 and the projects it may read, with `GET /api/projects/{idx}/readers` or
@@ -3896,6 +3900,129 @@ cloop project readers ls shop
 cloop project readers add shop billing
 cloop project readers rm shop billing
 ```
+
+### Reading another project's tree
+
+When project B's readers list names project A, every run of A is given B's
+source tree read-only, and a run of any other project is not. The hub resolves
+the lists once, when it dispatches the run. Only a run of a project
+(`cloop run`) is given anything: a dashboard model call, a probe and a feature's
+run are not, because a list names projects and never their features
+(`TestARunIsGivenOnlyTheProjectsWhoseReadersListsNameIt`). A run is given at
+most 16 other projects. Some projects are never given, whatever a list says:
+the hub's own directory, whose `.cloop` holds the control plane; a directory
+that breaks the hub's [project confinement](../architecture/executors.md#which-directory-a-project-may-be); and a
+project that keeps no source on the hub, such as one whose tree lives on its
+executor. A run is given nothing when it couldn't be told that access ended:
+when the hub can't give it a session (it needs `ui.external_url` to name an
+address the run reaches the hub at, with a certificate the run trusts, as the
+knowledge search does), or when its sandbox has no network. The project's
+journal says which projects were left out and why.
+
+**How the tree reaches the run** depends on the executor, and the executor says
+which way it can (`Capabilities.ReadOnlyProjects`):
+
+| Executor | What the run is given | Where | What makes it read-only |
+| --- | --- | --- | --- |
+| Container on the hub's host, under runc, Kata or gVisor | B's directory, bound | `/readonly/<slug>` | The runtime's read-only bind. A write fails with EROFS for every user, root included |
+| Host process on the hub | B's directory, where it is | B's path on the hub | The [host sandbox](#the-host-sandbox)'s Landlock policy grants B's entries read-only and B's root list-only. A write fails with EACCES, or EROFS where the run's namespace makes the tree read-only |
+| Kubernetes Pod | A snapshot, fetched by the workspace init container | `/readonly/<slug>` | A volume the harness mounts read-only. A write fails with EROFS |
+| Remote device, in a container or a virtual executor | A snapshot, fetched by the agent (protocol v31) | `/readonly/<slug>` | A read-only bind of the directory the agent unpacked it into |
+| Remote device, as a host process | A snapshot, fetched by the agent | A directory beneath the agent's root | The host sandbox: on a device whose agent can sandbox its host processes, the hub confines a host-mode run it gives another project, and Landlock grants the snapshot read-only. On one that can't, or for an opted-out project, the run is not confined and the snapshot is not read-only to it; the journal says so |
+
+**What is left out.** Neither the bind nor the snapshot gives the run B's
+`.cloop` (its state, configuration and the credentials cloop keeps for it),
+B's `.git`, or the files credentials live in by convention: `.env` and
+`.env.*`, `.envrc`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`,
+`.mcp.json`, the `.ssh`, `.aws`, `.kube`, `.docker`, `.gnupg`, `.azure`,
+`.gcloud` and `.claude` directories, and private keys (`*.key`, `*.p12`,
+`*.pfx`, `id_rsa` and its kind) (`executor.ReadOnlyHidden`). A hidden name that
+is a link into B's own tree, such as a `.cloop` kept as a link to a directory
+beside it, hides the directory it points into as well
+(`TestReadOnlyEntriesHidesWhatAHiddenLinkPointsInto`). A bind or a grant
+in place leaves out these entries at the top of B's tree. In a container each
+one is covered by an empty read-only bind, and the host sandbox never grants
+them. A snapshot leaves them out at any depth. It holds the files git would
+commit from B's working tree, tracked and untracked but not ignored, with no
+history. A file over 32 MiB is left out, and a tree over 256 MiB (64 MiB
+compressed) is refused. The hub reads B's files beneath B's directory and never
+follows a link at their last component, so a link B's own runs plant can't
+make it read anything else. In the host sandbox each entry is opened beneath
+B's root following no link, so one that B's runs swap for a link after the
+hub listed it isn't granted either
+(`TestAnotherProjectsEntriesAreOpenedFollowingNoLink`). A link inside the
+snapshot stays a link, resolved inside the run's sandbox. The hub builds one
+snapshot at a time for a run's session and serves it at most three of each
+project. Unpacking refuses an entry that would leave its
+directory (`TestReadOnlyProjectIsBoundReadOnlyWithItsSecretsCovered`,
+`TestASandboxedRunReadsAListedProjectWhereItIsAndCannotWriteIt`,
+`TestBuildPod_ReadOnlyProjectsAreMountedReadOnlyInTheHarness`,
+`TestLoopbackAConfinedHostRunReadsTheSnapshotItWasGivenAndCannotWriteIt`,
+`TestLoopbackAContainerRunIsGivenTheSnapshotToBindAtReadonly`,
+`TestBuildCarriesTheTreeWithoutItsSecrets`,
+`TestExtractRefusesWhatWouldLeaveItsDestination`). A run given no project has
+no `/readonly` at all (`TestNoReadOnlyProjectNoMount`,
+`TestASandboxedRunGivenNoProjectReachesNone`,
+`TestBuildPod_NoReadOnlyProjectsNoVolume`).
+
+**What the run is told, and what is recorded.** The run gets the list in
+`CLOOP_READONLY_PROJECTS`. Its orchestrator names in every task's prompt the
+projects whose trees are actually there, and where. A project an executor
+could not place is left out of the prompt rather than promised
+(`TestReadOnlySectionNamesOnlyTreesThatAreThere`). The hub records what it gave
+the run in the run's knowledge session, on the project's journal, on the spec's
+`read_only_projects` label, and in `read_only_projects` on the
+[`task.dispatch`](../reference/audit-events.md#task) row of every task the run
+starts. Each snapshot the hub serves, or refuses, is a
+[`knowledge.run.snapshot`](../reference/audit-events.md#knowledge) row.
+
+**Taking a project off a list during a run.** A run's view of another project
+is given for the whole of the run, so a removal reaches a run at two points:
+
+- The hub stops serving the project at once. Its next answer about the
+  project, a snapshot an executor fetches or a search of its knowledge, is the
+  404 a path that names no project gets
+  (`TestTheHubServesAReadOnlyProjectOnlyWhileItsListNamesTheRun`).
+- The tree disappears at the next task boundary. Before it starts each task
+  after its first, the run asks the hub whether every project it was given
+  still lists its project. When one doesn't, the run stops before that task. It
+  is paused `readers_changed`, which the hub resumes at once, and the run it
+  starts again is given only what the lists name now
+  (`TestReadersBoundaryEndsTheRunWhenAProjectStopsListingIt`,
+  `TestARunPausedForAReadersChangeIsStartedAgainAtOnce`). The change is a
+  [`knowledge.run.readonly`](../reference/audit-events.md#knowledge) row. When
+  the hub can't answer, after a second try, the run stops too, but the hub
+  starts it again only two minutes later: a hub the run can't reach is no
+  removal, and the first task of every run still runs
+  (`TestReadersBoundaryEndsTheRunWhenTheHubCannotAnswer`,
+  `TestReadersBoundaryIsNotAskedBeforeTheFirstTask`). A hub that can't read
+  its own readers lists says so with a 503, not as a removal
+  (`TestTheReadersListsUnreadableIsNotARemoval`).
+
+What a run already read stays read: a removal can't take back a file the agent
+copied into its own tree. Until the task in flight ends, a bound or granted
+tree keeps showing B as it is, including B's changes since the removal, and a
+snapshot keeps what it held. A run whose task never ends keeps its view for as
+long as the task runs. Stopping the run ends the view at once.
+
+**Residual risks.** A bind or a grant in place hides B's hidden entries only at
+the top of its tree. A `.env` further down, such as `services/api/.env`, is
+readable there, and so is one B creates at the top of its tree after a
+container was started. Keep credentials out of a tree other projects read, or
+in files B's `.gitignore` excludes, which no snapshot carries. In the host
+sandbox without namespaces (a hub that is not root), B's root is granted
+list-only, so the names of the entries in B's `.cloop` can be listed, though
+not read. On a hub's host or a device whose runs are outside the host sandbox,
+because the project was opted out (`executors.host_sandbox.opt_out`) or the
+sandbox is off, the run can read and write every file the hub's or the agent's
+user can, so read-only isn't enforced there, and the same holds on a device
+whose agent can't sandbox its host processes. The project's journal says so.
+A Kubernetes Pod's harness image must hold a `cloop` of this release or later:
+its workspace container fetches the snapshots, and an older one refuses the
+flags that say what to fetch. B's tree is B's data, and every task's prompt
+tells the agent not to follow instructions found in it; it is still text an
+agent reads. B's administrators decide what A's runs read, and taking A off B's
+list restarts A's runs.
 
 ### When RBAC is in force
 

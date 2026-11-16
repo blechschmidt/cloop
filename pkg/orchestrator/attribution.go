@@ -141,6 +141,11 @@ type dispatchFacts struct {
 	SetupHash       string
 	LeaseIDs        []string
 	Identity        string
+	// ReadOnlyProjects are the other projects the run was given to read
+	// (Task 20501); placed says the hub's placement record was read, so an
+	// empty list is the hub saying the run was given none.
+	ReadOnlyProjects []string
+	placed           bool
 }
 
 // resolveDispatchFacts reads the placement record for the dispatch row.
@@ -165,6 +170,8 @@ func resolveDispatchFacts(workDir string) dispatchFacts {
 	f.SpecHash = rec.SpecHash
 	f.SetupHash = rec.SetupHash
 	f.LeaseIDs = rec.LeaseIDs
+	f.ReadOnlyProjects = rec.ReadOnlyProjects
+	f.placed = true
 	f.Identity = strings.TrimSpace(rec.Identity)
 	return f
 }
@@ -203,6 +210,10 @@ func (o *Orchestrator) beginTaskExecution(task *pm.Task) dispatchFacts {
 		SetupHash:       f.SetupHash,
 		LeaseIDs:        f.LeaseIDs,
 		Actor:           f.Identity,
+		// What else the run could read (Task 20501): recorded only for a run
+		// the hub dispatched, whose placement record says.
+		ReadOnlyProjects: f.ReadOnlyProjects,
+		ReadOnlyKnown:    f.placed,
 	})
 	return f
 }

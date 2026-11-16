@@ -662,7 +662,15 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// its agent search the project's knowledge with. Never a refusal — a run
 	// that cannot have one runs without knowledge, and the journal says why —
 	// and taken back if the run does not start.
-	spec, knowledge := applyKnowledgeSession(spec, ex, workDir, runID, identity, argv)
+	//
+	// The other projects the run may read (Task 20501) are resolved here, once,
+	// and given to the run with the same session, which records them: the run
+	// asks with it at every task boundary whether each still lists its project,
+	// and an executor that fetches snapshots fetches them with it.
+	readOnly, readOnlyNotes := resolveReadOnly(workDir, argv)
+	readOnly, readOnlyNotes = deliverableReadOnly(readOnly, spec, ex, readOnlyNotes)
+	spec, knowledge := applyRunSession(spec, ex, workDir, runID, identity, argv, readOnly)
+	spec = applyReadOnly(spec, ex, workDir, readOnly, readOnlyNotes, knowledge)
 	defer func() {
 		if err != nil {
 			knowledge.abandon("the run did not start")
@@ -703,6 +711,10 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		lease.Close()
 		return nil, executor.Handle{}, err
 	}
+	// A run on the hub's host outside the host sandbox can write the projects
+	// it was given to read like any file of the hub's user: said in the
+	// journal, as for a read-only local repository there.
+	readOnlyUnenforced(spec, ex, workDir)
 
 	// Last gate before dispatch, and deliberately after every step that can add
 	// a binding to the spec: the lease, the repository grants and the workspace
@@ -792,7 +804,8 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 			closeRunForwards(handle.ID, "the run ended")
 		}()
 	}
-	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs())
+	recordSandboxProvenance(workDir, sandboxSpec, ex, handle, identity, runID, lease.LeaseIDs(),
+		readOnlyProjectsOf(spec)...)
 	// One of cloop's own images that ran unverified, on the run's journal
 	// (Task 20453).
 	journalImageProvenance(workDir, ex, handle)
@@ -804,7 +817,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 			payer = cost.IdentityLocal
 		}
 		rememberSeededDispatch(ex, handle.ID, seededProvenance(ex, handle, sandboxSpec, runID, payer,
-			lease.LeaseIDs()))
+			lease.LeaseIDs(), readOnlyProjectsOf(spec)...))
 		// And for a feature, where its work is landed when it comes back.
 		rememberFeatureReturn(ex, handle.ID, featureReturnFor(spec))
 	}

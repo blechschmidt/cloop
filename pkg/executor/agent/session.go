@@ -976,6 +976,29 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		spec.HostMounts = append(spec.HostMounts, placed.hostMounts()...)
 	}
 
+	// The other projects the run may read (Task 20501): fetched from the hub
+	// with the run's session and unpacked where only this agent writes, then
+	// bound read-only by the container driver or granted read-only by the
+	// host sandbox below. A host payload outside the sandbox — the project was
+	// opted out — runs as the user who owns them, so for it they are not
+	// read-only, and the log says so.
+	if len(spec.ReadOnly) > 0 {
+		roDir, rerr := a.placeReadOnly(ctx, &spec, handleID, hostMode)
+		if roDir != "" {
+			wl.setReadOnly(roDir)
+		}
+		if rerr != nil {
+			a.closeDevicesFor(handleID, "the workload did not start")
+			a.forget(handleID)
+			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{HandleID: handleID, Error: rerr.Error()})
+			return
+		}
+		if hostMode && !spec.ConfineToProject && len(spec.ReadOnly) > 0 {
+			a.cfg.logf("workload %s: runs outside the host sandbox, so the projects it reads are not read-only to it",
+				handleID)
+		}
+	}
+
 	// The forwarded devices the hub attached here for this workload (Task
 	// 20430), given to its sandbox like any other device or interface. Only a
 	// container sandbox may have them: on the host they would belong to the
@@ -1568,6 +1591,8 @@ func (a *Agent) forget(handleID string) {
 		wl.takeSecrets().wipe(a.cfg.logf)
 		// And the private directory of a workload that named no project.
 		a.removeScratchWorkDir(wl.takeScratch())
+		// And the projects it was given to read (Task 20501).
+		a.removeReadOnly(wl.takeReadOnly())
 	}
 	// Destroy whatever the vault still holds for this workload, then drop the
 	// binding so a revocation does not wait for an ack about nothing.

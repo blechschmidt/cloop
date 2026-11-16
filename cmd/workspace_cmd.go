@@ -63,6 +63,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/gitprovision"
 	"github.com/blechschmidt/cloop/pkg/executor/kubernetes"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
+	"github.com/blechschmidt/cloop/pkg/knowledgerun"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/spf13/cobra"
 )
@@ -75,6 +76,9 @@ var (
 	workspaceProvisionSizeLimitMB int
 	workspaceProvisionSeed        string
 	workspaceProvisionSeedCopy    string
+	workspaceProvisionReadOnly    []string
+	workspaceProvisionReadOnlyDir string
+	workspaceProvisionReadOnlyEnv string
 )
 
 // workspaceProvisionDirPerm is the mode the target directory is created with.
@@ -121,7 +125,10 @@ spawned, and no output of this command can contain the token.`,
 		// line runs with the credential held in a local variable and nowhere
 		// else. See takeWorkspaceCredential.
 		cred := takeWorkspaceCredential()
-		return runWorkspaceProvision(cmd.Context(), workspaceProvisionOptions{
+		// The run's session token for the read-only projects' snapshots, taken
+		// the same way (Task 20501).
+		readersToken := takeReadOnlyToken(workspaceProvisionReadOnlyEnv)
+		if err := runWorkspaceProvision(cmd.Context(), workspaceProvisionOptions{
 			Dir:         workspaceProvisionDir,
 			Repo:        workspaceProvisionRepo,
 			Ref:         workspaceProvisionRef,
@@ -129,7 +136,11 @@ spawned, and no output of this command can contain the token.`,
 			SizeLimitMB: workspaceProvisionSizeLimitMB,
 			Seed:        workspaceProvisionSeed,
 			SeedCopy:    workspaceProvisionSeedCopy,
-		}, cred, cmd.OutOrStdout())
+		}, cred, cmd.OutOrStdout()); err != nil {
+			return err
+		}
+		return placeReadOnlySnapshots(cmd.Context(), workspaceProvisionReadOnlyDir, workspaceProvisionReadOnly,
+			readersToken, cmd.OutOrStdout())
 	},
 }
 
@@ -424,6 +435,12 @@ func init() {
 		"place the project state in this file into the checkout as .cloop/state.json")
 	f.StringVar(&workspaceProvisionSeedCopy, "seed-copy", "",
 		"also leave the project state at this path, for `cloop workspace writeback --seed` (with --seed)")
+	f.StringArrayVar(&workspaceProvisionReadOnly, "readonly-snapshot", nil,
+		"SLUG=URL: place a snapshot of another project the run may read, fetched from URL, at --readonly-dir/SLUG (repeatable)")
+	f.StringVar(&workspaceProvisionReadOnlyDir, "readonly-dir", "",
+		"the directory the read-only projects are placed in (with --readonly-snapshot)")
+	f.StringVar(&workspaceProvisionReadOnlyEnv, "readonly-token-env", knowledgerun.EnvReadersToken,
+		"the environment variable holding the run's session token the snapshots are fetched with")
 
 	workspaceCmd.AddCommand(workspaceProvisionCmd)
 }

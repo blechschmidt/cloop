@@ -44,6 +44,13 @@ const (
 	// EnvTask names the task an agent works on, as attachments.EnvTaskID
 	// does: what the hub records a read for.
 	EnvTask = "CLOOP_TASK_ID"
+	// EnvReadersURL and EnvReadersToken carry the same session for the other
+	// projects a run was given to read (Task 20501): set whenever it was given
+	// any, beside EnvURL and EnvToken when the project has knowledge sources
+	// and without them when it has none — so a run with no knowledge is not
+	// told it has a knowledge search.
+	EnvReadersURL   = "CLOOP_READERS_URL"
+	EnvReadersToken = "CLOOP_READERS_TOKEN"
 )
 
 // TokenPrefix starts every knowledge session token: cloop_know1_<id>.<secret>.
@@ -268,6 +275,16 @@ func New(base, token string) (*Client, error) {
 // when one is malformed.
 func FromEnv(getenv func(string) string) (*Client, error) {
 	base, token := strings.TrimSpace(getenv(EnvURL)), strings.TrimSpace(getenv(EnvToken))
+	if base == "" || token == "" {
+		return nil, ErrNotConfigured
+	}
+	return New(base, token)
+}
+
+// ReadersFromEnv is FromEnv for the session a run was given for the projects
+// it reads (EnvReadersURL, EnvReadersToken).
+func ReadersFromEnv(getenv func(string) string) (*Client, error) {
+	base, token := strings.TrimSpace(getenv(EnvReadersURL)), strings.TrimSpace(getenv(EnvReadersToken))
 	if base == "" || token == "" {
 		return nil, ErrNotConfigured
 	}

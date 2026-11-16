@@ -339,7 +339,19 @@ const (
 	// with every other project's tree in reach, so the hub refuses a host-mode
 	// dispatch it asked to confine and names the upgrade, or the opt-out. See
 	// MinProjectConfinementVersion.
-	ProtocolVersion = 30
+	//
+	// v31 makes the agent honour Spec.ReadOnly (Task 20501): before it starts
+	// the payload it fetches, from the hub, a snapshot of each other project
+	// the run may read — with the run's session token, from the URL the
+	// entry names — unpacks it beneath its root where only it can write, and
+	// gives it to the payload read-only: bound at /readonly/<slug> in a
+	// container, granted read-only by the host sandbox to a confined host
+	// process. No frame changes; the field rides inside the Spec. Gated on
+	// the hub side by degrading: an older agent's sessions advertise no
+	// read-only delivery, so the hub gives their runs no other project and
+	// says so in the journal; a spec carrying some is refused. See
+	// MinReadOnlyProjectsVersion.
+	ProtocolVersion = 31
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -609,6 +621,15 @@ const MinProjectConfinementVersion = 30
 // SupportsProjectConfinement reports whether an agent speaking this protocol
 // version honours Spec.ConfineToProject.
 func SupportsProjectConfinement(version int) bool { return version >= MinProjectConfinementVersion }
+
+// MinReadOnlyProjectsVersion is the first protocol whose agents place the
+// other projects a run may read (Spec.ReadOnly, Task 20501). An older agent
+// ignores the field.
+const MinReadOnlyProjectsVersion = 31
+
+// SupportsReadOnlyProjects reports whether an agent speaking this protocol
+// version honours Spec.ReadOnly.
+func SupportsReadOnlyProjects(version int) bool { return version >= MinReadOnlyProjectsVersion }
 
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.
@@ -1076,6 +1097,13 @@ type AgentCapabilities struct {
 	// firewall-capable agent older than the field.
 	PacketFilter      bool   `json:"packet_filter,omitempty"`
 	PacketFilterIssue string `json:"packet_filter_issue,omitempty"`
+	// HostSandbox reports that the agent can keep a host-process payload in
+	// the host sandbox (Landlock ABI 3 or later). The hub asks it of a run it
+	// gives another project to read (Task 20501): only the sandbox makes such
+	// a project read-only to a host payload, so the hub confines one where the
+	// device can, and says the projects are not read-only where it cannot.
+	// Absent below v31, which the hub reads as "cannot".
+	HostSandbox bool `json:"host_sandbox,omitempty"`
 	// DenialLog reports that the agent reads its sandboxes' packet log and
 	// reports what their firewalls refused (Task 20437): it bound an NFLOG
 	// group with the CAP_NET_ADMIN its packet filter already has.
@@ -1148,9 +1176,12 @@ type AgentCapabilities struct {
 // wrong place.
 func (c AgentCapabilities) Executor() executor.Capabilities {
 	return executor.Capabilities{
-		Isolation:              executor.IsolationRemote,
-		SupportsStream:         true,
-		SupportsSignal:         true,
+		Isolation:      executor.IsolationRemote,
+		SupportsStream: true,
+		SupportsSignal: true,
+		// A device fetches each other project a run may read as a snapshot
+		// (Task 20501); the session narrows it for an older agent.
+		ReadOnlyProjects:       executor.ReadOnlySnapshot,
 		SupportsResourceLimits: false,
 		SharesHostFilesystem:   false,
 		NetworkEgress:          true,

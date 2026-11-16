@@ -112,6 +112,11 @@ type Policy struct {
 	// One that does not exist is skipped: the defaults name directories some
 	// distributions do not have.
 	ReadOnly []string `json:"read_only,omitempty"`
+	// ListOnly are directories beneath which the workload may list entries
+	// and read nothing: the root of another project it may read (Task 20501),
+	// whose entries are granted read-only one by one so that the hidden ones
+	// stay out of reach. One that does not exist is skipped.
+	ListOnly []string `json:"list_only,omitempty"`
 	// Devices are device nodes (and the /dev/pts directory) the workload may
 	// open for reading and writing. Missing ones are skipped.
 	Devices []string `json:"devices,omitempty"`
@@ -138,7 +143,7 @@ func (p Policy) Validate() error {
 	if len(p.Argv) == 0 || strings.TrimSpace(p.Argv[0]) == "" {
 		return fmt.Errorf("hostsandbox: policy has no program")
 	}
-	for _, list := range [][]string{p.ReadWrite, p.ReadOnly, p.Devices} {
+	for _, list := range [][]string{p.ReadWrite, p.ReadOnly, p.ListOnly, p.Devices} {
 		for _, path := range list {
 			if !filepath.IsAbs(path) {
 				return fmt.Errorf("hostsandbox: %q is not an absolute path", path)

@@ -62,6 +62,9 @@ func TestAutoResumableOnlyForARolledOverUsageCap(t *testing.T) {
 		{"cap at the exact reset instant", ptr(NewUntil(CodeUsageCap, "5-hour cap reached", now)), true},
 		{"cap still inside its window", ptr(NewUntil(CodeUsageCap, "weekly cap reached", future)), false},
 		{"cap with no known reset", ptr(New(CodeUsageCap, "cap reached")), false},
+		// A readers change resumes as soon as it is recorded (Task 20501).
+		{"readers changed", ptr(NewUntil(CodeReadersChanged, "/p/b no longer lists /p/a", past)), true},
+		{"readers changed with no resume time", ptr(New(CodeReadersChanged, "changed")), false},
 
 		// Every other code needs a human. Resuming these on a timer would
 		// override the very decision that stopped the run — which is the
@@ -151,7 +154,7 @@ func TestCodesOrder(t *testing.T) {
 		"approval", "abort", "cancelled", "plan_only",
 		"idle", "operator", "stale", "state_not_persisted",
 		"uncommitted_work", "disk_low", "executor_lost", "disk_limit",
-		"starter_unavailable", "pool_capacity",
+		"starter_unavailable", "pool_capacity", "readers_changed",
 	}
 	got := Codes()
 	if len(got) != len(want) {

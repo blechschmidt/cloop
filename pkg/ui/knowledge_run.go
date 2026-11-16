@@ -123,6 +123,8 @@ func isRunArgv(argv []string) bool {
 type runKnowledge struct {
 	id      string
 	workDir string
+	// base is the URL the session is served at.
+	base string
 	// handle is the workload holding it, once bindHandle has run.
 	handle atomic.Pointer[string]
 }
@@ -311,6 +313,14 @@ func tokenSHA256(token string) string {
 // own while its knowledge is its parent's.
 type knowledgeScope struct {
 	WorkDir string `json:"workdir"`
+	// ReadOnly are the other projects the run was given to read (Task
+	// 20501), resolved at its dispatch: what it asks about at each task
+	// boundary, and what it may fetch snapshots of — while their readers
+	// lists still name it.
+	ReadOnly []readOnlyGrant `json:"read_only,omitempty"`
+	// Knowledge says the session was minted for the project's knowledge, not
+	// only for the projects it reads.
+	Knowledge bool `json:"knowledge,omitempty"`
 }
 
 // applyKnowledgeSession gives a run of a project with knowledge sources bound
@@ -320,6 +330,17 @@ type knowledgeScope struct {
 // without knowledge, or a dispatch that is not a run, gets nothing; so does a
 // run the session cannot be made for, which the project's journal is told.
 func applyKnowledgeSession(spec executor.Spec, ex executor.Executor, workDir, runID, identity string, argv []string) (executor.Spec, *runKnowledge) {
+	return applyRunSession(spec, ex, workDir, runID, identity, argv, nil)
+}
+
+// applyRunSession is applyKnowledgeSession for a run also given other
+// projects to read (Task 20501): the session is minted for them too, records
+// them, and is handed to the run under knowledgerun.EnvReadersURL and
+// EnvReadersToken — beside the knowledge variables when the project has
+// knowledge, without them when it has none, so a run with no knowledge
+// sources is not told it has a knowledge search.
+func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, identity string, argv []string,
+	readOnly []readOnlyGrant) (executor.Spec, *runKnowledge) {
 	if ex == nil || strings.TrimSpace(workDir) == "" || !isRunArgv(argv) {
 		return spec, nil
 	}
@@ -332,40 +353,49 @@ func applyKnowledgeSession(spec executor.Spec, ex executor.Executor, workDir, ru
 	if err != nil {
 		noteKnowledge(workDir, "The run was started without access to the project's knowledge sources: the hub could "+
 			"not read their bindings ("+err.Error()+").")
-		return spec, nil
+		has = false
 	}
-	if !has {
+	if !has && len(readOnly) == 0 {
 		return spec, nil
 	}
 	base, why := knowledgeRouteFor(ex)
 	if base == "" {
-		noteKnowledge(workDir, fmt.Sprintf("Knowledge sources are bound to this project, but its runs on %s cannot "+
-			"reach this hub's knowledge search: %s. The run's tasks get no reference material and its agent no "+
-			"knowledge search.", ex.ID(), why))
+		if has {
+			noteKnowledge(workDir, fmt.Sprintf("Knowledge sources are bound to this project, but its runs on %s "+
+				"cannot reach this hub's knowledge search: %s. The run's tasks get no reference material and its "+
+				"agent no knowledge search.", ex.ID(), why))
+		}
 		return spec, nil
 	}
 	id, token, err := newKnowledgeToken()
 	if err != nil {
-		noteKnowledge(workDir, "The run was started without access to the project's knowledge sources: no session "+
-			"token could be minted ("+err.Error()+").")
+		noteKnowledge(workDir, "The run was started without a session to reach the hub with: no session token "+
+			"could be minted ("+err.Error()+").")
 		return spec, nil
 	}
-	scope, _ := json.Marshal(knowledgeScope{WorkDir: workDir})
+	scope, _ := json.Marshal(knowledgeScope{WorkDir: workDir, ReadOnly: readOnly, Knowledge: has})
 	now := time.Now().UTC()
 	if err := db.PutProxySession(statedb.ProxySessionRow{
 		Kind: statedb.ProxySessionKnowledge, SessionID: id, TokenSHA256: tokenSHA256(token),
 		Holder: leaseHolderID(), RunID: runID, ProjectID: policyProjectPath(workDir), ExecutorID: ex.ID(),
 		Actor: identity, Scope: string(scope), IssuedAt: now, ExpiresAt: now.Add(knowledgeSessionTTL), UpdatedAt: now,
 	}); err != nil {
-		noteKnowledge(workDir, "The run was started without access to the project's knowledge sources: its session "+
-			"could not be recorded ("+err.Error()+").")
+		noteKnowledge(workDir, "The run was started without a session to reach the hub with: its session could not "+
+			"be recorded ("+err.Error()+").")
 		return spec, nil
 	}
-	spec = withSensitiveEnv(spec, ex, map[string]string{
-		knowledgerun.EnvURL:   base,
-		knowledgerun.EnvToken: token,
-	}, []string{knowledgerun.EnvToken})
-	return spec, &runKnowledge{id: id, workDir: workDir}
+	vars := map[string]string{}
+	var sensitive []string
+	if has {
+		vars[knowledgerun.EnvURL], vars[knowledgerun.EnvToken] = base, token
+		sensitive = append(sensitive, knowledgerun.EnvToken)
+	}
+	if len(readOnly) > 0 {
+		vars[knowledgerun.EnvReadersURL], vars[knowledgerun.EnvReadersToken] = base, token
+		sensitive = append(sensitive, knowledgerun.EnvReadersToken)
+	}
+	spec = withSensitiveEnv(spec, ex, vars, sensitive)
+	return spec, &runKnowledge{id: id, workDir: workDir, base: base}
 }
 
 // withSensitiveEnv sets vars in spec's environment, replacing any of the same

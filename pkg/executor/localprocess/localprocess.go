@@ -305,6 +305,10 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		SupportsResourceLimits: false,
 		SharesHostFilesystem:   true,
 		NetworkEgress:          true,
+		// The other projects a run may read (Task 20501) are read where they
+		// are. The host sandbox grants them read-only; a workload outside it
+		// reaches every file the hub's user can, which the hub says.
+		ReadOnlyProjects: executor.ReadOnlyInPlace,
 		// Stated explicitly rather than left to the zero value: a driver that
 		// runs in the host's filesystem has already answered the workspace
 		// question, and a reader should not have to infer that from an absence.

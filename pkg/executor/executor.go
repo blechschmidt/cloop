@@ -240,6 +240,12 @@ type Capabilities struct {
 	// mount namespace to bind into can honour the field, and a driver that
 	// ignored it would start a harness whose /repos is empty.
 	SupportsHostMounts bool `json:"supports_host_mounts"`
+	// ReadOnlyProjects says how this driver gives a run the other projects it
+	// may read (Spec.ReadOnly, Task 20501), and is empty when it gives none.
+	// The hub reads it to decide what a run is given and what it is told: a
+	// project the driver cannot deliver is left out and named in the
+	// project's journal, never promised to the run.
+	ReadOnlyProjects ReadOnlyDelivery `json:"read_only_projects,omitempty"`
 	// SupportsDevices reports whether Spec.Devices is honoured — i.e.
 	// whether this driver can expose a host device node inside the sandbox.
 	//
@@ -609,6 +615,13 @@ type Spec struct {
 	// credential, only the decision.
 	ConfineToProject bool `json:"confine_to_project,omitempty"`
 
+	// ReadOnly are the other projects this run may read, because their
+	// readers lists name its project (Task 20501): resolved by the hub at
+	// dispatch, and delivered by the driver read-only — bound, granted in
+	// place or fetched as a snapshot, as Capabilities.ReadOnlyProjects says.
+	// A driver that delivers none never receives any. See readonly.go.
+	ReadOnly []ReadOnlyProject `json:"read_only,omitempty"`
+
 	// WriteBack says how the file changes the workload produces get back to
 	// the hub. It carries no credential either — a push reuses the grant
 	// Workspace named — for the reasons set out in writeback.go. The zero
@@ -726,6 +739,11 @@ func (s Spec) Validate() error {
 	// dispatched spec), and the next driver to grow SupportsHostMounts would
 	// otherwise inherit no enforcement at all.
 	if err := ValidateHostMounts(s.HostMounts); err != nil {
+		return err
+	}
+	// Another project's tree, for the same reason: a slug becomes a mount
+	// target and a directory name on every driver that delivers one.
+	if err := ValidateReadOnly(s.ReadOnly); err != nil {
 		return err
 	}
 	// Devices, for the same reason and with one more: a device grant is the

@@ -303,6 +303,9 @@ type workload struct {
 	// scratch is the private directory a workload that named no project
 	// directory runs in (Task 20500), removed when the workload is forgotten.
 	scratch string
+	// readOnly is the directory the other projects the workload may read were
+	// placed in (Task 20501), removed when the workload is forgotten.
+	readOnly string
 	// confined is the spec a host-mode workload kept to its project was
 	// started with (Task 20500), so that an attach terminal beside it is kept
 	// to the same reach; nil for a workload that is not.
@@ -399,6 +402,22 @@ func (w *workload) confinedSpec() *executor.Spec {
 	}
 	spec := *w.confined
 	return &spec
+}
+
+// setReadOnly records the directory a workload's read-only projects are in.
+func (w *workload) setReadOnly(dir string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.readOnly = dir
+}
+
+// takeReadOnly removes and returns that directory, so it is removed once.
+func (w *workload) takeReadOnly() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	dir := w.readOnly
+	w.readOnly = ""
+	return dir
 }
 
 // takeScratch removes and returns that directory, so it is removed once.
@@ -573,6 +592,7 @@ func New(cfg Config) (*Agent, error) {
 		return nil, errors.New("agent: --holds applies to --ephemeral runners only")
 	}
 	a.clearBranchIncoming()
+	a.clearReadOnly()
 	// Undo what a previous agent process left attached — a vhci port, a TAP —
 	// before this one attaches anything (Task 20430).
 	a.openDeviceLedger()

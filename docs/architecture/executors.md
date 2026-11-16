@@ -1579,7 +1579,13 @@ tree is sent. Three consequences:
   `Spec.ConfineToProject` (protocol v30), because another project may run on the
   device, a host-mode payload runs in the host sandbox with only its project's
   directory, home and caches writable
-  ([on a device](../security/model.md#on-a-device)).
+  ([on a device](../security/model.md#on-a-device)). It sets it as well for a
+  host-mode run it gives another project to read (`Spec.ReadOnly`, protocol
+  v31): the agent fetches a snapshot of each such project from the hub with the
+  run's session, unpacks it beneath its root, and the host sandbox grants it to
+  the payload read-only; in a container it is bound read-only at
+  `/readonly/<slug>`
+  ([reading another project's tree](../security/model.md#reading-another-projects-tree)).
 - **The directory is kept.** The name is deterministic and the agent doesn't
   wipe it, so a repository cloned by one task is still there for the next. This
   is the only kind for which `WorkspaceKind.KeepsWorkDir()` is true. The

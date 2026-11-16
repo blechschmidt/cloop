@@ -1043,6 +1043,7 @@ const pauseReasonLabels = {
   disk_limit: 'workspace over its disk limit',
   starter_unavailable: "starter's Claude account unavailable",
   pool_capacity: 'waiting for pool capacity',
+  readers_changed: 'a project it reads stopped listing it',
 };
 
 // pauseReasonText renders a pause reason as one line of prose:

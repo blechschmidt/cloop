@@ -457,6 +457,9 @@ type Orchestrator struct {
 	// knowledge is the run's knowledge session (Task 20472): nil for a run
 	// with no knowledge sources to reach. See knowledge.go.
 	knowledge *knowledgeAccess
+	// readOnly is what the run was told about the other projects it may read
+	// (Task 20501): nil for a run given none. See readonly.go.
+	readOnly *readOnlyAccess
 
 	// testAbortWaitCeiling and testAbortBackoff narrow maxAbortWait and
 	// abortBackoff so tests can exercise the abort paths without sleeping out
@@ -656,7 +659,9 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 	// task from the UI (Task 20140).
 	o := &Orchestrator{config: cfg, state: s, provider: prov, router: r, memory: mem, webhook: wh, metrics: cfg.Metrics, envVars: envVars, secretStore: secretStore, log: log, queue: queue, statedb: sdb, watchdog: &watchdog.Watchdog{}, liveDeadlines: newLiveDeadlineRegistry(),
 		// The run's knowledge session, when the hub gave it one (Task 20472).
-		knowledge: newKnowledgeAccess(os.Getenv)}
+		knowledge: newKnowledgeAccess(os.Getenv),
+		// The other projects it may read, when it was given any (Task 20501).
+		readOnly: newReadOnlyAccess(os.Getenv)}
 	o.adopt = defaultAdoptHooks()
 	o.selfBuild = state.SelfBuild()
 	o.refusedFiles = map[runbuild.FileID]bool{}
@@ -1779,6 +1784,12 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		if err := o.atTaskBoundary(ctx, s, carry, false); err != nil {
 			return err
 		}
+		// The projects the run was given to read (Task 20501): one that no
+		// longer lists this project ends the run here, before another task
+		// starts with its tree, and the hub starts the run again at once.
+		if stop, err := o.atReadersBoundary(ctx, s); stop || err != nil {
+			return err
+		}
 		// A plan may not finish — or evolve — on the strength of an error
 		// message. Any task recorded as done whose summary is a provider or
 		// harness refusal goes back to pending here, before IsComplete is
@@ -2357,6 +2368,10 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		// {{NAME}} a wiki page holds stays text and is never replaced by the
 		// project's secret or variable of that name.
 		prompt = o.withTaskReference(ctx, s, task, prompt)
+		// The other projects the agent may read, and where (Task 20501) —
+		// after the override too, so an edited prompt still says.
+		readOnly := o.readOnlySection()
+		prompt = withGateSection(prompt, readOnly)
 		// The requirements the task implements, as its acceptance contract
 		// (Task 20460) — after the override, so an edited prompt keeps it too.
 		contract := o.requirementContract(task)
@@ -2469,7 +2484,7 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 				Goal:           s.Goal,
 				Instructions:   s.Instructions,
 				ProjectContext: projCtxStr,
-				Notice:         contract + activeGate.promptSection() + outbox.promptSection(),
+				Notice:         readOnly + contract + activeGate.promptSection() + outbox.promptSection(),
 			})
 			if maErr != nil {
 				if requeueIfInterrupted("while the multi-agent pipeline was running") {
@@ -4323,6 +4338,11 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 		if err := o.atTaskBoundary(ctx, s, carry, true); err != nil {
 			return err
 		}
+		// The projects the run was given to read (Task 20501), as on the
+		// sequential path: checked with no task in flight.
+		if stop, err := o.atReadersBoundary(ctx, s); stop || err != nil {
+			return err
+		}
 		// Same gate as the sequential loop: no completion and no evolve round
 		// on top of tasks whose recorded "work" is a refusal (Task 20224).
 		// Safe here for the same reason the mode switch above is — top of the
@@ -4664,6 +4684,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			// on the sequential path; retrieved here, in the main goroutine,
 			// with the rest of the prompt, so the workers touch no plan state.
 			prompt = o.withTaskReference(ctx, s, t, prompt)
+			prompt = withGateSection(prompt, o.readOnlySection())
 			prompt = withGateSection(prompt, o.requirementContract(t))
 			prompt = withGateSection(prompt, requirementsRetrySection(t.RequirementsCheck))
 			roundOutboxes[i] = o.openOutbox(t, o.router.For(t.Role))

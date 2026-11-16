@@ -119,22 +119,31 @@ func (s *Server) SweepAutoResume(ctx context.Context) { s.runAutoResumeSweep(ctx
 func (s *Server) runAutoResumeSweep(ctx context.Context) {
 	defer recoverGoroutine("runAutoResumeSweep")
 
-	if !s.autoResumeEnabled() {
-		return
-	}
+	// ui.auto_resume_on_cap_reset governs the restarts after a usage cap. A
+	// run a readers change stopped (Task 20501) is restarted whatever it
+	// says: it stopped only so that its next task would start in a run given
+	// what the readers lists name now, not because anything ran out.
+	caps := s.autoResumeEnabled()
 	for _, e := range s.allProjectEntries() {
 		if ctx.Err() != nil {
 			return
 		}
-		s.maybeAutoResume(e.Path)
+		s.maybeAutoResumeFor(e.Path, caps)
 	}
 }
 
 // maybeAutoResume restarts one project if its cap window has rolled over.
 // Returns true when a run was started, which is what the tests assert on.
-func (s *Server) maybeAutoResume(workDir string) bool {
+func (s *Server) maybeAutoResume(workDir string) bool { return s.maybeAutoResumeFor(workDir, true) }
+
+// maybeAutoResumeFor is maybeAutoResume, restarting a usage cap's pause only
+// when caps says the hub may.
+func (s *Server) maybeAutoResumeFor(workDir string, caps bool) bool {
 	st, err := state.LoadLite(workDir)
 	if err != nil || st == nil {
+		return false
+	}
+	if !caps && (st.PauseReason == nil || st.PauseReason.Code != pausereason.CodeReadersChanged) {
 		return false
 	}
 	acct, ok := s.autoResumeReady(workDir, st)
@@ -169,7 +178,11 @@ func (s *Server) maybeAutoResume(workDir string) bool {
 	for k, v := range acct.auditFields() {
 		fields[k] = v
 	}
-	s.log().Info(logger.EventSessionStart, 0, "auto-resume: subscription window reopened, run restarted", fields)
+	what := "auto-resume: subscription window reopened, run restarted"
+	if reason != nil && reason.Code == pausereason.CodeReadersChanged {
+		what = "auto-resume: a project the run read stopped listing it, run restarted with what the lists name now"
+	}
+	s.log().Info(logger.EventSessionStart, 0, what, fields)
 	s.auditAutoResume(workDir, reason, resumesAt, acct)
 	return true
 }

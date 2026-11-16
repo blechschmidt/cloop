@@ -511,6 +511,12 @@ type Server struct {
 	// test can assert *which* projects would be resumed without starting a
 	// real workload. Nil means the real dispatch.
 	autoResumeStart func(workDir string) error
+	// readersResume carries the directories whose runs ended paused for a
+	// readers change (Task 20501) to watchReadersResume, guarded by
+	// readersResumeMu. Nil on a Server that was never Run: the auto-resume
+	// sweep restarts them instead.
+	readersResumeMu sync.Mutex
+	readersResume   chan string
 
 	// autoResumeUsage replaces the Claude Code usage snapshot the same sweep
 	// reads for a pause recorded by an older build (Task 20440), so a test can
@@ -1605,6 +1611,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// same reason: it acts on every registered project, so it belongs to
 	// whichever hub holds the instance lease. See autoresume.go.
 	s.runLeaderDuty(watcherCtx, "autoresume", s.watchAutoResume)
+	// Restarts at once a run that stopped because a project it read stopped
+	// listing it (Task 20501) — on every member, not only the leader: the
+	// member that followed the run settles it, and it should not wait for the
+	// next sweep. See readonly_resume.go.
+	go s.watchReadersResume(watcherCtx)
 	// Pins the head of every audit chain off the database, so deleting the
 	// newest rows is detectable (Task 20404). A leader duty because the
 	// records are one per chain per window, cluster-wide; the window marker

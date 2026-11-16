@@ -390,6 +390,32 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// (Task 20482) — last, after everything above read what it had to from
 	// the runner.
 	s.retireEphemeralAfterRun(ex)
+	// A run that stopped at a task boundary because a project it read stopped
+	// listing it (Task 20501) starts again now, not at the next sweep: the
+	// run it starts is given what the readers lists name now.
+	s.resumeAfterReadersChanged(workDir)
+}
+
+// resumeAfterReadersChanged hands workDir to watchReadersResume when its run
+// ended paused for a readers change, for it to be restarted through the same
+// checks and the same routing as the auto-resume sweep. A process that is not
+// watching, or has a backlog, leaves it to the sweep.
+func (s *Server) resumeAfterReadersChanged(workDir string) {
+	if workDir == "" {
+		return
+	}
+	st, err := state.LoadLite(workDir)
+	if err != nil || st == nil || st.Status != "paused" || st.PauseReason == nil ||
+		st.PauseReason.Code != pausereason.CodeReadersChanged {
+		return
+	}
+	s.readersResumeMu.Lock()
+	ch := s.readersResume
+	s.readersResumeMu.Unlock()
+	select {
+	case ch <- workDir:
+	default:
+	}
 }
 
 // errNoWorkload stands in for a Status nobody could ask for: no executor, or

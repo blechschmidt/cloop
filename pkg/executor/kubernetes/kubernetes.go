@@ -946,6 +946,10 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// finished on the dashboard, and the next Start does not run it again.
 		// See projectresult.go.
 		SupportsProjectSeed: true,
+		// The other projects a run may read (Task 20501) arrive as snapshots
+		// the workspace container fetches into a volume the harness mounts
+		// read-only.
+		ReadOnlyProjects:    executor.ReadOnlySnapshot,
 		ReturnsProjectState: true,
 		MaxConcurrent:       e.opts.MaxConcurrent,
 		Platform:            "linux",
@@ -1625,6 +1629,7 @@ func (e *Executor) podRequestWith(spec executor.Spec, img chosenImage, handleID,
 		GitCABundle:           e.opts.GitCABundle,
 		GitCA:                 podGitCA(spec.GitCA, e.opts.GitCABundle),
 		ProjectSeed:           len(spec.ProjectSeed) > 0,
+		ReadOnly:              spec.ReadOnly,
 		ImageProvenance:       prov,
 		ImageLog:              img.log,
 

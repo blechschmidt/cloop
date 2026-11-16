@@ -77,7 +77,7 @@ func checkRuns(who string, f RunFacts, quiesce bool) []Finding {
 			Message: fmt.Sprintf("%s has a run waiting in executor pool %s's queue. The move takes it out before it captures anything; "+
 				"start the project on the target afterwards.", who, f.Queued.PoolID),
 		})
-	case f.Status == "paused" && quiesce && f.Pause != nil && f.Pause.Code == pausereason.CodeUsageCap && f.Pause.ResumesAt != nil:
+	case f.Status == "paused" && quiesce && f.Pause.ResumedByHub():
 		out = append(out, Finding{
 			Kind: KindRun, Severity: SeverityWillCarry, Side: SideSource,
 			Title: "The hub's scheduled restart of " + who + " waits for the move",
@@ -115,7 +115,7 @@ func checkRuns(who string, f RunFacts, quiesce bool) []Finding {
 			Message: msg,
 			Remedy:  "Stop the run, which takes it out of the pool's queue, then run the preflight again. A run a runner has just been assigned cannot be taken back for up to 20 minutes: wait for it to start, then stop it.",
 		})
-	case f.Status == "paused" && f.Pause != nil && f.Pause.Code == pausereason.CodeUsageCap && f.Pause.ResumesAt != nil:
+	case f.Status == "paused" && f.Pause.ResumedByHub():
 		out = append(out, Finding{
 			Kind: KindRun, Severity: SeverityBlocker, Side: SideSource,
 			Title: "The hub will restart " + who + "'s paused run by itself",

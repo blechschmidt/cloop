@@ -137,6 +137,13 @@ type SandboxRecord struct {
 	// reader who needs to defend the join against a hostile workload should use
 	// the run id and read the broker's rows.
 	LeaseIDs []string `json:"lease_ids,omitempty"`
+
+	// ReadOnlyProjects are the other projects this run was given to read,
+	// read-only, by their paths on the hub (Task 20501): resolved from their
+	// readers lists when the hub dispatched it. Stamped onto every task.dispatch
+	// row the run writes, so "what else could this task read" has an answer
+	// in the trail.
+	ReadOnlyProjects []string `json:"read_only_projects,omitempty"`
 }
 
 // NewRunID mints an identifier for one execution.

@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/hostsandbox"
 )
 
 // knownContainerRuntimes are the runtimes the container executor can drive.
@@ -116,6 +117,8 @@ func Detect(opts DetectOptions) remote.AgentCapabilities {
 	}
 
 	caps.Virtualization = detectVirtualization(opts.KVMDevice)
+	// Whether a host payload can be confined (Task 20501).
+	caps.HostSandbox = hostsandbox.Available() == nil
 
 	for _, rt := range knownContainerRuntimes {
 		if _, err := lookPath(rt); err == nil {

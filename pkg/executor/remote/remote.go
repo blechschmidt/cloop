@@ -448,6 +448,14 @@ func (e *Executor) Capabilities() executor.Capabilities {
 	return e.capabilitiesFor(sandbox, sandboxErr)
 }
 
+// RunsHostProcesses reports whether this device runs its payloads as
+// processes on its own host — its sandbox mode is not container — rather than
+// in containers. A read error answers false, the claim that grants nothing.
+func (e *Executor) RunsHostProcesses() bool {
+	sandbox, err := e.opts.sandboxSettings()
+	return err == nil && sandbox.Mode != executor.SandboxModeContainer
+}
+
 // capabilitiesFor is Capabilities with the sandbox settings supplied by the
 // caller: the device's own for a direct dispatch, a virtual executor's for one
 // of its sub-executors (Task 20345).
@@ -557,6 +565,11 @@ func (e *Executor) capabilitiesFor(sandbox executor.SandboxSettings, sandboxErr 
 		// so placement must not route one there (MinDiskLimitVersion).
 		if !SupportsDiskLimit(sess.Version()) {
 			caps.DiskEnforcement = executor.DiskEnforcementNone
+		}
+		// An older agent ignores Spec.ReadOnly, so its runs are given no
+		// other project to read (MinReadOnlyProjectsVersion).
+		if !SupportsReadOnlyProjects(sess.Version()) {
+			caps.ReadOnlyProjects = executor.ReadOnlyNone
 		}
 	}
 	return caps
@@ -856,6 +869,15 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 	// its bind mount — and an older agent ignores the field, running it with
 	// every other project's tree beneath the agent's root in reach. Refused,
 	// not degraded, for the reason the sandbox mode above is.
+	// The other projects the run may read (Task 20501): an older agent
+	// ignores the field, and the run would be told of trees it does not have.
+	// The hub gives such a device's runs none; a spec that carries some
+	// anyway is refused here.
+	if len(spec.ReadOnly) > 0 && !SupportsReadOnlyProjects(sess.Version()) {
+		return executor.Handle{}, fmt.Errorf("%w: %s", ErrReadOnlyProjectsUnsupported, executor.NeedsProtocol(
+			e.subject(), sess.Version(), MinReadOnlyProjectsVersion,
+			"to place the other projects this run may read", ""))
+	}
 	if spec.ConfineToProject && virtual == nil && sandbox.Mode != executor.SandboxModeContainer &&
 		!SupportsProjectConfinement(sess.Version()) {
 		return executor.Handle{}, fmt.Errorf("%w: %s", ErrProjectConfinementUnsupported, executor.NeedsProtocol(

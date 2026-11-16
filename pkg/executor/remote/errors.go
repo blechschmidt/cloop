@@ -118,6 +118,11 @@ var (
 	// beneath its root in reach. Refused rather than dispatched.
 	ErrProjectConfinementUnsupported = errors.New("remote: agent cannot keep a host workload to its project")
 
+	// ErrReadOnlyProjectsUnsupported: the spec gives the run other projects
+	// to read (Spec.ReadOnly, Task 20501) and the agent speaks a protocol
+	// older than MinReadOnlyProjectsVersion, so it would ignore them.
+	ErrReadOnlyProjectsUnsupported = errors.New("remote: agent cannot place the projects a run may read")
+
 	// ErrGitCAUnsupported: the agent speaks a protocol version older than
 	// MinGitCAVersion, so it would ignore Spec.GitCA and run a workload whose
 	// git reaches the hub's proxy without the CA that proxy's certificate

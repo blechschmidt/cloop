@@ -296,6 +296,34 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A project's runs can now read the source trees of the projects whose
+  readers lists name it, and only those, read-only.** The hub resolves the
+  lists when it dispatches a run of a project, and gives the run each such
+  project in the one way its executor can. A container on the hub's host,
+  under runc, Kata or gVisor, binds it read-only at `/readonly/<slug>`. A run
+  on the hub's host reads it where it is, and the host sandbox grants it
+  read-only. A Kubernetes Pod's workspace container, or a device's agent
+  (protocol 31; an older agent's runs are given none), fetches a snapshot of
+  it from the hub and places it at `/readonly/<slug>` where the run cannot
+  write it. A write fails with EROFS or EACCES on every one of them. The
+  project's `.cloop`, `.git` and credential files (`.env`, `.netrc`, private
+  keys and the like) are never given. A snapshot also leaves out files git
+  ignores and carries no history. The run is told in every task's prompt
+  which projects it may read and where, and what it was given is recorded on
+  the project's journal, in its session and in `read_only_projects` on every
+  `task.dispatch` row. Taking a project off a list during a run stops the hub
+  serving it at once (a snapshot is refused, recorded as
+  `knowledge.run.snapshot`). At its next task boundary the run asks whether
+  its projects still list it, and if one doesn't, it stops there, paused
+  `readers_changed`, and the hub starts it again at once without that project
+  (recorded as `knowledge.run.readonly`); a run that cannot reach the hub to
+  ask stops too, and is started again two minutes later. A feature's run, a
+  dashboard model call and a run with no network are given nothing, and
+  nobody is given the hub's own directory. On a device that cannot sandbox
+  its host processes, and for a project opted out of the host sandbox, the
+  trees are not read-only to a host-process run, and the journal says so. A
+  Kubernetes Pod's harness image needs this release's `cloop` to fetch the
+  trees (Task 20501).
 - **Each project now has a readers list: the other projects whose runs may
   read it.** The list is deny-by-default. A project may read another only when
   the other's list names it; a project is never on its own list, and a

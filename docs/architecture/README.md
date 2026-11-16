@@ -1084,6 +1084,7 @@ calls helpers that use a model: `pkg/clarify`, `pkg/coach`, `pkg/diagnosis`,
 | `pkg/executor/projectseed` | carrying a project into a sandbox that fetched its own source |
 | `pkg/executor/resultframe` | carrying a seeded run's outcome out through its output stream |
 | `pkg/executor/featurehub` | the hub's half of a feature on an isolating executor |
+| `pkg/executor/readonlysnap` | a snapshot of another project's source tree a run may read: built on the hub without its `.cloop`, `.git` and credential files, and unpacked read-only by a Pod's workspace container or a device's agent |
 | `pkg/executor/gitstate` | what a project's tree on the hub holds that no remote has, read with hardened git that writes nothing |
 | `pkg/executor/movegit` | a project move's git: the working tree's state on a hidden ref and every branch in one bundle, rebuilt elsewhere and read back |
 | `pkg/executor/movecapture` | the device's half of a project move: reading or capturing a working copy an agent keeps, confined to it through an `os.Root`, and the hub's check of what comes back |

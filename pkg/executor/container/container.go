@@ -428,6 +428,10 @@ type record struct {
 	// gitCADir holds the hub CA bound into this container (Spec.GitCA, Task
 	// 20409), removed when it is terminal. Empty when the Spec carried none.
 	gitCADir string
+	// readOnlyDir holds the covers of the read-only projects' hidden entries
+	// (Spec.ReadOnly, Task 20501), removed when it is terminal. Empty when
+	// nothing needed covering.
+	readOnlyDir string
 	// interfaces are the host network interfaces moved into this container's
 	// network namespace, kept so a graceful stop can return them to the host
 	// before the kernel's own teardown rules apply — which destroy a veth
@@ -636,6 +640,10 @@ func (e *Executor) Capabilities() executor.Capabilities {
 		// bind it can actually make. It is the executor a developer wanting
 		// their local checkouts in a sandbox should be bound to.
 		SupportsHostMounts: true,
+		// The other projects a run may read are bound the same way, read-only
+		// at /readonly/<slug> (Task 20501). The read-only flag is the
+		// runtime's, which runc, Kata and gVisor alike enforce.
+		ReadOnlyProjects: executor.ReadOnlyBind,
 		// Host devices are the same story as host mounts with harder edges: the
 		// driver runs on the machine that has the hardware, and the runtime
 		// takes --device, so a granted device node is one it can genuinely
@@ -769,6 +777,20 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	}()
 	if caMount != nil {
 		extraMounts = append(append([]mount(nil), extraMounts...), *caMount)
+	}
+	// The other projects the run may read (Task 20501), bound read-only at
+	// /readonly/<slug> with their hidden entries covered; see readonly.go.
+	roMounts, roDir, err := e.readOnlyMounts(spec)
+	if err != nil {
+		return executor.Handle{}, err
+	}
+	defer func() {
+		if !started {
+			removeReadOnlyStage(roDir)
+		}
+	}()
+	if len(roMounts) > 0 {
+		extraMounts = append(append([]mount(nil), extraMounts...), roMounts...)
 	}
 
 	// A feature workload runs in a standalone checkout of its branch, staged
@@ -1018,6 +1040,7 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// the deferred cleanup above.
 		secretStage: stage,
 		gitCADir:    caDir,
+		readOnlyDir: roDir,
 		// Retained where Spec.Env is not: an interface list is a set of
 		// handles and host device names with no credential in it, and
 		// without it a graceful stop could not return the interfaces.
@@ -2504,6 +2527,7 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 	// until the next reboot.
 	rec.secretStage.remove()
 	removeGitCA(rec.gitCADir)
+	removeReadOnlyStage(rec.readOnlyDir)
 	// A feature workload's tree and output wait for the hub to collect them,
 	// but not forever. See feature.go.
 	if rec.feature != nil && state.Terminal() {

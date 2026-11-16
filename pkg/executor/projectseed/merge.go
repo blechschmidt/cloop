@@ -114,6 +114,9 @@ type Provenance struct {
 	SpecHash        string   `json:",omitempty"`
 	SetupHash       string   `json:",omitempty"`
 	LeaseIDs        []string `json:",omitempty"`
+	// ReadOnlyProjects are the other projects the run was given to read
+	// (Task 20501), written on each task.dispatch row with the rest.
+	ReadOnlyProjects []string `json:",omitempty"`
 }
 
 // MergeReport says what folding a Result into the hub's project did.
@@ -716,6 +719,10 @@ func auditDispatches(workDir string, st *state.ProjectState, ids []int, prov Pro
 			LeaseIDs:        prov.LeaseIDs,
 			Actor:           prov.Identity,
 			RecordedBy:      "hub",
+			// The hub dispatched it, so it knows what the run was given to
+			// read, none included.
+			ReadOnlyProjects: prov.ReadOnlyProjects,
+			ReadOnlyKnown:    true,
 		})
 	}
 }

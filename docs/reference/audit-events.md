@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 267 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 269 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 234 |
+| `control-plane` | the hub's own state.db | 236 |
 | `project` | the project's .cloop/state.db | 29 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-267 actions in 55 families. Every action is listed: this section is the whole
+269 actions in 55 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (9) · [`run.*`](#run) (6) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (3) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (13) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.move.*`](#projectmove) (6) · [`project.member.*`](#projectmember) (4) · [`project.reader.*`](#projectreader) (2) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (9) · [`run.*`](#run) (6) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (5) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (19) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (13) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.move.*`](#projectmove) (6) · [`project.member.*`](#projectmember) (4) · [`project.reader.*`](#projectreader) (2) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -111,7 +111,7 @@ Payload keys:
 
 - `task.attachment_delete` — `id`, `attachment_id`, `name`, `size`, `sha256`
 - `task.delete` — `id`
-- `task.dispatch` — `task_id`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `requested_image`, `pinned_image`, `image_digest`, `image_provenance`, `verified_digest`, `spec_sha256`, `setup_sha256`, `lease_ids`, `recorded_by`
+- `task.dispatch` — `task_id`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `requested_image`, `pinned_image`, `image_digest`, `image_provenance`, `verified_digest`, `spec_sha256`, `setup_sha256`, `lease_ids`, `read_only_projects`, `recorded_by`
 - `task.finish` — `task_id`, `outcome`, `title`, `project`, `run_id`, `executor_id`, `executor_kind`, `isolation`, `reason`, `started_at`, `completed_at`, `duration_ms`, `abort_class`, `abort_cleared`, `fail_count`, `write_back_commit`
 - `task.gate_approve` — `task_id`, `title`, `kind`, `waiting`, `via`
 - `task.quarantine` — `task_id`, `title`, `kind`, `nodes`, `reason`
@@ -120,7 +120,7 @@ Payload keys:
 - `task.upsert` — `id`, `title`, `status`, `priority`, `role`, `description`
 
 - `task.attachment_delete` — Attaching is not audited: a run's files are recorded in the project's event journal, which names the run. A file deleted with its task is covered by that task's `task.delete`.
-- `task.dispatch` — This and task.finish are what make "where did this task run, and what credentials did it hold" answerable from audit_events alone, without joining the executor tables. image_digest is the digest pinned_image names. A run carried out as a seed — on a Kubernetes Pod or a device — writes its own rows into a copy of the project that never comes back, so the hub writes them when it merges the run's outcome, recorded_by "hub" (Task 20457).
+- `task.dispatch` — This and task.finish are what make "where did this task run, and what credentials did it hold" answerable from audit_events alone, without joining the executor tables. image_digest is the digest pinned_image names. A run carried out as a seed — on a Kubernetes Pod or a device — writes its own rows into a copy of the project that never comes back, so the hub writes them when it merges the run's outcome, recorded_by "hub" (Task 20457). read_only_projects are the other projects the run was given to read, by their paths on the hub, because their readers lists named its project (Task 20501); an empty list on a hub-dispatched run says it was given none.
 - `task.finish` — `outcome` carries the terminal status; `reason` carries why, when there is one.
 - `task.gate_approve` — `kind` is `human_gate` for a review gate and empty for a task. `waiting` is true when a run had stopped at the gate. `via` names where it was approved: the dashboard or `cloop task gate approve`.
 - `task.quarantine` — `nodes` lists each executor that went down under the task with when it went unreachable. A marked task runs again only after an explicit reset, recorded as task.quarantine_release.
@@ -242,17 +242,23 @@ Payload keys:
 | --- | --- | --- | --- | --- |
 | `knowledge.run.citations` | `knowledge_session` | control-plane | beta | A run asks for the citations of a project other than its own — POST /api/run/knowledge/citations naming one — and is refused (Task 20499). |
 | `knowledge.run.get` | `knowledge_session` | control-plane | stable | A run reads one document of its project's knowledge with its knowledge session — by its id, its URL or its issue key: the orchestrator reading a document the task names, or the agent's knowledge_get tool — POST /api/run/knowledge/get. |
+| `knowledge.run.readonly` | `knowledge_session` | control-plane | beta | A run asks at a task boundary which of the projects it was given to read it may still read — POST /api/run/knowledge/readonly — and one of them no longer lists its project (Task 20501). |
 | `knowledge.run.search` | `knowledge_session` | control-plane | stable | A run searches its project's knowledge with its knowledge session: the orchestrator assembling a task's reference material, or the agent's knowledge_search tool or `cloop knowledge search` in its sandbox — POST /api/run/knowledge/search. |
+| `knowledge.run.snapshot` | `knowledge_session` | control-plane | beta | An executor that does not share the hub's filesystem — a Kubernetes Pod's workspace container, a device's agent — fetches, with a run's session, a snapshot of a project the run was given to read — POST /api/run/knowledge/readonly/snapshot (Task 20501). |
 
 Payload keys:
 
 - `knowledge.run.citations` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `read_project`, `outcome`, `reason`
 - `knowledge.run.get` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `purpose`, `lookup`, `documents`, `outcome`, `reason`, `read_project`, `reader`
+- `knowledge.run.readonly` — `session_id`, `run_id`, `project`, `executor_id`, `reader`, `read_projects`, `outcome`, `reason`
 - `knowledge.run.search` — `session_id`, `run_id`, `project`, `executor_id`, `task`, `purpose`, `query`, `k`, `hits`, `documents`, `mode`, `outcome`, `reason`, `read_project`, `reader`
+- `knowledge.run.snapshot` — `session_id`, `run_id`, `project`, `executor_id`, `reader`, `slug`, `read_project`, `files`, `links`, `bytes`, `archive_bytes`, `skipped`, `outcome`, `reason`
 
 - `knowledge.run.citations` — Written only for refusals: a run taking its own task's citations is bookkeeping, recorded on the task. Citations are taken from the run's session, so another project's would be a write, which no readers list allows.
 - `knowledge.run.get` — `lookup` says how the document was named (`id`, `url` or `key`) with the value, scrubbed and cut at 512 bytes. `documents` are the ids returned: none when the project's knowledge holds nothing by that name, which is also the answer for another project's document — whose row says so, `refused`, though the run is told only that there is nothing by that name. A read from another project's knowledge carries `read_project` and `reader`, as a search's does.
+- `knowledge.run.readonly` — Written only when the answer changed: `read_projects` are the projects whose readers lists no longer name `reader`, the directory the run was dispatched to, and `reason` says why for each. The run then stops before its next task, paused `readers_changed`, and the hub starts it again with what the lists name now. An unchanged answer, asked at every boundary, writes no row.
 - `knowledge.run.search` — The entity id is the knowledge session's. `query` is what the run searched for, scrubbed of anything shaped like a credential and cut at 512 bytes; `documents` are the ids of the documents the answer held. `purpose` is `inject` for the orchestrator's own retrieval, whose documents the task cites as injected; otherwise they are recorded as the agent's reads. `outcome` is `ok`, or `refused` with `reason` for a request the session's rate limit or a malformed query refused. A token that is not a live session's is refused before anything is read, and writes no row. A search of another project (Task 20499) names it as `read_project`, and `reader` the directory the run was dispatched to, whose project that project's readers list has to name: refused, with why in `reason`, when it does not.
+- `knowledge.run.snapshot` — `outcome` is `ok` with what the snapshot held — `files`, `links`, their `bytes`, the compressed `archive_bytes`, and how many files over the per-file bound were `skipped` — or `refused` with `reason`: a slug the run was not given, a project whose readers list no longer names `reader`, or a tree over the snapshot's bounds. The run is told only that no project it may read is there.
 
 ### step.*
 

@@ -67,7 +67,7 @@ var registry = []Entry{
 		Payload: []string{
 			"task_id", "title", "project", "run_id", "executor_id", "executor_kind",
 			"isolation", "requested_image", "pinned_image", "image_digest", "image_provenance",
-			"verified_digest", "spec_sha256", "setup_sha256", "lease_ids", "recorded_by",
+			"verified_digest", "spec_sha256", "setup_sha256", "lease_ids", "read_only_projects", "recorded_by",
 		},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
@@ -76,7 +76,10 @@ var registry = []Entry{
 			"joining the executor tables. image_digest is the digest pinned_image names. " +
 			"A run carried out as a seed — on a Kubernetes Pod or a device — writes its own " +
 			"rows into a copy of the project that never comes back, so the hub writes them " +
-			"when it merges the run's outcome, recorded_by \"hub\" (Task 20457).",
+			"when it merges the run's outcome, recorded_by \"hub\" (Task 20457). " +
+			"read_only_projects are the other projects the run was given to read, by their " +
+			"paths on the hub, because their readers lists named its project (Task 20501); " +
+			"an empty list on a hub-dispatched run says it was given none.",
 	},
 	{
 		Action:  ActionTaskFinish,
@@ -547,6 +550,38 @@ var registry = []Entry{
 		Note: "Written only for refusals: a run taking its own task's citations is bookkeeping, recorded on the " +
 			"task. Citations are taken from the run's session, so another project's would be a write, which no " +
 			"readers list allows.",
+	},
+	{
+		Action: ActionKnowledgeRunReadOnly,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_session",
+		Trigger: "A run asks at a task boundary which of the projects it was given to read it may still read — POST " +
+			"/api/run/knowledge/readonly — and one of them no longer lists its project (Task 20501).",
+		Payload:   []string{"session_id", "run_id", "project", "executor_id", "reader", "read_projects", "outcome", "reason"},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "Written only when the answer changed: `read_projects` are the projects whose readers lists no longer " +
+			"name `reader`, the directory the run was dispatched to, and `reason` says why for each. The run then " +
+			"stops before its next task, paused `readers_changed`, and the hub starts it again with what the lists " +
+			"name now. An unchanged answer, asked at every boundary, writes no row.",
+	},
+	{
+		Action: ActionKnowledgeRunSnapshot,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_session",
+		Trigger: "An executor that does not share the hub's filesystem — a Kubernetes Pod's workspace container, a " +
+			"device's agent — fetches, with a run's session, a snapshot of a project the run was given to read — " +
+			"POST /api/run/knowledge/readonly/snapshot (Task 20501).",
+		Payload: []string{
+			"session_id", "run_id", "project", "executor_id", "reader", "slug", "read_project", "files", "links",
+			"bytes", "archive_bytes", "skipped", "outcome", "reason",
+		},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`outcome` is `ok` with what the snapshot held — `files`, `links`, their `bytes`, the compressed " +
+			"`archive_bytes`, and how many files over the per-file bound were `skipped` — or `refused` with " +
+			"`reason`: a slug the run was not given, a project whose readers list no longer names `reader`, or a " +
+			"tree over the snapshot's bounds. The run is told only that no project it may read is there.",
 	},
 
 	// ── step ───────────────────────────────────────────────────────────────
