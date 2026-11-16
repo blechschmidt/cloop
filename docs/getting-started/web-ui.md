@@ -148,6 +148,8 @@ bottom:
 | **Overview** | Steps, Provider, Executor, Mode, Tokens, Est. Cost, Created, Updated |
 | **Active Options** | the persistent run flags (see [Run options](#run-options)) |
 | **Features** | the project's parallel features, each a git worktree with its own tasks and settings, and a **+ New feature** button (see [developing features in parallel](../guides/features.md)) |
+| **Members** | on a hub with single sign-on, the project's owner and the people and teams it is shared with, each at a role |
+| **Readers** | the other projects whose runs get this project's files read-only, and the projects this one can read. Its administrators add and remove readers here (see [letting one project read another](../guides/project-readers.md)) |
 | **Claude Code Subscription Caps** | weekly, 5-hour, Opus and Sonnet utilisation limits, plus the weekly usage of any model your plan limits separately, such as Fable. Shown only with the `claudecode` provider |
 | **Controls** | **Run**, **Pause / Stop** while running, **Refresh**, **Voice** |
 | **Live Output** | the running step's output as it arrives, with **Clear** |

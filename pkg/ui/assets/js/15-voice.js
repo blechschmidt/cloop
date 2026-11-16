@@ -175,7 +175,6 @@ let dictateTarget = 'add';
 
 function dictateIDs()   { return DICTATE_TARGETS[dictateTarget] || DICTATE_TARGETS.add; }
 function dictateBtn()   { return document.getElementById(dictateIDs().btn); }
-function dictateLabel() { return document.getElementById(dictateIDs().label); }
 
 // ── Where the words land (Task 20309) ────────────────────────────────────────
 //

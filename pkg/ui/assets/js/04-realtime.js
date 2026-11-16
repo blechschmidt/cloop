@@ -328,6 +328,11 @@ function handleRealtimeMsg(type, data, scope) {
       // draws it where it is open. The card's word comes with 'projects'.
       panelIf('projectmove', 'pushed', data);
       break;
+    case 'project_readers':
+      // A readers list entry naming this project changed (Task 20503): its
+      // lists, rendered for this socket's viewer by the hub.
+      panelIf('readers', 'pushed', data);
+      break;
     case 'requirements_coverage':
       // The traceability matrix changed (Task 20465): the coverage, and the
       // digest that tells an open Traceability view to read its rows again.
@@ -422,6 +427,7 @@ function handleRealtimeMsg(type, data, scope) {
         // Pushes may have been among the dropped frames.
         _historyPush({gap: 1});
         refreshHubHealth();
+        panelIf('readers', 'refresh');
         const url = (typeof pUrl === 'function' && isMultiProject) ? pUrl('/api/state') : '/api/state';
         api(url).then(s => { try { render(s); } catch(_) {} }).catch(() => {});
         if (isMultiProject) {
@@ -532,6 +538,8 @@ function connectWS() {
     // hydrate the log panel: pUrl() would resolve against the *current*
     // selection, pulling the new project's log on the old project's event.
     if (!_scopeAccepts(scope)) return;
+    // A readers list may have changed while no socket was there (Task 20503).
+    panelIf('readers', 'refresh');
     // On reconnect also refresh the live log buffer in case we missed output.
     api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {
@@ -614,6 +622,7 @@ function connectSSE() {
     refreshApprovals();
     refreshHubHealth();
     if (!_scopeAccepts(scope)) return;
+    panelIf('readers', 'refresh');
     api(pUrl('/api/livelog')).then(d => {
       if (d.lines && d.lines.length) {
         liveLogText = d.lines.join('');
@@ -628,7 +637,7 @@ function connectSSE() {
   };
   // Named SSE events carry the WebSocket message of the same type; 'log' is
   // step_output's older name.
-  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health', 'requirements_update', 'requirements_coverage', 'knowledge_source', 'project_move']) {
+  for (const t of ['log', 'projects', 'run_state', 'suggest_status', 'resync', 'history_append', 'credential_ended', 'hub_health', 'requirements_update', 'requirements_coverage', 'knowledge_source', 'project_move', 'project_readers']) {
     evtSource.addEventListener(t, (e) => {
       try { handleRealtimeMsg(t === 'log' ? 'step_output' : t, JSON.parse(e.data), scope); } catch(_) {}
     });

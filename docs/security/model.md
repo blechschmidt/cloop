@@ -3875,8 +3875,9 @@ else reads another project through the list, and no write crosses, whatever a
 list says ([what a run's credentials reach](#what-a-runs-credentials-reach)).
 
 **Who may see and change it.** Everyone who can see a project may see its list,
-and the projects it may read, with `GET /api/projects/{idx}/readers` or
-`cloop project readers ls`. Changing the list needs `project.readers` on the
+and the projects it may read, in the **Readers** section of the project's
+Overview, with `GET /api/projects/{idx}/readers` or `cloop project readers ls`
+(see [letting one project read another](../guides/project-readers.md)). Changing the list needs `project.readers` on the
 project, which only `admin` holds: the project's owner, a member at `admin`, the
 hub's administrators, and on a hub without sign-in whoever holds its static
 admin token. A maintainer can't add a reader. An entry gives every run of
@@ -3892,6 +3893,10 @@ can see it. An entry naming a project you can't see, or one no longer on the
 hub, is counted but not named. The project's administrators also get that
 entry's id, who added it and when, so they can remove it without learning
 anything about the other project (`TestReaders_OnlyProjectsTheCallerCanSee`).
+A dashboard open on either project of a changed entry is pushed the change,
+drawn for the person viewing it by the same rule, and a stream whose credential
+has ended is sent nothing (`TestReadersPush_EachDashboardIsSentItsOwnView`,
+`TestReadersPush_SurvivesARecipientWithNoAuthority`).
 
 **Entries follow the project's path.** An entry names both projects by their
 paths on the hub. Renaming a project's registry entry doesn't change its

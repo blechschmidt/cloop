@@ -187,6 +187,10 @@ Seven pages, best read in order. They are also listed on the
 - **[Secrets and egress](guides/secrets.md)**: giving tasks access to a GitHub
   repository or token, a kubeconfig, a registry login, environment variables
   or the Internet, with expiry times and limits, and real command output.
+- **[Letting one project read another](guides/project-readers.md)**: a
+  project's readers list, the other projects whose runs get its files
+  read-only. Keeping it in the Overview's Readers section, with
+  `cloop project readers` or over the HTTP API, and who may see and change it.
 - **[Running an agent in CI](guides/ci-pipelines.md)**: letting a GitHub
   Actions job use Claude through the hub, so the repository doesn't need an
   `ANTHROPIC_API_KEY` secret. Covers OIDC federation, which pipelines are

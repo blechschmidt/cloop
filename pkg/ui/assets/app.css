@@ -732,7 +732,6 @@
   .adv-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; margin-top:10px; }
   .adv-label { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; cursor:pointer; }
   .adv-label input[type=checkbox] { accent-color:var(--accent); }
-  .adv-row { display:flex; gap:8px; margin-top:8px; }
 
   /* ── Task list ── */
   .task-list { display:flex; flex-direction:column; gap:6px; }
@@ -1083,7 +1082,6 @@
 
   /* ── Suggest ── */
   .suggest-controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-  .suggest-log { background:var(--code-bg); border:1px solid var(--border); border-radius:var(--radius); padding:12px; font-family:monospace; font-size:12px; white-space:pre-wrap; color:#adbac7; max-height:320px; overflow-y:auto; margin-top:10px; }
   .suggest-status { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:8px; }
   .suggest-summary { font-size:12px; color:var(--muted); font-style:italic; padding:0 4px 10px; white-space:pre-line; }
   .suggest-list { display:flex; flex-direction:column; gap:10px; }
@@ -1759,16 +1757,6 @@
     color: var(--muted);
   }
   .chat-voice-indicator { display: flex; align-items: center; gap: 6px; }
-  .chat-tts-btn {
-    background: none;
-    border: none;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 11px;
-    padding: 2px 5px;
-    border-radius: 3px;
-  }
-  .chat-tts-btn:hover { color: var(--accent); background: rgba(88,166,255,.1); }
 
   /* ── Assistant tab ── */
   .assistant-chips {
@@ -1954,8 +1942,6 @@
   .tl-task-label { font-size: 12px; fill: var(--text); }
   .tl-tick-label { font-size: 10px; fill: var(--muted); }
   .tl-grid-line  { stroke: var(--border); stroke-width: 1; }
-  .tl-row-even   { fill: var(--surface); }
-  .tl-row-odd    { fill: var(--bg); }
   .tl-bar        { rx: 4; ry: 4; cursor: pointer; opacity: 0.88; transition: opacity .15s, filter .15s; }
   .tl-bar:hover  { opacity: 1; filter: brightness(1.15); }
   .tl-now-line   { stroke: #f87171; stroke-width: 2; stroke-dasharray: 4 3; }
@@ -1977,7 +1963,6 @@
   }
   .tl-tooltip strong { display: block; margin-bottom: 4px; font-size: 13px; color: var(--text); }
   .tl-tooltip .tl-tip-row { color: var(--muted); }
-  .tl-tooltip .tl-tip-status { font-weight: 600; }
   .timeline-legend {
     display: flex;
     gap: 14px;
@@ -2180,7 +2165,6 @@
     /* Form rows: stack */
     .form-row { flex-direction: column; }
     .adv-grid  { grid-template-columns: 1fr; }
-    .adv-row   { flex-direction: column; }
 
     /* Timeline / Gantt: horizontal scroll on small screen */
     .timeline-chart-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }

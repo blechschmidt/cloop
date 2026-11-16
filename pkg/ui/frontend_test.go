@@ -307,6 +307,12 @@ var knowledgePushSource string
 //go:embed projectmove_view.go
 var projectMoveViewSource string
 
+// readersPushSource is pkg/ui/readers_push.go (Task 20503): the
+// project_readers push a project's Readers section redraws its lists on.
+//
+//go:embed readers_push.go
+var readersPushSource string
+
 // allUISources concatenates every Go source the architectural tests need
 // to scan for WebSocket broadcast sites. Adding a new file with a
 // `wsMessage{Type: ...}` site should mean adding it both here and as a
@@ -338,7 +344,8 @@ func allUISources() string {
 		"\n" + hubHealthSource +
 		"\n" + requirementsAPISource +
 		"\n" + requirementsTraceSource +
-		"\n" + knowledgePushSource
+		"\n" + knowledgePushSource +
+		"\n" + readersPushSource
 }
 
 // dashboardSource is the whole dashboard front end — the rendered index.html

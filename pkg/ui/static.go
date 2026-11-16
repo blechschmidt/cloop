@@ -136,6 +136,8 @@ var bundleFiles = []string{
 var deferredScripts = []struct{ token, path string }{
 	// The Members card on a project's Overview (Task 20366).
 	{"members.js", "assets/js/deferred/members.js"},
+	// The Readers section beside it (Task 20503).
+	{"readers.js", "assets/js/deferred/readers.js"},
 	// The Forwarded devices card on a project's Overview (Task 20430).
 	{"devices.js", "assets/js/deferred/devices.js"},
 	// The Claude credential card and dialog (Task 20379).

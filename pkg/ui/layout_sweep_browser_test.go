@@ -55,6 +55,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/projectmove"
+	"github.com/blechschmidt/cloop/pkg/projectreaders"
 	"github.com/blechschmidt/cloop/pkg/quota"
 	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
@@ -148,6 +149,9 @@ type layoutFixture struct {
 	Source           string              `json:"source"`
 	// PoolName is the executor pool the Executors tab lists (Task 20486).
 	PoolName string `json:"poolName"`
+	// ReaderProject is the project the Overview's Readers section names, as a
+	// reader of this one and as one it may read (Task 20503).
+	ReaderProject string `json:"readerProject"`
 }
 
 // The fixture's long content. Unbroken on purpose: CSS offers a line break at
@@ -373,6 +377,7 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 	}
 	seedLayoutRequirements(t, primary, s)
 	seedLayoutActivity(t, primary, s)
+	seedLayoutReaders(t, primary, others[1])
 
 	srv := New(primary, 0, "")
 	srv.Projects = others
@@ -443,11 +448,28 @@ func seedSweepHub(t *testing.T, s sweepStrings) (*httptest.Server, *Server, layo
 		Transcript: layoutLong("also cover the case where", s.Device, "drops off mid-dispatch, see",
 			s.URL), TranscriptMarker: s.Device,
 		PromptMarker: s.PromptMarker, ReplayOutput: s.ReplayOutput, DraftTitle: s.DraftTitle, Source: s.Source,
-		PoolName: layoutPool,
+		PoolName: layoutPool, ReaderProject: s.OtherProject,
 		Assistant: []map[string]string{
 			{"role": "user", "content": layoutLong("what blocks", s.TaskTitle+"?")},
 			{"role": "assistant", "content": layoutLong("Nothing — it finished; the test is at", s.URL)},
 		},
+	}
+}
+
+// seedLayoutReaders lists other on the selected project's readers list and
+// the selected project on other's (Task 20503), so the Overview's Readers
+// section names the fixture's long project name under both of its headings.
+func seedLayoutReaders(t *testing.T, primary, other string) {
+	t.Helper()
+	db, err := statedb.Open(state.DBPath(primary))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, pair := range [][2]string{{primary, other}, {other, primary}} {
+		if _, _, err := projectreaders.Add(db, pair[0], pair[1], "layout-sweep", nil); err != nil {
+			t.Fatalf("list %s on %s's readers: %v", pair[1], pair[0], err)
+		}
 	}
 }
 

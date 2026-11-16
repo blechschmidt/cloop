@@ -361,6 +361,9 @@ func (s *Server) onProjectMembersChange(c projectmember.Change) {
 		}
 		s.deliverToProject(path, wsMessage{Type: "members_update", Data: raw})
 	}
+	// Who sees these projects changed, so what every open Readers section
+	// may name to whom, and offer to add, may have too (Task 20503).
+	s.readersRefreshAll()
 }
 
 // announceMembershipChange tells the other hub members that the table changed,

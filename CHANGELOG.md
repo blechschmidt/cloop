@@ -340,6 +340,25 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **A project's Overview now shows its readers list, and its administrators
+  can change it there.** A new Readers section, after Members, lists the
+  other projects whose runs get this project's files read-only, with who added
+  each one and when, and below it the projects this one can read. The
+  project's administrators get a picker of the projects they can see that the
+  hub would accept, and a Remove button on each row, including on an entry
+  naming a project they can't see, which shows as "A project you can't see".
+  Everyone else on the project sees the lists without any controls, with the
+  readers they can't see counted rather than named. On a hub with single
+  sign-on, a change from a sign-in older than the recent-sign-in window opens
+  "Confirm it's you" and goes through once you have. Changes reach every open
+  dashboard as they happen: the hub pushes a `project_readers` message on the
+  WebSocket (and event stream) of each dashboard showing either project of a
+  changed entry, drawn for that dashboard's viewer, and to every open Overview
+  when who can see which project changes. Another hub member's change arrives
+  the same way, and a dashboard reads the lists again when it reconnects. `GET /api/projects/{idx}/readers` now also
+  answers `candidates`, the projects an administrator could add. The section's
+  code is fetched when the Overview opens, so the dashboard's first load is no
+  larger (Task 20503).
 - **A project's runs can now read the source trees of the projects whose
   readers lists name it, and only those, read-only.** The hub resolves the
   lists when it dispatches a run of a project, and gives the run each such

@@ -754,6 +754,9 @@ type Server struct {
 	// knowledgePush is what this member owes its dashboards of the knowledge
 	// sources' changes (Task 20473). See knowledge_push.go.
 	knowledgePush knowledgePushState
+	// readersPush is what this member owes its dashboards of the readers
+	// lists' changes (Task 20503). See readers_push.go.
+	readersPush readersPushState
 	// The spec-file reads this member is running, one per project, and the
 	// parses of what they read (Task 20459). See requirements_spec_api.go.
 	specReads  specReadJobs
@@ -6599,6 +6602,12 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 	// Features are removed far more often than projects, from the dashboard
 	// and from terminals alike, so the membership itself is compared.
 	listChanged := s.entrySetChanged(entries)
+	if listChanged {
+		// A project came or went: the candidates every open Readers
+		// section offers, and the projects its lists may name, with it
+		// (Task 20503).
+		s.readersRefreshAll()
+	}
 	// Liveness moves without the state moving: a run killed outright writes
 	// nothing on its way out, and one started from a terminal is seen here
 	// before its first write. A project's Running flag and its health both
@@ -8062,7 +8071,8 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// the projects that could read it, and what it could read. Keyed by path,
 	// an entry left behind would let whatever is registered here next read,
 	// or be read by, the other project.
-	if err := s.dropProjectReaders(r, entry); err != nil {
+	readersOtherSide, err := s.dropProjectReaders(r, entry)
+	if err != nil {
 		jsonErr(w, "could not remove the project's readers-list entries, so it was not removed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -8077,6 +8087,11 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// Its open streams go with it (Task 20366): rooms are keyed by path, so a
 	// socket left in this one would be sent whatever is registered here next.
 	s.closeProjectStreams(entry.Path, "this project was removed from the hub")
+	// The projects its entries named lost a reader or a project they could
+	// read, and every Readers section that offered it to add must stop
+	// (Task 20503).
+	s.readersChanged(readersOtherSide...)
+	s.readersRefreshAll()
 	// Give the owner their project slot back (Task 20182). Keyed on the
 	// entry's recorded owner rather than on the caller, so an admin
 	// deleting somebody else's project credits the right tenant.

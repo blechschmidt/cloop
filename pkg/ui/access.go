@@ -151,6 +151,10 @@ func (s *Server) onTeamsChange(c hubteam.Change) {
 			s.deliverToProject(m.ProjectPath, wsMessage{Type: "members_update", Data: raw})
 		}
 	}
+	// Who sees which project changed with the team, so what every open
+	// Readers section may name to whom, and offer to add, may have too
+	// (Task 20503).
+	s.readersRefreshAll()
 }
 
 // announceTeamsChange tells the other hub members the teams changed.

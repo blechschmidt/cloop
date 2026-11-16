@@ -145,6 +145,8 @@ function loadProjectMembers() {
   loadHarnessCred();
   loadProjectForwards();
   loadReqCoverage();
+  // The Readers section (Task 20503): on every hub, sign-on or not.
+  _noProject() || deferredPanel('readers').then(p => p.load(), () => {});
   if (_membersOff()) return;
   return deferredPanel('members', {
     api, apiMethod, esc, toast, left: clearProjectSelection, idx: _overviewIdx, hidden: _membersOff,

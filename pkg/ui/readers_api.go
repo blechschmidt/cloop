@@ -31,6 +31,20 @@ package ui
 //
 // The reader travels in the query string on DELETE because several clients
 // and proxies drop a DELETE body (members_api.go gives the same reason).
+//
+// # What an administrator is offered
+//
+// A caller who may change the list is also sent the projects they could add,
+// as candidates: the projects they can see that are not this one, not a
+// feature and not on the list already — the PUT's own rules, so the
+// dashboard's picker offers what the hub takes. When who sees which project
+// changes, every open Readers section is sent its candidates again.
+//
+// # Open dashboards
+//
+// A change to a list is pushed to every dashboard showing either project of
+// the entry, rendered for that dashboard as its own GET would answer
+// (readers_push.go).
 
 import (
 	"encoding/json"
@@ -103,11 +117,22 @@ type readersResponse struct {
 	// CanManage reports whether the caller may change this project's list:
 	// project.readers on it.
 	CanManage bool `json:"can_manage"`
+	// Candidates are the projects a caller who may change the list could add
+	// to it: those they can see that are neither this project, a feature, nor
+	// on the list already. Sent only with CanManage.
+	Candidates []readerCandidate `json:"candidates,omitempty"`
 
 	// Feature is set when the project at the index is a feature, which has no
 	// list of its own and reads nothing by its project's.
 	Feature bool   `json:"feature,omitempty"`
 	Note    string `json:"note,omitempty"`
+}
+
+// readerCandidate is a project the caller could add to the list.
+type readerCandidate struct {
+	Project string `json:"project"`
+	Path    string `json:"path"`
+	Idx     int    `json:"idx"`
 }
 
 // readerRequest is the PUT body: the reader by its path, or by its index in
@@ -125,23 +150,35 @@ func (s *Server) handleProjectReaders(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var res *projectreaders.Resolver
+	if !entry.IsFeature() {
+		var err error
+		if res, err = s.loadReaders(); err != nil {
+			s.writeReadersStoreError(w, err)
+			return
+		}
+	}
+	jsonOK(w, s.readersViewFor(entry, s.grantFor(r), s.visibleProjectEntries(r), res))
+}
+
+// readersViewFor is entry's lists as a caller holding g is shown them, when
+// visible is that caller's project list — the index space every idx in the
+// answer counts in. The GET answers with it, and a push sends each dashboard
+// what it makes for that dashboard's credential (readers_push.go), so the
+// two can never disagree about who is named to whom.
+func (s *Server) readersViewFor(entry multiui.ProjectEntry, g *grant, visible []multiui.ProjectEntry, res *projectreaders.Resolver) readersResponse {
 	resp := readersResponse{Project: entry.Name, Path: entry.Path, Readers: []readerView{}, Readable: []readerView{}}
 	if entry.IsFeature() {
 		resp.Feature = true
 		resp.Note = "A feature has no readers list of its own, and reads no other project by its project's list. " +
 			"The list of " + s.featureParentLabel(entry) + " names the projects that may read it."
-		jsonOK(w, resp)
-		return
+		return resp
 	}
-	g := s.grantFor(r)
 	resp.CanManage = g.decide(s.entryScope(entry)).Allows(authz.PermProjectReaders)
-	res, err := s.loadReaders()
-	if err != nil {
-		s.writeReadersStoreError(w, err)
-		return
-	}
-	seen := s.seenProjects(r)
+	seen := s.seenProjectsIn(g, visible)
+	listed := map[string]bool{}
 	for _, e := range res.ReadersOf(entry.Path) {
+		listed[e.ReaderPath] = true
 		if v, ok := seen.view(e, e.ReaderPath); ok {
 			resp.Readers = append(resp.Readers, v)
 			continue
@@ -158,7 +195,20 @@ func (s *Server) handleProjectReaders(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.HiddenReadable++
 	}
-	jsonOK(w, resp)
+	if resp.CanManage {
+		// The PUT's rules (readerFromRequest), in the order of the caller's
+		// own project list: one they can see, not a feature, not this
+		// project, not listed already, and named by a path the PUT takes
+		// back unchanged.
+		for i, e := range visible {
+			if _, ok := seen[e.Path]; !ok || listed[projectreaders.NormalizePath(e.Path)] ||
+				!readerCandidatePath(e.Path) || projectreaders.CheckPair(entry.Path, e.Path) != nil {
+				continue
+			}
+			resp.Candidates = append(resp.Candidates, readerCandidate{Project: e.Name, Path: e.Path, Idx: i})
+		}
+	}
+	return resp
 }
 
 // handleProjectReaderAdd serves PUT /api/projects/{idx}/readers.
@@ -180,11 +230,16 @@ func (s *Server) handleProjectReaderAdd(w http.ResponseWriter, r *http.Request) 
 		s.writeReadersStoreError(w, err)
 		return
 	}
-	defer db.Close()
 	stored, added, err := projectreaders.Add(db, entry.Path, reader.Path, s.auditActor(r), s.readerAudit(r, ""))
+	db.Close()
 	if err != nil {
 		s.writeReadersStoreError(w, err)
 		return
+	}
+	if added {
+		// Both sides' dashboards: this project's readers and the reader's
+		// list of what it may read changed.
+		s.readersChanged(entry.Path, reader.Path)
 	}
 	jsonOK(w, map[string]any{
 		"added": added,
@@ -232,7 +287,6 @@ func (s *Server) handleProjectReaderRemove(w http.ResponseWriter, r *http.Reques
 		s.writeReadersStoreError(w, err)
 		return
 	}
-	defer db.Close()
 	audit := s.readerAudit(r, "")
 	var removed *projectreaders.Reader
 	if id != "" {
@@ -240,6 +294,7 @@ func (s *Server) handleProjectReaderRemove(w http.ResponseWriter, r *http.Reques
 	} else {
 		removed, err = projectreaders.Remove(db, entry.Path, readerPath, audit)
 	}
+	db.Close()
 	if err != nil {
 		s.writeReadersStoreError(w, err)
 		return
@@ -248,6 +303,7 @@ func (s *Server) handleProjectReaderRemove(w http.ResponseWriter, r *http.Reques
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "this project's readers list has no such entry"))
 		return
 	}
+	s.readersChanged(entry.Path, removed.ReaderPath)
 	out := map[string]any{"ok": true, "id": removed.ID}
 	// Named back only when the caller named it, or can see it.
 	if readerPath != "" {
@@ -351,8 +407,12 @@ type seenProjects map[string]struct {
 }
 
 func (s *Server) seenProjects(r *http.Request) seenProjects {
-	entries := s.visibleProjectEntries(r)
-	g := s.grantFor(r)
+	return s.seenProjectsIn(s.grantFor(r), s.visibleProjectEntries(r))
+}
+
+// seenProjectsIn is seenProjects for a caller holding g whose project list is
+// entries.
+func (s *Server) seenProjectsIn(g *grant, entries []multiui.ProjectEntry) seenProjects {
 	out := make(seenProjects, len(entries))
 	for i, e := range entries {
 		if e.IsFeature() || !g.decide(s.entryScope(e)).Allows(authz.PermProjectRead) {
@@ -441,21 +501,35 @@ func readerAuditEvent(actor string, action auditaction.Action, e *projectreaders
 }
 
 // dropProjectReaders removes every entry naming a project that is leaving the
-// hub, on either side of a list. Entries are keyed by path, and one outliving
-// its project would hand the access to whatever is registered at that path
-// next. Called before the registry change, which does not happen if this fails.
-func (s *Server) dropProjectReaders(r *http.Request, entry multiui.ProjectEntry) error {
+// hub, on either side of a list, and returns the projects on the other side of
+// them, whose dashboards lose a reader or a project they could read: the
+// caller pushes those once the project is off the registry, so that no list
+// pushed offers it. Entries are keyed by path, and one outliving its project
+// would hand the access to whatever is registered at that path next. Called
+// before the registry change, which does not happen if this fails.
+func (s *Server) dropProjectReaders(r *http.Request, entry multiui.ProjectEntry) ([]string, error) {
 	if _, err := os.Stat(state.DBPath(s.WorkDir)); err != nil {
 		// No control plane yet, so no list.
-		return nil
+		return nil, nil
 	}
 	db, err := s.controlPlaneDB()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer db.Close()
-	_, err = projectreaders.RemoveProject(db, entry.Path, s.readerAudit(r, "the project was removed from the hub"))
-	return err
+	removed, err := projectreaders.RemoveProject(db, entry.Path, s.readerAudit(r, "the project was removed from the hub"))
+	if err != nil {
+		return nil, err
+	}
+	var others []string
+	for _, e := range removed {
+		for _, p := range []string{e.ProjectPath, e.ReaderPath} {
+			if p != projectreaders.NormalizePath(entry.Path) {
+				others = append(others, p)
+			}
+		}
+	}
+	return others, nil
 }
 
 // writeReadersInputError answers a refused path or pair with 400.

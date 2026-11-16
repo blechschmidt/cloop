@@ -710,6 +710,10 @@ func (s *Server) onBusInvalidate(ev hubcluster.Event) {
 		// A knowledge source's sync moved, or a person changed the source,
 		// on another member (Task 20473): this member tells its dashboards.
 		s.onBusKnowledge(ev)
+	case invalidateReaders:
+		// An entry on a readers list changed on another member (Task
+		// 20503): this member pushes both projects' lists to its dashboards.
+		s.onBusReaders(ev)
 	case invalidateBinding:
 		var p bindingInvalidation
 		if err := ev.Decode(&p); err == nil {

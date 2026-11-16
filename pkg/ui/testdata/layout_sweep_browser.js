@@ -706,10 +706,12 @@ const TAB_READY = {
   // The header's approvals badge (Task 20427) counts the fixture's pending
   // request, and its hub health indicator (Task 20434) the fixture's failing
   // check, so every tab is measured with both showing. The Spec coverage card
-  // (Task 20465) shows the fixture's two musts.
+  // (Task 20465) shows the fixture's two musts, and the Readers section
+  // (Task 20503) names the second project under both of its headings.
   'overview': `${hasContent('#goalText', F.project)} && document.getElementById('approvalsBadge').style.display !== 'none'
     && document.getElementById('hubHealthBadge').style.display !== 'none'
-    && document.getElementById('reqCovCard').style.display !== 'none' && ${hasText('#statReqCov', 'of musts pass')}`,
+    && document.getElementById('reqCovCard').style.display !== 'none' && ${hasText('#statReqCov', 'of musts pass')}
+    && ${hasContent('#readersList', F.readerProject)} && ${hasContent('#readableList', F.readerProject)}`,
   'tasks': hasContent('#taskListFull', F.taskTitle),
   // A requirement whose last check failed, with its details open: the test
   // output and the commands are the long lines (Task 20458).
