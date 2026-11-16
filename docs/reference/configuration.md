@@ -285,7 +285,17 @@ Every container is started with:
 - a **non-root UID**, taken from the owner of the project directory, so files
   the workload creates have the right owner on the host and an escape lands on
   an unprivileged user. Under rootless podman, `--userns=keep-id` does the same.
-- **`--network=none`** by default. Egress is enabled per executor.
+- **`--network=none`** by default. Egress is enabled per executor. With
+  `network: bridge`, each project's sandboxes get a network of their own
+  (`cloop-sbx-<executor>-p<project>`) instead of the engine's default bridge,
+  so two projects' sandboxes can't reach each other. The network is removed
+  when the project's last sandbox on it ends. An engine with a small subnet
+  pool may need a larger one for many projects at once (docker:
+  `default-address-pools`). Where the control plane may use `nft`, each such
+  network also gets a ruleset that refuses every connection opened into it
+  from outside. A network you name yourself is used as it is and shared by
+  every project's sandboxes, which preflight reports as a `network-isolation`
+  warning.
 - **all Linux capabilities dropped** and `no-new-privileges` set, so a setuid
   binary in the image can't change the UID.
 - **`--cpus` / `--memory` / `--pids-limit`**, with swap set to the memory limit
@@ -462,14 +472,20 @@ filter, and also because an empty allowlist denies everything, including
 wherever your harness clones from. When you turn it on, also set
 `cidrs`/`ports` or `allow_public_internet`.
 
+Every Pod gets a NetworkPolicy even with the filter off. That policy admits no
+inbound connection and leaves egress alone, so no other Pod, another project's
+run included, can connect to the run's Pod. Turning the filter on adds the
+allowlist to the same policy.
+
 The filter needs two things from the cluster that cloop can't provide:
 
 - **RBAC.** The executor's identity needs
-  `networkpolicies: [create delete list]` in the workload namespace. Preflight
-  lists NetworkPolicies to confirm the leased identity has these permissions. A
-  `403` is a `fail`, because every `Start` would then refuse to run instead of
-  starting a Pod with unfiltered egress. The Helm chart's
-  `executor.kubernetes.rbac.create` grants them.
+  `networkpolicies: [create delete list]` in the workload namespace, with the
+  filter on or off, because every Pod gets a policy. Preflight lists
+  NetworkPolicies to confirm the leased identity has these permissions
+  (`pod-isolation`). A `403` is a `fail`, because every `Start` would then
+  refuse to run instead of starting a Pod that other Pods can connect to. The
+  Helm chart's `executor.kubernetes.rbac.create` grants them.
 - **A CNI that implements NetworkPolicy.** flannel doesn't; Calico, Cilium,
   Antrea and most managed CNIs do. The API server stores the object either way,
   so from the hub's side a cluster with the wrong CNI looks the same as a

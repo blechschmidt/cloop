@@ -449,6 +449,23 @@ func (e *Executor) ensureDerivedImage(ctx context.Context, base ImageIdentity, s
 		"--network", e.buildNetwork(spec),
 		contextDir,
 	}
+	// On podman a build "on the bridge" would run the project's setup on the
+	// default network, which podman's isolate does not keep apart from the
+	// sandbox networks — so it runs on an isolated network of its own,
+	// removed with the build (Task 20502). docker keeps its default bridge
+	// apart from user-defined networks already.
+	if e.buildNetwork(spec) == NetworkBridge && e.rt.Name == RuntimePodman {
+		buildNet, remove, err := e.isolatedBuildNetwork(ctx)
+		if err != nil {
+			return ImageIdentity{}, err
+		}
+		defer remove()
+		for i := range args {
+			if args[i] == "--network" {
+				args[i+1] = buildNet
+			}
+		}
+	}
 
 	buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildTimeout)
 	defer cancel()

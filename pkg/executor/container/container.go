@@ -94,6 +94,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor/internal/diskwatch"
 	"github.com/blechschmidt/cloop/pkg/executor/internal/logbus"
 	"github.com/blechschmidt/cloop/pkg/imagepolicy"
+	"github.com/blechschmidt/cloop/pkg/netfilter"
 	"github.com/blechschmidt/cloop/pkg/projectconfine"
 )
 
@@ -377,12 +378,18 @@ type Executor struct {
 
 	mu      sync.Mutex
 	handles map[string]*record
-	// rulesNets counts the live workloads on each network this executor made
-	// for a workload's own firewall rules (Task 20363), under rulesMu, which
-	// is held across creating, joining and removing one so a network is never
-	// removed between another workload finding it and joining it.
-	rulesMu   sync.Mutex
-	rulesNets map[string]*rulesNetUse
+	// netUses counts the live workloads on each network this executor made
+	// for a tenant (Task 20502; rule sets' networks since Task 20363), under
+	// netMu, which is held across creating, joining and removing one so a
+	// network is never removed between another workload finding it and
+	// joining it. See tenantnet.go.
+	netMu   sync.Mutex
+	netUses map[string]*netUse
+	// guardOnce settles, once, whether this process may install the inbound
+	// guard on an unfiltered sandbox network; see nftForGuards.
+	guardOnce sync.Once
+	guardNft  *netfilter.Applier
+	guardErr  error
 	// store is the durable handle table, nil when the embedder has none. It
 	// lives under mu rather than being set once at construction because
 	// AttachHandleStore can install one long after New has returned, while the
@@ -438,10 +445,13 @@ type record struct {
 	// rather than returning it. Empty for every workload without an
 	// interface grant, which is nearly all of them.
 	interfaces []executor.HostInterface
-	// rulesNetwork is the network this container joined because it carried
-	// firewall rules of its own (Task 20363), empty otherwise. See
-	// releaseRulesNetwork.
-	rulesNetwork string
+	// tenantNetwork is the network of this container's tenant it joined
+	// (Task 20502), empty for "none" and for an operator's own network. See
+	// releaseTenantNetwork.
+	tenantNetwork string
+	// tenantTable is the nftables table on that network's bridge, "" when
+	// none, recorded on the handle row so an adopter counts it again.
+	tenantTable string
 	// feature is the staged tree and output of a feature workload — one built
 	// from a branch the hub shipped (Task 20367) — and nil for every other
 	// workload. See feature.go.
@@ -846,10 +856,19 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		prelude.WriteString(line)
 	}
 
-	// Provision and filter the network before anything can run on it. The
-	// bridge exists from the moment the runtime creates the network, which
-	// is strictly before a container can join, so there is no window in
-	// which the sandbox is up and unfiltered — see firewall.go.
+	// The network is decided first and made last.
+	//
+	// Decided first because the decision can refuse (a scope the executor
+	// cannot honour, a rootless engine asked for a filter), and that refusal
+	// belongs before a multi-minute image build, not after it. Made last —
+	// created, filtered, and joined by the container — under the network's
+	// host-wide lock, held until `run` returns: a network and its table are
+	// shared by name with any other process driving this engine, and one
+	// whose release ran between this start's table install and its container
+	// joining would leave the sandbox on a bridge with no firewall (Task
+	// 20502). The bridge exists from the moment the runtime creates the
+	// network, which is strictly before a container can join, so there is no
+	// window in which the sandbox is up and unfiltered — see firewall.go.
 	//
 	// A sandbox spec that took the network away is left alone: DisableNetwork
 	// has already set req.Network to "none", which is narrower than anything
@@ -868,30 +887,59 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	// here is true, so omitting it would start the sandbox on an unfiltered
 	// network while the dashboard showed a firewall. Rules that reach nothing
 	// take the network away instead, which needs no filter at all.
+	//
+	// And the engine's default bridge is never joined (Task 20502): it is the
+	// one network every container on the host shares, so an unfiltered
+	// sandbox gets a network of its project's own instead — keyed by the
+	// tenant like every bridge planNetwork names, filtered or not.
 	if spec.EgressRules != nil && !spec.EgressRules.HasDestination() {
 		req.Network = NetworkNone
 	}
-	var rulesNetwork string
+	var plan networkPlan
+	planned := e.joinsSandboxNetwork(spec, req.Network)
+	if planned {
+		if plan, err = e.planNetwork(confineTo(spec), tenantTag(tenantOf(spec, req.Labels[LabelHandle]))); err != nil {
+			return executor.Handle{}, err
+		}
+	}
+
+	// Resolve the image next, because it is the only step that can be slow:
+	// on a cache miss with setup commands this builds a derived image. Doing
+	// it after the cheap validation means a malformed spec fails immediately
+	// instead of after a multi-minute `pip install`.
+	image, err := e.sandboxImage(ctx, spec)
+	if err != nil {
+		return executor.Handle{}, err
+	}
+	// The digest-pinned form, not the tag: between resolving and running, a
+	// concurrent `podman pull` could repoint the tag, and the whole point of
+	// pinning is that the artifact names what actually executed.
+	req.Image = image.Pinned()
+
+	var tenantNetwork, tenantTable string
 	var gateway netip.Addr
 	var denials *denialTrack
-	if (e.opts.EgressFilter.Enabled || spec.EgressScope.NeedsFilter() || spec.EgressRules != nil) &&
-		req.Network != NetworkNone {
-		c := confineTo(spec)
-		sbxNet, ferr := e.installRulesAware(ctx, c)
+	unlockNetwork := func() {}
+	if planned {
+		sbxNet, unlock, ferr := e.joinTenantNetwork(ctx, plan)
 		if ferr != nil {
 			return executor.Handle{}, ferr
 		}
 		network, dns := sbxNet.name, sbxNet.dns
 		gateway = sbxNet.gateway
 		denials = sbxNet.denials
-		if c.rules != nil {
-			rulesNetwork = network
+		if sbxNet.tenant {
+			tenantNetwork, tenantTable = network, sbxNet.table
+			// Registered before the unlock below, so it runs after it: the
+			// release takes the same lock.
 			defer func() {
 				if !started {
-					e.releaseRulesNetwork(rulesNetwork)
+					e.releaseTenantNetwork(tenantNetwork)
 				}
 			}()
 		}
+		unlockNetwork = unlock
+		defer unlock()
 		req.Network = network
 		req.DNS = dns
 		if len(dns) > 0 {
@@ -904,6 +952,20 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 			// the allowed resolvers in the sandbox's own resolv.conf works
 			// the same way under every runtime.
 			conf, rerr := e.resolvConf(dns)
+			if rerr != nil {
+				return executor.Handle{}, rerr
+			}
+			req.ExtraMounts = append(req.ExtraMounts, mount{
+				HostPath: conf, TargetPath: "/etc/resolv.conf", ReadOnly: true,
+				SELinuxLabel: e.opts.SELinuxLabel,
+			})
+		} else if sbxNet.hostDNS && !hasDNSFlag(e.opts.ExtraArgs) {
+			// An unfiltered sandbox resolved through the host's resolvers on
+			// the default bridge, and keeps doing so on its own network:
+			// docker's embedded resolver there is the one a gVisor or Kata
+			// sandbox cannot reach (see above). An operator's own --dns in
+			// extra_args is left to say where it resolves.
+			conf, rerr := e.hostResolvConf()
 			if rerr != nil {
 				return executor.Handle{}, rerr
 			}
@@ -924,19 +986,6 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		}
 	}
 
-	// Resolve the image last, because it is the only step that can be slow:
-	// on a cache miss with setup commands this builds a derived image. Doing
-	// it after the cheap validation means a malformed spec fails immediately
-	// instead of after a multi-minute `pip install`.
-	image, err := e.sandboxImage(ctx, spec)
-	if err != nil {
-		return executor.Handle{}, err
-	}
-	// The digest-pinned form, not the tag: between resolving and running, a
-	// concurrent `podman pull` could repoint the tag, and the whole point of
-	// pinning is that the artifact names what actually executed.
-	req.Image = image.Pinned()
-
 	built, err := buildRunArgs(req)
 	if err != nil {
 		return executor.Handle{}, err
@@ -949,6 +998,9 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 	defer cancel()
 
 	res, err := runCLI(startCtx, e.rt, built.Env, built.Args...)
+	// The container has joined the network or never will: another start or a
+	// release may have it now.
+	unlockNetwork()
 	if err != nil {
 		// The CLI could not be invoked, or the start timed out. Either way a
 		// container may already have been created under our name; the name
@@ -1045,10 +1097,11 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// handles and host device names with no credential in it, and
 		// without it a graceful stop could not return the interfaces.
 		interfaces: append([]executor.HostInterface(nil), spec.Interfaces...),
-		// The rules-keyed network this container joined, released by finish
-		// so the bridge and its ruleset go once the last workload on them has.
-		rulesNetwork: rulesNetwork,
-		feature:      feature,
+		// The tenant network this container joined, released by finish so
+		// the bridge and its ruleset go once the last workload on them has.
+		tenantNetwork: tenantNetwork,
+		tenantTable:   tenantTable,
+		feature:       feature,
 	}
 	started = true
 	// The spec is dropped, but the *values* it carried have to outlive it here.
@@ -1130,7 +1183,8 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, extraMounts []
 		// sampling the workload it adopts — and so does where its credential
 		// files are staged, so an adopter wipes, revokes and refreshes them
 		// (Task 20419).
-		Meta: denialMeta(withStageMeta(executor.WithRunID(withDiskMeta(handleMeta(e.rt.Name, feature), disk), spec), stage), denials),
+		Meta: withNetworkMeta(denialMeta(withStageMeta(executor.WithRunID(withDiskMeta(handleMeta(e.rt.Name, feature), disk), spec), stage), denials),
+			tenantNetwork, tenantTable),
 		// The lease attribution recorded above in e.leases.Bind, persisted so
 		// a revocation arriving after a hub restart can rebuild that index and
 		// still reach this sandbox. Names and paths only — the credential
@@ -2126,6 +2180,12 @@ func (e *Executor) ReapOrphans(ctx context.Context) ([]string, error) {
 	running, runErr := e.reapRunningOrphans(ctx, live)
 	removed = append(removed, running...)
 	sort.Strings(removed)
+	// Then the networks the containers above held, and any a dead process
+	// left (Task 20502). Reported here rather than returned: callers count
+	// what this returns as containers.
+	for _, n := range e.reapIdleNetworks(ctx) {
+		fmt.Fprintf(os.Stderr, "container: removed idle sandbox network %s\n", n)
+	}
 	if runErr != nil {
 		// The exited sweep already succeeded and its removals really happened.
 		// Returning them alongside the error rather than discarding them keeps
@@ -2542,7 +2602,7 @@ func (e *Executor) finish(rec *record, state executor.State, exitCode int, errMs
 		// Before the network goes: the monitor keeps the sandbox's address
 		// attributed for the log lines the kernel still holds (Task 20437).
 		releaseDenials(rec)
-		e.releaseRulesNetwork(rec.rulesNetwork)
+		e.releaseTenantNetwork(rec.tenantNetwork)
 	}
 
 	// Close the bus only after the status is final; see pump's doc comment.
@@ -2663,8 +2723,17 @@ func (e *Executor) rootless() bool { return e.rt.Rootless }
 // than rewriting one a running sandbox has mounted. World-readable, because the
 // sandbox runs as an unprivileged user who must be able to read it.
 func (e *Executor) resolvConf(dns []string) (string, error) {
+	return e.writeResolvConf("# Written by cloop: the resolvers this sandbox's egress filter allows.\n",
+		dns, nil, []string{"edns0"})
+}
+
+// writeResolvConf stages a resolv.conf with the given nameservers, search list
+// and options, and returns its path. Nameservers must be address literals;
+// search domains and options must be single tokens, so nothing passed here can
+// add a line of its own to the file.
+func (e *Executor) writeResolvConf(header string, dns, search, options []string) (string, error) {
 	var b strings.Builder
-	b.WriteString("# Written by cloop: the resolvers this sandbox's egress filter allows.\n")
+	b.WriteString(header)
 	for _, d := range dns {
 		a, err := netip.ParseAddr(strings.TrimSpace(d))
 		if err != nil {
@@ -2672,7 +2741,22 @@ func (e *Executor) resolvConf(dns []string) (string, error) {
 		}
 		b.WriteString("nameserver " + a.String() + "\n")
 	}
-	b.WriteString("options edns0\n")
+	if len(search) > 0 {
+		for _, d := range search {
+			if !resolvToken(d) {
+				return "", fmt.Errorf("container: search domain %q is not one token", d)
+			}
+		}
+		b.WriteString("search " + strings.Join(search, " ") + "\n")
+	}
+	if len(options) > 0 {
+		for _, o := range options {
+			if !resolvToken(o) {
+				return "", fmt.Errorf("container: resolver option %q is not one token", o)
+			}
+		}
+		b.WriteString("options " + strings.Join(options, " ") + "\n")
+	}
 	content := b.String()
 	sum := sha256.Sum256([]byte(content))
 

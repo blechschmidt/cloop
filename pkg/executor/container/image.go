@@ -197,6 +197,7 @@ func (e *Executor) Preflight(ctx context.Context, workDir string) PreflightRepor
 
 	// --- 3c. egress filter ----------------------------------------------
 	e.preflightEgressFilter(ctx, add)
+	e.preflightNetworkIsolation(ctx, add)
 
 	// --- 3d. device access mode -----------------------------------------
 	e.preflightDeviceMode(add)

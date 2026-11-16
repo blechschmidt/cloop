@@ -138,15 +138,15 @@ func TestBadConfigIsRefusedNotIgnored(t *testing.T) {
 // rather than leaking a new one on every boot.
 func TestNetworkNameIsDerivedAndSafe(t *testing.T) {
 	cases := map[string]string{
-		"container":             "cloop-sbx-container",
-		"Build Fleet":           "cloop-sbx-build-fleet",
-		"a/../../etc":           "cloop-sbx-a-------etc",
-		"":                      "cloop-sbx-default",
-		"--dangerous":           "cloop-sbx-dangerous",
-		strings.Repeat("x", 80): "cloop-sbx-" + strings.Repeat("x", 32),
+		"container":             "cloop-sbx-container-p" + testTenant,
+		"Build Fleet":           "cloop-sbx-build-fleet-p" + testTenant,
+		"a/../../etc":           "cloop-sbx-a-------etc-p" + testTenant,
+		"":                      "cloop-sbx-default-p" + testTenant,
+		"--dangerous":           "cloop-sbx-dangerous-p" + testTenant,
+		strings.Repeat("x", 80): "cloop-sbx-" + strings.Repeat("x", 32) + "-p" + testTenant,
 	}
 	for in, want := range cases {
-		got := networkName(in, scoped(executor.EgressScopeUnset))
+		got := networkName(in, scoped(executor.EgressScopeUnset), testTenant)
 		if got != want {
 			t.Errorf("networkName(%q) = %q, want %q", in, got, want)
 		}
@@ -275,19 +275,23 @@ func TestEnsureNetworkIsIdempotent(t *testing.T) {
 	}
 
 	e := &Executor{id: "fwtest", rt: rt, opts: mustNormalize(t, Options{Network: NetworkBridge})}
-	name := networkName("cloop-selftest-"+t.Name(), scoped(executor.EgressScopeUnset))
+	name := networkName("cloop-selftest-"+t.Name(), scoped(executor.EgressScopeUnset), testTenant)
 	t.Cleanup(func() {
 		_, _ = runCLITimeout(context.Background(), rt, shortCmdTimeout, "network", "rm", name)
 	})
+	spec := networkSpec{name: name, internal: true, bridge: bridgeName(name), tenant: testTenant}
 
-	bridge, err := e.ensureNetwork(ctx, name, true)
+	bridge, err := e.ensureNetwork(ctx, spec)
 	if err != nil {
 		t.Skipf("could not create a test network (the runtime may be unprivileged): %v", err)
 	}
 	if err := netfilter.ValidateInterfaceName(bridge); err != nil {
 		t.Fatalf("ensureNetwork returned an unusable interface %q: %v", bridge, err)
 	}
-	again, err := e.ensureNetwork(ctx, name, true)
+	if bridge != spec.bridge {
+		t.Fatalf("ensureNetwork made bridge %q, want the sandbox bridge %q", bridge, spec.bridge)
+	}
+	again, err := e.ensureNetwork(ctx, spec)
 	if err != nil {
 		t.Fatalf("second ensureNetwork failed instead of reusing the network: %v", err)
 	}

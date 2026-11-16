@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blechschmidt/cloop/pkg/netfilter"
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 func TestIntegration_AContainingAllowKeepsTheMetadataServiceClosed(t *testing.T) {
@@ -54,12 +54,17 @@ func TestIntegration_AContainingAllowKeepsTheMetadataServiceClosed(t *testing.T)
 			o.EgressFilter = EgressFilter{Enabled: true, AllowCIDRs: allow, AllowPorts: []int{80},
 				Resolvers: []string{"1.1.1.1"}}
 		})
-		table := netfilter.TableName("sbx", id)
+		// The ruleset is the project's and goes with its last workload (Task
+		// 20502), so a second workload of the same project holds it while the
+		// probe runs and the table is read.
+		work := t.TempDir()
+		table := firewallTable(id, confinement{}, tenantTag(tenantOf(executor.Spec{WorkDir: work}, "")))
 		t.Cleanup(func() {
 			_ = exec.Command("nft", "delete", "table", "inet", table).Run()
-			_ = exec.Command(ex.rt.Name, "network", "rm", "cloop-sbx-"+id).Run()
 		})
-		res, err := runInSandbox(t, ex, t.TempDir(), probe, nil)
+		release := holdTenantNetwork(t, ex, work)
+		defer release()
+		res, err := runInSandbox(t, ex, work, probe, nil)
 		if err != nil {
 			t.Fatalf("%s: Run: %v (output %q)", id, err, res.Output)
 		}

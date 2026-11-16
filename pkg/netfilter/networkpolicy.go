@@ -234,6 +234,49 @@ func RenderNetworkPolicy(p Policy, opts NetworkPolicyOptions) (*NetworkPolicy, e
 	return np, nil
 }
 
+// RenderIsolationPolicy renders the NetworkPolicy a sandbox Pod gets when no
+// egress filter applies to it (Task 20502): inbound denied, outbound left as
+// the cluster has it. RenderNetworkPolicy, for a Pod with a filter, denies
+// inbound the same way.
+//
+// Ingress is the half that keeps two runs apart. Admitting a connection takes
+// both ends' policies, so a Pod that admits nothing is unreachable from every
+// other Pod, and when every sandbox Pod carries one, no run can open a
+// connection into another project's — on a cluster with no egress filter at
+// all, and on one whose allow list names the Pod network. A sandbox only ever
+// dials out: the harness talks to the hub and the Internet, and the hub reaches
+// the Pod through the API server and the kubelet, which no NetworkPolicy
+// governs, so denying ingress takes nothing a run does away from it.
+//
+// Egress is not governed — the policy type is left out rather than listed with
+// a rule allowing everything — because the operator has not asked for an egress
+// filter, and inventing one here would be the upgrade outage
+// RenderNetworkPolicy's callers keep behind a switch.
+func RenderIsolationPolicy(opts NetworkPolicyOptions) (*NetworkPolicy, error) {
+	if opts.Name == "" {
+		return nil, fmt.Errorf("netfilter: NetworkPolicy needs a name")
+	}
+	if len(opts.PodSelector) == 0 {
+		return nil, fmt.Errorf("netfilter: NetworkPolicy needs a pod selector — "+
+			"an empty selector governs every Pod in namespace %q", opts.Namespace)
+	}
+	return &NetworkPolicy{
+		APIVersion: "networking.k8s.io/v1",
+		Kind:       "NetworkPolicy",
+		Metadata: NetworkPolicyMeta{
+			Name:        opts.Name,
+			Namespace:   opts.Namespace,
+			Labels:      opts.Labels,
+			Annotations: opts.Annotations,
+		},
+		Spec: NetworkPolicySpec{
+			PodSelector: LabelSelector{MatchLabels: opts.PodSelector},
+			// Ingress named with no ingress rule: nothing may connect in.
+			PolicyTypes: []string{"Ingress"},
+		},
+	}, nil
+}
+
 // exceptSet holds the carve-outs for the two families.
 type exceptSet struct {
 	v4 []string

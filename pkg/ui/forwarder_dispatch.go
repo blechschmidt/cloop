@@ -553,8 +553,14 @@ func attachOneHere(fd executor.ForwardedDevice) ([]executor.HostDevice, *executo
 		relay.mu.Lock()
 		relay.local = imp
 		relay.mu.Unlock()
+		nodes := imp.HostDevices(fd.Name)
+		release := hubForwarded.hold(nodes)
+		go func() {
+			<-imp.Done()
+			release()
+		}()
 		go watchLocalAttachment(relay, imp.Done())
-		return imp.HostDevices(fd.Name), nil, nil
+		return nodes, nil, nil
 	case executor.ForwardedL2:
 		tap := hubTAPName(fd.BindingID)
 		id := ledger.Add(deviceforward.LedgerEntry{Kind: deviceforward.LedgerTAP, TAP: tap})
@@ -597,6 +603,50 @@ var (
 	hubLedgerOnce sync.Once
 	hubLedger     *deviceforward.Ledger
 )
+
+// hubForwarded is the nodes of the USB devices this hub process holds for
+// forwarders (Task 20502), while each is attached. A device grant for a
+// sandbox on this host may not name one: the path a forwarded device
+// enumerated at may be the one a granted device had before it was unplugged.
+var hubForwarded = &forwardedNodes{held: map[string]int{}}
+
+type forwardedNodes struct {
+	mu   sync.Mutex
+	held map[string]int
+}
+
+// hold records a device's nodes and returns their release.
+func (f *forwardedNodes) hold(devs []executor.HostDevice) func() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var paths []string
+	for _, d := range devs {
+		p := filepath.Clean(d.Source)
+		f.held[p]++
+		paths = append(paths, p)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for _, p := range paths {
+				if f.held[p]--; f.held[p] <= 0 {
+					delete(f.held, p)
+				}
+			}
+		})
+	}
+}
+
+// names reports whether path, or what it resolves to, is a held node.
+func (f *forwardedNodes) names(path string) bool {
+	clean := filepath.Clean(path)
+	real, err := filepath.EvalSymlinks(clean)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.held[clean] > 0 || err == nil && f.held[real] > 0
+}
 
 // hubDeviceLedger is this hub process's record of the devices it attached in
 // process, under the control plane's .cloop, opened after sweeping what a

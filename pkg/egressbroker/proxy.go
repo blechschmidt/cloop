@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +73,14 @@ type Options struct {
 	// credential is then authenticated as usual. A credential naming a session
 	// the broker does hold — right token or wrong — is never offered.
 	AwaitSession func(ctx context.Context, sessionID, token string) bool
+	// Refuse, when set, names destinations no grant may open on this host,
+	// and why (Task 20502): the hub refuses the subnets of its own sandbox
+	// bridges. The proxy dials from the host, where neither a sandbox
+	// ruleset nor the engine's isolation between its networks applies, so a
+	// grant whose CIDRs cover an engine's pool (10.0.0.0/8) would otherwise
+	// open one project's sandbox to another project's run. It is asked for
+	// every address a destination resolved to, after the grant's own check.
+	Refuse func(netip.Addr) string
 }
 
 func (o Options) dialTimeout() time.Duration {
@@ -324,6 +333,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.handleHTTP(w, r, sess)
 }
 
+// refused applies Options.Refuse to every address dest resolved to.
+func (p *Proxy) refused(dest Destination) error {
+	if p.opts.Refuse == nil {
+		return nil
+	}
+	for _, a := range append([]netip.Addr{dest.Addr}, dest.Resolved...) {
+		if why := p.opts.Refuse(a); why != "" {
+			return fmt.Errorf("%w: %s is %s, which no grant opens", ErrDestinationBlocked, a, why)
+		}
+	}
+	return nil
+}
+
 // authenticate resolves the Proxy-Authorization header to a live session.
 func (p *Proxy) authenticate(r *http.Request) (*Session, error) {
 	id, token, err := ParseProxyCredential(r.Header.Get("Proxy-Authorization"))
@@ -361,6 +383,9 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request, sess *Sess
 	defer cancel()
 
 	dest, err := Resolve(ctx, p.opts.Resolver, sess.Grant, host, port)
+	if err == nil {
+		err = p.refused(dest)
+	}
 	if err != nil {
 		p.broker.auditRequest(sess, secretbroker.ActionEgressConnect, host, port, err, "")
 		p.refuse(w, nil, r, statusFor(err), err)
@@ -607,6 +632,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, sess *Session
 	defer cancel()
 
 	dest, err := Resolve(ctx, p.opts.Resolver, sess.Grant, host, port)
+	if err == nil {
+		err = p.refused(dest)
+	}
 	if err != nil {
 		p.broker.auditRequest(sess, secretbroker.ActionEgressRequest, host, port, err, "")
 		p.refuse(w, nil, r, statusFor(err), err)

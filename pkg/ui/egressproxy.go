@@ -46,6 +46,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/egressbroker"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/hublease"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretstore"
@@ -212,6 +213,11 @@ func startEgressProxy(cfg *config.Config, dir string, port int) (*egressProxySer
 		// A run's session whose holder stopped waits for the process adopting
 		// the run to restore it (Task 20383).
 		AwaitSession: egressSessionHold,
+		// The proxy dials from this host, past every sandbox ruleset and
+		// the engine's isolation between networks: no grant opens a sandbox
+		// network here, so a run cannot reach another project's sandbox
+		// through it (Task 20502).
+		Refuse: container.SandboxAddressRefusal,
 	})
 	if err != nil {
 		_ = ln.Close()

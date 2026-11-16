@@ -41,30 +41,55 @@ func filteredExecutor() EgressFilter {
 	}
 }
 
-// TestBuildNetworkPolicy_DisabledFilterBuildsNothing is the backward
-// compatibility guarantee, and it is a security-relevant one in the other
-// direction: an upgrade that started firewalling existing deployments would be
-// a total outage delivered by a version bump.
-func TestBuildNetworkPolicy_DisabledFilterBuildsNothing(t *testing.T) {
-	np, err := buildNetworkPolicy(testPodRequest(), EgressFilter{})
-	if err != nil {
-		t.Fatalf("buildNetworkPolicy: %v", err)
+// TestBuildNetworkPolicy_UnfilteredPodIsStillIsolated (Task 20502): a Pod
+// with no egress filter still gets a policy, and it denies inbound alone — no
+// other Pod, another project's run included, can connect into it — while its
+// egress stays as the operator left it. The backward-compatibility guarantee
+// this replaces was "no object at all"; what it protected is kept: nothing a
+// run sends is governed, so nothing that worked stops working.
+func TestBuildNetworkPolicy_UnfilteredPodIsStillIsolated(t *testing.T) {
+	for _, disable := range []bool{false, true} {
+		req := testPodRequest()
+		req.DisableNetwork = disable
+		np, err := buildNetworkPolicy(req, EgressFilter{})
+		if err != nil {
+			t.Fatalf("buildNetworkPolicy: %v", err)
+		}
+		if np == nil {
+			t.Fatalf("disable_network=%t: an unfiltered Pod got no NetworkPolicy, so every other Pod in the "+
+				"cluster can connect into it", disable)
+		}
+		if got := np.Spec.PolicyTypes; len(got) != 1 || got[0] != "Ingress" {
+			t.Errorf("disable_network=%t: policyTypes = %v, want [Ingress] alone — egress is not governed "+
+				"without a filter", disable, got)
+		}
+		if len(np.Spec.Ingress) != 0 || len(np.Spec.Egress) != 0 {
+			t.Errorf("disable_network=%t: the policy carries rules: ingress %+v egress %+v", disable,
+				np.Spec.Ingress, np.Spec.Egress)
+		}
+		if sel := np.Spec.PodSelector.MatchLabels; len(sel) != 1 || sel[LabelHandleID] != "h-abc123" {
+			t.Errorf("disable_network=%t: selector = %v, want this Pod's handle alone", disable, sel)
+		}
+		if np.Metadata.Name != networkPolicyName("h-abc123") || np.Metadata.Namespace != "cloop" {
+			t.Errorf("disable_network=%t: policy %s/%s, want the handle's name in the Pod's namespace", disable,
+				np.Metadata.Namespace, np.Metadata.Name)
+		}
+		if got := np.Metadata.Annotations[AnnotationEgressMode]; got != EgressModeUnfiltered {
+			t.Errorf("disable_network=%t: egress mode annotation = %q, want %q", disable, got, EgressModeUnfiltered)
+		}
+		// The sweep's labels, the same as a filtered Pod's policy.
+		for _, k := range []string{LabelManaged, LabelExecutorID, LabelHandleID, LabelTaskID} {
+			if np.Metadata.Labels[k] == "" {
+				t.Errorf("disable_network=%t: label %s missing: %v", disable, k, np.Metadata.Labels)
+			}
+		}
 	}
-	if np != nil {
-		t.Fatalf("a disabled egress filter produced a NetworkPolicy: %+v", np)
-	}
-
-	// Including for a Pod that asked for no network: without a filter the
-	// driver has no enforcement mechanism, and inventing one for this case
-	// only would make "enabled" mean two different things.
+	// And the selector refusals hold here too: an empty id would select every
+	// Pod sharing the sanitised value.
 	req := testPodRequest()
-	req.DisableNetwork = true
-	np, err = buildNetworkPolicy(req, EgressFilter{})
-	if err != nil {
-		t.Fatalf("buildNetworkPolicy: %v", err)
-	}
-	if np != nil {
-		t.Fatalf("a disabled egress filter produced a NetworkPolicy for a no-network Pod: %+v", np)
+	req.HandleID = ""
+	if _, err := buildNetworkPolicy(req, EgressFilter{}); !errors.Is(err, executor.ErrInvalidSpec) {
+		t.Errorf("an unfiltered policy with no handle id = %v, want ErrInvalidSpec", err)
 	}
 }
 
@@ -495,22 +520,44 @@ func TestStart_PolicyIsRemovedWhenThePodIsRefused(t *testing.T) {
 	t.Errorf("policies left behind by a refused Start: %v", api.policyNames())
 }
 
-// TestStart_NoPolicyWhenFilterIsDisabled: the default path must make no
-// NetworkPolicy call at all. An executor whose RBAC has no networkpolicies rule
-// is the overwhelming majority, and a driver that probed the endpoint anyway
-// would fill their logs with authorization failures for a feature they do not
-// use.
-func TestStart_NoPolicyWhenFilterIsDisabled(t *testing.T) {
+// TestStart_UnfilteredPodGetsItsIsolationPolicyFirst (Task 20502): an
+// executor with no egress filter creates the Pod's ingress-only policy before
+// the Pod, as a filtered one does its filter — a Pod that started first would
+// be reachable from every other Pod for as long as the gap lasted — and a
+// refused create stops the Start rather than running a Pod other projects'
+// runs can connect into.
+func TestStart_UnfilteredPodGetsItsIsolationPolicyFirst(t *testing.T) {
 	ex, api, _ := newTestExecutor(t, nil)
-
 	if _, err := ex.Start(context.Background(), testSpec()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if got := api.creates(); len(got) != 1 || got[0] != "pod" {
-		t.Errorf("create order = %v, want the Pod alone", got)
+	if got := api.creates(); len(got) != 2 || got[0] != "networkpolicy" || got[1] != "pod" {
+		t.Errorf("create order = %v, want the policy, then the Pod", got)
 	}
-	if calls := api.requestsMatching("networkpolicies"); len(calls) != 0 {
-		t.Errorf("the driver called %v with the egress filter disabled", calls)
+	names := api.policyNames()
+	if len(names) != 1 {
+		t.Fatalf("policies = %v, want the Pod's one", names)
+	}
+	np := api.policy(names[0])
+	if np == nil || len(np.Spec.PolicyTypes) != 1 || np.Spec.PolicyTypes[0] != "Ingress" || len(np.Spec.Egress) != 0 {
+		t.Errorf("the unfiltered Pod's policy is %+v, want ingress denied and egress ungoverned", np)
+	}
+
+	refused, rapi, _ := newTestExecutor(t, nil)
+	rapi.failAlways("POST /networkpolicies", apiFailure{
+		Code: http.StatusForbidden, Reason: "Forbidden", Message: "networkpolicies is forbidden",
+	})
+	_, err := refused.Start(context.Background(), testSpec())
+	if err == nil {
+		t.Fatal("Start ran a Pod whose isolation policy the API server refused")
+	}
+	if !strings.Contains(err.Error(), "networkpolicies") || strings.Contains(err.Error(), "egress_filter.enabled to false") {
+		t.Errorf("the refusal %q does not name the rule to grant, or offers switching the filter off as a way round", err)
+	}
+	for _, c := range rapi.creates() {
+		if c == "pod" {
+			t.Error("a Pod was created after its isolation policy was refused")
+		}
 	}
 }
 
@@ -596,21 +643,36 @@ func TestPreflight_EgressFindings(t *testing.T) {
 		}
 	})
 
-	t.Run("enabled without RBAC fails", func(t *testing.T) {
-		ex, api, _ := newTestExecutor(t, func(o *Options) { o.EgressFilter = filteredExecutor() })
-		api.failAlways("GET /networkpolicies", apiFailure{
-			Code: http.StatusForbidden, Reason: "Forbidden", Message: "networkpolicies is forbidden",
+	// Task 20502: every Pod gets a policy, so the RBAC check runs with or
+	// without a filter, and fails the report either way.
+	for name, mutate := range map[string]func(*Options){
+		"enabled without RBAC fails":  func(o *Options) { o.EgressFilter = filteredExecutor() },
+		"disabled without RBAC fails": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ex, api, _ := newTestExecutor(t, mutate)
+			api.failAlways("GET /networkpolicies", apiFailure{
+				Code: http.StatusForbidden, Reason: "Forbidden", Message: "networkpolicies is forbidden",
+			})
+			report := ex.Preflight(context.Background())
+			f := findingNamed(t, report, "pod-isolation")
+			if f.Level != LevelFail {
+				t.Errorf("pod-isolation finding = %s, want %s when the identity cannot manage policies", f.Level, LevelFail)
+			}
+			if !strings.Contains(f.Fix, "networkpolicies") {
+				t.Errorf("fix %q does not name the missing rule", f.Fix)
+			}
+			if report.OK() {
+				t.Error("a report whose Pods cannot be isolated must not be OK")
+			}
 		})
-		report := ex.Preflight(context.Background())
-		f := findingNamed(t, report, "egress")
-		if f.Level != LevelFail {
-			t.Errorf("egress finding = %s, want %s when the identity cannot manage policies", f.Level, LevelFail)
-		}
-		if !strings.Contains(f.Fix, "networkpolicies") {
-			t.Errorf("fix %q does not name the missing rule", f.Fix)
-		}
-		if report.OK() {
-			t.Error("a report with an unenforceable egress filter must not be OK")
+	}
+
+	t.Run("isolation reported", func(t *testing.T) {
+		ex, _, _ := newTestExecutor(t, nil)
+		f := findingNamed(t, ex.Preflight(context.Background()), "pod-isolation")
+		if f.Level != LevelOK || !strings.Contains(f.Message, "admits no inbound connection") {
+			t.Errorf("pod-isolation finding = %+v, want ok saying no Pod admits another's connection", f)
 		}
 	})
 }

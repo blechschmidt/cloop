@@ -132,20 +132,21 @@ func TestAProxyRouteGetsANetworkOfItsOwnOnlyUnderARuleset(t *testing.T) {
 
 	plain := confinement{rules: rules}
 	proxied := confinement{rules: rules, proxy: route}
-	if networkName("ex", plain) == networkName("ex", proxied) || firewallTable("ex", plain) == firewallTable("ex", proxied) {
+	if networkName("ex", plain, testTenant) == networkName("ex", proxied, testTenant) ||
+		firewallTable("ex", plain, testTenant) == firewallTable("ex", proxied, testTenant) {
 		t.Fatal("a workload that opens the proxy shares a bridge and table with one that does not")
 	}
 	other := confinement{rules: rules, proxy: &executor.EgressProxyRoute{Host: "x", Port: 41001, Gateway: true}}
-	if networkName("ex", proxied) == networkName("ex", other) {
+	if networkName("ex", proxied, testTenant) == networkName("ex", other, testTenant) {
 		t.Error("two proxy ports share a bridge")
 	}
-	if err := validateNetworkName(networkName("ex", proxied)); err != nil {
+	if err := validateNetworkName(networkName("ex", proxied, testTenant)); err != nil {
 		t.Errorf("unusable network name: %v", err)
 	}
-	if err := netfilter.ValidateNftName(firewallTable("ex", proxied)); err != nil {
+	if err := netfilter.ValidateNftName(firewallTable("ex", proxied, testTenant)); err != nil {
 		t.Errorf("unusable table name: %v", err)
 	}
-	if got := networkName("ex", confinement{proxy: route}); got != "cloop-sbx-ex-x41000" {
+	if got := networkName("ex", confinement{proxy: route}, testTenant); got != "cloop-sbx-ex-x41000-p"+testTenant {
 		t.Errorf("the executor's own policy with a proxy = %q", got)
 	}
 }
@@ -268,7 +269,7 @@ func TestInternalOnlyFilterNeedsNoPacketFilterPrivilege(t *testing.T) {
 
 	e := &Executor{id: "internal-only", opts: Options{Network: NetworkBridge,
 		EgressFilter: EgressFilter{Enabled: true, Internal: true}}}
-	err := e.removeFirewall(context.Background(), confinement{})
+	err := e.removeFirewall(context.Background(), firewallTable(e.id, confinement{}, testTenant))
 	if os.Geteuid() == 0 {
 		if err == nil {
 			t.Fatal("as root, an nft that refuses is a fault and must be reported")

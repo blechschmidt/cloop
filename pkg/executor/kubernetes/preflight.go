@@ -250,9 +250,9 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 		case isAPI && ae.Code == http.StatusForbidden:
 			add("rbac", LevelFail,
 				fmt.Sprintf("the leased identity may not list Pods in %q: %s", namespace, ae.Message),
-				rbacFix(namespace, e.opts.EgressFilter.Enabled))
+				rbacFix(namespace))
 		default:
-			add("namespace", LevelFail, err.Error(), rbacFix(namespace, e.opts.EgressFilter.Enabled))
+			add("namespace", LevelFail, err.Error(), rbacFix(namespace))
 		}
 		return report
 	}
@@ -282,39 +282,43 @@ func (e *Executor) Preflight(ctx context.Context) PreflightReport {
 	// CNI. Both are checked here rather than assumed, because "the operator
 	// enabled the filter" and "the filter is enforced" are separated by two
 	// things cloop does not control.
-	if !e.opts.EgressFilter.Enabled {
-		add("egress", LevelWarn,
-			"Pods join the cluster network with unrestricted egress; cloop does not filter it",
-			fmt.Sprintf("apply a default-deny NetworkPolicy to namespace %q and allow only what the harness needs", namespace))
-	} else {
-		// The same call the sweep makes, for the same reason the Pod list above
-		// is the one ReconcileOrphans makes: a preflight that passes has proved
-		// the credential can actually reach the endpoint, rather than proving
-		// that the config file parses.
-		npCtx, cancelNP := context.WithTimeout(ctx, requestTimeout)
-		policies, nperr := cli.listNetworkPolicies(npCtx, namespace, executorLabelSelector(e.id))
-		cancelNP()
-		switch ae, isAPI := asAPIError(nperr); {
-		case nperr == nil:
+	// Every Start creates a NetworkPolicy now (Task 20502), filter or not: the
+	// one that keeps other Pods from connecting into the run's. So whether
+	// this identity may manage them is checked on every executor, with the
+	// same call the sweep makes, for the same reason the Pod list above is
+	// the one ReconcileOrphans makes: a preflight that passes has proved the
+	// credential can actually reach the endpoint, rather than proving that the
+	// config file parses.
+	npCtx, cancelNP := context.WithTimeout(ctx, requestTimeout)
+	policies, nperr := cli.listNetworkPolicies(npCtx, namespace, executorLabelSelector(e.id))
+	cancelNP()
+	switch ae, isAPI := asAPIError(nperr); {
+	case nperr == nil:
+		add("pod-isolation", LevelOK,
+			fmt.Sprintf("every Pod gets a NetworkPolicy that admits no inbound connection, so no run can open "+
+				"one into another's, and the leased identity can manage NetworkPolicies in %q (%d cloop "+
+				"policy/policies currently present)", namespace, len(policies.Items)),
+			"")
+		if !e.opts.EgressFilter.Enabled {
+			add("egress", LevelWarn,
+				"Pods dial out with unrestricted egress; cloop does not filter it",
+				"set executors.kubernetes.egress_filter, or apply a default-deny NetworkPolicy to namespace "+
+					namespace+" and allow only what the harness needs")
+		} else {
 			add("egress", LevelOK,
-				fmt.Sprintf("egress is filtered by a per-Pod NetworkPolicy (%s), and the leased identity "+
-					"can manage NetworkPolicies in %q (%d cloop policy/policies currently present)",
-					e.opts.EgressFilter.Describe(), namespace, len(policies.Items)),
+				fmt.Sprintf("egress is filtered by a per-Pod NetworkPolicy (%s)", e.opts.EgressFilter.Describe()),
 				"")
-		case isAPI && ae.Code == http.StatusForbidden:
-			add("egress", LevelFail,
-				fmt.Sprintf("the egress filter is enabled but the leased identity may not manage "+
-					"NetworkPolicies in %q: %s — every Start will be refused rather than run a Pod "+
-					"with unfiltered egress", namespace, ae.Message),
-				"add `"+roleRuleFor("networkpolicies").inline()+"` to the executor's Role")
-		default:
-			add("egress", LevelFail,
-				fmt.Sprintf("the egress filter is enabled but its NetworkPolicies cannot be listed in %q: %v",
-					namespace, nperr),
-				"check that the cluster serves networking.k8s.io/v1 and that the executor's Role covers "+
-					roleRuleFor("networkpolicies").brief())
 		}
-
+	case isAPI && ae.Code == http.StatusForbidden:
+		add("pod-isolation", LevelFail,
+			fmt.Sprintf("the leased identity may not manage NetworkPolicies in %q: %s — every Start will be "+
+				"refused rather than run a Pod other Pods can connect into", namespace, ae.Message),
+			"add `"+roleRuleFor("networkpolicies").inline()+"` to the executor's Role")
+	default:
+		add("pod-isolation", LevelFail,
+			fmt.Sprintf("the per-Pod NetworkPolicies cannot be listed in %q: %v", namespace, nperr),
+			"check that the cluster serves networking.k8s.io/v1 and that the executor's Role covers "+
+				roleRuleFor("networkpolicies").brief())
 	}
 
 	// --- 5b. is any of that actually enforced -----------------------------
@@ -402,15 +406,11 @@ func addEnforcementFinding(e *Executor, add func(name, level, msg, fix string)) 
 // fix and an afternoon, and rendering them from executorRole is what keeps
 // them the verbs the chart grants.
 //
-// egress adds the networkpolicies rule. It is conditional because the rule is:
-// an executor that does not filter egress creates no NetworkPolicies and should
-// not be told to grant itself authority over them.
-func rbacFix(namespace string, egress bool) string {
+// Every rule, networkpolicies included: since Task 20502 every Pod gets a
+// NetworkPolicy, filter or not.
+func rbacFix(namespace string) string {
 	var rules []string
 	for _, r := range executorRole {
-		if r.Resource == "networkpolicies" && !egress {
-			continue
-		}
 		rules = append(rules, r.brief())
 	}
 	last := len(rules) - 1

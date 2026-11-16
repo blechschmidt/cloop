@@ -3,8 +3,8 @@ package fwpolicy
 // explain.go says why a sandbox's firewall refused a connection, in the terms a
 // developer set it up in (Task 20437).
 //
-// The packet log names a deny path and nothing else: "default", or a deny-list,
-// metadata, block-set or translation prefix. Which allowlist did not name the
+// The packet log names a deny path and nothing else: "default", "peer", or a
+// deny-list, metadata, block-set or translation prefix. Which allowlist did not name the
 // address, whose deny list did — that depends on the levels the workload's
 // firewall was composed of, which only the hub knows, from the dispatch. So
 // the sentence is built here, from those levels, and stored with the refusal:
@@ -55,6 +55,10 @@ func Explain(levels []Level, rule string, dst netip.Addr, port uint16, proto str
 			what = "the cloud metadata service at " + svc.Describe()
 		}
 		return what + ", which a firewall opens only when every level names its own address"
+	case netfilter.TagPeer:
+		// Not a level's doing: no allow list opens another project's sandbox
+		// network (Task 20502), so there is no list to name.
+		return "another project's sandbox on the same executor, whose network no firewall opens"
 	case netfilter.TagKindTranslation:
 		return "an IPv6 translation prefix (" + prefix.String() + "), which no allow list waives — allow the IPv4 " +
 			"range it stands for instead"

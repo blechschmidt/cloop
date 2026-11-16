@@ -188,7 +188,7 @@ func TestRootlessEngineCannotFilter(t *testing.T) {
 	if caps.FilteredEgress || caps.SupportsEgressScope {
 		t.Errorf("a rootless engine advertises filtering: %+v", caps)
 	}
-	if _, _, err := ex.installFirewall(context.Background(), scoped(executor.EgressScopeUnset)); err == nil ||
+	if _, _, err := ex.installFirewall(context.Background(), scoped(executor.EgressScopeUnset), testTenant); err == nil ||
 		!errors.Is(err, executor.ErrUnsupported) || !strings.Contains(err.Error(), "rootless") {
 		t.Fatalf("installFirewall on a rootless engine = %v", err)
 	}

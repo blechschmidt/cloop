@@ -232,8 +232,8 @@ func TestEgressScopeNoneNeedsNoFilter(t *testing.T) {
 // confinement from becoming its neighbour's. Two scopes sharing a bridge would
 // share a ruleset, and the second Apply would replace the first's.
 func TestEgressScopeGetsItsOwnBridgeAndTable(t *testing.T) {
-	unscopedNet := networkName("sbx-a", scoped(executor.EgressScopeUnset))
-	publicNet := networkName("sbx-a", scoped(executor.EgressScopePublic))
+	unscopedNet := networkName("sbx-a", scoped(executor.EgressScopeUnset), testTenant)
+	publicNet := networkName("sbx-a", scoped(executor.EgressScopePublic), testTenant)
 	if unscopedNet == publicNet {
 		t.Fatalf("a scoped and an unscoped project share the bridge %q, so they would "+
 			"share one nftables ruleset", unscopedNet)
@@ -248,19 +248,19 @@ func TestEgressScopeGetsItsOwnBridgeAndTable(t *testing.T) {
 		t.Errorf("scoped network name %q is not a valid network name: %v", publicNet, err)
 	}
 
-	unscopedTable := firewallTable("sbx-a", scoped(executor.EgressScopeUnset))
-	publicTable := firewallTable("sbx-a", scoped(executor.EgressScopePublic))
+	unscopedTable := firewallTable("sbx-a", scoped(executor.EgressScopeUnset), testTenant)
+	publicTable := firewallTable("sbx-a", scoped(executor.EgressScopePublic), testTenant)
 	if unscopedTable == publicTable {
 		t.Fatalf("both scopes compile into the nftables table %q", unscopedTable)
 	}
 	if err := netfilter.ValidateNftName(publicTable); err != nil {
 		t.Errorf("scoped table name %q is not a valid nft name: %v", publicTable, err)
 	}
-	// The unsuffixed name has to stay exactly what it was, or an upgrade
-	// orphans every running sandbox's bridge.
-	if want := "cloop-sbx-sbx-a"; unscopedNet != want {
-		t.Errorf("the unscoped network name changed to %q (want %q); sandboxes already "+
-			"attached to the old bridge would be orphaned by an upgrade", unscopedNet, want)
+	// Every network is its tenant's (Task 20502): the executor's own policy
+	// no longer means one bridge for every project on the executor. Running
+	// sandboxes keep the bridge they joined; the next start joins its own.
+	if want := "cloop-sbx-sbx-a-p" + testTenant; unscopedNet != want {
+		t.Errorf("the unscoped network name is %q, want %q", unscopedNet, want)
 	}
 }
 

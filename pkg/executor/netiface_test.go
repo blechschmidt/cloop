@@ -163,3 +163,24 @@ func TestSpecRequiresInterfaceCapability(t *testing.T) {
 			"ordinary executors")
 	}
 }
+
+// TestReservedInterfaceSources (Task 20502): a grant may never name an
+// interface cloop creates for one run — a forwarded TAP, a sandbox bridge —
+// while the driver's own check still passes the forwarded TAP it is handed in
+// Spec.Interfaces, which is how a forwarded segment reaches its sandbox.
+func TestReservedInterfaceSources(t *testing.T) {
+	for _, src := range []string{"cfwd0123456789", "cfwh0123456789", "clsb0123456789a"} {
+		if ReservedInterfaceSource(src) == "" {
+			t.Errorf("%s is grantable", src)
+		}
+	}
+	for _, src := range []string{"eth1", "veth-dut", "fwdprobe0", "clso0", "cfw0"} {
+		if why := ReservedInterfaceSource(src); why != "" {
+			t.Errorf("%s is refused: %s", src, why)
+		}
+	}
+	tap := HostInterface{Name: "fwd-lab", Source: "cfwd0123456789", Target: "fwd0"}
+	if err := ValidateHostInterface(tap); err != nil {
+		t.Errorf("the driver refuses the forwarded TAP it must move into the sandbox: %v", err)
+	}
+}

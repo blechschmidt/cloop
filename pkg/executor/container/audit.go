@@ -60,6 +60,20 @@ func AuditRunArgv(opts Options, rt AuditRuntime, workDir string, spec executor.S
 	if err != nil {
 		return nil, err
 	}
+	// The network Start would provision (Task 20502), named by the same
+	// decision and not created: a sandbox on a bridge executor joins its
+	// project's own network, never the engine's default bridge, and the audit
+	// says so rather than the "bridge" the configuration reads.
+	if spec.EgressRules != nil && !spec.EgressRules.HasDestination() {
+		req.Network = NetworkNone
+	}
+	if e.joinsSandboxNetwork(spec, req.Network) {
+		plan, err := e.planNetwork(confineTo(spec), tenantTag(tenantOf(spec, req.Labels[LabelHandle])))
+		if err != nil {
+			return nil, err
+		}
+		req.Network = plan.name
+	}
 	built, err := buildRunArgs(req)
 	if err != nil {
 		return nil, err

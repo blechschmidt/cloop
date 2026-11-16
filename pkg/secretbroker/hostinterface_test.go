@@ -48,6 +48,9 @@ func TestParseInterfaceInventory_Refuses(t *testing.T) {
 		{"loopback", "lo0=lo", "loopback"},
 		{"docker bridge", "d=docker0", "Docker's own bridge"},
 		{"per-network bridge", "d=br-328fcf8d72a7", "veth end attached to it"},
+		// Task 20502: interfaces cloop creates for one run are no grant's.
+		{"forwarded TAP", "lab=cfwd0123456789", "device forwarder"},
+		{"sandbox bridge", "lab=clsb0123456789a", "sandbox network"},
 		{"duplicate handle", "a=veth0\na=veth1", "already defined"},
 		{"two handles one netdev", "a=veth0\nb=veth0", "already claimed"},
 		{"two entries one target", "a=veth0,target=eth1\nb=veth1,target=eth1", "already appears"},

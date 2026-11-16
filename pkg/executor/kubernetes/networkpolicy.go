@@ -57,9 +57,15 @@ const (
 	AnnotationEgressWarnings = "cloop.dev/egress-warnings"
 
 	// AnnotationEgressMode records the shape of the authorisation the policy was
-	// compiled from: isolated, brokered or filtered. It answers "was this Pod
-	// supposed to reach anything at all" without re-deriving it from the peers.
+	// compiled from: isolated, brokered or filtered — or EgressModeUnfiltered
+	// for a Pod with no egress filter, whose policy denies only inbound. It
+	// answers "was this Pod supposed to reach anything at all" without
+	// re-deriving it from the peers.
 	AnnotationEgressMode = "cloop.dev/egress-mode"
+
+	// EgressModeUnfiltered is AnnotationEgressMode on the policy of a Pod
+	// with no egress filter (Task 20502).
+	EgressModeUnfiltered = "unfiltered"
 
 	// defaultResolverPort is assumed for a resolver written as a bare address.
 	// A DNS server on a port other than 53 is rare enough to be worth spelling
@@ -82,11 +88,12 @@ const (
 type EgressFilter struct {
 	// Enabled turns the filter on.
 	//
-	// Off means *no NetworkPolicy is created at all*, not an empty one. An
-	// empty one would deny everything, which is the safe default for a new
-	// deployment and a silent, total outage for an existing one — and a
-	// security feature that arrives without being switched on is a feature
-	// operators learn to switch off.
+	// Off means the Pod's *egress* is not governed, not that it is denied. A
+	// policy denying everything would be the safe default for a new deployment
+	// and a silent, total outage for an existing one — and a security feature
+	// that arrives without being switched on is a feature operators learn to
+	// switch off. The Pod still gets a policy, denying inbound only (Task
+	// 20502): see buildNetworkPolicy.
 	Enabled bool
 
 	// CIDRs are the destination ranges a workload may reach, as "10.8.0.0/24".
@@ -459,27 +466,21 @@ func networkPolicyName(handleID string) string {
 }
 
 // buildNetworkPolicy renders the NetworkPolicy that must exist before req's Pod
-// does, or nil when this executor is not filtering egress.
+// does.
+//
+// Every Pod gets one (Task 20502). With an egress filter it is the filter,
+// compiled, and it denies inbound too; without one it denies inbound alone
+// (netfilter.RenderIsolationPolicy). Inbound is what keeps two runs apart: a
+// connection needs both ends' policies to admit it, so when every sandbox Pod
+// admits nothing, no run reaches another project's — whatever the filter, or
+// its absence, lets each one dial. A sandbox only ever dials out, and the hub
+// reaches its Pod through the API server and the kubelet, which no
+// NetworkPolicy governs, so denying inbound takes nothing a run does away.
 //
 // It is pure, like buildPod and for the same reason: what a workload can reach
 // is a security decision, and a security decision only inspectable by running
 // it against a live cluster is one that never gets inspected.
 func buildNetworkPolicy(req podRequest, filter EgressFilter) (*netfilter.NetworkPolicy, error) {
-	// The project's own scope is resolved first, because it can turn a filter
-	// that was switched off into one that must be installed: an executor with
-	// no egress_filter still owes a per-project `egress: public` an actual
-	// policy object, and that is exactly the case SupportsEgressScope now
-	// advertises. Resolution can also refuse — see forScope.
-	filter, err := filter.forConfinement(req.EgressScope, req.EgressRules)
-	if err != nil {
-		return nil, err
-	}
-	if !filter.Enabled {
-		// Unchanged behaviour for every deployment that has not opted in and
-		// whose projects ask for nothing: no object, no selector, no policy
-		// types. See EgressFilter.Enabled.
-		return nil, nil
-	}
 	// The selector is the security boundary of this file. LabelHandleID carries
 	// a per-run random token, so it selects exactly one Pod; an empty or shared
 	// value would make this policy govern every Pod that also carries it, and a
@@ -494,6 +495,45 @@ func buildNetworkPolicy(req podRequest, filter EgressFilter) (*netfilter.Network
 	if strings.TrimSpace(req.Namespace) == "" {
 		return nil, fmt.Errorf("%w: a NetworkPolicy is namespaced and this request names no namespace",
 			executor.ErrInvalidSpec)
+	}
+	// The project's own scope is resolved first, because it can turn a filter
+	// that was switched off into one that must be installed: an executor with
+	// no egress_filter still owes a per-project `egress: public` an actual
+	// policy object, and that is exactly the case SupportsEgressScope now
+	// advertises. Resolution can also refuse — see forScope.
+	filter, err := filter.forConfinement(req.EgressScope, req.EgressRules)
+	if err != nil {
+		return nil, err
+	}
+	opts := netfilter.NetworkPolicyOptions{
+		Name:        networkPolicyName(req.HandleID),
+		Namespace:   req.Namespace,
+		PodSelector: map[string]string{LabelHandleID: sanitizeLabelValue(req.HandleID)},
+		// The same labels the Pod carries, including the task-id the sweep
+		// requires to exist, so the orphan sweep finds a policy with the
+		// selector it already uses for Pods and an operator finds both with one
+		// `kubectl get`.
+		Labels: map[string]string{
+			LabelManaged:    "true",
+			LabelExecutorID: sanitizeLabelValue(req.ExecutorID),
+			LabelHandleID:   sanitizeLabelValue(req.HandleID),
+			LabelTaskID:     sanitizeLabelValue(taskIDFrom(req.Labels)),
+			LabelProject:    sanitizeLabelValue(projectSlug(req.Labels["project"])),
+		},
+	}
+	if !filter.Enabled {
+		// No egress filter for this Pod: egress stays as the cluster has it,
+		// as every deployment that has not opted in expects, and only
+		// inbound is denied.
+		opts.Annotations = map[string]string{AnnotationEgressMode: EgressModeUnfiltered}
+		if p := strings.TrimSpace(req.Labels["project"]); p != "" {
+			opts.Annotations[AnnotationProjectPath] = p
+		}
+		np, err := netfilter.RenderIsolationPolicy(opts)
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes: %w", err)
+		}
+		return np, nil
 	}
 
 	// A Spec that asked for no network compiles from an empty authorisation,
@@ -517,29 +557,14 @@ func buildNetworkPolicy(req podRequest, filter EgressFilter) (*netfilter.Network
 	if len(policy.Warnings) > 0 {
 		annotations[AnnotationEgressWarnings] = strings.Join(policy.Warnings, " | ")
 	}
+	opts.Annotations = annotations
+	// Cluster DNS is opened by default, and closed for a Pod that asked for
+	// no network at all: a sandbox with no egress that can still query
+	// kube-dns has a DNS tunnel, which is an exfiltration channel with a
+	// well-known toolchain.
+	opts.AllowClusterDNS = !req.DisableNetwork && filter.ClusterDNSAllowed()
 
-	np, err := netfilter.RenderNetworkPolicy(policy, netfilter.NetworkPolicyOptions{
-		Name:        networkPolicyName(req.HandleID),
-		Namespace:   req.Namespace,
-		PodSelector: map[string]string{LabelHandleID: sanitizeLabelValue(req.HandleID)},
-		// The same labels the Pod carries, including the task-id the sweep
-		// requires to exist, so the orphan sweep finds a policy with the
-		// selector it already uses for Pods and an operator finds both with one
-		// `kubectl get`.
-		Labels: map[string]string{
-			LabelManaged:    "true",
-			LabelExecutorID: sanitizeLabelValue(req.ExecutorID),
-			LabelHandleID:   sanitizeLabelValue(req.HandleID),
-			LabelTaskID:     sanitizeLabelValue(taskIDFrom(req.Labels)),
-			LabelProject:    sanitizeLabelValue(projectSlug(req.Labels["project"])),
-		},
-		Annotations: annotations,
-		// Cluster DNS is opened by default, and closed for a Pod that asked for
-		// no network at all: a sandbox with no egress that can still query
-		// kube-dns has a DNS tunnel, which is an exfiltration channel with a
-		// well-known toolchain.
-		AllowClusterDNS: !req.DisableNetwork && filter.ClusterDNSAllowed(),
-	})
+	np, err := netfilter.RenderNetworkPolicy(policy, opts)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes: %w", err)
 	}
@@ -560,10 +585,14 @@ func explainNetworkPolicyFailure(namespace, name string, err error) error {
 	}
 	switch {
 	case ae.Code == 403:
-		return fmt.Errorf("kubernetes: not allowed to create NetworkPolicies in %q, which the egress "+
-			"filter needs: %w — add this rule to the executor's Role:\n%s\n"+
-			"or set executors.kubernetes.egress_filter.enabled to false and accept unfiltered egress "+
-			"deliberately, rather than by RBAC accident", namespace, err, roleRuleFor("networkpolicies").yaml())
+		// No way round this one by switching the filter off: every Pod gets a
+		// policy that keeps other Pods from connecting into it (Task 20502),
+		// and a run started without it would be reachable from every other
+		// project's.
+		return fmt.Errorf("kubernetes: not allowed to create NetworkPolicies in %q, which every workload "+
+			"Pod needs — it keeps other Pods, other projects' runs among them, from connecting into the "+
+			"Pod, and carries the egress filter where one is configured: %w — add this rule to the "+
+			"executor's Role:\n%s", namespace, err, roleRuleFor("networkpolicies").yaml())
 	case ae.Code == 404:
 		return fmt.Errorf("kubernetes: namespace %q does not exist (or the kubeconfig cannot see it): %w",
 			namespace, err)

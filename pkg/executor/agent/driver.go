@@ -58,6 +58,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
@@ -184,7 +185,21 @@ func (c *driverCache) driverFor(s executor.SandboxSettings, host payloadDriver) 
 			s.Describe(), err)
 	}
 	c.drivers[key] = ex
+	sweepIdleNetworks(ex)
 	return ex, nil
+}
+
+// sweepIdleNetworks removes, in the background, the sandbox networks a driver
+// of this ID left idle — an agent runs no orphan sweep, and a network whose
+// last workload outlived the agent that started it would otherwise hold one
+// of the engine's subnets for good (Task 20502).
+func sweepIdleNetworks(ex *container.Executor) {
+	go func() {
+		defer func() { _ = recover() }()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		ex.ReapIdleNetworks(ctx)
+	}()
 }
 
 // containerDriverID names a container driver after the configuration it serves.

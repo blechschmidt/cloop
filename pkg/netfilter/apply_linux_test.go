@@ -25,6 +25,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv(agentEnv) != "" {
 		os.Exit(runAgentRole())
 	}
+	if role := os.Getenv(siblingRoleEnv); role != "" {
+		os.Exit(runSiblingRole(role))
+	}
 	os.Exit(m.Run())
 }
 

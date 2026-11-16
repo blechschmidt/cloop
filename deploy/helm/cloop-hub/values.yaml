@@ -576,6 +576,10 @@ executor:
 
     # Enforce an egress allowlist with a NetworkPolicy per workload Pod.
     #
+    # Every workload Pod gets a NetworkPolicy whether or not this is on: one
+    # that admits no inbound connection, so no run can reach another's Pod.
+    # This section adds what the Pod may reach.
+    #
     # Off by default, and the default is deliberate twice over: enabling it on
     # an upgrade would firewall workloads nobody asked to firewall, and an empty
     # allowlist denies everything — including whatever your harness clones from.

@@ -257,7 +257,7 @@ func ValidRule(s string) bool {
 	return ok
 }
 
-// RuleKind is a tag's kind: "default", "deny", "meta", "block" or "xlat".
+// RuleKind is a tag's kind: "default", "peer", "deny", "meta", "block" or "xlat".
 func RuleKind(rule string) string {
 	kind, _, _ := netfilter.ParseTag(rule)
 	return kind

@@ -53,6 +53,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/blechschmidt/cloop/pkg/executor"
 )
 
 // MaxHostInterfaces bounds how many interfaces one grant may open.
@@ -178,6 +180,10 @@ func ParseInterfaceInventory(payload []byte) ([]GrantedInterface, error) {
 		n, err := parseInterfaceLine(line)
 		if err != nil {
 			return nil, wrapf(ErrMalformedPayload, "host_interface line %d: %v", i+1, err)
+		}
+		if why := executor.ReservedInterfaceSource(n.Source); why != "" {
+			return nil, wrapf(ErrMalformedPayload, "host_interface line %d: host interface %q %s",
+				i+1, n.Source, why)
 		}
 		if _, dup := seenName[n.Name]; dup {
 			return nil, wrapf(ErrMalformedPayload,

@@ -1316,6 +1316,13 @@ func applyDeviceGrantsList(spec executor.Spec, ex executor.Executor, granted []s
 	}
 
 	for _, d := range granted {
+		// A sandbox on this host may not be granted a node of a device this
+		// hub attached for a forwarder, another run's by its binding (Task
+		// 20502). An executor elsewhere is held to the same by its agent.
+		if caps.SharesHostFilesystem && hubForwarded.names(d.Source) {
+			return spec, fmt.Errorf("%w: host_device grant %q names %s, a node of a USB device a device "+
+				"forwarder brought in on this host for another run", executor.ErrInvalidSpec, d.Name, d.Source)
+		}
 		spec.Devices = append(spec.Devices, executor.HostDevice{
 			Name:        d.Name,
 			Source:      d.Source,
@@ -1386,6 +1393,13 @@ func applyInterfaceGrantsList(spec executor.Spec, ex executor.Executor, granted 
 	}
 
 	for _, n := range granted {
+		// Re-asked here, not only when the inventory was stored: a row
+		// written before Task 20502 may name a forwarded TAP or a sandbox
+		// bridge, and neither is a grant's to hand over.
+		if why := executor.ReservedInterfaceSource(n.Source); why != "" {
+			return spec, fmt.Errorf("%w: host_interface grant %q names %s, which %s",
+				executor.ErrInvalidSpec, n.Name, n.Source, why)
+		}
 		spec.Interfaces = append(spec.Interfaces, executor.HostInterface{
 			Name:    n.Name,
 			Source:  n.Source,

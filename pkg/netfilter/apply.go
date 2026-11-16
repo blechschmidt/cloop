@@ -143,6 +143,19 @@ func (a *Applier) Apply(ctx context.Context, p Policy, opts NftablesOptions) err
 	return nil
 }
 
+// ApplyInboundGuard installs RenderInboundGuard's ruleset, replacing the
+// table if it exists, in one transaction.
+func (a *Applier) ApplyInboundGuard(ctx context.Context, opts NftablesOptions) error {
+	script, err := RenderInboundGuard(opts)
+	if err != nil {
+		return err
+	}
+	if err := a.run(ctx, script); err != nil {
+		return fmt.Errorf("netfilter: installing table inet %s: %w", opts.Table, err)
+	}
+	return nil
+}
+
 // Remove deletes a sandbox's table.
 //
 // A table that is already gone is success. Teardown runs on paths that also

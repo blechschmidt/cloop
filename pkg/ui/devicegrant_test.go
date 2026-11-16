@@ -207,3 +207,32 @@ func TestForbiddenDevicesAgreeAtBothEnds(t *testing.T) {
 func applyDeviceGrantsFor(spec executor.Spec, ex executor.Executor, granted []secretbroker.GrantedDevice) (executor.Spec, error) {
 	return applyDeviceGrantsList(spec, ex, granted)
 }
+
+// TestApplyDeviceGrantsRefusesAForwardedNode (Task 20502): while this hub holds
+// a USB device for a device forwarder — another run's, by its binding — a
+// device grant for a sandbox on this host may not name any of its nodes, and
+// the grant passes again once the device is released. An executor elsewhere is
+// held to the same by its agent, so a grant there is not judged by this host's
+// devices.
+func TestApplyDeviceGrantsRefusesAForwardedNode(t *testing.T) {
+	local := sandboxExecutor()
+	local.caps.SharesHostFilesystem = true
+	granted := []secretbroker.GrantedDevice{{Name: "serial0", Source: "/dev/ttyACM9", Target: "/dev/ttyACM9", Permissions: "rw"}}
+
+	release := hubForwarded.hold([]executor.HostDevice{
+		{Name: "bench", Source: "/dev/bus/usb/009/002"},
+		{Name: "bench-ttyACM9", Source: "/dev/ttyACM9"},
+	})
+	if _, err := applyDeviceGrantsFor(executor.Spec{Env: []string{}}, local, granted); err == nil ||
+		!strings.Contains(err.Error(), "forwarder") {
+		t.Errorf("a grant naming a forwarded device's node was applied to a sandbox on this host: %v", err)
+	}
+	if _, err := applyDeviceGrantsFor(executor.Spec{Env: []string{}}, sandboxExecutor(), granted); err != nil {
+		t.Errorf("a grant for an executor on another host was judged by this host's devices: %v", err)
+	}
+	release()
+	release()
+	if _, err := applyDeviceGrantsFor(executor.Spec{Env: []string{}}, local, granted); err != nil {
+		t.Errorf("after the forwarded device was released the grant is still refused: %v", err)
+	}
+}

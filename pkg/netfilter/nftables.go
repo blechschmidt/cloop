@@ -57,6 +57,17 @@ type NftablesOptions struct {
 	// the NFLOG group it names (Task 20437). Nil renders none — a process
 	// that cannot read the group has no use for its entries.
 	Log *LogOptions
+
+	// Siblings, beside Bridge, is an nft interface pattern ("clsb*") matching
+	// every sandbox bridge on this host, this one's included (Task 20502).
+	// The forward chain then refuses what this sandbox sends to any other
+	// bridge the pattern matches, ahead of every allow — 10.0.0.0/8 for a
+	// corporate network can cover an engine's subnet pool — and refuses every
+	// connection anything else on the host opens into this sandbox's bridge:
+	// another project's sandbox, a container on the engine's default network,
+	// a build's. One project's sandbox never reaches another's through this
+	// host. Empty renders neither rule.
+	Siblings string
 }
 
 // RenderNftables renders the policy as a script for `nft -f -`.
@@ -70,6 +81,14 @@ func RenderNftables(p Policy, opts NftablesOptions) (string, error) {
 	}
 	if opts.Bridge != "" {
 		if err := ValidateInterfaceName(opts.Bridge); err != nil {
+			return "", err
+		}
+	}
+	if opts.Siblings != "" {
+		if opts.Bridge == "" {
+			return "", fmt.Errorf("netfilter: a sibling pattern needs the bridge it keeps apart from its siblings")
+		}
+		if err := ValidateInterfacePattern(opts.Siblings); err != nil {
 			return "", err
 		}
 	}
@@ -143,6 +162,9 @@ func renderBridgeChain(b *strings.Builder, p Policy, opts NftablesOptions) {
 	for _, hook := range []string{"forward", "input"} {
 		fmt.Fprintf(b, "\tchain %s {\n", hook)
 		fmt.Fprintf(b, "\t\ttype filter hook %s priority 0; policy accept;\n", hook)
+		if hook == "forward" && opts.Siblings != "" {
+			writeInboundGuard(b, bridge)
+		}
 		fmt.Fprintf(b, "\t\tiifname != %q return comment \"not this sandbox\"\n", bridge)
 		// Replies to flows this policy already permitted. Without it every
 		// allow rule would need a mirrored inbound counterpart and the
@@ -152,6 +174,9 @@ func renderBridgeChain(b *strings.Builder, p Policy, opts NftablesOptions) {
 		if hook == "input" {
 			writeNeighbourDiscovery(b, "\t\t")
 		}
+		if hook == "forward" && opts.Siblings != "" {
+			writeSiblingOutbound(b, bridge, opts.Siblings, opts.Log)
+		}
 		writeRules(b, wire, "\t\t", opts.Log)
 		writeDefaultDeny(b, "\t\t", opts.Log)
 		b.WriteString("\t}\n")
@@ -159,6 +184,76 @@ func renderBridgeChain(b *strings.Builder, p Policy, opts NftablesOptions) {
 			b.WriteString("\n")
 		}
 	}
+}
+
+// writeSiblingOutbound refuses what this sandbox sends towards another
+// sandbox's bridge (Task 20502): one project's run never opens a connection
+// into another's, through this host, whatever the allow rules below name.
+//
+// After the conntrack accept, which costs nothing here: the inbound rule keeps
+// any flow between two sandboxes from ever being established, so there is no
+// reply to let through. Logged like every deny this sandbox's own packets
+// meet, under the prefix-less TagPeer, because a developer whose connection to
+// another project's address fails should read that it was another project's.
+func writeSiblingOutbound(b *strings.Builder, bridge, siblings string, log *LogOptions) {
+	match := fmt.Sprintf("oifname %q oifname != %q", siblings, bridge)
+	if log != nil {
+		if line, ok := logRule(match, log.Fingerprint, TagPeer, log); ok {
+			b.WriteString("\t\t" + line + "\n")
+		}
+	}
+	b.WriteString("\t\t" + match + " counter jump " + denyChain + " comment \"another sandbox's network\"\n")
+}
+
+// writeInboundGuard refuses every connection forwarded into this sandbox's
+// bridge from anywhere else (Task 20502), ahead of the early return that would
+// otherwise hand such a packet back to the chain policy untouched — it did not
+// come from this sandbox, so nothing else in this chain looks at it.
+//
+// Anywhere, and not only another sandbox's bridge: nothing has reason to open
+// a connection into a sandbox through the host, and the senders that matter
+// are not all cloop's. podman's isolate keeps a sandbox network apart only from
+// other isolated networks, so its default network — where a container no cloop
+// rule governs may run — reaches every sandbox unless something refuses it
+// here. Replies to what the sandbox opened are established and pass; so is
+// what the host itself sends, which no forward hook sees.
+//
+// Not logged. The packet is someone else's, and a log line under this rule
+// set's fingerprint would be filed against this run as something it tried to
+// reach.
+//
+// The states are named as a set. `ct state != established,related` reads the
+// same and is not: nft takes the comma list as one bitmask and compares the
+// packet's state to it exactly, so an established reply — whose state is not
+// "established|related" — matched, and every connection the sandbox opened lost
+// its answers. The container e2e's metadata control caught that.
+func writeInboundGuard(b *strings.Builder, bridge string) {
+	fmt.Fprintf(b, "\t\toifname %q iifname != %q ct state { new, invalid, untracked } counter jump %s "+
+		"comment \"nothing opens a connection into this sandbox\"\n", bridge, bridge, denyChain)
+}
+
+// RenderInboundGuard renders a ruleset holding the inbound guard alone, for a
+// sandbox bridge that carries no egress filter (Task 20502): its egress is the
+// operator's to leave open, but no one else's connection into it is.
+func RenderInboundGuard(opts NftablesOptions) (string, error) {
+	if err := ValidateNftName(opts.Table); err != nil {
+		return "", err
+	}
+	if err := ValidateInterfaceName(opts.Bridge); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("# cloop sandbox inbound guard: no egress filter, and no connection into the sandbox\n")
+	b.WriteString("# Generated by pkg/netfilter. Edits are lost on the next task.\n\n")
+	fmt.Fprintf(&b, "add table inet %s\n", opts.Table)
+	fmt.Fprintf(&b, "delete table inet %s\n", opts.Table)
+	fmt.Fprintf(&b, "table inet %s {\n", opts.Table)
+	renderDenyChain(&b, Policy{})
+	b.WriteString("\tchain forward {\n")
+	b.WriteString("\t\ttype filter hook forward priority 0; policy accept;\n")
+	writeInboundGuard(&b, opts.Bridge)
+	b.WriteString("\t}\n}\n")
+	return b.String(), nil
 }
 
 // writeNeighbourDiscovery opens IPv6's link-local control traffic between the
@@ -288,6 +383,27 @@ func ValidateInterfaceName(name string) error {
 		default:
 			return fmt.Errorf("netfilter: interface name %q contains an invalid character %q", name, r)
 		}
+	}
+	return nil
+}
+
+// ValidateInterfacePattern checks an nft interface pattern: an interface name,
+// or a prefix of one followed by a single trailing '*'. A pattern that is only
+// '*' is refused — it would match every interface on the host, the uplink
+// included, which is no sibling of anything.
+func ValidateInterfacePattern(pattern string) error {
+	prefix, wild := strings.CutSuffix(pattern, "*")
+	if prefix == "" {
+		return fmt.Errorf("netfilter: interface pattern %q matches every interface", pattern)
+	}
+	if strings.Contains(prefix, "*") {
+		return fmt.Errorf("netfilter: interface pattern %q may hold one '*', at the end", pattern)
+	}
+	if wild && len(prefix) > 14 {
+		return fmt.Errorf("netfilter: interface pattern %q is longer than an interface name can be", pattern)
+	}
+	if err := ValidateInterfaceName(prefix); err != nil {
+		return fmt.Errorf("netfilter: interface pattern %q: %w", pattern, err)
 	}
 	return nil
 }

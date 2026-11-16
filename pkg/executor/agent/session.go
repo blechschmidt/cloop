@@ -999,6 +999,19 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		}
 	}
 
+	// No device the hub granted may be one this agent holds for a forwarder
+	// (Task 20502): a grant names a path, and a forwarded device can have
+	// enumerated at the path a granted one had before it was unplugged.
+	if derr := a.refuseForwardedNodes(spec.Devices, a.cfg.SysfsRoot, a.cfg.DevRoot); derr != nil {
+		a.closeDevicesFor(handleID, "the workload did not start")
+		a.forget(handleID)
+		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+			HandleID: handleID,
+			Error:    derr.Error(),
+		})
+		return
+	}
+
 	// The forwarded devices the hub attached here for this workload (Task
 	// 20430), given to its sandbox like any other device or interface. Only a
 	// container sandbox may have them: on the host they would belong to the

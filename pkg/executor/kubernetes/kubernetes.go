@@ -72,13 +72,15 @@
 // automountServiceAccountToken false so no in-cluster API credential is
 // handed to model-authored code. Those are not configurable.
 //
-// Egress is filtered when — and only when — an operator configures it. With
-// executors.kubernetes.egress_filter.enabled set, every Pod gets a companion
-// NetworkPolicy created before it and deleted with it, selecting that Pod alone
-// and compiled from the same pkg/netfilter policy the container driver's
-// nftables ruleset comes from; see networkpolicy.go. Without it a Pod gets the
-// cluster's pod network, which by default reaches every other Pod and the
-// Internet, and this driver says so rather than implying otherwise.
+// Every Pod gets a companion NetworkPolicy, created before it and deleted with
+// it, selecting that Pod alone; see networkpolicy.go. It admits no inbound
+// connection (Task 20502), so no run's Pod can be reached from another's —
+// another project's least of all. Egress is filtered when — and only when — an
+// operator configures it: with executors.kubernetes.egress_filter.enabled set,
+// the same policy carries an allowlist compiled from the pkg/netfilter policy
+// the container driver's nftables ruleset comes from. Without it a Pod dials
+// out over the cluster's pod network, which by default reaches every other Pod
+// and the Internet, and this driver says so rather than implying otherwise.
 //
 // Even with the filter on, one claim stays outside cloop's reach: a
 // NetworkPolicy is inert unless the cluster's CNI implements it, and the API
@@ -285,11 +287,11 @@ type Options struct {
 	// (the cluster's ResourceQuota is the real ceiling).
 	MaxConcurrent int
 
-	// EgressFilter turns the Pod's cluster egress into an enforced allowlist by
-	// creating a NetworkPolicy alongside each Pod. The zero value creates no
-	// policy and leaves egress exactly as the cluster grants it, which is what
-	// keeps an upgrade from silently firewalling a running deployment. See
-	// networkpolicy.go.
+	// EgressFilter turns the Pod's cluster egress into an enforced allowlist,
+	// carried by the NetworkPolicy created alongside each Pod. The zero value
+	// leaves egress exactly as the cluster grants it, which is what keeps an
+	// upgrade from silently firewalling a running deployment; the Pod's policy
+	// then denies inbound only. See networkpolicy.go.
 	EgressFilter EgressFilter
 
 	// NetworkPolicyEnforcement carries what is known about whether this

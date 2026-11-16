@@ -12,6 +12,50 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **Two runs of different projects on one executor can no longer reach each
+  other over the network.** A container executor with `network: bridge` and
+  no egress filter started every project's sandbox on the engine's default
+  bridge, where a container connects to its neighbours' listeners directly
+  (measured on docker 29 with every capability dropped); an `internal: true`
+  filter put every project on one internal bridge; and a direct-egress filter
+  or a set of firewall rules shared one bridge between every project confined
+  alike. Every sandbox network is now its project's alone: named after the
+  project, created with a bridge named `clsb…`, removed with its nftables
+  table once the project's last workload has gone, and swept at startup (and
+  by an agent when it builds a driver) if a dead process left it. Creating,
+  joining and removing a network happen under a host-wide lock, so one
+  process's cleanup can never delete the table of a network another is
+  starting a sandbox on. podman creates the network with `isolate=true`,
+  without which netavark routes between its networks, and runs a derived
+  image's `setup:` on an isolated network of its own instead of its default
+  network; docker keeps user-defined networks apart already. Every ruleset
+  now refuses what its sandbox sends to another sandbox's bridge, ahead of its
+  allows, so an allow list covering an engine's subnets (`10.0.0.0/8`) no
+  longer opens one project to another (logged under the rule `peer`), and
+  refuses every connection opened into its sandbox from anywhere else. An
+  unfiltered or internal sandbox network gets that inbound rule on its own
+  where the control plane may use `nft`; preflight warns when it cannot on
+  podman, whose default network its isolation does not cover. The hub's egress
+  proxy, which dials from the hub's host past every sandbox rule, refuses the
+  addresses of the host's sandbox networks whatever a grant's CIDRs cover. An
+  unfiltered sandbox on docker resolves through the host's resolvers, as it
+  did on the default bridge. An operator's own `network:` is still shared by
+  every project's sandboxes, and preflight now warns that it is. A host whose
+  engine gives each network a subnet from a small pool may need more (docker:
+  `default-address-pools`). On Kubernetes every workload Pod now gets a
+  NetworkPolicy, with or without an egress filter, that admits no inbound
+  connection, so no run's Pod can be reached from another's; the executor
+  Role's `networkpolicies` rule, which the chart always granted, is now
+  required, and preflight checks it on every executor. An agent no longer
+  lets a virtual executor's USB selector, a device path (through a link too)
+  or a host device grant name a device it attached for another run's
+  forwarder, and leaves such devices out of the inventory it reports; a
+  `host_interface` inventory may not name a forwarded TAP (`cfwd…`) or a
+  sandbox bridge (`clsb…`). The egress proxy, git proxy and Kubernetes monitor
+  were checked and already refuse one run's session id with another's secret,
+  both ways, and a request with no credential; tests now hold them to it
+  (Task 20502).
+
 - **A run of one project can no longer open, list or write another project
   on the same executor, whoever starts it.** The host sandbox used to confine
   only a person's runs on a hub with sign-in: an administrator's run, the

@@ -90,9 +90,11 @@ data:
         max_concurrent: {{ .Values.executor.kubernetes.maxConcurrent }}
       {{- if .Values.executor.kubernetes.egressFilter.enabled }}
         # One NetworkPolicy per Pod, created before the Pod and deleted with it,
-        # selecting that Pod alone. Off unless asked for: turning it on without
-        # being asked would firewall an existing deployment's workloads on an
-        # upgrade. The Role above carries the networkpolicies rule it needs.
+        # selecting that Pod alone. Every Pod gets one, denying inbound
+        # connections; this adds the egress allowlist to it. Off unless asked
+        # for: turning it on without being asked would firewall an existing
+        # deployment's workloads on an upgrade. The Role above carries the
+        # networkpolicies rule it needs.
         #
         # A NetworkPolicy is applied by the cluster's CNI. If yours does not
         # implement one (flannel does not), the object is stored and enforces

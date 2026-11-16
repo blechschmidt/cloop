@@ -44,7 +44,7 @@ type roleRule struct {
 //	secrets         create  createSecret         a run's credentials and environment, and a workspace fetch's token
 //	secrets         patch   patchSecretData      replace a GitHub App token before GitHub's hour ends
 //	secrets         delete  deleteSecret         take them back
-//	networkpolicies create  createNetworkPolicy  the Pod's egress allowlist, before the Pod
+//	networkpolicies create  createNetworkPolicy  the Pod's isolation and egress allowlist, before the Pod
 //	networkpolicies delete  deleteNetworkPolicy  remove it once the Pod is gone
 //	networkpolicies list    listNetworkPolicies  the orphan sweep, and the preflight check
 //

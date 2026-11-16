@@ -112,25 +112,32 @@ func TestRulesNamingNeverSharesABridgeBetweenDifferentRules(t *testing.T) {
 	a := executor.FirewallRules{AllowPublicInternet: true, AllowPorts: []int{443}}
 	b := executor.FirewallRules{AllowPublicInternet: true, AllowPorts: []int{80}}
 	aAgain := executor.FirewallRules{AllowPublicInternet: true, AllowPorts: []int{443, 443}}
-	na, nb := networkName("vx-1", confinement{rules: &a}), networkName("vx-1", confinement{rules: &b})
-	if na == nb || firewallTable("vx-1", confinement{rules: &a}) == firewallTable("vx-1", confinement{rules: &b}) {
+	na, nb := networkName("vx-1", confinement{rules: &a}, testTenant), networkName("vx-1", confinement{rules: &b}, testTenant)
+	if na == nb || firewallTable("vx-1", confinement{rules: &a}, testTenant) == firewallTable("vx-1", confinement{rules: &b}, testTenant) {
 		t.Fatal("two rule sets must never share a bridge or a table: the second Apply would replace the first")
 	}
-	if networkName("vx-1", confinement{rules: &aAgain}) != na {
+	if networkName("vx-1", confinement{rules: &aAgain}, testTenant) != na {
 		t.Error("two spellings of one rule set must share a bridge")
 	}
-	if networkName("vx-1", confinement{}) != "cloop-sbx-vx-1" {
-		t.Error("a workload carrying nothing must keep the executor's own bridge")
+	if got := networkName("vx-1", confinement{}, testTenant); got != "cloop-sbx-vx-1-p"+testTenant {
+		t.Errorf("a workload carrying nothing joins %q, want its tenant's network on the executor's own policy", got)
 	}
-	if !strings.HasPrefix(na, "cloop-sbx-vx-1-r") || validateNetworkName(na) != nil {
+	if !strings.HasPrefix(na, "cloop-sbx-vx-1-r") || !strings.HasSuffix(na, "-p"+testTenant) || validateNetworkName(na) != nil {
 		t.Errorf("rules network %q", na)
 	}
-	if err := netfilter.ValidateNftName(firewallTable("vx-1", confinement{rules: &a})); err != nil {
+	if err := netfilter.ValidateNftName(firewallTable("vx-1", confinement{rules: &a}, testTenant)); err != nil {
 		t.Errorf("rules table: %v", err)
 	}
 	// Rules take precedence over a scope: the hub has folded the scope in.
-	if networkName("vx-1", confinement{scope: executor.EgressScopePublic, rules: &a}) != na {
+	if networkName("vx-1", confinement{scope: executor.EgressScopePublic, rules: &a}, testTenant) != na {
 		t.Error("rules must key the bridge even when a scope is also present")
+	}
+	// And the same rules for two projects are two bridges and two tables
+	// (Task 20502): identical confinement used to mean one shared segment.
+	other := tenantTag("project:/srv/other")
+	if networkName("vx-1", confinement{rules: &a}, other) == na ||
+		firewallTable("vx-1", confinement{rules: &a}, other) == firewallTable("vx-1", confinement{rules: &a}, testTenant) {
+		t.Error("two projects under identical rules share a bridge or a table")
 	}
 }
 

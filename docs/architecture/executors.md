@@ -728,18 +728,69 @@ in place first. `installFirewall` runs before the image is even resolved, and if
 it fails, the `Start` fails. A sandbox that ran without the requested filtering,
 with no error, would be worse than one that refuses to run.
 
-The network name is derived from the executor id (`cloop-sbx-<id>`), not taken
-from config, so two executors with different filters can't share one bridge,
-where the second would replace the first one's rules without any error. It also
-means the policy is per executor: every sandbox that executor starts joins the
-same bridge under the same ruleset. Enabling the filter makes the driver stop
-using the configured `Network`, because an operator-named network could be
+The network name is derived, never taken from config:
+`cloop-sbx-<id>[-<confinement>]-p<project>`, where `<project>` is a digest of
+the project's directory on the hub. Two executors with different filters can't
+share a bridge, where the second would replace the first one's rules without
+any error, and neither can two projects. Every sandbox network belongs to one
+project, filtered or not:
+
+- An executor with `network: bridge` and no filter still gives each project a
+  network of its own. The engine's default bridge is shared by every container
+  on the host, and a container on it can connect to its neighbours' ports.
+- The bridge interface is named `clsb` followed by a digest of the network
+  name, so the pattern `clsb*` matches every sandbox bridge on the host. Each
+  ruleset refuses what its sandbox sends to any other `clsb*` bridge, before
+  its allow rules, so an allow list that covers an engine's subnets
+  (`10.0.0.0/8`) never opens one project's sandbox to another's. That refusal
+  is logged under the rule `peer`. Each ruleset also refuses every connection
+  opened into its bridge from any other interface; replies to what the sandbox
+  opened still pass.
+- An unfiltered or internal sandbox network has no egress filter, but where
+  the control plane may use `nft` it gets a ruleset holding that inbound rule
+  alone.
+- podman creates the network with `isolate=true`. Without it netavark routes
+  between its networks. podman's isolation does not cover its default
+  network, so a derived image's `setup:` runs on an isolated network of its
+  own, and preflight warns when the control plane can't install the inbound
+  rule. docker keeps user-defined networks apart by default.
+- The driver counts the workloads on each network and removes the network and
+  its nftables table when the project's last workload ends. Creating a network,
+  installing its table and starting the container happen under a host-wide
+  lock on the network (a file in `/run/lock`), and so does removing them, so a
+  release in one process never deletes the table of a network another process
+  is starting a sandbox on. At startup the hub also removes networks a dead
+  process left behind, once they are an hour old and unused, and an agent does
+  the same when it builds a container driver. Each network carries the labels
+  `cloop.executor`, `cloop.tenant` and `cloop.nft_table`.
+- An unfiltered sandbox on docker gets a `resolv.conf` with the host's
+  resolvers, which is what the default bridge gave it. docker's embedded
+  resolver on a user-defined network can't be reached from gVisor or Kata.
+- The hub's egress proxy dials from the hub's host, where no sandbox ruleset
+  applies, so it refuses any address on one of the host's `clsb*` bridges,
+  whatever the grant's CIDRs cover.
+
+A project's own workloads share its network. Enabling the filter makes the
+driver stop using an operator-named `network:`, because such a network could be
 shared with workloads this executor doesn't manage, and a default-deny ruleset
-on their bridge would cut them off too.
+on their bridge would cut them off too. Without a filter, an operator-named
+network is used as configured, so every project's sandboxes share it, and
+preflight warns about that (`network-isolation`).
 
 ### The Kubernetes driver: a NetworkPolicy per Pod
 
-`RenderNetworkPolicy` translates the same compiled `Policy`. The translation is
+Every workload Pod gets a NetworkPolicy, created before the Pod and deleted
+with it. Without an egress filter it is built by `RenderIsolationPolicy`: its
+`policyTypes` is `Ingress` alone, with no ingress rule, so no other Pod can
+connect to the run's Pod, and egress stays as the cluster has it. A connection
+needs both ends' policies to allow it, so when every sandbox Pod admits nothing,
+no run can reach another project's run, whatever each one may dial. The hub
+reaches the Pod through the API server and the kubelet, which no NetworkPolicy
+governs. The annotation `cloop.dev/egress-mode` reads `unfiltered` on such a
+policy.
+
+With an egress filter, `RenderNetworkPolicy` translates the same compiled
+`Policy`. The translation is
 not mechanical, because the two models differ: a `Policy` is ordered and has
 both verdicts, while a `NetworkPolicy` is an unordered union of allow rules with
 no deny rule at all. So the drops become `ipBlock.except` entries and the
@@ -774,10 +825,10 @@ The renderer can't promise enforcement. A `NetworkPolicy` does nothing unless
 the cluster runs a CNI that implements it; flannel doesn't, and the API server
 accepts the object anyway. cloop can't read that from the API, so preflight
 reports it as a standing `egress-enforcement` warning. Managing the objects also
-needs `networkpolicies: [create delete list]` on the executor's Role, and
-preflight lists policies to prove the leased identity has it. A `403` there is a
-`fail`, because every `Start` would refuse instead of running a Pod with
-unfiltered egress.
+needs `networkpolicies: [create delete list]` on the executor's Role, with or
+without a filter, and preflight lists policies to prove the leased identity has
+it (`pod-isolation`). A `403` there is a `fail`, because every `Start` would
+refuse instead of running a Pod that other Pods can connect to.
 
 ### Reaching the hub's egress proxy: `Spec.EgressProxy`
 
@@ -815,16 +866,18 @@ installed, and refuses the start if an operator deny list covers it, instead of
 starting a sandbox with a session it can't use. Second, a ruleset that opens the
 proxy is different from one that doesn't, so the proxy's port is part of the
 confinement key. Such sandboxes get a bridge and a table of their own
-(`cloop-sbx-<id>-…-x<port>`), so applying the second ruleset can never close the
+(`cloop-sbx-<id>-…-x<port>-p<project>`), so applying the second ruleset can never close the
 first one's way out. An `--internal` bridge with no ruleset needs no opening,
-because its gateway is on-link, so its sandboxes keep sharing one bridge.
+because its gateway is on-link, so a project's sandboxes on it keep sharing one
+bridge.
 
 ### Seeing what a policy compiles to
 
 `cloop egress firewall` renders the policy without touching a host, in the same
 text the driver installs (see [the command
 reference](../reference/commands.md#cloop-egress-firewall)). You can diff it
-against `nft list table inet cloop_sbx_<id>` on the host or
+against the sandbox's table on the host (`nft list table inet <table>`, where
+the network's `cloop.nft_table` label names the table) or
 `kubectl get netpol -o yaml` in a cluster, and `--check <addr:port>` tells you
 what the policy does to one address, with the verdict in the exit status.
 

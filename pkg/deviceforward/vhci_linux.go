@@ -219,3 +219,32 @@ func (v VHCI) detachIfOurs(port int, devid uint32) (bool, error) {
 	}
 	return true, nil
 }
+
+// HeldUSBBusIDs returns the local bus ids ("3-1") of the USB devices this
+// process's ledger records attaching through vhci_hcd and that the kernel has
+// placed on the virtual hub (Task 20502): the forwarded devices this host
+// holds for some run.
+//
+// They are on the host's USB bus like any other device, so anything choosing
+// devices from that bus — a virtual executor's selector, the inventory an admin
+// picks from — would offer one run's forwarded device to another project's
+// sandbox. Callers exclude what this returns. It reads the controller's status
+// rather than remembering what enumerated: the ledger records a port before
+// the kernel holds anything, and the status names the device as soon as the
+// kernel does, which is before the device can appear in sysfs at all.
+func (l *Ledger) HeldUSBBusIDs() map[string]bool {
+	held := map[string]bool{}
+	for _, e := range l.Entries() {
+		if e.Kind != LedgerVHCI {
+			continue
+		}
+		p, ok, err := VHCI{Root: e.VHCIRoot}.port(e.VHCIPort)
+		if err != nil || !ok {
+			continue
+		}
+		if b := strings.TrimSpace(p.LocalBusID); b != "" && b != "0-0" {
+			held[b] = true
+		}
+	}
+	return held
+}

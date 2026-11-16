@@ -556,12 +556,25 @@ carve-out comes after it.
 
 The layer-3 filter has two limits:
 
-- **The container driver's filtered network is per executor, not per task.**
-  The network name is derived from the executor id, so every sandbox the
-  executor starts joins the same bridge under the same ruleset. Deriving the
-  name stops two executors with different filters from sharing a bridge, where
-  the second would replace the first's rules without an error, but it makes
-  the policy executor-wide.
+- **The container driver's network is per project, not per task.** The
+  network name is derived from the executor id, the confinement and the
+  project, so every sandbox of one project on that executor joins the same
+  bridge under the same ruleset, and two runs of one project can reach each
+  other. Two projects never share a bridge: an unfiltered executor gives each
+  project a network of its own instead of the engine's default bridge, every
+  ruleset refuses what its sandbox sends to every other sandbox bridge on the
+  host (named `clsb…`) and every connection opened into it from elsewhere, and
+  podman's networks are created isolated from each other. An unfiltered or
+  internal network gets the inbound refusal alone when the control plane may
+  use `nft`; without it, on podman, a container on podman's default network can
+  still open a connection into a sandbox, and preflight warns. The hub's egress
+  proxy refuses addresses on the host's sandbox bridges whatever a grant
+  covers (`TestRefuseClosesWhatAGrantCovers`).
+  An operator-named `network:` without a filter is the exception: every
+  project's sandboxes join it as configured, and preflight warns that they
+  share it. Tested by `TestTwoProjectsSandboxesNeverShareANetwork`,
+  `TestIntegration_TwoProjectsSandboxesCannotReachEachOther` and
+  `TestSiblingRulesKeepTwoBridgesApart`.
 - **A `NetworkPolicy` is enforced by the cluster's CNI, not by cloop.**
   flannel doesn't implement NetworkPolicy and the API server stores the object
   anyway, so from the hub's side a cluster with the wrong CNI looks the same as

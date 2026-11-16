@@ -120,16 +120,20 @@ rules narrows nothing.
 
 | executor | enforces rules by | needs |
 |---|---|---|
-| hub container executor | a bridge and nftables table for each rule set (`cloop-sbx-<id>-r<fingerprint>`), with the filter in place before any sandbox joins | `nft(8)` and `CAP_NET_ADMIN` on the hub; a rootful engine |
+| hub container executor | a bridge and nftables table for each rule set and project (`cloop-sbx-<id>-r<fingerprint>-p<project>`), with the filter in place before any sandbox joins | `nft(8)` and `CAP_NET_ADMIN` on the hub; a rootful engine |
 | enrolled device, container mode | the same, on the device | an agent speaking protocol **v15**, with the packet filter granted (`cloop executor agent install --packet-filter`); **v24** to report what it refused |
 | virtual executor | the same, on its device | as above |
 | Kubernetes | the Pod's NetworkPolicy, with the denylist cut out of every allow | a cluster whose NetworkPolicy enforcement is proven or asserted (`cloop hub doctor --probe-network-policy`) |
 | the hub's host-process executor, a device in host mode | nothing | can't enforce rules, so runs are refused while rules apply |
 
 Two rule sets never share a bridge, since the second would replace the first
-one's ruleset. The bridge and table are named after the rule set's fingerprint
-and removed when the last run on them ends. A rule set that reaches nothing
-needs no filter: the run gets no network.
+one's ruleset, and neither do two projects under the same rule set. The bridge
+and table are named after the rule set's fingerprint and the project, and
+removed when the project's last run on them ends. Every ruleset also refuses
+what its sandbox sends to the other sandbox bridges on the host, and every
+connection opened into its sandbox from elsewhere, so one project's run can't
+reach another's even when an allow list covers the address. A rule set that
+reaches nothing needs no filter: the run gets no network.
 
 A host interface granted to a project (an L2 passthrough) bypasses any IP
 firewall, so a run that carries one is refused while rules apply.

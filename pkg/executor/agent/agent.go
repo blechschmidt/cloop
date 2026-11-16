@@ -660,6 +660,9 @@ func (a *Agent) Capabilities() remote.AgentCapabilities {
 		opts.ProbeOCIRuntimes = probeOCIRuntimes
 	}
 	caps := Detect(opts)
+	// The devices this agent attached for forwarders are other runs' and are
+	// not offered for an admin to give a virtual executor (Task 20502).
+	caps.USBDevices, _ = withoutForwarded(caps.USBDevices, a.forwardedHeld(caps.USBDevices))
 	// Whether forwarded devices can be attached here (Task 20430): a probe of
 	// the kernel and this process's privileges, so only an agent with host
 	// probes — or a configured attacher — claims it.

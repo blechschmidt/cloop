@@ -41,7 +41,16 @@ type virtualDevices struct {
 // task started without its hardware produces a run that looks like a software
 // bug, on a machine whose operator would have to be told the device was
 // unplugged by reading a stack trace.
-func resolveVirtualDevices(sels []executor.DeviceSelector, sysfsRoot, devRoot string) (virtualDevices, error) {
+//
+// heldFor names the devices this agent attached for forwarders (Task 20502),
+// asked after the scan, so a device that was in it was recorded before it.
+// Each is on this host's USB bus like any other device, and each belongs to
+// the run whose project its binding names, so no selector may choose one and
+// no path may name one: otherwise a virtual executor bound to another project,
+// asking for "any 1050:0030", would hand that project's sandbox somebody
+// else's on-prem hardware.
+func resolveVirtualDevices(sels []executor.DeviceSelector, sysfsRoot, devRoot string,
+	heldFor func([]executor.USBDevice) forwardedSet) (virtualDevices, error) {
 	var out virtualDevices
 	if len(sels) == 0 {
 		return out, nil
@@ -49,7 +58,12 @@ func resolveVirtualDevices(sels []executor.DeviceSelector, sysfsRoot, devRoot st
 	if devRoot == "" {
 		devRoot = "/dev"
 	}
-	inventory := scanUSB(sysfsRoot, devRoot)
+	scanned := scanUSB(sysfsRoot, devRoot)
+	var held forwardedSet
+	if heldFor != nil {
+		held = heldFor(scanned)
+	}
+	inventory, forwarded := withoutForwarded(scanned, held)
 	groups := map[int]bool{}
 	for _, sel := range sels {
 		var nodes []executor.HostDevice
@@ -58,12 +72,24 @@ func resolveVirtualDevices(sels []executor.DeviceSelector, sysfsRoot, devRoot st
 		case sel.USB != nil:
 			d, err := executor.ResolveUSB(inventory, *sel.USB)
 			if err != nil {
+				for _, f := range forwarded {
+					if sel.USB.Matches(f) {
+						return virtualDevices{}, fmt.Errorf("device %q: %w: the %s on port %s is a device "+
+							"forwarder's, attached on %s for another run, and is not this executor's to give",
+							sel.Name, executor.ErrUSBDeviceNotFound, f.Label(), f.Port, deviceName())
+					}
+				}
 				return virtualDevices{}, fmt.Errorf("device %q: %w", sel.Name, err)
 			}
 			nodes = executor.USBHostDevices(sel, d)
 			gid = d.GID
 			out.Log = append(out.Log, fmt.Sprintf("%s → %s at %s (port %s)", sel.Name, d.Label(), d.Node, d.Port))
 		default:
+			if held.holds(devRoot, sel.Path) {
+				return virtualDevices{}, fmt.Errorf("device %q: %s is a node of a USB device a device "+
+					"forwarder brought in on %s for another run, and is not this executor's to give",
+					sel.Name, sel.Path, deviceName())
+			}
 			nodes = []executor.HostDevice{{
 				Name: sel.Name, Source: sel.Path, Target: sel.Path, Permissions: sel.Permissions,
 			}}
@@ -95,6 +121,128 @@ func resolveVirtualDevices(sels []executor.DeviceSelector, sysfsRoot, devRoot st
 	}
 	sort.Strings(out.Groups)
 	return out, nil
+}
+
+// forwardedSet is what this agent holds for device forwarders (Task 20502):
+// the local bus ids of the USB devices it attached, and their nodes.
+type forwardedSet struct {
+	ports map[string]bool
+	nodes map[string]bool
+}
+
+// holds reports whether path, or what it resolves to under devRoot, is the
+// node of a forwarded device. A link (/dev/serial/by-id/…) names its target.
+func (f forwardedSet) holds(devRoot, path string) bool {
+	if len(f.nodes) == 0 {
+		return false
+	}
+	if f.nodes[filepath.Clean(path)] {
+		return true
+	}
+	return f.nodes[resolveDevPath(devRoot, path)]
+}
+
+// resolveDevPath resolves a /dev path through devRoot's links and returns it
+// in /dev form, or the cleaned path when it does not resolve.
+func resolveDevPath(devRoot, path string) string {
+	clean := filepath.Clean(path)
+	rel, ok := strings.CutPrefix(clean, "/dev/")
+	if !ok {
+		return clean
+	}
+	if devRoot == "" {
+		devRoot = "/dev"
+	}
+	root, err := filepath.EvalSymlinks(devRoot)
+	if err != nil {
+		return clean
+	}
+	real, err := filepath.EvalSymlinks(filepath.Join(root, rel))
+	if err != nil {
+		return clean
+	}
+	inside, err := filepath.Rel(root, real)
+	if err != nil || inside == ".." || strings.HasPrefix(inside, "../") {
+		return clean
+	}
+	return "/dev/" + inside
+}
+
+// withoutForwarded splits an inventory into the devices a selector may choose
+// from and the forwarded ones it may not (Task 20502).
+func withoutForwarded(inventory []executor.USBDevice, held forwardedSet) (free, forwarded []executor.USBDevice) {
+	if len(held.ports) == 0 && len(held.nodes) == 0 {
+		return inventory, nil
+	}
+	for _, d := range inventory {
+		if held.ports[d.Port] || held.nodes[d.Node] {
+			forwarded = append(forwarded, d)
+			continue
+		}
+		free = append(free, d)
+	}
+	return free, forwarded
+}
+
+// forwardedHeld is what this agent holds for forwarders, given a USB scan
+// taken just before: the ports its ledger records — written before the kernel
+// holds anything — and the devices its live attachments report, which covers
+// an agent that could not keep a ledger. The nodes are every node of those
+// devices in the scan, and the ones the attachments themselves give.
+func (a *Agent) forwardedHeld(inventory []executor.USBDevice) forwardedSet {
+	set := forwardedSet{ports: map[string]bool{}, nodes: map[string]bool{}}
+	if a == nil {
+		return set
+	}
+	if a.ledger != nil {
+		for b := range a.ledger.HeldUSBBusIDs() {
+			set.ports[b] = true
+		}
+	}
+	for _, d := range a.devices.all() {
+		d.mu.Lock()
+		att := d.attached
+		d.mu.Unlock()
+		if att == nil || d.payload.Kind != executor.ForwardedUSB {
+			continue
+		}
+		if o := att.Opened(); o.LocalBusID != "" {
+			set.ports[o.LocalBusID] = true
+		}
+		nodes, _ := att.Give(d.payload.Name, executor.HostInterface{})
+		for _, n := range nodes {
+			set.nodes[filepath.Clean(n.Source)] = true
+		}
+	}
+	for _, dev := range inventory {
+		if !set.ports[dev.Port] {
+			continue
+		}
+		set.nodes[filepath.Clean(dev.Node)] = true
+		for _, n := range dev.Nodes {
+			set.nodes[filepath.Clean(n.Path)] = true
+		}
+	}
+	return set
+}
+
+// refuseForwardedNodes refuses device grants the hub dispatched that name a
+// node of a device this agent holds for a forwarder (Task 20502): a grant names
+// a path, and the path a forwarded device enumerated at may be the one a
+// granted device had before it was unplugged. The workload's own forwarded
+// devices are added after this check, from its own claim.
+func (a *Agent) refuseForwardedNodes(devs []executor.HostDevice, sysfsRoot, devRoot string) error {
+	if len(devs) == 0 {
+		return nil
+	}
+	held := a.forwardedHeld(scanUSB(sysfsRoot, devRoot))
+	for _, d := range devs {
+		if held.holds(devRoot, d.Source) {
+			return fmt.Errorf("device %q: %s is a node of a USB device a device forwarder brought in on %s "+
+				"for another run, and no grant gives it", d.Name, d.Source, deviceName())
+		}
+	}
+	return nil
 }
 
 // resolveGroup turns a group name or number into a GID on this device.
@@ -195,6 +343,7 @@ func (c *driverCache) virtualDriverFor(s executor.SandboxSettings, v *remote.Vir
 		c.virtual = make(map[string]payloadDriver)
 	}
 	c.virtual[key] = ex
+	sweepIdleNetworks(ex)
 	return ex, nil
 }
 
@@ -205,7 +354,7 @@ func (a *Agent) virtualRunner(payload remote.StartPayload, spec *executor.Spec, 
 	if err := v.Validate(payload.Sandbox.Normalize()); err != nil {
 		return nil, fmt.Errorf("agent: refusing virtual executor configuration from the control plane: %w", err)
 	}
-	devs, err := resolveVirtualDevices(v.Devices, a.cfg.SysfsRoot, a.cfg.DevRoot)
+	devs, err := resolveVirtualDevices(v.Devices, a.cfg.SysfsRoot, a.cfg.DevRoot, a.forwardedHeld)
 	if err != nil {
 		return nil, fmt.Errorf("virtual executor %s (%s) on %s: %w", v.ID, v.Name, deviceName(), err)
 	}

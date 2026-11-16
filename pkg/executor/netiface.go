@@ -164,6 +164,31 @@ var forbiddenInterfacePrefixes = map[string]string{
 	"br-": "is a Docker per-network bridge; move a veth end attached to it instead of the bridge itself",
 }
 
+// reservedInterfacePrefixes name the interfaces cloop itself creates for one
+// run (Task 20502), which no grant may name: a forwarded TAP carries another
+// run's on-prem segment and is that run's by its project's binding, and a
+// sandbox bridge is one project's sandbox network. ValidateHostInterface cannot
+// refuse them — a forwarded TAP reaches the container driver as an entry of the
+// very list it checks — so ReservedInterfaceSource is asked where interfaces
+// are granted: a host_interface inventory, and the hub turning grants into a
+// Spec.
+var reservedInterfacePrefixes = map[string]string{
+	"cfwd": "is a TAP a device forwarder feeds for one run; it belongs to that run's project, never to a grant",
+	"cfwh": "is a TAP a device forwarder feeds for one run on the hub; it belongs to that run's project, never to a grant",
+	"clsb": "is a cloop sandbox network's bridge; moving it would cut a project's sandboxes off their network",
+}
+
+// ReservedInterfaceSource returns why a grant may not name src, or "".
+func ReservedInterfaceSource(src string) string {
+	src = strings.TrimSpace(src)
+	for prefix, reason := range reservedInterfacePrefixes {
+		if strings.HasPrefix(src, prefix) {
+			return reason
+		}
+	}
+	return ""
+}
+
 // ValidateHostInterface checks one interface grant.
 //
 // Exported for the reason ValidateHostDevice is: the broker needs the same

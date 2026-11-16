@@ -203,14 +203,23 @@ VM, usually the provider's resolver in CGNAT or link-local space), so without
 resolvers of its own, no hostname resolves. The dialog fills in `1.1.1.1` for a
 new executor's firewall.
 
-To enforce the rules, the device creates a bridge for the virtual executor
-(`cloop-sbx-<id>`) and installs an nftables table (`cloop_sbx_<id>`) that filters
-traffic arriving from it. It does this before any sandbox joins the bridge, so
-no sandbox runs unfiltered, whatever the OCI runtime. On the device:
+To enforce the rules, the device creates a bridge for each project the
+virtual executor runs (`cloop-sbx-<id>-p<project>`, with the interface named
+`clsb…`) and installs an nftables table that filters traffic arriving from it.
+It does this before any sandbox joins the bridge, so no sandbox runs
+unfiltered, whatever the OCI runtime. The table also refuses what the sandbox
+sends to any other project's bridge, and every connection opened into the
+sandbox from elsewhere, so two projects bound to one virtual executor can't
+reach each other. The network's `cloop.nft_table` label names the table.
+On the device, while a run is going:
 
 ```bash
-sudo nft list table inet cloop_sbx_vx_abcdefghij
+docker network ls --filter label=cloop.executor=vx-abcdefghij
+docker network inspect cloop-sbx-vx-abcdefghij-p0123456789 --format '{{index .Labels "cloop.nft_table"}}'
+sudo nft list table inet cloop_sbx_vx_abcdefghij_p0123456789
 ```
+
+The bridge and table are removed when the project's last run on them ends.
 
 A project can narrow its virtual executor's firewall further, with
 `capabilities.egress` in `.cloop/sandbox.yaml` or with a rule set its

@@ -250,3 +250,42 @@ func TestForwarderNeverCarriesAnImportedDevice(t *testing.T) {
 		t.Fatal("a vhci-imported device was opened for forwarding")
 	}
 }
+
+// TestHeldUSBBusIDsAreOnlyWhatThisProcessAttached (Task 20502): the devices an
+// agent holds for forwarders are named by the vhci ports its ledger records,
+// read through the controller's status — so the operator's own import on port
+// 0 (the sgx host's hardware security module) stays any virtual executor's to
+// select, and a port this process attached is withheld as soon as the kernel
+// has placed a device on it.
+func TestHeldUSBBusIDsAreOnlyWhatThisProcessAttached(t *testing.T) {
+	v := fakeVHCI(t, `hub port sta spd dev      sockfd local_busid
+hs  0000 006 002 00030002 000003 3-1
+hs  0001 006 002 00050009 000004 3-2
+hs  0002 005 002 00060001 000005 3-3
+hs  0003 004 000 00000000 000000 0-0
+`)
+	l, err := OpenLedger(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := l.HeldUSBBusIDs(); len(got) != 0 {
+		t.Fatalf("an empty ledger holds %v", got)
+	}
+	l.Add(LedgerEntry{Kind: LedgerVHCI, VHCIRoot: v.Root, VHCIPort: 1, DevID: 0x00050009})
+	l.Add(LedgerEntry{Kind: LedgerVHCI, VHCIRoot: v.Root, VHCIPort: 3})
+	l.Add(LedgerEntry{Kind: LedgerTAP, TAP: "cfwd0123456789"})
+	got := l.HeldUSBBusIDs()
+	if !got["3-2"] || len(got) != 1 {
+		t.Errorf("held = %v, want port 1's device 3-2 alone: never the operator's 3-1, and nothing for a free port", got)
+	}
+	// Attached but not yet enumerated: the status already names the device,
+	// before it can appear in sysfs.
+	l.Add(LedgerEntry{Kind: LedgerVHCI, VHCIRoot: v.Root, VHCIPort: 2})
+	if got := l.HeldUSBBusIDs(); !got["3-3"] {
+		t.Errorf("held = %v, want the not-yet-enumerated 3-3 too", got)
+	}
+	var none *Ledger
+	if got := none.HeldUSBBusIDs(); len(got) != 0 {
+		t.Errorf("a nil ledger holds %v", got)
+	}
+}

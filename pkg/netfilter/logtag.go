@@ -15,6 +15,7 @@ package netfilter
 // digest the sandbox's bridge and table are named after) and the tag is one of
 //
 //	default            the implicit final deny: nothing allowed the packet
+//	peer               another sandbox's network on the same host (Task 20502)
 //	deny:<prefix>      an entry of a deny list
 //	meta:<prefix>      a cloud metadata service
 //	block:<prefix>     the rest of the hard-block set: private, loopback, ...
@@ -35,6 +36,10 @@ const (
 	// TagDefault is the implicit final deny. It carries no prefix: nothing
 	// matched, which is the point.
 	TagDefault = "default"
+	// TagPeer is the refusal of traffic towards another sandbox's bridge on
+	// the same host (Task 20502). No prefix either: what it matched is an
+	// interface, not an address range.
+	TagPeer = "peer"
 	// TagKindDeny is a deny-list entry.
 	TagKindDeny = "deny"
 	// TagKindMetadata is a cloud metadata service, whether the block set
@@ -120,11 +125,11 @@ func ParseLogPrefix(s string) (fingerprint, tag string, ok bool) {
 	return fingerprint, tag, true
 }
 
-// ParseTag splits a deny-path tag into its kind and prefix. TagDefault has no
-// prefix and comes back with a zero one.
+// ParseTag splits a deny-path tag into its kind and prefix. TagDefault and
+// TagPeer have no prefix and come back with a zero one.
 func ParseTag(tag string) (kind string, prefix netip.Prefix, ok bool) {
-	if tag == TagDefault {
-		return TagDefault, netip.Prefix{}, true
+	if tag == TagDefault || tag == TagPeer {
+		return tag, netip.Prefix{}, true
 	}
 	kind, raw, found := strings.Cut(tag, ":")
 	if !found {

@@ -38,6 +38,9 @@ func TestExplainNamesTheLevel(t *testing.T) {
 		{"block:10.0.0.0/8", a("10.1.2.3"), 5432, "tcp", "private (RFC1918/ULA) range 10.0.0.0/8, which the project's allow list does not name"},
 		{"meta:169.254.169.254/32", a("169.254.169.254"), 80, "tcp", "the cloud metadata service at 169.254.169.254 (instance metadata on AWS, Azure, Google Cloud, Oracle Cloud and most other clouds), which a firewall opens only when every level names its own address"},
 		{"xlat:64:ff9b::/96", a("64:ff9b::808:808"), 443, "tcp", "an IPv6 translation prefix (64:ff9b::/96), which no allow list waives — allow the IPv4 range it stands for instead"},
+		// Task 20502: no level's list opens another project's sandbox, so
+		// none is named — even though the project's allows the address.
+		{"peer", a("198.51.100.7"), 443, "tcp", "another project's sandbox on the same executor, whose network no firewall opens"},
 	} {
 		if got := Explain(levels, c.rule, c.dst, c.port, c.proto); got != c.want {
 			t.Errorf("%s %s:%d/%s\n got %q\nwant %q", c.rule, c.dst, c.port, c.proto, got, c.want)

@@ -189,12 +189,11 @@ func TestExecutorRoleNeverReadsSecretsOrMutatesWhatItCreated(t *testing.T) {
 	if got := secretsRuleYAML(); !strings.Contains(got, `verbs: ["create", "patch", "delete"]`) {
 		t.Errorf("secretsRuleYAML() = %q", got)
 	}
-	if got := rbacFix("cloop", true); !strings.Contains(got, "secrets: [create patch delete]") ||
+	// Every rule, networkpolicies included, with or without an egress filter:
+	// every Pod gets a NetworkPolicy since Task 20502.
+	if got := rbacFix("cloop"); !strings.Contains(got, "secrets: [create patch delete]") ||
 		!strings.Contains(got, "networking.k8s.io networkpolicies: [create delete list]") {
 		t.Errorf("rbacFix = %q, want every rule of the table", got)
-	}
-	if got := rbacFix("cloop", false); strings.Contains(got, "networkpolicies") {
-		t.Errorf("rbacFix without egress = %q; it must not ask for authority the executor does not use", got)
 	}
 }
 

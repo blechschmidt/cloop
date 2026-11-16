@@ -201,6 +201,10 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 	// token runs out — as its dispatcher would have.
 	stage, problems := restoreSecretStage(saved.Meta)
 	rec.secretStage = stage
+	// And the tenant network it joined (Task 20502), counted again so the
+	// network and its table go once this container, and every other on it,
+	// has ended — rather than staying until the startup sweep.
+	rec.tenantNetwork, rec.tenantTable = restoreNetworkMeta(saved.Meta)
 	for _, p := range problems {
 		fmt.Fprintf(os.Stderr, "container: handle %s: credential staging not restored: %s\n", saved.HandleID, p)
 	}
@@ -214,6 +218,7 @@ func (e *Executor) adopt(saved executor.HandleRecord) {
 	// can never evict the workload we just reattached to.
 	e.pruneLocked()
 	e.mu.Unlock()
+	e.adoptTenantNetwork(rec.tenantNetwork, rec.tenantTable)
 
 	// Restore the lease→handle index from the persisted bindings, so a
 	// revocation issued after this restart still finds the workload. A row

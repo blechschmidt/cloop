@@ -2,12 +2,15 @@ package container
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/cloudmeta"
 	"github.com/blechschmidt/cloop/pkg/executor"
@@ -345,40 +348,59 @@ func (c confinement) key() string {
 	return base + "-" + px
 }
 
-// networkName derives the runtime network a filter needs.
+// networkName derives the runtime network one workload joins.
 //
-// It is keyed by executor *and* by confinement, because those are exactly the
-// two things that decide which ruleset applies. Deriving the name rather than
-// accepting one keeps an operator from pointing two differently-filtered
-// executors at the same bridge, where the second Apply would silently replace
-// the first's rules; adding the confinement extends the same guarantee to two
-// differently-confined workloads on one executor.
+// It is keyed by executor, by confinement and by tenant (Task 20502), because
+// those are exactly the three things that decide who may share a bridge.
+// Deriving the name rather than accepting one keeps an operator from pointing
+// two differently-filtered executors at the same bridge, where the second
+// Apply would silently replace the first's rules; the confinement extends the
+// same guarantee to two differently-confined workloads on one executor.
 //
-// Workloads confined identically do share a bridge. That is the pre-existing
-// model — every project on an executor shared one — and the sharing is bounded
-// by the policy itself: under a filter that drops private space the bridge
-// subnet is private, so a sandbox's neighbours are on the far side of a drop
-// rule rather than merely uninteresting to it.
-func networkName(executorID string, c confinement) string {
+// The tenant is the project (tenantTag of tenantOf). Workloads confined
+// identically used to share a bridge, which left two projects' sandboxes on
+// one Layer 2 segment: on an --internal network, or on any host without
+// br_netfilter, nothing at all stood between them. Now only a project's own
+// workloads share one, and every bridge carries the sibling rules, so a
+// sandbox's neighbours are always its own project's.
+func networkName(executorID string, c confinement, tenant string) string {
 	base := "cloop-sbx-" + sanitizeNetworkPart(executorID)
-	k := c.key()
-	if k == "" {
-		// Unsuffixed, so every deployment predating per-workload confinement
-		// keeps the bridge it already has and no running sandbox is orphaned.
-		return base
+	if k := c.key(); k != "" {
+		base += "-" + sanitizeNetworkPart(k)
 	}
-	return base + "-" + sanitizeNetworkPart(k)
+	return base + "-p" + sanitizeNetworkPart(tenant)
 }
 
 // firewallTable derives the nftables table name for one (executor,
-// confinement) pair, matching networkName so that a bridge and its ruleset are
-// never mismatched.
-func firewallTable(executorID string, c confinement) string {
-	k := c.key()
-	if k == "" {
-		return netfilter.TableName("sbx", executorID)
+// confinement, tenant) triple, matching networkName so that a bridge and its
+// ruleset are never mismatched.
+//
+// netfilter.TableName truncates at 64 bytes, and the tenant is the last part
+// of the id: truncated, two projects' tables would share a name, and the
+// second Apply would replace the first project's ruleset with its own — keyed
+// to its own bridge, leaving the first project's sandbox unfiltered. So a name
+// that does not fit whole is a digest of the whole id instead; the network's
+// cloop.nft_table label still says which table is whose.
+func firewallTable(executorID string, c confinement, tenant string) string {
+	id := executorID
+	if k := c.key(); k != "" {
+		id += "-" + k
 	}
-	return netfilter.TableName("sbx", executorID+"-"+k)
+	id += "-p" + tenant
+	if name := netfilter.TableName("sbx", id); len("cloop_sbx_")+len(id) <= 64 && isASCII(id) {
+		return name
+	}
+	sum := sha256.Sum256([]byte(id))
+	return netfilter.TableName("sbx", "h"+hex.EncodeToString(sum[:16]))
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 func sanitizeNetworkPart(s string) string {
@@ -403,6 +425,29 @@ func sanitizeNetworkPart(s string) string {
 	return out
 }
 
+// networkSpec is everything a sandbox network is created with.
+type networkSpec struct {
+	// name is the runtime network's name (networkName).
+	name string
+	// internal asks the runtime for a network with no route off the host.
+	internal bool
+	// bridge is the interface the network's bridge is created as
+	// (bridgeName), so every sandbox bridge matches siblingBridges.
+	bridge string
+	// tenant is the tenant tag, recorded as a label.
+	tenant string
+	// table is the nftables table that filters the bridge, recorded as a
+	// label so the idle-network sweep removes it with the network; "" when
+	// none is installed.
+	table string
+	// engineDNS keeps the engine's own resolver for the network. Off for an
+	// unfiltered sandbox, which resolves through the host's resolvers as it
+	// did on the default bridge: podman is asked to run none (--disable-dns)
+	// and docker's, which no gVisor or Kata sandbox can reach, is replaced
+	// by a resolv.conf the driver writes.
+	engineDNS bool
+}
+
 // ensureNetwork creates the sandbox network if it does not exist and returns
 // its bridge interface name.
 //
@@ -411,59 +456,134 @@ func sanitizeNetworkPart(s string) string {
 // fatal, and every other one — a driver that is unavailable, a subnet that
 // collides — must be. Distinguishing them by string match on the runtime's
 // stderr would break on a runtime update or a translated locale.
-func (e *Executor) ensureNetwork(ctx context.Context, name string, internal bool) (string, error) {
-	if bridge, gotInternal, err := e.inspectNetwork(ctx, name); err == nil {
+func (e *Executor) ensureNetwork(ctx context.Context, n networkSpec) (string, error) {
+	if got, err := e.inspectNetwork(ctx, n.name); err == nil {
 		// Reuse only if the existing network still means what the current
-		// configuration says. The name is derived from the executor ID and
-		// therefore does not change when the filter does, so an operator who
-		// switches internal on would otherwise keep running on the
-		// non-internal bridge created before the change — believing egress is
-		// blocked when it is not. Refusing is the only safe answer: the
-		// network cannot be recreated underneath containers that are already
-		// attached to it.
-		if gotInternal != internal {
-			return "", fmt.Errorf(
-				"container: network %s exists with internal=%t but the egress filter needs internal=%t. "+
-					"Stop the sandboxes on it and run `%s network rm %s`; it will be recreated correctly",
-				name, gotInternal, internal, e.rt.Name, name)
+		// configuration says. The name is derived, not configured, so it does
+		// not change when the filter does: an operator who switches internal
+		// on would otherwise keep running on the non-internal bridge created
+		// before the change — believing egress is blocked when it is not.
+		// Refusing is the only safe answer: the network cannot be recreated
+		// underneath containers that are already attached to it.
+		if why := e.networkMismatch(got, n); why != "" {
+			return "", fmt.Errorf("container: network %s exists but %s. Stop the sandboxes on it and run "+
+				"`%s network rm %s`; it will be recreated correctly", n.name, why, e.rt.Name, n.name)
 		}
-		return bridge, nil
+		return got.bridge, nil
 	}
 
-	args := []string{"network", "create", "--driver", "bridge"}
-	if internal {
-		args = append(args, "--internal")
-	}
-	args = append(args, name)
-	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout, args...)
+	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout, e.networkCreateArgs(n)...)
 	if err != nil {
-		return "", fmt.Errorf("container: creating network %s: %w", name, err)
+		return "", fmt.Errorf("container: creating network %s: %w", n.name, err)
 	}
 	if res.ExitCode != 0 {
 		// Another hub process may have won the race between the inspect
 		// above and this create. Re-inspecting settles it without parsing
-		// the runtime's prose — and re-checks the internal flag, because a
-		// network created by a differently-configured peer is exactly the
+		// the runtime's prose — and re-checks what the network means, because
+		// one created by a differently-configured peer is exactly the
 		// mismatch the reuse path above refuses.
-		if bridge, gotInternal, ierr := e.inspectNetwork(ctx, name); ierr == nil {
-			if gotInternal != internal {
-				return "", fmt.Errorf(
-					"container: network %s was created concurrently with internal=%t, but this "+
-						"executor's egress filter needs internal=%t", name, gotInternal, internal)
+		if got, ierr := e.inspectNetwork(ctx, n.name); ierr == nil {
+			if why := e.networkMismatch(got, n); why != "" {
+				return "", fmt.Errorf("container: network %s was created concurrently, but %s", n.name, why)
 			}
-			return bridge, nil
+			return got.bridge, nil
 		}
-		return "", fmt.Errorf("container: creating network %s: %s", name, firstLine(res.Stderr))
+		return "", fmt.Errorf("container: creating network %s: %s%s", n.name, firstLine(res.Stderr),
+			networkCreateHint(res.Stderr))
 	}
-	bridge, _, err := e.inspectNetwork(ctx, name)
-	return bridge, err
+	got, err := e.inspectNetwork(ctx, n.name)
+	if err != nil {
+		return "", err
+	}
+	if why := e.networkMismatch(got, n); why != "" {
+		// The engine accepted the request and made something else — an old
+		// podman that ignores isolate, say. A network that does not keep its
+		// sandbox apart is not one to start a sandbox on.
+		_, _ = runCLITimeout(ctx, e.rt, shortCmdTimeout, "network", "rm", n.name)
+		return "", fmt.Errorf("container: %s created network %s, but %s; refusing to start a sandbox on it",
+			e.rt.Name, n.name, why)
+	}
+	return got.bridge, nil
 }
+
+// networkCreateArgs renders `network create` for one sandbox network.
+//
+// The bridge interface is named rather than left to the engine, so one nft
+// pattern (siblingBridges) matches every sandbox bridge on the host and each
+// ruleset can refuse its neighbours. podman is asked to isolate the network
+// from its other isolated networks: unlike docker, which keeps user-defined
+// networks apart by default, netavark routes between them unless told not to
+// (measured on netavark 1.4: a sandbox on one network reached a listener on
+// another until both carried isolate=true).
+func (e *Executor) networkCreateArgs(n networkSpec) []string {
+	args := []string{"network", "create", "--driver", "bridge"}
+	if n.internal {
+		args = append(args, "--internal")
+	}
+	args = append(args,
+		"--label", LabelManaged+"=true",
+		"--label", LabelExecutor+"="+e.id,
+		"--label", labelNetTenant+"="+n.tenant)
+	if n.table != "" {
+		args = append(args, "--label", labelNetTable+"="+n.table)
+	}
+	if n.bridge != "" {
+		if e.rt.Name == RuntimePodman {
+			args = append(args, "--interface-name", n.bridge)
+		} else {
+			args = append(args, "--opt", dockerBridgeNameOpt+"="+n.bridge)
+		}
+	}
+	if e.rt.Name == RuntimePodman {
+		args = append(args, "--opt", "isolate=true")
+		if !n.engineDNS {
+			args = append(args, "--disable-dns")
+		}
+	}
+	return append(args, n.name)
+}
+
+// networkMismatch says how an existing network differs from what n asks for,
+// or "" when it is the network n describes.
+func (e *Executor) networkMismatch(got networkFacts, n networkSpec) string {
+	if got.internal != n.internal {
+		return fmt.Sprintf("has internal=%t where this sandbox needs internal=%t", got.internal, n.internal)
+	}
+	if n.bridge != "" && got.bridge != n.bridge {
+		return fmt.Sprintf("its bridge is %s, not %s, so the sandbox rulesets would not recognise it", got.bridge, n.bridge)
+	}
+	if e.rt.Name == RuntimePodman && n.bridge != "" && !got.isolated {
+		return "it is not isolated from the engine's other networks (isolate=true)"
+	}
+	return ""
+}
+
+// networkCreateHint explains the two refusals of `network create` this
+// driver's sandbox networks can newly meet (Task 20502): an engine out of
+// subnets, which a host running many projects at once can now reach — every
+// project's sandbox has a network of its own, and docker's default pools give
+// about thirty — and a podman too old to name a bridge or isolate a network.
+func networkCreateHint(stderr string) string {
+	low := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(low, "address pool") || strings.Contains(low, "subnet") && strings.Contains(low, "exhaust"):
+		return " — the engine has no free subnet left for another sandbox network; give it smaller and more " +
+			"subnets (docker: default-address-pools in daemon.json, e.g. base 10.200.0.0/16 size 24)"
+	case strings.Contains(low, "interface-name") || strings.Contains(low, "isolate"):
+		return " — this podman cannot create the isolated network with a named bridge that keeps one " +
+			"project's sandbox apart from another's; podman 4 with the netavark backend can"
+	}
+	return ""
+}
+
+// dockerBridgeNameOpt is the driver option docker names a bridge by.
+const dockerBridgeNameOpt = "com.docker.network.bridge.name"
 
 // networkInspection is the union of what the two runtimes report about a
 // network. They agree on nothing but the concepts:
 //
-//	docker  {"Id": "...", "Internal": false}
-//	podman  {"id": "...", "internal": false, "network_interface": "podman1"}
+//	docker  {"Id": "...", "Internal": false, "Options": {...}, "Labels": {...}, "Created": "..."}
+//	podman  {"id": "...", "internal": false, "network_interface": "podman1", "options": {...}, ...}
 //
 // Both spellings are decoded because a --format template naming a field the
 // runtime does not have is a *template error*, not an empty string — asking
@@ -472,68 +592,106 @@ func (e *Executor) ensureNetwork(ctx context.Context, name string, internal bool
 // getting this wrong produced a driver that worked under podman and could not
 // start a sandbox under docker.
 type networkInspection struct {
-	ID               string `json:"Id"`
-	IDLower          string `json:"id"`
-	Internal         *bool  `json:"Internal"`
-	InternalLower    *bool  `json:"internal"`
-	NetworkInterface string `json:"network_interface"`
+	ID               string            `json:"Id"`
+	IDLower          string            `json:"id"`
+	Internal         *bool             `json:"Internal"`
+	InternalLower    *bool             `json:"internal"`
+	NetworkInterface string            `json:"network_interface"`
+	Options          map[string]string `json:"Options"`
+	OptionsLower     map[string]string `json:"options"`
+	Labels           map[string]string `json:"Labels"`
+	LabelsLower      map[string]string `json:"labels"`
+	Created          string            `json:"Created"`
+	CreatedLower     string            `json:"created"`
 }
 
-// inspectNetwork returns the host interface backing a runtime network and
-// whether that network is internal.
+// networkFacts is what this driver reads back about a network.
+type networkFacts struct {
+	bridge   string
+	internal bool
+	// isolated is podman's isolate=true (Task 20502).
+	isolated bool
+	labels   map[string]string
+	created  time.Time
+}
+
+// inspectNetwork returns the host interface backing a runtime network, and
+// whether that network is internal and isolated.
 //
-// podman names the interface itself ("podman1") and reports it; docker does
-// not report one at all, and its bridge is br-<first 12 of the network id>.
-// Deriving the docker name is therefore a fallback, not the primary path —
-// podman's interface is not derivable from its id, so a driver that only
-// derived would attach rules to an interface that does not exist and filter
-// nothing.
-func (e *Executor) inspectNetwork(ctx context.Context, name string) (bridge string, internal bool, err error) {
+// A bridge cloop named reports its name — docker in Options, podman as
+// network_interface. A docker network whose bridge the engine named reports
+// none, and its bridge is br-<first 12 of the network id>; deriving it is
+// therefore a fallback, not the primary path — podman's interface is not
+// derivable from its id, so a driver that only derived would attach rules to
+// an interface that does not exist and filter nothing.
+func (e *Executor) inspectNetwork(ctx context.Context, name string) (networkFacts, error) {
 	if err := validateNetworkName(name); err != nil {
-		return "", false, err
+		return networkFacts{}, err
 	}
 	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout,
 		"network", "inspect", name, "--format", "{{json .}}")
 	if err != nil {
-		return "", false, err
+		return networkFacts{}, err
 	}
 	if res.ExitCode != 0 {
-		return "", false, fmt.Errorf("container: network %s does not exist", name)
+		return networkFacts{}, fmt.Errorf("container: network %s does not exist", name)
 	}
 
 	var got networkInspection
 	if err := json.Unmarshal([]byte(strings.TrimSpace(firstLine(res.Stdout))), &got); err != nil {
-		return "", false, fmt.Errorf("container: %s reported an unreadable description of network %s: %w",
+		return networkFacts{}, fmt.Errorf("container: %s reported an unreadable description of network %s: %w",
 			e.rt.Name, name, err)
 	}
+	var f networkFacts
 	// Absent reads as not-internal. That is the fail-closed direction: an
 	// answer this code could not parse must never be mistaken for "no route
 	// off this bridge", which is a security claim.
 	switch {
 	case got.Internal != nil:
-		internal = *got.Internal
+		f.internal = *got.Internal
 	case got.InternalLower != nil:
-		internal = *got.InternalLower
+		f.internal = *got.InternalLower
+	}
+	opts := got.Options
+	if len(opts) == 0 {
+		opts = got.OptionsLower
+	}
+	f.isolated = opts["isolate"] == "true"
+	f.labels = got.Labels
+	if len(f.labels) == 0 {
+		f.labels = got.LabelsLower
+	}
+	created := got.Created
+	if created == "" {
+		created = got.CreatedLower
+	}
+	if t, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(created)); perr == nil {
+		f.created = t
 	}
 
-	if iface := strings.TrimSpace(got.NetworkInterface); iface != "" {
+	iface := strings.TrimSpace(got.NetworkInterface)
+	if iface == "" {
+		iface = strings.TrimSpace(opts[dockerBridgeNameOpt])
+	}
+	if iface != "" {
 		if err := netfilter.ValidateInterfaceName(iface); err != nil {
-			return "", false, err
+			return networkFacts{}, err
 		}
-		return iface, internal, nil
+		f.bridge = iface
+		return f, nil
 	}
 	id := strings.TrimSpace(got.ID)
 	if id == "" {
 		id = strings.TrimSpace(got.IDLower)
 	}
 	if len(id) < 12 {
-		return "", false, fmt.Errorf("container: network %s reported no usable interface or id", name)
+		return networkFacts{}, fmt.Errorf("container: network %s reported no usable interface or id", name)
 	}
-	bridge = "br-" + id[:12]
-	if err := netfilter.ValidateInterfaceName(bridge); err != nil {
-		return "", false, err
+	f.bridge = "br-" + id[:12]
+	if err := netfilter.ValidateInterfaceName(f.bridge); err != nil {
+		return networkFacts{}, err
 	}
-	return bridge, internal, nil
+	return f, nil
 }
 
 // validateNetworkName guards the name before it reaches the runtime CLI.
@@ -575,8 +733,8 @@ func validateNetworkName(name string) error {
 // queries from the container's own namespace, through this filter. Opening
 // the configured resolvers without also pointing the sandbox at them would
 // leave every lookup going somewhere the filter drops.
-func (e *Executor) installFirewall(ctx context.Context, c confinement) (string, []string, error) {
-	n, err := e.provisionNetwork(ctx, c)
+func (e *Executor) installFirewall(ctx context.Context, c confinement, tenant string) (string, []string, error) {
+	n, err := e.provisionNetwork(ctx, c, tenant)
 	return n.name, n.dns, err
 }
 
@@ -598,43 +756,149 @@ type sandboxNet struct {
 	// address (Task 20437): set when the ruleset installed logs to a group
 	// this process reads. The addresses are filled in after the start.
 	denials *denialTrack
+	// tenant reports a network of the workload's tenant's own (Task 20502),
+	// which the driver counts and removes once its last workload has gone;
+	// false for "none" and for an operator's own network, used as configured.
+	tenant bool
+	// table is the nftables table installed on the bridge, "" when none.
+	table string
+	// hostDNS asks Start to point the sandbox at the host's resolvers: an
+	// unfiltered sandbox on docker, whose embedded resolver on a
+	// user-defined network no gVisor or Kata sandbox can reach.
+	hostDNS bool
 }
 
-// provisionNetwork is installFirewall with everything the caller needs back.
-func (e *Executor) provisionNetwork(ctx context.Context, c confinement) (sandboxNet, error) {
+// networkPlan is what a workload's network will be, decided without touching
+// the host: the network it joins, and how that network is made.
+type networkPlan struct {
+	// name is the runtime network the workload joins.
+	name string
+	// tenant reports a network of the workload's tenant's own, which the
+	// driver creates; false for "none" and an operator's own network.
+	tenant bool
+	// unfiltered reports a tenant network with no filter: no ruleset, the
+	// host's resolvers.
+	unfiltered bool
+	// filter is the effective filter; keyed the confinement the network and
+	// its table are named after.
+	filter EgressFilter
+	keyed  confinement
+	// spec is what the network is created with; table its ruleset's table,
+	// when a ruleset is installed.
+	spec  networkSpec
+	table string
+}
+
+// planNetwork decides a workload's network (Task 20502). It is pure, so the
+// conformance seam (AuditRunArgv) shows the network a sandbox really joins, by
+// the same decision provisionNetwork then carries out.
+//
+// tenant is the workload's tenant tag (tenantTag): every bridge this driver
+// makes is its project's alone, whether or not a filter is installed on it.
+func (e *Executor) planNetwork(c confinement, tenant string) (networkPlan, error) {
+	if strings.TrimSpace(tenant) == "" {
+		return networkPlan{}, fmt.Errorf("container: a sandbox network needs the tenant it belongs to")
+	}
 	f, err := e.effectiveFilter(c)
 	if err != nil {
-		return sandboxNet{}, err
+		return networkPlan{}, err
 	}
 	if !f.Enabled {
-		return sandboxNet{name: e.opts.Network}, nil
+		if e.opts.Network != NetworkBridge {
+			// "none" has nothing to share, and an operator's own network is
+			// used as it is — preflight says that its sandboxes share it.
+			return networkPlan{name: e.opts.Network}, nil
+		}
+		// The engine's default bridge is the one network every container on
+		// the host joins, and on it a sandbox reaches its neighbours'
+		// listeners directly (measured on docker 29: a container with every
+		// capability dropped connected to another's port). An unfiltered
+		// sandbox therefore gets a network of its project's own, which both
+		// engines keep apart from their other networks, and no ruleset — an
+		// unfiltered executor asked for none, and needs no privilege for it.
+		name := networkName(e.id, confinement{}, tenant)
+		// The table its inbound guard goes in, when this process may install
+		// one; recorded on the network either way, so a release or the sweep
+		// removes whichever exists.
+		return networkPlan{name: name, tenant: true, unfiltered: true, filter: f,
+			spec: networkSpec{name: name, bridge: bridgeName(name), tenant: tenant,
+				table: firewallTable(e.id, confinement{}, tenant)}}, nil
 	}
 	if e.rootless() {
 		// Rootless podman creates the bridge inside a network namespace the
-		// invoking user owns. The ruleset below would be installed in the
-		// host's namespace, keyed to an interface name that exists only in the
-		// other one — it would load cleanly and match nothing, and the sandbox
-		// would run with unrestricted egress under a firewall that reported
-		// success (Task 20345).
-		return sandboxNet{}, fmt.Errorf("%w: executor %s runs %s rootless, and a rootless engine's networks "+
+		// invoking user owns. A ruleset would be installed in the host's
+		// namespace, keyed to an interface name that exists only in the other
+		// one — it would load cleanly and match nothing, and the sandbox would
+		// run with unrestricted egress under a firewall that reported success
+		// (Task 20345).
+		return networkPlan{}, fmt.Errorf("%w: executor %s runs %s rootless, and a rootless engine's networks "+
 			"live in a network namespace the host's packet filter cannot see, so an egress filter "+
 			"installed for one would filter nothing; run the engine as root (docker, or podman as "+
 			"root) for a filtered sandbox, or remove the filter", executor.ErrUnsupported, e.id, e.rt.Name)
 	}
-
 	// The proxy route is part of a bridge's identity only when a ruleset is
 	// installed on it, because the ruleset is what has to open the proxy. An
 	// --internal bridge with no ruleset reaches its gateway on-link already,
-	// so every workload on the executor can keep sharing one.
+	// so its project's workloads can keep sharing one.
 	if !f.filtersDirectly() {
 		c.proxy = nil
 	}
-	name := networkName(e.id, c)
-	bridge, err := e.ensureNetwork(ctx, name, f.Internal)
+	name := networkName(e.id, c, tenant)
+	table := firewallTable(e.id, c, tenant)
+	// The table is recorded on the network whichever ruleset it holds — the
+	// filter, or an --internal network's inbound guard — so a release or the
+	// sweep removes it with the network.
+	spec := networkSpec{name: name, internal: f.Internal, bridge: bridgeName(name), tenant: tenant, engineDNS: true,
+		table: table}
+	return networkPlan{name: name, tenant: true, filter: f, keyed: c, spec: spec, table: table}, nil
+}
+
+// joinsSandboxNetwork reports whether a workload whose request names network
+// joins a network planNetwork decides: any but "none", once the engine's
+// default bridge, a filter, a scope or rules are involved.
+func (e *Executor) joinsSandboxNetwork(spec executor.Spec, network string) bool {
+	return network != NetworkNone && (network == NetworkBridge || e.opts.EgressFilter.Enabled ||
+		spec.EgressScope.NeedsFilter() || spec.EgressRules != nil)
+}
+
+// provisionNetwork is installFirewall with everything the caller needs back:
+// planNetwork's plan, carried out. Start goes through joinTenantNetwork, which
+// holds the network's lock across this and the container's start.
+func (e *Executor) provisionNetwork(ctx context.Context, c confinement, tenant string) (sandboxNet, error) {
+	plan, err := e.planNetwork(c, tenant)
 	if err != nil {
 		return sandboxNet{}, err
 	}
-	out := sandboxNet{name: name, keyed: c}
+	return e.provisionPlan(ctx, plan)
+}
+
+// provisionPlan creates a planned network and installs its ruleset.
+func (e *Executor) provisionPlan(ctx context.Context, plan networkPlan) (sandboxNet, error) {
+	if !plan.tenant {
+		return sandboxNet{name: plan.name}, nil
+	}
+	bridge, err := e.ensureNetwork(ctx, plan.spec)
+	if err != nil {
+		return sandboxNet{}, err
+	}
+	if plan.unfiltered {
+		out := sandboxNet{name: plan.name, tenant: true, hostDNS: e.rt.Name == RuntimeDocker}
+		// No egress filter, but no one else's connection into the sandbox
+		// either (Task 20502), where this process may install a ruleset: the
+		// engines keep their own networks apart, but podman's isolation does
+		// not cover its default network, where a container no cloop rule
+		// governs may run. A process that may not use nft relies on the
+		// engine's isolation alone, which preflight reports.
+		if applier, aerr := e.nftForGuards(ctx); aerr == nil {
+			if err := applier.ApplyInboundGuard(ctx, netfilter.NftablesOptions{Table: plan.spec.table, Bridge: bridge}); err != nil {
+				return sandboxNet{}, err
+			}
+			out.table = plan.spec.table
+		}
+		return out, nil
+	}
+	f, c, name, table := plan.filter, plan.keyed, plan.name, plan.table
+	out := sandboxNet{name: name, keyed: c, tenant: true}
 	if c.proxy != nil {
 		ap, gw, err := e.proxyEndpoint(ctx, name, *c.proxy)
 		if err != nil {
@@ -644,17 +908,26 @@ func (e *Executor) provisionNetwork(ctx context.Context, c confinement) (sandbox
 	}
 	if !f.filtersDirectly() {
 		// --internal alone: the runtime installs no route off the bridge,
-		// so there is nothing for nft to add and no privilege to require.
-		//
-		// Any ruleset a previous configuration left behind has to go, and
-		// this is the only place that can know. The table name is derived
-		// from the executor ID, so it does not change when the filter does:
-		// an operator who narrows a direct-egress filter down to internal
-		// would otherwise keep running under the old, wider allow list on
-		// the same bridge. Removing an absent table is success, so this
-		// costs one nft call on the common path and closes the case where
-		// the configuration moved and the kernel did not.
-		if err := e.removeFirewall(ctx, c); err != nil {
+		// so there is no egress filter for nft to add and no privilege to
+		// require. Where this process may install a ruleset, the inbound
+		// guard goes on, as on an unfiltered sandbox network (Task 20502),
+		// replacing the table whole.
+		if applier, aerr := e.nftForGuards(ctx); aerr == nil {
+			if err := applier.ApplyInboundGuard(ctx, netfilter.NftablesOptions{Table: table, Bridge: bridge}); err != nil {
+				return sandboxNet{}, err
+			}
+			out.table = table
+			return out, nil
+		}
+		// Otherwise any ruleset a previous configuration left behind has to
+		// go, and this is the only place that can know. The table name is
+		// derived, so it does not change when the filter does: an operator
+		// who narrows a direct-egress filter down to internal would
+		// otherwise keep running under the old, wider allow list on the same
+		// bridge. Removing an absent table is success, so this costs one nft
+		// call on the common path and closes the case where the
+		// configuration moved and the kernel did not.
+		if err := e.removeFirewall(ctx, table); err != nil {
 			return sandboxNet{}, err
 		}
 		return out, nil
@@ -683,12 +956,16 @@ func (e *Executor) provisionNetwork(ctx context.Context, c confinement) (sandbox
 	fp := tableFingerprint(c, f)
 	logOpts := denialLogOptions(fp)
 	if err := applier.Apply(ctx, policy, netfilter.NftablesOptions{
-		Table:  firewallTable(e.id, c),
+		Table:  table,
 		Bridge: bridge,
 		Log:    logOpts,
+		// Every other sandbox bridge on this host, other projects' included:
+		// refused both ways ahead of the allows (Task 20502).
+		Siblings: siblingBridges,
 	}); err != nil {
 		return sandboxNet{}, err
 	}
+	out.table = table
 	if logOpts != nil {
 		out.denials = &denialTrack{fingerprint: fp, bridge: bridge}
 	}
@@ -844,7 +1121,7 @@ func (e *Executor) effectiveFilter(c confinement) (EgressFilter, error) {
 // for the table's forward allows to open, and its input chain drops more of
 // the host than an unfiltered bridge does. Any other failure is returned — an
 // nft this process may use and that still refuses is a fault worth a refusal.
-func (e *Executor) removeFirewall(ctx context.Context, c confinement) error {
+func (e *Executor) removeFirewall(ctx context.Context, table string) error {
 	applier, err := netfilter.NewApplier()
 	if err != nil {
 		if errors.Is(err, netfilter.ErrUnavailable) {
@@ -852,7 +1129,7 @@ func (e *Executor) removeFirewall(ctx context.Context, c confinement) error {
 		}
 		return err
 	}
-	if err := applier.Remove(ctx, firewallTable(e.id, c)); err != nil && !errors.Is(err, netfilter.ErrUnavailable) {
+	if err := applier.Remove(ctx, table); err != nil && !errors.Is(err, netfilter.ErrUnavailable) {
 		return err
 	}
 	return nil
@@ -1046,68 +1323,4 @@ func (e *Executor) filterForRules(want executor.FirewallRules) (EgressFilter, er
 	cfg := e.opts.EgressFilter
 	f.Internal, f.Broker, f.HostPatterns = cfg.Internal, cfg.Broker, cfg.HostPatterns
 	return f, nil
-}
-
-// rulesNetUse counts the live workloads on one rules-keyed network.
-type rulesNetUse struct {
-	refs  int
-	table string
-}
-
-// installRulesAware installs the firewall for a confinement, and for one
-// carrying rules records the workload on its network under rulesMu.
-func (e *Executor) installRulesAware(ctx context.Context, c confinement) (sandboxNet, error) {
-	if c.rules == nil {
-		return e.provisionNetwork(ctx, c)
-	}
-	e.rulesMu.Lock()
-	defer e.rulesMu.Unlock()
-	n, err := e.provisionNetwork(ctx, c)
-	if err != nil {
-		return sandboxNet{}, err
-	}
-	if e.rulesNets == nil {
-		e.rulesNets = map[string]*rulesNetUse{}
-	}
-	u := e.rulesNets[n.name]
-	if u == nil {
-		u = &rulesNetUse{table: firewallTable(e.id, n.keyed)}
-		e.rulesNets[n.name] = u
-	}
-	u.refs++
-	return n, nil
-}
-
-// releaseRulesNetwork drops one workload from a rules-keyed network and, when
-// it was the last this executor knows of, removes the network and its ruleset.
-//
-// The scope networks and a virtual executor's own bridge are kept for the
-// executor's life, because there are a handful of them. Rules networks are
-// keyed by a fingerprint, so every edit to a rule set mints a new one, and an
-// engine has a finite pool of subnets to give bridges: kept forever, they
-// would exhaust it. Removal is best-effort — a network another process's
-// workload still uses refuses to go, and is left with its ruleset intact.
-func (e *Executor) releaseRulesNetwork(name string) {
-	if name == "" {
-		return
-	}
-	e.rulesMu.Lock()
-	defer e.rulesMu.Unlock()
-	u := e.rulesNets[name]
-	if u == nil {
-		return
-	}
-	if u.refs--; u.refs > 0 {
-		return
-	}
-	delete(e.rulesNets, name)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*shortCmdTimeout)
-	defer cancel()
-	res, err := runCLITimeout(ctx, e.rt, shortCmdTimeout, "network", "rm", name)
-	if err != nil || res.ExitCode != 0 {
-		return
-	}
-	if applier, err := netfilter.NewApplier(); err == nil {
-		_ = applier.Remove(ctx, u.table)
-	}
 }

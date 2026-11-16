@@ -1718,6 +1718,35 @@ jobs:
             exit 1
           }
 
+      - name: Two projects' sandboxes cannot reach each other
+        timeout-minutes: 5 # observed locally: about 10s for docker's unfiltered and internal cases
+        env:
+          CLOOP_FIREWALL_CONTAINER_E2E: "1"
+        # Task 20502: a listener in one project's sandbox, and another
+        # project's sandbox on the same executor trying to connect to it, on an
+        # unfiltered executor (which used to put every sandbox on the engine's
+        # default bridge) and on an --internal filter (one shared internal
+        # bridge). A second sandbox of the listener's own project must connect,
+        # or the refusal proves nothing. The cases that install an nftables
+        # ruleset need root and skip here; they run on a root host and in the
+        # kernel-only rig in pkg/netfilter. The pinned base pulled above is the
+        # image, so nothing is fetched. The PASS-line assertions catch a run
+        # that skipped because docker was unavailable.
+        run: |
+          set -euo pipefail
+          CLOOP_TEST_CONTAINER_IMAGE=$(grep -oE 'alpine@sha256:[0-9a-f]{64}' tests/flagship/flagship_test.go | head -1)
+          export CLOOP_TEST_CONTAINER_IMAGE
+          go test ./pkg/executor/container/ -run '^TestIntegration_TwoProjectsSandboxesCannotReachEachOther$' \
+            -v -count=1 -timeout 4m 2>&1 | tee /tmp/isolation-container.log
+          for c in unfiltered internal; do
+            grep -qE "^    --- PASS: TestIntegration_TwoProjectsSandboxesCannotReachEachOther/docker/$c \(" \
+              /tmp/isolation-container.log || {
+              echo "::error::the docker/$c case of TestIntegration_TwoProjectsSandboxesCannotReachEachOther did" \
+                   "not pass — it was skipped (docker unavailable, or CLOOP_FIREWALL_CONTAINER_E2E lost)."
+              exit 1
+            }
+          done
+
       - name: Project directories confined on a container sandbox
         timeout-minutes: 8 # observed locally: 57s once the image layer is cached
         env:

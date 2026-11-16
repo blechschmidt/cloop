@@ -513,3 +513,48 @@ func TestRenderedObjectIsAValidAPIShape(t *testing.T) {
 		}
 	}
 }
+
+// TestIsolationPolicyDeniesIngressAndLeavesEgress (Task 20502): the policy a
+// Pod with no egress filter gets names Ingress with no rule — nothing may
+// connect in, so no other Pod, another project's run included, reaches it —
+// and does not name Egress at all, so what the operator left unfiltered stays
+// so. It selects exactly the Pod it was built for, and refuses to be built
+// without a selector, which would govern the whole namespace.
+func TestIsolationPolicyDeniesIngressAndLeavesEgress(t *testing.T) {
+	np, err := RenderIsolationPolicy(NetworkPolicyOptions{
+		Name:        "cloop-egress-h1",
+		Namespace:   "cloop",
+		PodSelector: map[string]string{"cloop.dev/handle-id": "h1"},
+		Labels:      map[string]string{"cloop.dev/managed": "true"},
+	})
+	if err != nil {
+		t.Fatalf("RenderIsolationPolicy: %v", err)
+	}
+	if got := np.Spec.PolicyTypes; len(got) != 1 || got[0] != "Ingress" {
+		t.Errorf("policyTypes = %v, want [Ingress] alone", got)
+	}
+	if len(np.Spec.Ingress) != 0 {
+		t.Errorf("the isolation policy admits something: %+v", np.Spec.Ingress)
+	}
+	if len(np.Spec.Egress) != 0 {
+		t.Errorf("the isolation policy governs egress the operator left unfiltered: %+v", np.Spec.Egress)
+	}
+	if sel := np.Spec.PodSelector.MatchLabels; len(sel) != 1 || sel["cloop.dev/handle-id"] != "h1" {
+		t.Errorf("selector = %v, want this Pod's handle alone", sel)
+	}
+	raw, err := json.Marshal(np)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// On the wire: the ingress key absent (no rule), the type present.
+	if !strings.Contains(string(raw), `"policyTypes":["Ingress"]`) || strings.Contains(string(raw), `"ingress"`) ||
+		strings.Contains(string(raw), `"egress"`) {
+		t.Errorf("rendered object does not deny ingress alone: %s", raw)
+	}
+	if _, err := RenderIsolationPolicy(NetworkPolicyOptions{Name: "x", Namespace: "cloop"}); err == nil {
+		t.Error("an isolation policy with no pod selector was built; it would govern every Pod in the namespace")
+	}
+	if _, err := RenderIsolationPolicy(NetworkPolicyOptions{PodSelector: map[string]string{"a": "b"}}); err == nil {
+		t.Error("an isolation policy with no name was built")
+	}
+}

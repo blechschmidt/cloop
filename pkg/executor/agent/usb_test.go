@@ -161,7 +161,7 @@ func TestResolveVirtualDevices(t *testing.T) {
 		USB:  &executor.USBMatch{VendorID: "1050", ProductID: "0030", Serial: "0031650425"},
 	}
 
-	got, err := resolveVirtualDevices([]executor.DeviceSelector{hsm}, root, t.TempDir())
+	got, err := resolveVirtualDevices([]executor.DeviceSelector{hsm}, root, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("resolveVirtualDevices: %v", err)
 	}
@@ -175,18 +175,18 @@ func TestResolveVirtualDevices(t *testing.T) {
 
 	// An explicit numeric group is honoured; root's is refused.
 	hsm.Group = "46"
-	got, err = resolveVirtualDevices([]executor.DeviceSelector{hsm}, root, t.TempDir())
+	got, err = resolveVirtualDevices([]executor.DeviceSelector{hsm}, root, t.TempDir(), nil)
 	if err != nil || strings.Join(got.Groups, ",") != "46" {
 		t.Fatalf("group 46: %v %v", got.Groups, err)
 	}
 	hsm.Group = "0"
-	if _, err := resolveVirtualDevices([]executor.DeviceSelector{hsm}, root, t.TempDir()); err == nil {
+	if _, err := resolveVirtualDevices([]executor.DeviceSelector{hsm}, root, t.TempDir(), nil); err == nil {
 		t.Error("root's group was accepted")
 	}
 
 	// Unplugged: the start must fail, naming the device.
 	gone := executor.DeviceSelector{Name: "gone", USB: &executor.USBMatch{VendorID: "1050", ProductID: "0407"}}
-	if _, err := resolveVirtualDevices([]executor.DeviceSelector{gone}, root, t.TempDir()); err == nil ||
+	if _, err := resolveVirtualDevices([]executor.DeviceSelector{gone}, root, t.TempDir(), nil); err == nil ||
 		!strings.Contains(err.Error(), "gone") {
 		t.Errorf("an unplugged device resolved: %v", err)
 	}
@@ -282,4 +282,127 @@ func TestDetectReportsProbes(t *testing.T) {
 		strings.Join(caps.OCIRuntimes, ",") != "runc,runsc" {
 		t.Errorf("probe answers not reported: %+v", caps)
 	}
+}
+
+// TestAForwardedDeviceIsNoOtherSandboxs (Task 20502): a USB device this agent
+// attached for a forwarder is on the host's bus like any other, but it is the
+// run's whose project the binding names. A virtual executor's selector that
+// would match it does not get it — it gets its own device when one is plugged
+// in, and a refusal naming the forwarder's when only that one matches — and a
+// path selector naming one of its nodes is refused, through a link too. The
+// inventory an admin picks devices from leaves it out.
+func TestAForwardedDeviceIsNoOtherSandboxs(t *testing.T) {
+	forwarded := fixtureUSB{port: "3-1", vendor: "1050", product: "0030", bus: "3", dev: "2",
+		manufacturer: "Yubico", productName: "YubiHSM", serial: "0099990000", class: "00",
+		children: map[string]string{"3-1:1.0/hidraw/hidraw7": "DEVNAME=hidraw7"}}
+	root := writeSysfs(t, forwarded)
+	byPort := func(ports ...string) func([]executor.USBDevice) forwardedSet {
+		return func(inv []executor.USBDevice) forwardedSet {
+			set := forwardedSet{ports: map[string]bool{}, nodes: map[string]bool{}}
+			for _, p := range ports {
+				set.ports[p] = true
+			}
+			for _, d := range inv {
+				if set.ports[d.Port] {
+					set.nodes[d.Node] = true
+					for _, n := range d.Nodes {
+						set.nodes[n.Path] = true
+					}
+				}
+			}
+			return set
+		}
+	}
+	held := byPort("3-1")
+	anyHSM := executor.DeviceSelector{Name: "hsm", USB: &executor.USBMatch{VendorID: "1050", ProductID: "0030"}}
+
+	if got, err := resolveVirtualDevices([]executor.DeviceSelector{anyHSM}, root, t.TempDir(), nil); err != nil ||
+		len(got.Devices) == 0 {
+		t.Fatalf("without the ledger's word the selector does not resolve the device (%v), so the next "+
+			"check proves nothing", err)
+	}
+	_, err := resolveVirtualDevices([]executor.DeviceSelector{anyHSM}, root, t.TempDir(), held)
+	if err == nil {
+		t.Fatal("a virtual executor's selector resolved a device a forwarder brought in for another run")
+	}
+	if !strings.Contains(err.Error(), "forwarder") || !strings.Contains(err.Error(), "3-1") {
+		t.Errorf("the refusal %q does not say whose the device is", err)
+	}
+	devRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(devRoot, "serial", "by-id"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devRoot, "hidraw7"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../hidraw7", filepath.Join(devRoot, "serial", "by-id", "usb-Yubico")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/dev/bus/usb/003/002", "/dev/hidraw7", "/dev/serial/by-id/usb-Yubico"} {
+		sel := executor.DeviceSelector{Name: "byPath", Path: path}
+		if _, err := resolveVirtualDevices([]executor.DeviceSelector{sel}, root, devRoot, held); err == nil {
+			t.Errorf("a path selector naming the forwarded device's node %s resolved", path)
+		}
+	}
+
+	// With the sandbox's own device plugged in beside it, the selector picks
+	// that one — the forwarded one no longer makes the choice ambiguous.
+	own := sgxYubiHSM
+	both := writeSysfs(t, own, forwarded)
+	got, err := resolveVirtualDevices([]executor.DeviceSelector{anyHSM}, both, t.TempDir(), held)
+	if err != nil {
+		t.Fatalf("with the executor's own device present: %v", err)
+	}
+	for _, d := range got.Devices {
+		if strings.Contains(d.Source, "/003/") || strings.Contains(d.Source, "hidraw7") {
+			t.Errorf("the forwarded device's node %s was given to the sandbox", d.Source)
+		}
+	}
+
+	free, fwd := withoutForwarded(scanUSB(both, t.TempDir()), held(scanUSB(both, t.TempDir())))
+	if len(fwd) != 1 || fwd[0].Port != "3-1" || len(free) != 1 || free[0].Port != own.port {
+		t.Errorf("inventory split = free %v / forwarded %v", free, fwd)
+	}
+}
+
+// TestHubGrantsNeverNameAForwardedNode (Task 20502): a device the hub granted
+// by path is refused when that path is a node of a device this agent attached
+// for a forwarder — a live attachment counts, so an agent that kept no ledger
+// is held to it too — and a grant naming anything else passes.
+func TestHubGrantsNeverNameAForwardedNode(t *testing.T) {
+	a := &Agent{}
+	dev := &agentDevice{id: "ch-1", payload: remote.DeviceOpenPayload{Kind: executor.ForwardedUSB, Name: "bench"},
+		attached: fakeUSBAttached{busID: "3-1", node: "/dev/bus/usb/003/002", nodes: []string{"/dev/ttyACM0"}}}
+	a.devices.devs = map[string]*agentDevice{dev.id: dev}
+	sysfs := t.TempDir()
+	if err := a.refuseForwardedNodes([]executor.HostDevice{{Name: "serial", Source: "/dev/ttyACM0", Target: "/dev/ttyACM0"}},
+		sysfs, t.TempDir()); err == nil || !strings.Contains(err.Error(), "forwarder") {
+		t.Errorf("a grant naming a forwarded device's node passed: %v", err)
+	}
+	if err := a.refuseForwardedNodes([]executor.HostDevice{{Name: "serial", Source: "/dev/ttyUSB0", Target: "/dev/ttyUSB0"}},
+		sysfs, t.TempDir()); err != nil {
+		t.Errorf("a grant naming another device was refused: %v", err)
+	}
+	if got := a.forwardedHeld(nil); !got.ports["3-1"] || !got.nodes["/dev/bus/usb/003/002"] {
+		t.Errorf("the live attachment is not held: %+v", got)
+	}
+}
+
+// fakeUSBAttached is a forwarded USB device attached without a kernel.
+type fakeUSBAttached struct {
+	busID, node string
+	nodes       []string
+}
+
+func (f fakeUSBAttached) Done() <-chan struct{} { return nil }
+func (f fakeUSBAttached) Close() error          { return nil }
+func (f fakeUSBAttached) Opened() remote.DeviceOpenedPayload {
+	return remote.DeviceOpenedPayload{LocalBusID: f.busID, Node: f.node}
+}
+func (f fakeUSBAttached) Give(name string, _ executor.HostInterface) ([]executor.HostDevice, *executor.HostInterface) {
+	out := []executor.HostDevice{{Name: name, Source: f.node, Target: f.node}}
+	for _, n := range f.nodes {
+		out = append(out, executor.HostDevice{Name: name + "-n", Source: n, Target: n})
+	}
+	return out, nil
 }

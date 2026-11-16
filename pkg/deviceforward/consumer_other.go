@@ -66,3 +66,6 @@ func processAlive(pid int, _ uint64) bool {
 
 // undoLedgerEntry has nothing to undo off Linux: nothing is ever attached.
 func undoLedgerEntry(LedgerEntry, *SweepReport, func(string, ...any)) {}
+
+// HeldUSBBusIDs reports none: nothing is attached off Linux.
+func (l *Ledger) HeldUSBBusIDs() map[string]bool { return map[string]bool{} }

@@ -193,7 +193,6 @@ func runVirtualSandbox(t *testing.T, engine string) {
 		t.Fatalf("the agent reports no packet filter: %s", parent.AgentCapabilities().PacketFilterIssue)
 	}
 	id := "vx-e2e-" + engine
-	table := "cloop_sbx_" + strings.ReplaceAll(id, "-", "_")
 	v := virtualOver(t, parent, id, executor.VirtualSpec{
 		Sandbox: executor.SandboxSettings{Mode: executor.SandboxModeContainer, Engine: engine, Image: "alpine:3.20"},
 		Firewall: &executor.FirewallRules{
@@ -203,10 +202,7 @@ func runVirtualSandbox(t *testing.T, engine string) {
 		},
 		Devices: []executor.DeviceSelector{{Name: "zero", Path: "/dev/zero", Permissions: executor.DeviceRead}},
 	})
-	t.Cleanup(func() {
-		_ = exec.Command("nft", "delete", "table", "inet", table).Run()
-		_ = exec.Command(engine, "network", "rm", "cloop-sbx-"+id).Run()
-	})
+	t.Cleanup(func() { removeSandboxNetworks(engine, id) })
 
 	work := filepath.Join(lb.root, "p")
 	if err := os.MkdirAll(work, 0o755); err != nil {
@@ -219,6 +215,11 @@ func runVirtualSandbox(t *testing.T, engine string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	// The project's network and ruleset go with its last workload (Task
+	// 20502); a second workload of the project holds them while the ruleset
+	// is read.
+	release := holdProjectNetwork(ctx, t, v, work)
+	defer release()
 	res, err := executor.Run(ctx, v, executor.Spec{
 		WorkDir: work,
 		// The wget is aimed into the denylist: TEST-NET-3 is unroutable, so
@@ -244,6 +245,7 @@ func runVirtualSandbox(t *testing.T, engine string) {
 		t.Errorf("handle executor = %q, want the virtual executor %q", res.Handle.ExecutorID, id)
 	}
 
+	table := sandboxTable(t, engine, id)
 	ruleset, err := exec.Command("nft", "list", "table", "inet", table).CombinedOutput()
 	if err != nil {
 		t.Fatalf("no ruleset installed for the virtual executor: %v %s", err, ruleset)
@@ -323,15 +325,11 @@ func TestIntegration_VirtualExecutorKeepsTheMetadataServiceClosed(t *testing.T) 
 	}
 	run := func(id string, allow []string) (string, string) {
 		t.Helper()
-		table := "cloop_sbx_" + strings.ReplaceAll(id, "-", "_")
 		v := virtualOver(t, parent, id, executor.VirtualSpec{
 			Sandbox:  executor.SandboxSettings{Mode: executor.SandboxModeContainer, Engine: engine, Image: image},
 			Firewall: &executor.FirewallRules{AllowCIDRs: allow, AllowPorts: []int{80}, Resolvers: []string{"1.1.1.1"}},
 		})
-		t.Cleanup(func() {
-			_ = exec.Command("nft", "delete", "table", "inet", table).Run()
-			_ = exec.Command(engine, "network", "rm", "cloop-sbx-"+id).Run()
-		})
+		t.Cleanup(func() { removeSandboxNetworks(engine, id) })
 		work := filepath.Join(lb.root, id)
 		if err := os.MkdirAll(work, 0o755); err != nil {
 			t.Fatal(err)
@@ -341,6 +339,8 @@ func TestIntegration_VirtualExecutorKeepsTheMetadataServiceClosed(t *testing.T) 
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
+		release := holdProjectNetwork(ctx, t, v, work)
+		defer release()
 		res, err := executor.Run(ctx, v, executor.Spec{WorkDir: work,
 			// A zero-I/O connect: reachability, without a request or a byte of
 			// what the service would answer.
@@ -348,7 +348,7 @@ func TestIntegration_VirtualExecutorKeepsTheMetadataServiceClosed(t *testing.T) 
 		if err != nil {
 			t.Fatalf("%s: Run: %v (output %q)", id, err, res.Output)
 		}
-		ruleset, err := exec.Command("nft", "list", "table", "inet", table).CombinedOutput()
+		ruleset, err := exec.Command("nft", "list", "table", "inet", sandboxTable(t, engine, id)).CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s: no ruleset installed: %v %s", id, err, ruleset)
 		}
@@ -370,5 +370,60 @@ func TestIntegration_VirtualExecutorKeepsTheMetadataServiceClosed(t *testing.T) 
 	if !reached(out) {
 		t.Errorf("with the address named the sandbox could not reach the service, so the check above proves nothing:\n%s\n%s",
 			out, ruleset)
+	}
+}
+
+// holdProjectNetwork starts a workload of work's project on v that keeps the
+// project's sandbox network and its ruleset in place until the returned
+// function stops it (Task 20502: both go with the project's last workload).
+func holdProjectNetwork(ctx context.Context, t *testing.T, v executor.Executor, work string) func() {
+	t.Helper()
+	h, err := v.Start(ctx, executor.Spec{WorkDir: work,
+		Argv: []string{"/bin/sh", "-c", "trap 'exit 0' TERM; sleep 600 & wait"}})
+	if err != nil {
+		t.Fatalf("start the workload holding the project's network: %v", err)
+	}
+	return func() {
+		stop, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		_ = v.Signal(stop, h.ID, executor.SignalKill)
+	}
+}
+
+// sandboxTable is the nftables table recorded on the sandbox network the
+// executor id made, while a workload holds it.
+func sandboxTable(t *testing.T, engine, id string) string {
+	t.Helper()
+	for _, name := range sandboxNetworks(engine, id) {
+		out, err := exec.Command(engine, "network", "inspect", name, "--format",
+			`{{index .Labels "cloop.nft_table"}}`).Output()
+		if table := strings.TrimSpace(string(out)); err == nil && table != "" && table != "<no value>" {
+			return table
+		}
+	}
+	t.Fatalf("no sandbox network of executor %s records a ruleset", id)
+	return ""
+}
+
+// sandboxNetworks lists the networks the executor id made.
+func sandboxNetworks(engine, id string) []string {
+	out, err := exec.Command(engine, "network", "ls", "--filter", "label=cloop.executor="+id,
+		"--format", "{{.Name}}").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
+}
+
+// removeSandboxNetworks removes what a failed test may leave of the executor
+// id's networks, and their rulesets.
+func removeSandboxNetworks(engine, id string) {
+	for _, name := range sandboxNetworks(engine, id) {
+		out, _ := exec.Command(engine, "network", "inspect", name, "--format",
+			`{{index .Labels "cloop.nft_table"}}`).Output()
+		_ = exec.Command(engine, "network", "rm", name).Run()
+		if table := strings.TrimSpace(string(out)); table != "" && table != "<no value>" {
+			_ = exec.Command("nft", "delete", "table", "inet", table).Run()
+		}
 	}
 }
