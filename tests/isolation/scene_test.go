@@ -308,12 +308,11 @@ func newScene(t *testing.T, kind, ociRuntime string) *scene {
 }
 
 // writeHubConfig writes the hub's configuration: what `cloop init` wrote,
-// the address runs reach the hub at, a request rate the suite's polling
-// stays under, the executor under test, and the projects optOut names in
-// executors.host_sandbox.opt_out. The hub reads it at every dispatch.
+// the address runs reach the hub at, the executor under test, and the
+// projects optOut names in executors.host_sandbox.opt_out. The hub reads it
+// at every dispatch.
 func (s *scene) writeHubConfig(optOut ...string) {
-	cfg := fmt.Sprintf("\nui:\n    external_url: %s\nrate_limit:\n    requests_per_second: 500\n    burst: 2000\n",
-		s.runBase)
+	cfg := fmt.Sprintf("\nui:\n    external_url: %s\n", s.runBase)
 	cfg += "executors:\n"
 	switch s.kind {
 	case onHost:
@@ -447,7 +446,12 @@ func (s *scene) start() {
 		listen = "0.0.0.0"
 	}
 	s.ownProjects()
+	// The per-address request rate well above the default (20 a second,
+	// burst 50): the test polls the hub from the address a hostile run on
+	// its host sends its probes from, and a slow machine's polling and the
+	// probes together go past the default.
 	cmd := exec.Command(s.bin, "ui", "--listen", listen, "--port", strconv.Itoa(s.port), "--no-browser",
+		"--rate-limit", "500", "--rate-burst", "2000",
 		"--projects", s.vault, "--projects", s.mallory, "--projects", s.library)
 	cmd.Dir, cmd.Env = s.hubDir, append(append([]string(nil), s.env...), s.hubEnv...)
 	s.hub = s.spawn(cmd, s.hubLog)

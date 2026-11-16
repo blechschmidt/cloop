@@ -557,7 +557,15 @@ func (s *scene) attackWith(ph phase, probes []probe) (hostileReport, []probe) {
 	id := s.addTask(s.mallory, "Do mallory's work [iso:"+ph.name+"]", encodePlan(t, plan))
 	s.run(s.mallory)
 	s.waitDone(s.mallory, id, 5*time.Minute)
-	data := s.attachment(s.mallory, id, "hostile-report.json")
+	// A device's run brings its attachments back with its outcome, and the
+	// hub can show the task done a moment before it has stored them.
+	var data []byte
+	deadline := time.Now().Add(90 * time.Second)
+	for data == nil && time.Now().Before(deadline) {
+		if data = s.attachment(s.mallory, id, "hostile-report.json"); data == nil {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
 	if data == nil {
 		// Where the run left it, for the failure message.
 		data, _ = os.ReadFile(filepath.Join(s.runTree(s.mallory), ".cloop", "hostile", ph.name+".json"))
