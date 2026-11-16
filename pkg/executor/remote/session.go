@@ -68,7 +68,10 @@ type Session struct {
 
 	done      chan struct{}
 	closeOnce sync.Once
-	closeMsg  string
+	// retireOnce sends a retired runner its bye once, whichever of the hub's
+	// Retire and the handshake's attach gets there first.
+	retireOnce sync.Once
+	closeMsg   string
 
 	// attaches routes interactive-session frames to the terminal that owns
 	// them (Task 20265). It locks itself, and is scoped to this connection

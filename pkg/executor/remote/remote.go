@@ -1641,6 +1641,14 @@ func (e *Executor) attach(sess *Session) {
 	if prev != nil && prev != sess {
 		prev.closeWithReason("superseded by a newer session")
 	}
+	// The hub retired this runner after the handshake sent its welcome and
+	// before this attach: Retire found no session to tell, so the session is
+	// told here. Read after the session is set, and Retire marks before it
+	// reads the session, so one of the two always sees the other.
+	if e.retired.Load() {
+		sess.retire("ephemeral runner retired")
+		return
+	}
 	e.setStatus(StatusOnline)
 
 	// Anything revoked while this agent was offline is owed to it now. Done

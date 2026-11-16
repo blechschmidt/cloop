@@ -1348,6 +1348,13 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **An executor pool's runner retired just as it connects is now told so.**
+  The hub sends a runner its welcome and only then attaches the connection to
+  the runner's executor. A retirement in that moment found no connection to
+  tell: the runner kept its connection open with a revoked credential and
+  never got the bye that makes it exit. The hub now retires
+  the connection as it attaches, whichever of the two comes first, and the
+  runner gets one bye (Task 20503).
 - **A project moved to a remote machine now runs from the working copy the
   move put there.** The move rebuilt the working copy on the machine with your
   branch, your unpushed commits and your uncommitted changes, and the next run

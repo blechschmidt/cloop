@@ -391,10 +391,12 @@ func (h *Hub) Retire(agentID, reason string) error {
 	if ex == nil {
 		return nil
 	}
+	// Marked before the session is read: a runner whose handshake attaches
+	// its session after this point finds the mark and is retired by attach,
+	// so one that was sent its welcome a moment ago is told too.
 	ex.retired.Store(true)
 	if sess := ex.currentSession(); sess != nil {
-		sess.sendRetire(reason)
-		sess.closeWithReason(reason)
+		sess.retire(reason)
 	}
 	// A runner retired with its run settled holds nothing; one retired early
 	// — its pool revoked — has its work failed rather than left to a link
@@ -804,6 +806,14 @@ func writeHTTPError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// retire tells an ephemeral runner its run is over and ends its session, once.
+func (s *Session) retire(reason string) {
+	s.retireOnce.Do(func() {
+		s.sendRetire(reason)
+		_ = s.closeWithReason(reason)
+	})
 }
 
 // sendRetire tells an ephemeral runner its run is over: a bye that asks it not
