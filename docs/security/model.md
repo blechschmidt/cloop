@@ -15,6 +15,7 @@ table run as a required CI job.
 
 - [Trust boundaries](#trust-boundaries)
 - [The no-host-execution guarantee](#the-no-host-execution-guarantee)
+- [Isolation between projects](#isolation-between-projects)
 - [Workspace provisioning](#workspace-provisioning)
 - [Identity, roles and permissions](#identity-roles-and-permissions)
 - [Session lifecycle and revocation](#session-lifecycle-and-revocation)
@@ -1005,6 +1006,116 @@ run leaves there reaches another's. A derived image built from a project's
 `setup:` commands is that project's own: its tag includes the project, and the
 build takes no layer from the builder's cache, so two projects with the same
 `setup:` never start from each other's build.
+
+---
+
+## Isolation between projects
+
+> A run of one project can't change another project. It can read another
+> project only while that project's readers list names its own project, and
+> then only read-only. This holds whatever the run's agent tries, on the hub's
+> own host, on a device and in a container.
+
+Projects often share an executor: the hub's own host, a device, or a container
+executor. The agent in each run may have been steered by what it read, such as
+a ticket, a wiki page or a file in the repository, so cloop treats it as
+hostile and keeps it to its own project: the project's directory, or its
+working copy on a device. Everything else belongs to someone else:
+
+- another project's source tree, its git repository with its hooks and
+  configuration, and its `.cloop` directory with the project's state database;
+- the hub's control plane: its database, its configuration and its registry of
+  projects;
+- another project's live run: its processes and whatever it listens on;
+- what the hub keeps for another project: its tasks, its readers list, its
+  knowledge and its repositories behind the git proxy.
+
+**What keeps runs apart** depends on where they run:
+
+| Where the run is | What keeps it to its project | Another project's live run |
+| --- | --- | --- |
+| The hub's own host | The [host sandbox](#the-host-sandbox), for every run once the hub serves a second project | Its processes' memory and environment are out of reach, and so are signals on a hub running as root or from Landlock ABI 6. What it listens on, and a Unix socket in its tree, are not ([limits](#what-is-not-mitigated)) |
+| A device | The agent's host sandbox, when another project may run there, and a directory of its own for each project ([on a device](#on-a-device)) | As on the hub's host |
+| A container, on the hub's host or a device | One bind mount, of its own tree ([in a container](#in-a-container)), and a network of its own for each project ([the network the sandbox sits on](#the-network-the-sandbox-sits-on)) | Out of reach |
+| A Kubernetes Pod | Volumes of its own, and a `NetworkPolicy` that refuses every connection into it | Out of reach, where the cluster's network plugin enforces `NetworkPolicy` |
+
+**Reading another project.** A project's [readers list](#project-readers)
+names the other projects whose runs may read it. It is empty until one of the
+project's administrators adds a project to it:
+
+```bash
+cloop project readers add vault billing   # billing's runs may read vault
+cloop project readers rm vault billing    # and now they may not
+```
+
+A run of a listed project is given the other project's source tree read-only,
+without its `.cloop`, its `.git` or the files credentials live in
+([reading another project's tree](#reading-another-projects-tree)), and the hub
+answers its knowledge searches that name the other project. No write crosses,
+whatever the list says. When a project is taken off a list, the hub stops
+serving it to the run at once, and the tree goes at the run's next task.
+
+**The run's credentials.** A run's knowledge session, its egress and git proxy
+sessions and its other credentials open its own project and nothing else
+([what a run's credentials reach](#what-a-runs-credentials-reach)). The
+dashboard refuses every one of them, a search naming another project gets a 404
+unless that project's list allows the read, and the git proxy refuses another
+project's repository.
+
+**The operator's opt-out.** Some projects need more of the host than their own
+directory, such as the Docker socket or an SSH key in the hub user's home.
+Listed in `executors.host_sandbox.opt_out`, a project's runs on the hub's host
+and on devices run outside the host sandbox
+([projects that share a host](#the-host-sandbox)). They can then read and
+write every other project on that host as the hub's or the agent's user can,
+the projects they were given read-only included, and `cloop hub doctor` names
+each opted-out project as a warning. The opt-out does not free a person who is
+not a hub administrator on a hub with sign-in, and `mode: all` ignores it.
+Containers have nothing to opt out of.
+
+**How it is checked.** `tests/isolation` runs a stand-in harness that has
+turned hostile. It gives the harness the paths, addresses and routes of
+another project and of the hub, and lets it attack them from a real run,
+through a real hub, on the hub's own host
+(`TestAHostileRunOnTheHubsHostReachesNoOtherProject`), on a device whose agent
+is a second process speaking the agent protocol
+(`TestAHostileRunOnADeviceReachesNoOtherProject`) and on a container executor
+(`TestAHostileRunInAContainerReachesNoOtherProject`). The harness tries to:
+
+- read, list, write, overwrite, append to, delete, move and link to the other
+  project's files, change their mode, and plant a git hook in its repository;
+- read the other project's state database and the hub's database,
+  configuration and registry, and open them for writing;
+- search the other project's knowledge and fetch a snapshot of its tree with
+  its own session;
+- call the dashboard's routes on the other project with its session, with its
+  egress session and with no credential at all, to read its state, add or
+  delete a task, start its run or put itself on its readers list;
+- fetch and push the other project's repository through the git proxy, and
+  open a tunnel to the other project's run or to the hub through the egress
+  proxy;
+- connect to the other project's live run, signal it and read its environment.
+
+It does that three times: with the other project's readers list empty, after
+`cloop project readers add`, and after `cloop project readers rm`. After each
+round the test checks that every attempt failed, that the other project's
+files, plan and canaries and the readers lists are as they were, and that the
+run read the other project only in the second round, and only read-only.
+Last, the operator opts the attacking project out, and the same reads succeed,
+which shows that the refusals were the sandbox's. The tests on the hub's host
+and on a device run in CI's Build and Test job, as an unprivileged user; the
+container test runs in the flagship job. All three are a requirement in
+`.cloop/requirements.yaml`, so `make requirements-check` runs them too.
+
+**Limits.** The host sandbox keeps a run away from other projects' files, but
+it gives the run no network of its own: on the hub's host and on a device, a run
+can connect to another project's live run over TCP and to a Unix socket in its
+tree. Without namespaces it can also change the
+mode of another project's files, and before Landlock ABI 6 signal its
+processes. A project in `opt_out` is not kept apart at all, and runs that sign
+in with one Claude login share its directory. On the hub's own host a container
+under gVisor cannot run a project reliably. Each of these is described under
+[what is not mitigated](#what-is-not-mitigated).
 
 ---
 
@@ -5549,6 +5660,22 @@ Retiring the static token while the hub runs (see
 | A container sandbox binds its own project's tree alone, under every runtime; it cannot reach another project's tree or `/tmp`; the hub's own directory is never bound; derived images are per project | `TestTwoProjectsOnOneContainerExecutorShareNothing`, `TestASandboxOfOneProjectCannotReachAnothers`, `TestTheHubsOwnDirectoryIsNeverBoundIntoASandbox`, `TestDerivedKey_IsEachProjectsOwn` |
 | Two projects' Pods share no volume and no Secret, and a runner volume's wipe takes the last project's caches with its tree | `TestTwoProjectsPodsShareNoVolume`, `TestAWipeTakesTheLastProjectsCachesWithItsTree` |
 
+### Project isolation — `tests/isolation` and the package suites
+
+These run [isolation between projects](#isolation-between-projects) end to end
+with the real binary: a real hub, three projects, and a stand-in harness that
+attacks one project from another's run on the executor under test, with the
+other project's readers list empty, after `cloop project readers add` and after
+`rm`. The package suites in the two tables above hold each executor's part of
+it.
+
+| Guarantee | Test |
+| --- | --- |
+| On the hub's own host, a run can neither read, list, write, delete, move nor link to another project's files, its state database, its git hooks, or the hub's database, configuration and registry; it reads another project only while that project's readers list names its own, in place, read-only, and without its `.cloop`, `.git` and `.env`; its session, egress session and git proxy session are refused for the other project at the run routes, the dashboard and the proxies; the other project's tree, plan and canaries and the readers lists are unchanged after every round; and an operator's opt-out lets the run out of the sandbox | `tests/isolation: TestAHostileRunOnTheHubsHostReachesNoOtherProject` |
+| The same on a device, against both the device's copy of the other project and the hub's, with a listed project given as a snapshot the run cannot write | `tests/isolation: TestAHostileRunOnADeviceReachesNoOtherProject` |
+| The same in a container, where another project's live sandbox is also out of reach, and a listed project is bound read-only with its credential files covered | `tests/isolation: TestAHostileRunInAContainerReachesNoOtherProject` |
+| A run is given another project only when that project's list names it, and the hub serves it only while the list does | `pkg/projectreaders: TestCanReadIsDenyByDefault`; `pkg/ui: TestARunIsGivenOnlyTheProjectsWhoseReadersListsNameIt`, `TestTheHubServesAReadOnlyProjectOnlyWhileItsListNamesTheRun`; `pkg/orchestrator: TestReadersBoundaryEndsTheRunWhenAProjectStopsListingIt` |
+
 ### Sandbox egress filtering — `netfilter_test.go` and the package suites
 
 These test the properties in [the network section](#the-network-the-sandbox-sits-on)
@@ -6731,6 +6858,35 @@ host, and some daemons (`iscsid`, `multipathd`) trust a caller for being root.
 `cloop hub doctor` warns about it (`TestHostSandboxFindingsAcrossTheMatrix`).
 Linux 6.12 scopes abstract sockets with Landlock, and a hub that does not run
 as root is not trusted by those daemons in the first place.
+
+**On the hub's host and on a device, a run shares the host's network and can
+connect to a Unix socket in another project's tree.** The host sandbox keeps a
+run to its project's files. It gives the run no network of its own, so the run
+can connect to whatever another project's live run listens on, loopback
+included. Connecting to a Unix socket is not a file open, so it can also
+connect to a socket another project's run made in its own tree. That holds on a
+hub running as root too: its namespaces hide `/run`, `/tmp` and the other
+directories the host's services share, and other projects' trees stay visible
+there, though not readable. A run on the
+hub's own host can also send the hub requests from the loopback address, and
+five without a credential lock that address out of the dashboard for a minute.
+Run projects whose services must stay apart in containers, which give each
+project a network of its own and see no other project's tree
+(`TestAHostileRunOnTheHubsHostReachesNoOtherProject`,
+`TestAHostileRunOnADeviceReachesNoOtherProject`).
+
+**On the hub's own host, a container under gVisor shares its project's database
+with the hub without the database's locks.** A container executor on the hub's
+host binds the project's directory, `.cloop/state.db` included, and the hub
+keeps reading and writing that database while the run works. SQLite keeps two
+writers apart with file locks, and gVisor keeps a sandbox's locks inside the
+sandbox. So the hub and a run under gVisor write the database without waiting
+for each other: the run fails on it at random with "disk I/O error", and two
+writes at once could damage it. In testing, the hub's copy was whole after such
+a failure, but nothing guarantees that. Use runc for a container executor on the
+hub's own host. A gVisor sandbox on a device works on the device's copy of
+the project, which the hub does not open
+(`TestAHostileRunInAContainerReachesNoOtherProject`).
 
 **A run acts with the credentials of whoever starts it, whatever its project
 holds.** A sandboxed run can read its own person's Claude login and the
