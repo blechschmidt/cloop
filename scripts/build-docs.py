@@ -81,8 +81,11 @@ ASSET_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 # untouched. docs-freshness.py fetches it from there; the name is its contract.
 STAMP_NAME = "build.json"
 # What a build reads. Local changes here mean the site is not exactly the
-# commit it names, which the stamp records rather than hides.
-STAMP_INPUTS = ("docs", "website", "README.md", "scripts/build-docs.py")
+# commit it names, which the stamp records rather than hides. The last three
+# are the dashboard demo's (scripts/build-demo.py), which `make docs-site`
+# builds into the same site.
+STAMP_INPUTS = ("docs", "website", "README.md", "scripts/build-docs.py",
+                "scripts/build-demo.py", "pkg/ui/assets", "pkg/ui/static.go")
 
 warnings: list[str] = []
 

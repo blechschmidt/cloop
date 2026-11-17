@@ -5,7 +5,10 @@ name: Documentation site (GitHub Pages)
 # The site is not a second copy of the docs: scripts/build-docs.py stages this
 # repository's own Markdown (docs/ and README.md) mirroring the repository
 # layout so the relative links between pages survive, derives the navigation
-# from docs/README.md, and Material for MkDocs renders it.
+# from docs/README.md, and Material for MkDocs renders it. Nor is its dashboard
+# demo (/demo/) a second UI: scripts/build-demo.py copies the dashboard's own
+# assets out of pkg/ui/assets and puts a read-only stand-in for the hub in
+# front of them, which is why pkg/ui/assets is among the paths below.
 #
 # The build job runs the same `make docs-check` and `make docs-site` developers
 # run locally, so CI and local builds cannot drift. That build is --strict with
@@ -56,6 +59,12 @@ on:
       - "CONTRIBUTING.md"
       - "scripts/build-docs.py"
       - "scripts/check-docs.sh"
+      # The dashboard demo at /demo/ is the dashboard's own assets behind a
+      # shim (scripts/build-demo.py), so a change to the dashboard is a change
+      # to the site. website/demo, its shim and fixtures, is under website/.
+      - "scripts/build-demo.py"
+      - "pkg/ui/assets/**"
+      - "pkg/ui/static.go"
       - "Makefile"
       - ".github/workflows/docs.yml"
   pull_request:
@@ -69,6 +78,12 @@ on:
       - "CONTRIBUTING.md"
       - "scripts/build-docs.py"
       - "scripts/check-docs.sh"
+      # The dashboard demo at /demo/ is the dashboard's own assets behind a
+      # shim (scripts/build-demo.py), so a change to the dashboard is a change
+      # to the site. website/demo, its shim and fixtures, is under website/.
+      - "scripts/build-demo.py"
+      - "pkg/ui/assets/**"
+      - "pkg/ui/static.go"
       - "Makefile"
       - ".github/workflows/docs.yml"
   # Manual re-publish, e.g. after enabling Pages, changing branch policy, or

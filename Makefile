@@ -1,5 +1,5 @@
 .PHONY: build test test-unit test-e2e test-e2e-update test-isolation test-projectmove e2e-stack fuzz bench lint lint-tool lint-version clean \
-        docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-serve docs-freshness \
+        docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-demo docs-serve docs-freshness \
         release-dist changelog-check requirements-check \
         terraform-test terraform-validate
 
@@ -325,11 +325,27 @@ terraform-test: terraform-validate
 docs-stage:
 	@python3 scripts/build-docs.py
 
-## docs-site: build the documentation site into dist/docs-site (strict)
+## docs-site: build the documentation site into dist/docs-site (strict),
+##            the dashboard demo at dist/docs-site/demo included
 docs-site: $(DOCS_VENV) docs-check docs-stage
 	@echo "==> mkdocs build --strict"
 	@$(DOCS_MKDOCS) build --strict -f $(DIST)/mkdocs.yml
+	@$(MAKE) --no-print-directory docs-demo
 	@echo "==> site built: $(DIST)/docs-site/index.html"
+
+## docs-demo: build the dashboard demo into dist/docs-site/demo
+##
+## The real dashboard, copied out of pkg/ui/assets the way pkg/ui/static.go
+## assembles it, behind website/demo/shim.js: a stand-in for the hub that
+## answers reads from website/demo/fixtures, refuses every write and lets
+## nothing leave the page. scripts/build-demo.py says what it adds and why.
+## docs-site runs this after mkdocs, which empties the site directory first;
+## run alone, it rebuilds only the demo. Python only, like the rest of the site.
+## To look at it, serve the site directory and open /demo/:
+##
+##     python3 -m http.server -d dist/docs-site 8000
+docs-demo:
+	@python3 scripts/build-demo.py --out $(DIST)/docs-site/demo
 
 ## docs-freshness: fail when the published site lags main's docs-touching
 ##                 commits by more than DOCS_MAX_LAG_HOURS (default 6)
@@ -382,7 +398,8 @@ requirements-check:
 screenshots:
 	@GO=$(GO) ./scripts/screenshots/capture.sh
 
-## docs-serve: live-preview the documentation site (http://127.0.0.1:$(DOCS_PORT))
+## docs-serve: live-preview the documentation site (http://127.0.0.1:$(DOCS_PORT)),
+##             without the dashboard demo, which mkdocs does not build (see docs-demo)
 docs-serve: $(DOCS_VENV) docs-stage
 	@echo "==> mkdocs serve on http://127.0.0.1:$(DOCS_PORT)  (re-run to pick up docs/ edits)"
 	@$(DOCS_MKDOCS) serve --strict -f $(DIST)/mkdocs.yml -a 127.0.0.1:$(DOCS_PORT)

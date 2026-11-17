@@ -340,6 +340,22 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **The documentation site hosts the dashboard at `/demo/`, with canned data,
+  so you can look around it before installing cloop.** It is the dashboard's
+  own HTML, script bundle, stylesheet and panels, copied out of
+  `pkg/ui/assets` when the site is built (`make docs-demo`, and
+  `make docs-site` runs it), so it changes whenever the dashboard does. A
+  script loaded before the dashboard's stands in for the hub: it answers reads
+  from fixtures in `website/demo/fixtures`, answers a read it has no fixture
+  for with an empty reply, refuses every write in the page with a toast
+  ("This is a read-only demo. Install cloop to try this."), and replays a
+  socket's opening frames. Nothing the page does leaves the site: sign-in
+  redirects, sign-out, Claude sign-in, telemetry, dictation and the microphone
+  are switched off. A banner across the top says it is a demo and links to
+  the install guide. The fixtures are one project with five tasks, enough for
+  the Projects, Overview and Tasks tabs; `website/demo/README.md` describes
+  their format. The hub is unchanged and does not serve any of this
+  (Task 20505).
 - **A conformance suite now attacks project isolation from a hostile run, on
   every kind of executor two projects can share.** `tests/isolation` starts a
   real hub with three projects and replaces the attacking project's `claude`

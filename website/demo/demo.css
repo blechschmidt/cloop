@@ -1,0 +1,42 @@
+/* The demo's banner (website/demo/banner.html), and room for it.
+
+   The banner is fixed to the top of the viewport, above the dashboard's own
+   sticky header, so the page and the two sticky bars that stop under the
+   viewport's top edge move down by its height. Everything else is the
+   dashboard's stylesheet, unchanged; the colours are its own variables, so the
+   banner follows the theme toggle. Dialogs (z-index 50 and up) still cover it,
+   as they cover the header. */
+
+:root { --cloop-demo-banner: 32px; }
+
+body { padding-top: var(--cloop-demo-banner); }
+.layout { min-height: calc(100vh - var(--cloop-demo-banner)); }
+header { top: var(--cloop-demo-banner); }
+.filter-bar { top: calc(52px + var(--cloop-demo-banner)); }
+
+.cloop-demo-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 45;
+  height: var(--cloop-demo-banner);
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 16px;
+  background: var(--surface);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  border-bottom: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 12.5px; line-height: 1.2;
+  white-space: nowrap;
+}
+.cloop-demo-tag {
+  flex-shrink: 0;
+  padding: 2px 7px; border-radius: 10px;
+  background: var(--accent); color: var(--on-accent);
+  font-size: 11px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase;
+}
+.cloop-demo-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.cloop-demo-link { flex-shrink: 0; color: var(--accent); font-weight: 600; text-decoration: none; }
+.cloop-demo-link:hover, .cloop-demo-link:focus-visible { text-decoration: underline; }
+.cloop-demo-link::after { content: " \2192"; }
+
+@media (max-width: 480px) {
+  .cloop-demo-banner { padding: 0 10px; gap: 8px; }
+}

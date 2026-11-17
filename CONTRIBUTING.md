@@ -494,8 +494,16 @@ push to `main` that changes them:
 ```bash
 make docs-serve       # live preview on http://127.0.0.1:8000
 make docs-site        # the strict build CI runs: dead links and anchors fail it
+make docs-demo        # rebuild only the dashboard demo in dist/docs-site/demo
 make docs-freshness   # is the published site as new as main's docs?
 ```
+
+The site also hosts the dashboard itself at `/demo/`, with canned data and
+every change refused. `make docs-site` builds it from the dashboard's own files
+in `pkg/ui/assets`, so a dashboard change shows up there without any edit to
+the demo. Its fixtures, and the stand-in for the hub that answers from them,
+are in `website/demo/`. [`website/demo/README.md`](website/demo/README.md)
+explains how to add a fixture and how to find requests that have none.
 
 Every build is stamped: `build.json` at the site root names the commit it was
 built from. A deploy can stall without anything failing. On 2026-09-30 GitHub
