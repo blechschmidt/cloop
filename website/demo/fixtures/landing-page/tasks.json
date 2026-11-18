@@ -1,0 +1,877 @@
+[
+ {
+  "request": "GET /api/tasks/1/attach/info?project_idx=1",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 1 is not running on any executor",
+   "task_id": 1
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/attachments?project_idx=1&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 1,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/details?project_idx=1",
+  "body": {
+   "artifact_body": "The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.\n\nCommitted 42c66ef: Add the hero with the Start free button (Task 1).\n\nTASK_DONE\n",
+   "artifact_path": ".cloop/tasks/1-build-the-hero-section.md",
+   "artifact_truncated": false,
+   "citations": [
+    {
+     "kind": "injected",
+     "title": "Tidewater brand voice",
+     "url": "https://wiki.demo.example.com/confluence/display/ENG/Tidewater+brand+voice",
+     "source": "Engineering wiki",
+     "source_kind": "confluence",
+     "document_id": 1,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    },
+    {
+     "kind": "injected",
+     "title": "WEB-31 The FAQ link in the navigation goes nowhere",
+     "url": "https://jira.demo.example.com/jira/browse/WEB-31",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 9,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    },
+    {
+     "kind": "injected",
+     "title": "WEB-34 Search results show no description",
+     "url": "https://jira.demo.example.com/jira/browse/WEB-34",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 10,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    },
+    {
+     "kind": "injected",
+     "title": "Engineering handbook",
+     "url": "https://wiki.demo.example.com/confluence/display/ENG/Engineering+handbook",
+     "source": "Engineering wiki",
+     "source_kind": "confluence",
+     "document_id": 6,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    }
+   ],
+   "live_body": "The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.\n\nCommitted 42c66ef: Add the hero with the Start free button (Task 1).\n\nTASK_DONEThe hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.\n\nCommitted 42c66ef: Add the hero with the Start free button (Task 1).\n\nTASK_DONE",
+   "live_path": ".cloop/artifacts/1_output.txt",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 1,
+    "title": "Build the hero section",
+    "description": "The product name, one sentence on what it does and a Start free button.",
+    "priority": 1,
+    "status": "done",
+    "role": "frontend",
+    "result": "The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.\n\nCommitted 42c66ef: Add the hero with the Start free button (Task 1).\n\nTASK_DONE",
+    "started_at": "2026-11-16T09:32:41.396461413Z",
+    "completed_at": "2026-11-16T09:33:06.469940673Z",
+    "estimated_minutes": 25,
+    "artifact_path": ".cloop/tasks/1-build-the-hero-section.md",
+    "tags": [
+     "hero",
+     "epic:launch"
+    ],
+    "annotations": [
+     {
+      "timestamp": "2026-11-16T09:32:41.396779634Z",
+      "author": "ai",
+      "text": "Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)"
+     },
+     {
+      "timestamp": "2026-11-16T09:33:06.473101071Z",
+      "author": "ai",
+      "text": "Task completed successfully in 25s."
+     }
+    ],
+    "risk_score": 6,
+    "impact_score": 8,
+    "requirements": [
+     1,
+     3
+    ],
+    "executor_id": "local",
+    "executor_kind": "localprocess",
+    "isolation": "none",
+    "run_id": "run_5a24c09f95726251b577f80833e8b8cf",
+    "citations": [
+     {
+      "kind": "injected",
+      "title": "Tidewater brand voice",
+      "url": "https://wiki.demo.example.com/confluence/display/ENG/Tidewater+brand+voice",
+      "source": "Engineering wiki",
+      "source_kind": "confluence",
+      "document_id": 1,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     },
+     {
+      "kind": "injected",
+      "title": "WEB-31 The FAQ link in the navigation goes nowhere",
+      "url": "https://jira.demo.example.com/jira/browse/WEB-31",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 9,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     },
+     {
+      "kind": "injected",
+      "title": "WEB-34 Search results show no description",
+      "url": "https://jira.demo.example.com/jira/browse/WEB-34",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 10,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     },
+     {
+      "kind": "injected",
+      "title": "Engineering handbook",
+      "url": "https://wiki.demo.example.com/confluence/display/ENG/Engineering+handbook",
+      "source": "Engineering wiki",
+      "source_kind": "confluence",
+      "document_id": 6,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/network?project_idx=1&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/provenance?project_idx=1",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 1,
+    "task_title": "Build the hero section",
+    "status": "done",
+    "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.",
+    "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB.",
+    "prompt": "You are a senior frontend engineer. Focus on user experience, accessibility, and performance. Apply best practices for component structure, state management, and responsive design. Ensure cross-browser compatibility and follow the project's existing UI conventions.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nShip the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.\n\n## CONSTRAINTS\nPlain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## CURRENT TASK\n**Task 1: Build the hero section** [role: frontend]\nThe product name, one sentence on what it does and a Start free button.\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Build the hero section\n  Summary: The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.  Committed 42c66ef: Add the hero with the Start free button (Task 1).  TA...\n- [x] Task 2: Add the features and pricing sections\n  Summary: Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.  Committed ea3fba7: Add the features and pricing sections (Task 2).  TASK_DONE\n- [x] Task 3: Check that every in-page link resolves\n  Summary: tests/links.sh passes: the navigation's #faq now has a section.  Committed 053346d: Add the FAQ section the navigation links to (Task 3).  TASK_DONE\n- [x] Task 4: Add a meta description and an FAQ\n  Summary: Added a 78-character meta description. The FAQ answers where the tide times come from.  Committed 64ec30e: Describe the page for search engines (Task 4).  TASK_DONE\n\n## UPCOMING TASKS (do not work on these now)\n- [ ] Task 5: Translate the page into German\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "14a380bec73e72cf8042828468edd6ea9db5e326c20a479e72738a032f2d4cf7",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "sandbox": {
+     "executor_id": "local",
+     "executor_kind": "localprocess",
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/reproductions?project_idx=1",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/attach/info?project_idx=1",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 2 is not running on any executor",
+   "task_id": 2
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/attachments?project_idx=1&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 2,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/details?project_idx=1",
+  "body": {
+   "artifact_body": "Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.\n\nCommitted ea3fba7: Add the features and pricing sections (Task 2).\n\nTASK_DONE\n",
+   "artifact_path": ".cloop/tasks/2-add-the-features-and-pricing-sections.md",
+   "artifact_truncated": false,
+   "citations": [
+    {
+     "kind": "injected",
+     "title": "WEB-31 The FAQ link in the navigation goes nowhere",
+     "url": "https://jira.demo.example.com/jira/browse/WEB-31",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 9,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    },
+    {
+     "kind": "injected",
+     "title": "Tidewater brand voice",
+     "url": "https://wiki.demo.example.com/confluence/display/ENG/Tidewater+brand+voice",
+     "source": "Engineering wiki",
+     "source_kind": "confluence",
+     "document_id": 1,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    },
+    {
+     "kind": "injected",
+     "title": "WEB-34 Search results show no description",
+     "url": "https://jira.demo.example.com/jira/browse/WEB-34",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 10,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    }
+   ],
+   "live_body": "Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.\n\nCommitted ea3fba7: Add the features and pricing sections (Task 2).\n\nTASK_DONEAdded #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.\n\nCommitted ea3fba7: Add the features and pricing sections (Task 2).\n\nTASK_DONE",
+   "live_path": ".cloop/artifacts/2_output.txt",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 2,
+    "title": "Add the features and pricing sections",
+    "description": "Three features as a list; one paragraph on pricing.",
+    "priority": 2,
+    "status": "done",
+    "role": "frontend",
+    "result": "Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.\n\nCommitted ea3fba7: Add the features and pricing sections (Task 2).\n\nTASK_DONE",
+    "started_at": "2026-11-16T09:33:06.571939556Z",
+    "completed_at": "2026-11-16T09:33:36.696505739Z",
+    "estimated_minutes": 30,
+    "artifact_path": ".cloop/tasks/2-add-the-features-and-pricing-sections.md",
+    "tags": [
+     "content",
+     "epic:launch"
+    ],
+    "annotations": [
+     {
+      "timestamp": "2026-11-16T09:33:06.573012927Z",
+      "author": "ai",
+      "text": "Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)"
+     },
+     {
+      "timestamp": "2026-11-16T09:33:36.699147264Z",
+      "author": "ai",
+      "text": "Task completed successfully in 30s."
+     }
+    ],
+    "risk_score": 8,
+    "impact_score": 7,
+    "requirements": [
+     3
+    ],
+    "executor_id": "local",
+    "executor_kind": "localprocess",
+    "isolation": "none",
+    "run_id": "run_5a24c09f95726251b577f80833e8b8cf",
+    "citations": [
+     {
+      "kind": "injected",
+      "title": "WEB-31 The FAQ link in the navigation goes nowhere",
+      "url": "https://jira.demo.example.com/jira/browse/WEB-31",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 9,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     },
+     {
+      "kind": "injected",
+      "title": "Tidewater brand voice",
+      "url": "https://wiki.demo.example.com/confluence/display/ENG/Tidewater+brand+voice",
+      "source": "Engineering wiki",
+      "source_kind": "confluence",
+      "document_id": 1,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     },
+     {
+      "kind": "injected",
+      "title": "WEB-34 Search results show no description",
+      "url": "https://jira.demo.example.com/jira/browse/WEB-34",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 10,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/network?project_idx=1&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/provenance?project_idx=1",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 2,
+    "task_title": "Add the features and pricing sections",
+    "status": "done",
+    "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.",
+    "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB.",
+    "prompt": "You are a senior frontend engineer. Focus on user experience, accessibility, and performance. Apply best practices for component structure, state management, and responsive design. Ensure cross-browser compatibility and follow the project's existing UI conventions.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nShip the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.\n\n## CONSTRAINTS\nPlain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## CURRENT TASK\n**Task 2: Add the features and pricing sections** [role: frontend]\nThree features as a list; one paragraph on pricing.\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Build the hero section\n  Summary: The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.  Committed 42c66ef: Add the hero with the Start free button (Task 1).  TA...\n- [x] Task 2: Add the features and pricing sections\n  Summary: Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.  Committed ea3fba7: Add the features and pricing sections (Task 2).  TASK_DONE\n- [x] Task 3: Check that every in-page link resolves\n  Summary: tests/links.sh passes: the navigation's #faq now has a section.  Committed 053346d: Add the FAQ section the navigation links to (Task 3).  TASK_DONE\n- [x] Task 4: Add a meta description and an FAQ\n  Summary: Added a 78-character meta description. The FAQ answers where the tide times come from.  Committed 64ec30e: Describe the page for search engines (Task 4).  TASK_DONE\n\n## UPCOMING TASKS (do not work on these now)\n- [ ] Task 5: Translate the page into German\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "a8873154c8ba016853dd0dcadd108521626402d0c74709f17264ebe14a54faae",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "sandbox": {
+     "executor_id": "local",
+     "executor_kind": "localprocess",
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/reproductions?project_idx=1",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/attach/info?project_idx=1",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 3 is not running on any executor",
+   "task_id": 3
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/attachments?project_idx=1&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 3,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/details?project_idx=1",
+  "body": {
+   "artifact_body": "tests/links.sh passes: the navigation's #faq now has a section.\n\nCommitted 053346d: Add the FAQ section the navigation links to (Task 3).\n\nTASK_DONE\n",
+   "artifact_path": ".cloop/tasks/3-check-that-every-in-page-link-resolves.md",
+   "artifact_truncated": false,
+   "citations": [
+    {
+     "kind": "injected",
+     "title": "WEB-31 The FAQ link in the navigation goes nowhere",
+     "url": "https://jira.demo.example.com/jira/browse/WEB-31",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 9,
+     "run_id": "run_5054131f73be1c87fcc3147d30d77498"
+    },
+    {
+     "kind": "injected",
+     "title": "Tidewater brand voice",
+     "url": "https://wiki.demo.example.com/confluence/display/ENG/Tidewater+brand+voice",
+     "source": "Engineering wiki",
+     "source_kind": "confluence",
+     "document_id": 1,
+     "run_id": "run_5054131f73be1c87fcc3147d30d77498"
+    },
+    {
+     "kind": "injected",
+     "title": "WEB-34 Search results show no description",
+     "url": "https://jira.demo.example.com/jira/browse/WEB-34",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 10,
+     "run_id": "run_5054131f73be1c87fcc3147d30d77498"
+    }
+   ],
+   "live_body": "tests/links.sh passes: the navigation's #faq now has a section.\n\nCommitted 053346d: Add the FAQ section the navigation links to (Task 3).\n\nTASK_DONEtests/links.sh passes: the navigation's #faq now has a section.\n\nCommitted 053346d: Add the FAQ section the navigation links to (Task 3).\n\nTASK_DONE",
+   "live_path": ".cloop/artifacts/3_output.txt",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 3,
+    "title": "Check that every in-page link resolves",
+    "description": "Run tests/links.sh and fix the page until it passes.",
+    "priority": 2,
+    "status": "done",
+    "role": "testing",
+    "result": "tests/links.sh passes: the navigation's #faq now has a section.\n\nCommitted 053346d: Add the FAQ section the navigation links to (Task 3).\n\nTASK_DONE",
+    "started_at": "2026-11-16T09:34:47.595405836Z",
+    "completed_at": "2026-11-16T09:35:02.682974539Z",
+    "estimated_minutes": 15,
+    "artifact_path": ".cloop/tasks/3-check-that-every-in-page-link-resolves.md",
+    "failure_diagnosis": "Root cause: the navigation links to #faq, but no element on the page has id=\"faq\", so tests/links.sh fails on its first check.\n\nFix: write the FAQ section (the goal asks for one) rather than removing the link; then run sh tests/links.sh again.",
+    "tags": [
+     "links",
+     "epic:launch"
+    ],
+    "fail_count": 1,
+    "heal_attempts": 2,
+    "annotations": [
+     {
+      "timestamp": "2026-11-16T09:33:36.794904812Z",
+      "author": "ai",
+      "text": "Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)"
+     },
+     {
+      "timestamp": "2026-11-16T09:33:51.953224517Z",
+      "author": "ai",
+      "text": "[HEAL 1/2] Diagnosis: Root cause: the navigation links to #faq, but no element on the page has id=\"faq\", so tests/links.sh fails on its first check.\n\nFix: write the FAQ section (the goal asks for one) rather than removing the link; then run sh tests/links.sh again."
+     },
+     {
+      "timestamp": "2026-11-16T09:33:51.953404618Z",
+      "author": "ai",
+      "text": "[HEAL 1/2] Prompt variant switched to testing-concise"
+     },
+     {
+      "timestamp": "2026-11-16T09:34:07.011817761Z",
+      "author": "ai",
+      "text": "[HEAL 1/2] Still failing — task emitted TASK_FAILED again"
+     },
+     {
+      "timestamp": "2026-11-16T09:34:07.069880565Z",
+      "author": "ai",
+      "text": "[HEAL 2/2] Diagnosis: Root cause: the navigation links to #faq, but no element on the page has id=\"faq\", so tests/links.sh fails on its first check.\n\nFix: write the FAQ section (the goal asks for one) rather than removing the link; then run sh tests/links.sh again."
+     },
+     {
+      "timestamp": "2026-11-16T09:34:07.07001702Z",
+      "author": "ai",
+      "text": "[HEAL 2/2] Prompt variant switched to testing-default"
+     },
+     {
+      "timestamp": "2026-11-16T09:34:22.128626609Z",
+      "author": "ai",
+      "text": "[HEAL 2/2] Still failing — task emitted TASK_FAILED again"
+     },
+     {
+      "timestamp": "2026-11-16T09:34:22.128648361Z",
+      "author": "ai",
+      "text": "[HEAL] Exhausted after 2 attempts — task remains failed"
+     },
+     {
+      "timestamp": "2026-11-16T09:34:22.131483778Z",
+      "author": "ai",
+      "text": "Task failed per AI TASK_FAILED signal after 45s."
+     },
+     {
+      "timestamp": "2026-11-16T09:34:47.59601857Z",
+      "author": "ai",
+      "text": "Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)"
+     },
+     {
+      "timestamp": "2026-11-16T09:35:02.685628243Z",
+      "author": "ai",
+      "text": "Task completed successfully in 15s."
+     }
+    ],
+    "risk_score": 1,
+    "impact_score": 6,
+    "requirements": [
+     2
+    ],
+    "executor_id": "local",
+    "executor_kind": "localprocess",
+    "isolation": "none",
+    "run_id": "run_5054131f73be1c87fcc3147d30d77498",
+    "citations": [
+     {
+      "kind": "injected",
+      "title": "WEB-31 The FAQ link in the navigation goes nowhere",
+      "url": "https://jira.demo.example.com/jira/browse/WEB-31",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 9,
+      "run_id": "run_5054131f73be1c87fcc3147d30d77498"
+     },
+     {
+      "kind": "injected",
+      "title": "Tidewater brand voice",
+      "url": "https://wiki.demo.example.com/confluence/display/ENG/Tidewater+brand+voice",
+      "source": "Engineering wiki",
+      "source_kind": "confluence",
+      "document_id": 1,
+      "run_id": "run_5054131f73be1c87fcc3147d30d77498"
+     },
+     {
+      "kind": "injected",
+      "title": "WEB-34 Search results show no description",
+      "url": "https://jira.demo.example.com/jira/browse/WEB-34",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 10,
+      "run_id": "run_5054131f73be1c87fcc3147d30d77498"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/network?project_idx=1&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/provenance?project_idx=1",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 3,
+    "task_title": "Check that every in-page link resolves",
+    "status": "done",
+    "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.",
+    "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB.",
+    "prompt": "You are a test engineering expert. Write comprehensive, maintainable tests that give real confidence. Cover happy paths, edge cases, and error conditions. Avoid over-mocking — prefer integration tests where feasible. Ensure tests are deterministic and fast.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nShip the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.\n\n## CONSTRAINTS\nPlain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## CURRENT TASK\n**Task 3: Check that every in-page link resolves** [role: testing]\nRun tests/links.sh and fix the page until it passes.\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Build the hero section\n  Summary: The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.  Committed 42c66ef: Add the hero with the Start free button (Task 1).  TA...\n- [x] Task 2: Add the features and pricing sections\n  Summary: Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.  Committed ea3fba7: Add the features and pricing sections (Task 2).  TASK_DONE\n- [x] Task 3: Check that every in-page link resolves\n  Summary: tests/links.sh passes: the navigation's #faq now has a section.  Committed 053346d: Add the FAQ section the navigation links to (Task 3).  TASK_DONE\n- [x] Task 4: Add a meta description and an FAQ\n  Summary: Added a 78-character meta description. The FAQ answers where the tide times come from.  Committed 64ec30e: Describe the page for search engines (Task 4).  TASK_DONE\n\n## UPCOMING TASKS (do not work on these now)\n- [ ] Task 5: Translate the page into German\n\n## PREVIOUS ATTEMPT FAILED — DIAGNOSIS\nThis task was attempted before and failed. Here is the diagnosis of what went wrong\nand what should be tried differently this time:\n\nRoot cause: the navigation links to #faq, but no element on the page has id=\"faq\", so tests/links.sh fails on its first check.\n\nFix: write the FAQ section (the goal asks for one) rather than removing the link; then run sh tests/links.sh again.\n\n**Apply this diagnosis: address the root cause identified above before proceeding.**\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "f30d5045320bf7cc094cadc3e6b3ec8ba812eee2d21f513f659dd13b2480c8f0",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "sandbox": {
+     "executor_id": "local",
+     "executor_kind": "localprocess",
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/reproductions?project_idx=1",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/attach/info?project_idx=1",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 4 is not running on any executor",
+   "task_id": 4
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/attachments?project_idx=1&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 4,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/details?project_idx=1",
+  "body": {
+   "artifact_body": "Added a 78-character meta description. The FAQ answers where the tide times come from.\n\nCommitted 64ec30e: Describe the page for search engines (Task 4).\n\nTASK_DONE\n",
+   "artifact_path": ".cloop/tasks/4-add-a-meta-description-and-an-faq.md",
+   "artifact_truncated": false,
+   "citations": [
+    {
+     "kind": "injected",
+     "title": "WEB-34 Search results show no description",
+     "url": "https://jira.demo.example.com/jira/browse/WEB-34",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 10,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    },
+    {
+     "kind": "injected",
+     "title": "Tidewater brand voice",
+     "url": "https://wiki.demo.example.com/confluence/display/ENG/Tidewater+brand+voice",
+     "source": "Engineering wiki",
+     "source_kind": "confluence",
+     "document_id": 1,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    },
+    {
+     "kind": "injected",
+     "title": "WEB-31 The FAQ link in the navigation goes nowhere",
+     "url": "https://jira.demo.example.com/jira/browse/WEB-31",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 9,
+     "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+    }
+   ],
+   "live_body": "Added a 78-character meta description. The FAQ answers where the tide times come from.\n\nCommitted 64ec30e: Describe the page for search engines (Task 4).\n\nTASK_DONEAdded a 78-character meta description. The FAQ answers where the tide times come from.\n\nCommitted 64ec30e: Describe the page for search engines (Task 4).\n\nTASK_DONE",
+   "live_path": ".cloop/artifacts/4_output.txt",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 4,
+    "title": "Add a meta description and an FAQ",
+    "description": "Describe the page for search engines; answer where the tide times come from.",
+    "priority": 3,
+    "status": "done",
+    "role": "frontend",
+    "result": "Added a 78-character meta description. The FAQ answers where the tide times come from.\n\nCommitted 64ec30e: Describe the page for search engines (Task 4).\n\nTASK_DONE",
+    "started_at": "2026-11-16T09:34:22.236636236Z",
+    "completed_at": "2026-11-16T09:34:42.342653525Z",
+    "estimated_minutes": 20,
+    "artifact_path": ".cloop/tasks/4-add-a-meta-description-and-an-faq.md",
+    "tags": [
+     "seo",
+     "epic:launch"
+    ],
+    "annotations": [
+     {
+      "timestamp": "2026-11-16T09:34:22.237119525Z",
+      "author": "ai",
+      "text": "Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)"
+     },
+     {
+      "timestamp": "2026-11-16T09:34:42.34499715Z",
+      "author": "ai",
+      "text": "Task completed successfully in 20s."
+     }
+    ],
+    "risk_score": 3,
+    "impact_score": 5,
+    "requirements": [
+     4
+    ],
+    "executor_id": "local",
+    "executor_kind": "localprocess",
+    "isolation": "none",
+    "run_id": "run_5a24c09f95726251b577f80833e8b8cf",
+    "citations": [
+     {
+      "kind": "injected",
+      "title": "WEB-34 Search results show no description",
+      "url": "https://jira.demo.example.com/jira/browse/WEB-34",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 10,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     },
+     {
+      "kind": "injected",
+      "title": "Tidewater brand voice",
+      "url": "https://wiki.demo.example.com/confluence/display/ENG/Tidewater+brand+voice",
+      "source": "Engineering wiki",
+      "source_kind": "confluence",
+      "document_id": 1,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     },
+     {
+      "kind": "injected",
+      "title": "WEB-31 The FAQ link in the navigation goes nowhere",
+      "url": "https://jira.demo.example.com/jira/browse/WEB-31",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 9,
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/network?project_idx=1&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/provenance?project_idx=1",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 4,
+    "task_title": "Add a meta description and an FAQ",
+    "status": "done",
+    "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.",
+    "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB.",
+    "prompt": "You are a senior frontend engineer. Focus on user experience, accessibility, and performance. Apply best practices for component structure, state management, and responsive design. Ensure cross-browser compatibility and follow the project's existing UI conventions.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nShip the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.\n\n## CONSTRAINTS\nPlain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## CURRENT TASK\n**Task 4: Add a meta description and an FAQ** [role: frontend]\nDescribe the page for search engines; answer where the tide times come from.\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Build the hero section\n  Summary: The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.  Committed 42c66ef: Add the hero with the Start free button (Task 1).  TA...\n- [x] Task 2: Add the features and pricing sections\n  Summary: Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.  Committed ea3fba7: Add the features and pricing sections (Task 2).  TASK_DONE\n- [x] Task 3: Check that every in-page link resolves\n  Summary: tests/links.sh passes: the navigation's #faq now has a section.  Committed 053346d: Add the FAQ section the navigation links to (Task 3).  TASK_DONE\n- [x] Task 4: Add a meta description and an FAQ\n  Summary: Added a 78-character meta description. The FAQ answers where the tide times come from.  Committed 64ec30e: Describe the page for search engines (Task 4).  TASK_DONE\n\n## UPCOMING TASKS (do not work on these now)\n- [ ] Task 5: Translate the page into German\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "b38aeb68051f06503ed55673fc68439fc789326461bc1bbd1d4e1672d7e45dfa",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "sandbox": {
+     "executor_id": "local",
+     "executor_kind": "localprocess",
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/reproductions?project_idx=1",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/5/attach/info?project_idx=1",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 5 is not running on any executor",
+   "task_id": 5
+  }
+ },
+ {
+  "request": "GET /api/tasks/5/attachments?project_idx=1&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 5,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/5/details?project_idx=1",
+  "body": {
+   "artifact_body": "",
+   "artifact_path": "",
+   "artifact_truncated": false,
+   "citations": [],
+   "live_body": "",
+   "live_path": "",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 5,
+    "title": "Translate the page into German",
+    "description": "A /de/ copy of the page with the same sections; the button says Kostenlos starten.",
+    "priority": 3,
+    "status": "pending"
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/5/network?project_idx=1&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/5/provenance?project_idx=1",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 5,
+    "task_title": "Translate the page into German",
+    "status": "pending",
+    "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.",
+    "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB.",
+    "prompt": "You are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nShip the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.\n\n## CONSTRAINTS\nPlain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## CURRENT TASK\n**Task 5: Translate the page into German**\nA /de/ copy of the page with the same sections; the button says Kostenlos starten.\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Build the hero section\n  Summary: The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.  Committed 42c66ef: Add the hero with the Start free button (Task 1).  TA...\n- [x] Task 2: Add the features and pricing sections\n  Summary: Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.  Committed ea3fba7: Add the features and pricing sections (Task 2).  TASK_DONE\n- [x] Task 3: Check that every in-page link resolves\n  Summary: tests/links.sh passes: the navigation's #faq now has a section.  Committed 053346d: Add the FAQ section the navigation links to (Task 3).  TASK_DONE\n- [x] Task 4: Add a meta description and an FAQ\n  Summary: Added a 78-character meta description. The FAQ answers where the tide times come from.  Committed 64ec30e: Describe the page for search engines (Task 4).  TASK_DONE\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "cf7f270233569021ebcdd19781c8c45e80a658f4c22ff6b163a47b96762f8dea",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "sandbox": {
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false,
+    "warnings": [
+     "no sandbox stamp on the task artifact: the executor and image this task ran on are unknown"
+    ]
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/5/reproductions?project_idx=1",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ }
+]

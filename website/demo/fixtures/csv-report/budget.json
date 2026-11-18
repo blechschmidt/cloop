@@ -1,0 +1,32 @@
+[
+ {
+  "request": "GET /api/budget?project_idx=2",
+  "body": {
+   "effective": {
+    "daily_token_limit": 0,
+    "daily_usd_limit": 0
+   },
+   "global": {
+    "alert_threshold_pct": 80,
+    "daily_token_limit": 2000000,
+    "daily_usd_limit": 25
+   },
+   "project": {
+    "alert_threshold_pct": 80,
+    "block_extra_usage": true,
+    "daily_token_limit": 400000,
+    "daily_usd_limit": 3,
+    "global_token_pct": 0,
+    "global_usd_pct": 0,
+    "max_five_hour_pct": 85,
+    "max_weekly_pct": 90,
+    "monthly_usd": 60
+   },
+   "usage": {
+    "entry_count": 5,
+    "total_tokens": 0,
+    "total_usd": 0
+   }
+  }
+ }
+]

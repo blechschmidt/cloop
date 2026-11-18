@@ -1,0 +1,60 @@
+[
+ {
+  "request": "GET /api/ci/config",
+  "body": {
+   "enabled": false,
+   "issuer": "https://token.actions.githubusercontent.com",
+   "audience": "cloop",
+   "clock_skew_seconds": 60,
+   "default_models": [
+    "claude-sonnet-*",
+    "claude-haiku-*"
+   ],
+   "upstream": "none",
+   "upstream_ready": false,
+   "base_url": "https://demo.example.com/api/ci/anthropic",
+   "snippet": "permissions:\n  id-token: write   # required: lets the job mint an OIDC token\n  contents: read\n\nsteps:\n  - uses: actions/checkout@v5\n  - name: Federate with cloop\n    run: |\n      set -euo pipefail\n      : \"${ACTIONS_ID_TOKEN_REQUEST_URL:?the job needs permissions: id-token: write}\"\n      ID_TOKEN=$(curl -fsS -H \"Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN\" \\\n        \"$ACTIONS_ID_TOKEN_REQUEST_URL&audience=cloop\" | jq -er .value)\n      RESP=$(curl -sS --fail-with-body -X POST https://demo.example.com/api/ci/token \\\n        -H 'content-type: application/json' \\\n        -d \"{\\\"token\\\":\\\"$ID_TOKEN\\\"}\") || {\n        echo \"::error::cloop issued no session: $(jq -r '.error | .message? // .' <<<\"$RESP\" 2>/dev/null)\"\n        exit 1\n      }\n      TOKEN=$(jq -er .token <<<\"$RESP\")\n      BASE_URL=$(jq -er .base_url <<<\"$RESP\")\n      echo \"::add-mask::$TOKEN\"\n      echo \"ANTHROPIC_BASE_URL=$BASE_URL\" >> \"$GITHUB_ENV\"\n      echo \"ANTHROPIC_AUTH_TOKEN=$TOKEN\" >> \"$GITHUB_ENV\"\n  - name: Run the agent\n    # a model the rule admits: Claude Code's own default can be one the allowlist refuses\n    run: npx -y @anthropic-ai/claude-code --model sonnet -p \"review the diff and fix any bug you find\""
+  }
+ },
+ {
+  "request": "GET /api/ci/exchanges",
+  "body": {
+   "exchanges": []
+  }
+ },
+ {
+  "request": "GET /api/ci/rules",
+  "body": {
+   "rules": [
+    {
+     "id": "73fef79ddf53c1fe1ad56adc",
+     "name": "todo-api release",
+     "enabled": true,
+     "repository": "acme/todo-api",
+     "created_by": "dana@demo.example.com",
+     "created_at": "2026-11-16T09:30:07.274236556Z",
+     "updated_at": "2026-11-16T09:30:07.274236556Z",
+     "last_matched_at": "0001-01-01T00:00:00Z",
+     "effective_models": [
+      "claude-sonnet-*",
+      "claude-haiku-*"
+     ],
+     "effective_ttl_seconds": 3600,
+     "effective_max_requests": 500,
+     "live_sessions": 0
+    }
+   ],
+   "default_models": [
+    "claude-sonnet-*",
+    "claude-haiku-*"
+   ],
+   "enabled": false
+  }
+ },
+ {
+  "request": "GET /api/ci/sessions",
+  "body": {
+   "sessions": []
+  }
+ }
+]

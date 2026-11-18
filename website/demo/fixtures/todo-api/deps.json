@@ -1,0 +1,69 @@
+[
+ {
+  "request": "GET /api/deps?project_idx=0",
+  "body": {
+   "edges": [
+    {
+     "from": 1,
+     "to": 2
+    },
+    {
+     "from": 2,
+     "to": 3
+    },
+    {
+     "from": 3,
+     "to": 4
+    },
+    {
+     "from": 4,
+     "to": 5
+    }
+   ],
+   "nodes": [
+    {
+     "id": 1,
+     "title": "Scaffold the HTTP server with a health check",
+     "status": "done",
+     "priority": 1,
+     "description": "A main package that listens on $ADDR (default :8080) and answers GET /healthz with 200 ok."
+    },
+    {
+     "id": 2,
+     "title": "Add an in-memory store for to-do items",
+     "status": "done",
+     "priority": 1,
+     "description": "A Store with Add, Get, List, SetDone and Delete, safe for concurrent use."
+    },
+    {
+     "id": 3,
+     "title": "Implement the /todos CRUD handlers",
+     "status": "done",
+     "priority": 2,
+     "description": "GET/POST /todos and GET/PATCH/DELETE /todos/{id}, JSON in and out, 400 and 404 as JSON errors."
+    },
+    {
+     "id": 4,
+     "title": "Cover the handlers with tests",
+     "status": "done",
+     "priority": 2,
+     "description": "httptest-based tests for create, list, complete, the empty-title 400 and unknown-id 404; attach the coverage report."
+    },
+    {
+     "id": 5,
+     "title": "Document the API in the README",
+     "status": "done",
+     "priority": 3,
+     "description": "A table of every endpoint, how to run the service and what an error looks like."
+    },
+    {
+     "id": 6,
+     "title": "Review the API before the first release",
+     "status": "done",
+     "priority": 2,
+     "description": "A second person reads the handlers and the tests before the README is written."
+    }
+   ]
+  }
+ }
+]

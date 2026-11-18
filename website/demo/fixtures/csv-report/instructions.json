@@ -1,0 +1,8 @@
+[
+ {
+  "request": "GET /api/instructions?project_idx=2&*",
+  "body": {
+   "instructions": "Python 3.12, standard library only."
+  }
+ }
+]

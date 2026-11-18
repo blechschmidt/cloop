@@ -1,0 +1,504 @@
+[
+ {
+  "request": "GET /api/executors?project_idx=3",
+  "body": {
+   "executors": [
+    {
+     "id": "BXWRDyhCGccKPnAH",
+     "name": "edge-fra-07",
+     "kind": "remote",
+     "status": "online",
+     "registered": true,
+     "enrolled": true,
+     "default": false,
+     "isolation": "remote",
+     "capabilities": {
+      "isolation": "remote",
+      "kernel_isolated": true,
+      "supports_stream": true,
+      "supports_signal": true,
+      "supports_resource_limits": true,
+      "disk_enforcement": "sampled",
+      "shares_host_filesystem": false,
+      "network_egress": true,
+      "filtered_egress": false,
+      "supports_image_override": true,
+      "supports_sandbox_build": true,
+      "supports_workspace_provisioning": true,
+      "supports_project_seed": true,
+      "returns_project_state": true,
+      "supports_write_back": true,
+      "supports_branch_bundle": true,
+      "supports_sandbox_mounts": false,
+      "supports_host_mounts": false,
+      "read_only_projects": "snapshot",
+      "supports_devices": false,
+      "supports_interfaces": false,
+      "supports_egress_scope": false,
+      "supports_secret_files": true,
+      "max_concurrent": 4,
+      "platform": "linux",
+      "arch": "amd64"
+     },
+     "agent_capabilities": {
+      "os": "linux",
+      "arch": "amd64",
+      "cpus": 12,
+      "memory_mb": 65536,
+      "container_runtimes": [
+       "docker"
+      ],
+      "harnesses": [
+       "claude",
+       "git"
+      ],
+      "workdir_root": "/srv/cloop/work",
+      "workspace_provisioning": true,
+      "write_back": true,
+      "branch_bundles": true,
+      "max_concurrent": 4,
+      "virtualization": true,
+      "usb_devices": [
+       {
+        "port": "1-2",
+        "bus": 1,
+        "dev": 4,
+        "vendor_id": "0483",
+        "product_id": "374b",
+        "manufacturer": "STMicroelectronics",
+        "product": "STM32 STLink",
+        "serial": "0669FF485671",
+        "node": "/dev/bus/usb/001/004"
+       },
+       {
+        "port": "1-3",
+        "bus": 1,
+        "dev": 5,
+        "vendor_id": "1050",
+        "product_id": "0030",
+        "manufacturer": "Yubico",
+        "product": "YubiHSM 2",
+        "serial": "0031650425",
+        "node": "/dev/bus/usb/001/005"
+       }
+      ],
+      "packet_filter": true,
+      "host_sandbox": true,
+      "denial_log": true,
+      "forwarded_usb": true,
+      "forwarded_l2": true,
+      "oci_runtimes": [
+       "runc",
+       "runsc"
+      ],
+      "update_channel": "stable",
+      "host_kernel": {
+       "schema": 1,
+       "release": "6.8.0-49-generic",
+       "version": "#49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov 4 02:06:24 UTC 2024",
+       "machine": "x86_64",
+       "proc_version": "Linux version 6.8.0-49-generic (buildd@lcy02-amd64-103) (x86_64-linux-gnu-gcc-13 (Ubuntu 13.2.0-23ubuntu4) 13.2.0) #49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov 4 02:06:24 UTC 2024",
+       "boot_id": "6f1c2a4e-3b7d-4e19-9a52-0c8d7e6b5a31",
+       "uptime_seconds": 1209600,
+       "dmi_vendor": "Supermicro",
+       "dmi_product": "SYS-E300-12D"
+      }
+     },
+     "inventory": {
+      "agent_version": "dev+g0a796d2.dirty",
+      "agent_version_label": "dev+g0a796d2.dirty",
+      "os": "linux",
+      "arch": "amd64",
+      "cpus": 12,
+      "memory_mb": 65536,
+      "memory_label": "64.0 GB",
+      "harnesses": [
+       "claude",
+       "git"
+      ],
+      "container_runtimes": [
+       "docker"
+      ],
+      "workdir_root": "/srv/cloop/work",
+      "live": true
+     },
+     "version_skew": {
+      "skew": "none",
+      "material": false,
+      "hub_version": "dev+g0a796d2.dirty",
+      "device_protocol": 31,
+      "hub_protocol": 31
+     },
+     "upgrade_note": "This device's agent speaks protocol v31; v0.0.7 speaks v26, so installing it would lower the device's protocol and lose what needs v27–v31. The hub runs an unreleased build (dev+g0a796d2.dirty), and the Executors panel's Upgrade button and auto-update install published releases only. To move the device forward, build cloop from the hub's own uncommitted source tree (on commit 0a796d2), in a full clone, as a static binary (`CGO_ENABLED=0 go build -ldflags \"-X github.com/blechschmidt/cloop/pkg/version.Commit=$(git rev-parse HEAD) -X github.com/blechschmidt/cloop/pkg/version.Sequence=$(git rev-list --count --first-parent HEAD)\" -o cloop .`), copy it to the device and run `sudo ./cloop executor agent install --upgrade --insecure-skip-verify` there (a binary built by hand carries no signed provenance); a plain --upgrade keeps the device's packet-filter grant as it is.",
+     "rollback_note": "This device's agent runs dev+g0a796d2.dirty, a build that carries no place on main, so its installer has nothing to order an upgrade by: rollback protection does not cover it, and a forced upgrade could still move it to any older release. Its agent cannot carry out an upgrade the hub asks for, so upgrade it once on the device, as root: `cloop upgrade` fetches the latest release (v0.0.7 or later) and verifies its signature, then `cloop executor agent install --upgrade --remote-upgrade` restarts the agent on it and installs the helper the Upgrade button needs. From then on its installer refuses any build earlier than the one it runs.",
+     "update_channel": "stable",
+     "sandbox": {
+      "mode": "container",
+      "engine": "docker",
+      "runtime": "runsc",
+      "image": "ghcr.io/blechschmidt/cloop-harness:latest",
+      "network": "bridge",
+      "configured": true
+     },
+     "isolation_evidence": {
+      "runtime": "runsc",
+      "claim": "userspace-kernel",
+      "status": "verified",
+      "summary": "claims runsc, verified: a userspace kernel (gVisor)",
+      "verdict": "userspace-kernel",
+      "detail": "gVisor's userspace kernel served the probe: it reports 4.4.0 #1 SMP Sun Jan 10 15:06:54 PST 2016 (/proc/version names gVisor's kernel; dmesg: Starting gVisor...)",
+      "probed_at": "2026-11-16T09:30:02Z",
+      "attempted_at": "2026-11-16T09:30:02Z",
+      "point": "runtime_change"
+     },
+     "restricted": true,
+     "admitted": true,
+     "labels": {
+      "rack": "b4",
+      "region": "eu-central",
+      "site": "fra"
+     },
+     "label_source": "agent credential",
+     "virtual_count": 1,
+     "created_at": "2026-11-16T09:30:01.552060751Z",
+     "enrolled_by": "2WBIk1Gr8jY7svYR",
+     "running": 0,
+     "running_known": true,
+     "blocked": false,
+     "protocol_version": 31,
+     "supports_revocation": true,
+     "sched_state": "ready",
+     "schedulable": true,
+     "admin_held": false,
+     "last_seen": "2026-11-16T09:39:52.933467346Z",
+     "in_flight": 0,
+     "in_flight_known": true
+    },
+    {
+     "id": "local",
+     "name": "local",
+     "kind": "localprocess",
+     "status": "online",
+     "registered": true,
+     "enrolled": false,
+     "default": true,
+     "isolation": "none",
+     "capabilities": {
+      "isolation": "none",
+      "supports_stream": true,
+      "supports_signal": true,
+      "supports_resource_limits": false,
+      "shares_host_filesystem": true,
+      "network_egress": true,
+      "filtered_egress": false,
+      "supports_image_override": false,
+      "supports_sandbox_build": false,
+      "supports_workspace_provisioning": false,
+      "supports_project_seed": false,
+      "returns_project_state": false,
+      "supports_write_back": false,
+      "supports_branch_bundle": false,
+      "supports_sandbox_mounts": false,
+      "supports_host_mounts": false,
+      "read_only_projects": "in_place",
+      "supports_devices": false,
+      "supports_interfaces": false,
+      "supports_egress_scope": false,
+      "supports_secret_files": true,
+      "secret_files_from_host_path": true,
+      "platform": "linux",
+      "arch": "amd64"
+     },
+     "admitted": true,
+     "last_heartbeat": "2026-11-16T09:30:01.03791355Z",
+     "created_at": "2026-11-16T09:30:01.03791355Z",
+     "running": 0,
+     "running_known": true,
+     "blocked": false,
+     "supports_revocation": true,
+     "sched_state": "ready",
+     "schedulable": true,
+     "admin_held": false,
+     "last_seen": "2026-11-16T09:39:28.578130152Z",
+     "in_flight": 0,
+     "in_flight_known": true
+    },
+    {
+     "id": "sandbox-eu",
+     "name": "sandbox-eu",
+     "kind": "container",
+     "status": "online",
+     "registered": true,
+     "enrolled": false,
+     "default": false,
+     "isolation": "container",
+     "capabilities": {
+      "isolation": "container",
+      "supports_stream": true,
+      "supports_signal": true,
+      "supports_resource_limits": true,
+      "disk_enforcement": "sampled",
+      "shares_host_filesystem": true,
+      "network_egress": true,
+      "filtered_egress": false,
+      "supports_image_override": true,
+      "supports_sandbox_build": true,
+      "supports_workspace_provisioning": false,
+      "supports_project_seed": true,
+      "returns_project_state": true,
+      "supports_write_back": true,
+      "supports_branch_bundle": true,
+      "supports_sandbox_mounts": true,
+      "supports_host_mounts": true,
+      "read_only_projects": "bind",
+      "supports_devices": true,
+      "supports_interfaces": true,
+      "supports_egress_scope": true,
+      "supports_secret_files": true,
+      "platform": "linux",
+      "arch": "amd64"
+     },
+     "isolation_evidence": {
+      "runtime": "",
+      "claim": "host-kernel",
+      "status": "unverified",
+      "summary": "runs the default runtime, not verified: the probe could not run",
+      "error": "container: start the isolation probe under the engine's default runtime: container: docker run failed (exit 1): docker: the demo recording runs no containers",
+      "attempted_at": "2026-11-16T09:30:01Z",
+      "point": "reconcile"
+     },
+     "admitted": true,
+     "labels": {
+      "region": "eu-central",
+      "tier": "sandbox"
+     },
+     "label_source": "configuration",
+     "last_heartbeat": "2026-11-16T09:30:01.03791355Z",
+     "created_at": "2026-11-16T09:30:01.03791355Z",
+     "running": 0,
+     "running_known": true,
+     "blocked": false,
+     "supports_revocation": true,
+     "sched_state": "ready",
+     "schedulable": true,
+     "admin_held": false,
+     "last_seen": "2026-11-16T09:39:28.580731624Z",
+     "in_flight": 0,
+     "in_flight_known": true,
+     "reconcile_status": "ok",
+     "reconcile_message": "registered: docker running ghcr.io/blechschmidt/cloop-harness:latest",
+     "preflight_findings": [
+      {
+       "name": "runtime",
+       "level": "ok",
+       "message": "docker 27.5.1 at /usr/local/bin/docker"
+      },
+      {
+       "name": "daemon",
+       "level": "ok",
+       "message": "docker is responding"
+      },
+      {
+       "name": "rootless",
+       "level": "warn",
+       "message": "the control plane runs as root, so containers are created by a root-owned runtime",
+       "fix": "run the control plane as an unprivileged user with podman for a second isolation layer"
+      },
+      {
+       "name": "egress",
+       "level": "warn",
+       "message": "network \"bridge\" has unrestricted outbound access; cloop does not filter it",
+       "fix": "set executors.container.egress_filter.enabled with internal: true to route sandboxes through the egress broker, or name the CIDRs they may reach"
+      },
+      {
+       "name": "network-isolation",
+       "level": "ok",
+       "message": "each project's sandboxes get a network of their own, never the engine's default bridge, which docker keeps apart from its other networks (no ruleset of cloop's: netfilter: host packet filtering is unavailable: nft(8) is not on PATH — install nftables (apt install nftables / dnf install nftables))"
+      },
+      {
+       "name": "devices",
+       "level": "warn",
+       "message": "a host_device grant's access mode (r/rw/rwm) is programmed into the container's device cgroup, whose enforcement depends on this host's cgroup version and runtime build and cannot be verified from here — on a host where it is not attached, a device granted \"r\" is writable because the node keeps its host file mode",
+       "fix": "where read-only access must be enforced, set it on the host node itself (chown root:cloop-ro /dev/… && chmod 0640) so the sandbox UID cannot open it for writing regardless of cgroups; verify with `cloop executor test`"
+      },
+      {
+       "name": "image",
+       "level": "ok",
+       "message": "image ghcr.io/blechschmidt/cloop-harness:latest is present"
+      },
+      {
+       "name": "network",
+       "level": "warn",
+       "message": "network \"bridge\" gives the workload outbound access; cloop does not filter egress itself",
+       "fix": "attach an operator-managed network with an egress policy, or set executors.container.network: none"
+      }
+     ]
+    },
+    {
+     "id": "vx-yxe3zrwqex",
+     "name": "hsm-signing",
+     "kind": "virtual",
+     "status": "online",
+     "registered": true,
+     "enrolled": false,
+     "default": false,
+     "isolation": "remote",
+     "capabilities": {
+      "isolation": "remote",
+      "supports_stream": true,
+      "supports_signal": true,
+      "supports_resource_limits": true,
+      "disk_enforcement": "sampled",
+      "shares_host_filesystem": false,
+      "network_egress": true,
+      "filtered_egress": true,
+      "supports_image_override": true,
+      "supports_sandbox_build": true,
+      "supports_workspace_provisioning": true,
+      "supports_project_seed": true,
+      "returns_project_state": true,
+      "supports_write_back": true,
+      "supports_branch_bundle": true,
+      "supports_sandbox_mounts": false,
+      "supports_host_mounts": false,
+      "read_only_projects": "snapshot",
+      "supports_devices": false,
+      "supports_interfaces": false,
+      "supports_egress_scope": true,
+      "supports_secret_files": true,
+      "max_concurrent": 4,
+      "platform": "linux",
+      "arch": "amd64"
+     },
+     "sandbox": {
+      "mode": "container",
+      "engine": "docker",
+      "runtime": "runc",
+      "image": "ghcr.io/blechschmidt/cloop-harness:latest",
+      "network": "firewalled",
+      "configured": true
+     },
+     "isolation_evidence": {
+      "runtime": "runc",
+      "claim": "host-kernel",
+      "status": "verified",
+      "summary": "claims runc, verified: the host kernel",
+      "verdict": "host-kernel",
+      "detail": "the sandbox's kernel is the host's own: it reports the host's boot ID (6f1c2a4e…) and its kernel, 6.8.0-49-generic #49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov 4 02:06:24 UTC 2024",
+      "probed_at": "2026-11-16T09:30:02Z",
+      "attempted_at": "2026-11-16T09:30:02Z",
+      "point": "runtime_change"
+     },
+     "admitted": true,
+     "labels": {
+      "rack": "b4",
+      "region": "eu-central",
+      "site": "fra"
+     },
+     "label_source": "the agent credential of device BXWRDyhCGccKPnAH",
+     "virtual": {
+      "parent_id": "BXWRDyhCGccKPnAH",
+      "parent_name": "edge-fra-07",
+      "firewall": "allow 10.40.12.0/24; deny 10.40.12.13/32; ports 443; dns 10.40.0.2:53",
+      "devices": [
+       "yubihsm=usb 1050:0030 serial 0031650425"
+      ]
+     },
+     "created_at": "2026-11-16T09:30:02.162009897Z",
+     "enrolled_by": "dana@demo.example.com",
+     "running": 0,
+     "running_known": true,
+     "blocked": false,
+     "supports_revocation": true,
+     "sched_state": "ready",
+     "schedulable": true,
+     "admin_held": false,
+     "last_seen": "2026-11-16T09:39:28.578020316Z",
+     "in_flight": 0,
+     "in_flight_known": true
+    }
+   ],
+   "policy": {
+    "allow_host_process": true,
+    "explicit": true,
+    "strict_mode": false,
+    "alternatives": [
+     "BXWRDyhCGccKPnAH",
+     "sandbox-eu",
+     "vx-yxe3zrwqex"
+    ],
+    "banner": "Host execution is enabled (executors.allow_host_process: true). Workloads run as child processes of this server with its user, filesystem, and network.",
+    "severity": "warn"
+   },
+   "project": {
+    "path": "/home/demo/projects/landing-page/.cloop/features/dark-mode",
+    "bound": false,
+    "effective_id": "local",
+    "blocked": false
+   },
+   "default_id": "local",
+   "reconciliation": {
+    "diagnostics": [
+     {
+      "id": "sandbox-eu",
+      "kind": "container",
+      "status": "ok",
+      "registered": true,
+      "isolating": true,
+      "message": "registered: docker running ghcr.io/blechschmidt/cloop-harness:latest",
+      "findings": [
+       {
+        "name": "runtime",
+        "level": "ok",
+        "message": "docker 27.5.1 at /usr/local/bin/docker"
+       },
+       {
+        "name": "daemon",
+        "level": "ok",
+        "message": "docker is responding"
+       },
+       {
+        "name": "rootless",
+        "level": "warn",
+        "message": "the control plane runs as root, so containers are created by a root-owned runtime",
+        "fix": "run the control plane as an unprivileged user with podman for a second isolation layer"
+       },
+       {
+        "name": "egress",
+        "level": "warn",
+        "message": "network \"bridge\" has unrestricted outbound access; cloop does not filter it",
+        "fix": "set executors.container.egress_filter.enabled with internal: true to route sandboxes through the egress broker, or name the CIDRs they may reach"
+       },
+       {
+        "name": "network-isolation",
+        "level": "ok",
+        "message": "each project's sandboxes get a network of their own, never the engine's default bridge, which docker keeps apart from its other networks (no ruleset of cloop's: netfilter: host packet filtering is unavailable: nft(8) is not on PATH — install nftables (apt install nftables / dnf install nftables))"
+       },
+       {
+        "name": "devices",
+        "level": "warn",
+        "message": "a host_device grant's access mode (r/rw/rwm) is programmed into the container's device cgroup, whose enforcement depends on this host's cgroup version and runtime build and cannot be verified from here — on a host where it is not attached, a device granted \"r\" is writable because the node keeps its host file mode",
+        "fix": "where read-only access must be enforced, set it on the host node itself (chown root:cloop-ro /dev/… && chmod 0640) so the sandbox UID cannot open it for writing regardless of cgroups; verify with `cloop executor test`"
+       },
+       {
+        "name": "image",
+        "level": "ok",
+        "message": "image ghcr.io/blechschmidt/cloop-harness:latest is present"
+       },
+       {
+        "name": "network",
+        "level": "warn",
+        "message": "network \"bridge\" gives the workload outbound access; cloop does not filter egress itself",
+        "fix": "attach an operator-managed network with an egress policy, or set executors.container.network: none"
+       }
+      ],
+      "checked_at": "2026-11-16T09:30:01.030846672Z"
+     }
+    ],
+    "reconciled_at": "2026-11-16T09:30:01.039266211Z",
+    "problems": 0
+   },
+   "ready": true
+  }
+ }
+]

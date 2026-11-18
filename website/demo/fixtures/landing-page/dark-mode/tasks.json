@@ -1,0 +1,113 @@
+[
+ {
+  "request": "GET /api/tasks/1/attach/info?project_idx=3",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 1 is not running on any executor",
+   "task_id": 1
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/attachments?project_idx=3&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 1,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/details?project_idx=3",
+  "body": {
+   "artifact_body": "dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\n\nCommitted d74dd26: Add a dark colour scheme (Task 1).\n\nTASK_DONE\n",
+   "artifact_path": ".cloop/tasks/1-add-a-dark-colour-scheme.md",
+   "artifact_truncated": false,
+   "citations": [],
+   "live_body": "dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\n\nCommitted d74dd26: Add a dark colour scheme (Task 1).\n\nTASK_DONEdark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\n\nCommitted d74dd26: Add a dark colour scheme (Task 1).\n\nTASK_DONE",
+   "live_path": ".cloop/artifacts/1_output.txt",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 1,
+    "title": "Add a dark colour scheme",
+    "description": "",
+    "priority": 1,
+    "status": "done",
+    "result": "dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\n\nCommitted d74dd26: Add a dark colour scheme (Task 1).\n\nTASK_DONE",
+    "started_at": "2026-11-16T09:35:15.260260463Z",
+    "completed_at": "2026-11-16T09:35:35.331068786Z",
+    "artifact_path": ".cloop/tasks/1-add-a-dark-colour-scheme.md",
+    "annotations": [
+     {
+      "timestamp": "2026-11-16T09:35:15.260641809Z",
+      "author": "ai",
+      "text": "Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)"
+     },
+     {
+      "timestamp": "2026-11-16T09:35:35.333598271Z",
+      "author": "ai",
+      "text": "Task completed successfully in 20s."
+     }
+    ],
+    "executor_id": "local",
+    "executor_kind": "localprocess",
+    "isolation": "none",
+    "run_id": "run_adef774f77421e084e0b67fb78b7c75d"
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/network?project_idx=3&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/provenance?project_idx=3",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 1,
+    "task_title": "Add a dark colour scheme",
+    "status": "done",
+    "goal": "A dark colour scheme that follows the reader's system setting.",
+    "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## Feature branch\nThis project is the feature \"Dark mode\" of landing-page. It is developed in its own git worktree on branch `cloop/feature/dark-mode`, cut from `main`, while other features of the same project are developed in parallel in their own worktrees.\n- Commit your work to this branch. Do not switch branches, and never merge into or push to `main`.\n- A plain `git push` publishes this branch only. When the feature is complete, a pull request into `main` is opened from it.\n- Change only files inside this worktree.",
+    "prompt": "You are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nA dark colour scheme that follows the reader's system setting.\n\n## CONSTRAINTS\nPlain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## Feature branch\nThis project is the feature \"Dark mode\" of landing-page. It is developed in its own git worktree on branch `cloop/feature/dark-mode`, cut from `main`, while other features of the same project are developed in parallel in their own worktrees.\n- Commit your work to this branch. Do not switch branches, and never merge into or push to `main`.\n- A plain `git push` publishes this branch only. When the feature is complete, a pull request into `main` is opened from it.\n- Change only files inside this worktree.\n\n## CURRENT TASK\n**Task 1: Add a dark colour scheme**\n\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Add a dark colour scheme\n  Summary: dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.  Committed d74dd26: Add a dark colour scheme (Task 1).  TASK_DONE\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "05408bd98cbdd1071bb0e4e66a58fcfc401d528b889d59ae21d0d243dab5dde7",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "sandbox": {
+     "executor_id": "local",
+     "executor_kind": "localprocess",
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/reproductions?project_idx=3",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ }
+]

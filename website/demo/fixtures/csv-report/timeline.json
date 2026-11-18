@@ -1,0 +1,61 @@
+[
+ {
+  "request": "GET /api/timeline?project_idx=2",
+  "body": {
+   "bars": [
+    {
+     "taskId": 1,
+     "title": "Parse the monthly sales export",
+     "start": "2026-11-16T09:35:41Z",
+     "end": "2026-11-16T09:36:02Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 20,
+     "actualMinutes": 0,
+     "dependsOn": []
+    },
+    {
+     "taskId": 2,
+     "title": "Summarise sales by region",
+     "start": "2026-11-16T09:36:02Z",
+     "end": "2026-11-16T10:06:02Z",
+     "status": "pending",
+     "assignee": "priya@demo.example.com",
+     "estimatedMinutes": 30,
+     "actualMinutes": 0,
+     "dependsOn": [
+      1
+     ]
+    },
+    {
+     "taskId": 3,
+     "title": "Write the summary as a Markdown report",
+     "start": "2026-11-16T10:06:02Z",
+     "end": "2026-11-16T10:31:02Z",
+     "status": "pending",
+     "assignee": "priya@demo.example.com",
+     "estimatedMinutes": 25,
+     "actualMinutes": 0,
+     "dependsOn": [
+      2
+     ]
+    },
+    {
+     "taskId": 4,
+     "title": "Send the report every Monday at 07:00",
+     "start": "2026-11-16T10:31:02Z",
+     "end": "2026-11-16T10:46:02Z",
+     "status": "pending",
+     "assignee": "priya@demo.example.com",
+     "estimatedMinutes": 15,
+     "actualMinutes": 0,
+     "dependsOn": [
+      3
+     ]
+    }
+   ],
+   "now": "2026-11-16T09:38:36Z",
+   "planStart": "2026-11-16T09:35:41Z"
+  }
+ }
+]

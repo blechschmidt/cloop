@@ -1,0 +1,11 @@
+[
+ {
+  "request": "GET /api/projects/2/features?*",
+  "body": {
+   "features": [],
+   "max": 32,
+   "path": "/home/demo/projects/csv-report",
+   "project": "csv-report"
+  }
+ }
+]

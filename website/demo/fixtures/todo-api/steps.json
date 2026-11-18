@@ -1,0 +1,52 @@
+[
+ {
+  "request": "GET /api/steps?project_idx=0&*",
+  "body": {
+   "limit": 50,
+   "offset": 0,
+   "steps": [
+    {
+     "step": 4,
+     "task": "Task 5: Document the API in the README",
+     "output": "The README now has a table of the six endpoints, how to run the service and the error shape.\n\nCommitted f604bb5: Document every endpoint in the README (Task 5).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "15s",
+     "time": "2026-11-16T09:32:35.676452125Z"
+    },
+    {
+     "step": 3,
+     "task": "Task 4: Cover the handlers with tests",
+     "output": "Three httptest tests pass; coverage is 86.7% (main is the only uncovered function). The coverage report and a chart of the load test are attached.\n\nCommitted 034e2f9: Test the handlers: create, complete, list, 400 and 404 (Task 4).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "30s",
+     "time": "2026-11-16T09:32:14.128121901Z"
+    },
+    {
+     "step": 2,
+     "task": "Task 3: Implement the /todos CRUD handlers",
+     "output": "handlers.go registers the five /todos routes on the 1.22 ServeMux patterns. Bad input is a 400 and an unknown id a 404, both as {\"error\": ...}.\n\nCommitted 9a1ae7f: Serve /todos: list, create, read, complete and delete (Task 3).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "45s",
+     "time": "2026-11-16T09:31:43.902919225Z"
+    },
+    {
+     "step": 1,
+     "task": "Task 2: Add an in-memory store for to-do items",
+     "output": "Added store.go with Add, Get, List (sorted by id), SetDone and Delete behind one mutex; an unknown id returns ErrNotFound.\n\nCommitted e148e51: Add an in-memory, mutex-guarded to-do store (Task 2).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "30s",
+     "time": "2026-11-16T09:30:58.626702295Z"
+    },
+    {
+     "step": 0,
+     "task": "Task 1: Scaffold the HTTP server with a health check",
+     "output": "Added main.go: the server listens on $ADDR (default :8080) and GET /healthz answers 200 ok. `go vet ./...` is clean.\n\nCommitted 36e3b86: Scaffold the HTTP server with GET /healthz (Task 1).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "20s",
+     "time": "2026-11-16T09:30:28.417814036Z"
+    }
+   ],
+   "total": 5
+  }
+ }
+]

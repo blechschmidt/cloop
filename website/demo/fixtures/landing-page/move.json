@@ -1,0 +1,215 @@
+[
+ {
+  "request": "GET /api/projects/1/move/preflight?*",
+  "body": {
+   "project": {
+    "name": "landing-page",
+    "path": "/home/demo/projects/landing-page"
+   },
+   "source": {
+    "binding": "",
+    "executor_id": "local",
+    "kind": "localprocess",
+    "workspace": "hub_tree",
+    "work_dir": "/home/demo/projects/landing-page",
+    "reachable": true
+   },
+   "target": {
+    "binding": "BXWRDyhCGccKPnAH",
+    "executor_id": "BXWRDyhCGccKPnAH",
+    "kind": "remote",
+    "workspace": "device_working_copy",
+    "work_dir": "/srv/cloop/work/landing-page-9ece3f2f",
+    "reachable": true
+   },
+   "checked_at": "2026-11-16T09:40:16.5328831Z",
+   "blocked": true,
+   "counts": {
+    "blockers": 1,
+    "warnings": 0,
+    "will_carry": 4
+   },
+   "findings": [
+    {
+     "kind": "harness_credential",
+     "severity": "blocker",
+     "side": "target",
+     "title": "A run on the target would get no harness credential",
+     "message": "No active grant gives landing-page's sandbox on executor BXWRDyhCGccKPnAH (remote) a Claude credential (ANTHROPIC_API_KEY or CLOOP_ANTHROPIC_API_KEY): a sandbox has no Claude login but what is granted to its project.",
+     "remedy": "Open the project's Overview and use Claude credential to grant an env secret holding ANTHROPIC_API_KEY or CLOOP_ANTHROPIC_API_KEY, or paste a token from `claude setup-token` there. From a shell on the hub: cloop secret grant <secret> --to project:/home/demo/projects/landing-page --env-keys ANTHROPIC_API_KEY. An executor that supplies its own credential can be listed in the hub's executors.harness_credential_exempt."
+    },
+    {
+     "kind": "local_commits",
+     "severity": "will-carry",
+     "side": "source",
+     "title": "13 commit(s) on local branches no remote holds",
+     "message": "The move bundles these commits with the tree and seeds the target with them (as of the hub's last fetch: nothing was fetched for this preflight).",
+     "remedy": "Push them first if the forge should have them too.",
+     "items": [
+      {
+       "name": "cloop/feature/dark-mode",
+       "count": 7,
+       "detail": "upstream origin/cloop/feature/dark-mode"
+      },
+      {
+       "name": "main",
+       "count": 6,
+       "detail": "no upstream"
+      }
+     ]
+    },
+    {
+     "kind": "project_files",
+     "severity": "will-carry",
+     "side": "source",
+     "title": "68 file(s), 32.1 MiB, under .cloop that no database holds",
+     "message": "The move delivers the task output, artifacts, attachment outbox, checkpoints and spec files among these to the target with the tree. The hub's copy of the project keeps them too: the sandbox spec and the requirements spec go on applying to runs, and the dashboard goes on showing the artifacts. The rest stays where it is and is never sent to the target — the project's configuration (.cloop/config.yaml): the project's configuration can hold API keys, which never leave the hub; runs on the target get their provider and model with the project's state; other files under .cloop: files under .cloop that are not the project's work stay with the hub's copy of the project.",
+     "items": [
+      {
+       "name": "artifacts",
+       "path": "/home/demo/projects/landing-page/.cloop",
+       "count": 12,
+       "bytes": 5045,
+       "detail": "task output and artifacts (.cloop/artifacts, .cloop/tasks)",
+       "examples": [
+        ".cloop/artifacts/1_output.txt",
+        ".cloop/artifacts/1_verdict.json",
+        ".cloop/artifacts/2_output.txt",
+        ".cloop/artifacts/2_verdict.json",
+        ".cloop/artifacts/3_output.txt"
+       ]
+      },
+      {
+       "name": "config",
+       "path": "/home/demo/projects/landing-page/.cloop",
+       "count": 1,
+       "bytes": 516,
+       "detail": "the project's configuration (.cloop/config.yaml)",
+       "examples": [
+        ".cloop/config.yaml"
+       ]
+      },
+      {
+       "name": "other",
+       "path": "/home/demo/projects/landing-page/.cloop",
+       "count": 39,
+       "bytes": 16907969,
+       "detail": "other files under .cloop",
+       "examples": [
+        ".cloop/cache/461d12d64e79f028c5a67980689bf7f39592441768598c3ef9638e79e7bef4fe.json.gz",
+        ".cloop/cache/63e7d0a97fc3d09df3bf8cffd26cf06adb1b7ab585cf20d50cfc0fec4db0caf5.json.gz",
+        ".cloop/cache/675baca370e95598cc51dd79ce3ad4dbc94370d825d4c09cc373f58d2b42da91.json.gz",
+        ".cloop/cache/81072f76a4cdab9f21a39eb8b895787bb3d24fb8f7ae1b5162f5fc1258d0f8bc.json.gz",
+        ".cloop/cache/stats.json"
+       ]
+      },
+      {
+       "name": "feature dark-mode: artifacts",
+       "path": "/home/demo/projects/landing-page/.cloop/features/dark-mode/.cloop",
+       "count": 3,
+       "bytes": 1078,
+       "detail": "task output and artifacts (.cloop/artifacts, .cloop/tasks)",
+       "examples": [
+        ".cloop/artifacts/1_output.txt",
+        ".cloop/artifacts/1_verdict.json",
+        ".cloop/tasks/1-add-a-dark-colour-scheme.md"
+       ]
+      },
+      {
+       "name": "feature dark-mode: config",
+       "path": "/home/demo/projects/landing-page/.cloop/features/dark-mode/.cloop",
+       "count": 1,
+       "bytes": 516,
+       "detail": "the project's configuration (.cloop/config.yaml)",
+       "examples": [
+        ".cloop/config.yaml"
+       ]
+      },
+      {
+       "name": "feature dark-mode: other",
+       "path": "/home/demo/projects/landing-page/.cloop/features/dark-mode/.cloop",
+       "count": 12,
+       "bytes": 16781819,
+       "detail": "other files under .cloop",
+       "examples": [
+        ".cloop/costs.jsonl",
+        ".cloop/feature.json",
+        ".cloop/plan-history/20261118-022139-v1.json",
+        ".cloop/plan-history/20261118-022140-v2.json",
+        ".cloop/plan-history/20261118-022200-v3.json"
+       ]
+      }
+     ]
+    },
+    {
+     "kind": "secret_grants",
+     "severity": "will-carry",
+     "side": "target",
+     "title": "3 grant(s) reach the target",
+     "message": "Runs on the target are issued these grants as runs on the source are.",
+     "items": [
+      {
+       "name": "acme-github-app",
+       "path": "grant_bf2beb51a5bb5ec19af2a914",
+       "detail": "github_app, project:/home/demo/projects/landing-page, until 2026-11-17T09:30:02Z"
+      },
+      {
+       "name": "datadog-api",
+       "path": "grant_aaaf4830a46ff5f1876ee8cf",
+       "detail": "env, executor:BXWRDyhCGccKPnAH, until 2026-11-23T09:30:02Z"
+      },
+      {
+       "name": "staging-kubeconfig",
+       "path": "grant_f4b5e9cb7d17599872da8381",
+       "detail": "kubeconfig, label:region=eu-central, until 2026-11-23T09:30:02Z"
+      }
+     ]
+    },
+    {
+     "kind": "path_bindings",
+     "severity": "will-carry",
+     "side": "project",
+     "title": "8 record(s) are keyed by the project's path",
+     "message": "Knowledge and policy records name the project by its path, /home/demo/projects/landing-page. A move keeps that path — it is the project's identity on the hub, and a device names its working copy after it — so every one of them stays valid. A move that changed the path would have to rewrite each of these. The project's requirements name no path: they are kept in its own database, and its spec file is named relative to the project, so they move with it.",
+     "items": [
+      {
+       "name": "knowledge_bindings",
+       "count": 2,
+       "detail": "knowledge sources the project searches"
+      },
+      {
+       "name": "project_members",
+       "count": 1,
+       "detail": "people and teams the project is shared with"
+      },
+      {
+       "name": "project_readers",
+       "count": 1,
+       "detail": "projects that may read this one, and projects it may read"
+      },
+      {
+       "name": "broker_grants",
+       "count": 1,
+       "detail": "secret grants issued to the project (project:<path>)"
+      },
+      {
+       "name": "secret_grant_requests",
+       "count": 1,
+       "detail": "pending requests for a grant to the project"
+      },
+      {
+       "name": "project_spend_cursor",
+       "count": 1,
+       "detail": "where the project's spend was last booked"
+      },
+      {
+       "name": "hub metadata",
+       "count": 1,
+       "detail": "whom the last run was started for, and the model relay's allowlist"
+      }
+     ]
+    }
+   ]
+  }
+ }
+]

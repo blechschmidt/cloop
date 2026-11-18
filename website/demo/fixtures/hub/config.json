@@ -1,0 +1,227 @@
+[
+ {
+  "request": "GET /api/config/disk",
+  "body": {
+   "min_free_disk_mb": 2048,
+   "stated": true,
+   "default_mb": 1024,
+   "lower_mb": 64,
+   "upper_mb": 1048576,
+   "overlay": true,
+   "hub": {
+    "volume": "/",
+    "path": "/home/demo/projects/todo-api/.cloop",
+    "free_bytes": 24698703872,
+    "floor_mb": 2048,
+    "floor_bytes": 2147483648,
+    "low": false,
+    "warn": false
+   }
+  }
+ },
+ {
+  "request": "GET /api/config/notifications",
+  "body": {
+   "dashboard_url": "https://demo.example.com",
+   "link": "https://demo.example.com/?approvals=1",
+   "webhooks": [
+    {
+     "name": "approvers",
+     "type": "slack",
+     "destination": "env:CLOOP_NOTIFY_APPROVERS",
+     "url_set": false,
+     "url_env": "CLOOP_NOTIFY_APPROVERS",
+     "events": [
+      "request.filed"
+     ],
+     "allow_addresses": [],
+     "status": {
+      "delivered": 0,
+      "dropped": 0,
+      "failures": 0,
+      "backlog": 0
+     }
+    }
+   ],
+   "events": [
+    "request.filed",
+    "request.reminder",
+    "request.approved",
+    "request.denied",
+    "request.withdrawn",
+    "request.lapsed",
+    "token.waiting",
+    "requirement.regression"
+   ],
+   "types": [
+    "slack",
+    "teams",
+    "discord",
+    "json"
+   ],
+   "reminder_hours": 12,
+   "max_webhooks": 8
+  }
+ },
+ {
+  "request": "GET /api/config/oidc",
+  "body": {
+   "enabled": true,
+   "issuer": "https://login.demo.example.com",
+   "client_id": "cloop-dashboard",
+   "redirect_url": "https://demo.example.com/auth/callback",
+   "scopes": [
+    "openid",
+    "email",
+    "profile",
+    "groups"
+   ],
+   "admin_emails": [
+    "dana@demo.example.com"
+   ],
+   "default_role": "none",
+   "role_mappings": [
+    {
+     "Claim": "group",
+     "Value": "platform-admins",
+     "Role": "admin",
+     "Project": "",
+     "Executor": ""
+    },
+    {
+     "Claim": "group",
+     "Value": "maintainers",
+     "Role": "maintainer",
+     "Project": "",
+     "Executor": ""
+    },
+    {
+     "Claim": "group",
+     "Value": "engineers",
+     "Role": "operator",
+     "Project": "",
+     "Executor": ""
+    },
+    {
+     "Claim": "group",
+     "Value": "readers",
+     "Role": "viewer",
+     "Project": "",
+     "Executor": ""
+    }
+   ],
+   "session_ttl_hours": 0,
+   "idle_timeout_hours": 0,
+   "refresh_interval_minutes": 0,
+   "max_claim_age_minutes": 0,
+   "clock_skew_seconds": 0,
+   "sudo_max_age_minutes": 0,
+   "require_idp": false,
+   "require_rbac": false,
+   "cookie_secure": "",
+   "client_secret_set": false,
+   "client_secret_source": "unset",
+   "active": {
+    "enabled": true,
+    "issuer": "https://login.demo.example.com",
+    "idp_ready": true
+   },
+   "restart_required": false,
+   "rbac": {
+    "enforced": true,
+    "saved_enforced": true,
+    "default_role": "none",
+    "can_enforce": false
+   },
+   "limits": {
+    "session_ttl_hours": {
+     "default": 24,
+     "lower": 1,
+     "upper": 720
+    },
+    "idle_timeout_hours": {
+     "default": 8,
+     "lower": 1,
+     "upper": 720
+    },
+    "refresh_interval_minutes": {
+     "default": 15,
+     "lower": 1,
+     "upper": 1440,
+     "disable": -1
+    },
+    "max_claim_age_minutes": {
+     "default": 5,
+     "lower": 1,
+     "upper": 60,
+     "disable": -1
+    },
+    "clock_skew_seconds": {
+     "default": 300,
+     "lower": 0,
+     "upper": 600,
+     "disable": -1
+    },
+    "sudo_max_age_minutes": {
+     "default": 120,
+     "lower": 1,
+     "upper": 1440,
+     "disable": -1
+    }
+   },
+   "roles": [
+    "none",
+    "viewer",
+    "operator",
+    "maintainer",
+    "admin"
+   ],
+   "claims": [
+    "group",
+    "role",
+    "email",
+    "sub",
+    "username",
+    "oid",
+    "scim_group"
+   ]
+  }
+ },
+ {
+  "request": "GET /api/config/stt",
+  "body": {
+   "has_key": true,
+   "stored": true,
+   "from_env": false,
+   "available": true,
+   "endpoint": "https://api.groq.com/openai/v1/audio/transcriptions"
+  }
+ },
+ {
+  "request": "GET /api/config/telemetry",
+  "body": {
+   "enabled": true,
+   "configured": true,
+   "sources": [
+    {
+     "name": "dashboard",
+     "collect": true,
+     "selected": true
+    },
+    {
+     "name": "glasses",
+     "collect": true,
+     "selected": true
+    }
+   ],
+   "stored": {
+    "events": 503,
+    "sessions": 4,
+    "oldest": "2026-11-16T09:36:47Z",
+    "newest": "2026-11-16T09:40:07Z"
+   },
+   "retention_days": 30,
+   "max_rows": 50000
+  }
+ }
+]

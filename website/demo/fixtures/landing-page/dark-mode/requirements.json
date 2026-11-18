@@ -1,0 +1,119 @@
+[
+ {
+  "request": "GET /api/requirements/export?project_idx=3&*",
+  "body": {
+   "content": "# What this project must keep doing, kept beside its code (cloop requirements).\n#\n# Review changes here like code. `cloop requirements import` brings them into the\n# hub, `cloop requirements export` writes the hub's back, and\n# `cloop requirements check --file .cloop/requirements.yaml` runs the approved\n# requirements' tests without a hub. An id is never given to a second\n# requirement. Format: docs/guides/requirements.md#requirements-as-code\n\nversion: 1\nrequirements: []\n",
+   "ok": true,
+   "path": ".cloop/requirements.yaml",
+   "requirements": 0,
+   "sha256": "9ccec13cc21f6bc4010d1dae5f6abdc3ea20ebd498c3f6022eac24af98ac9fa5"
+  }
+ },
+ {
+  "request": "GET /api/requirements/lint?project_idx=3&*",
+  "body": {
+   "checked": 0,
+   "findings": [],
+   "notes": [],
+   "ok": true
+  }
+ },
+ {
+  "request": "GET /api/requirements/spec?project_idx=3&*",
+  "body": {
+   "ok": true,
+   "reading": false,
+   "spec": {
+    "path": ".cloop/requirements.yaml",
+    "state": "missing",
+    "read": {
+     "read_at": "2026-11-16T09:39:16.232642Z",
+     "read_by": "dana@demo.example.com",
+     "executor_id": "local",
+     "path": ".cloop/requirements.yaml",
+     "found": false
+    },
+    "fresh": true,
+    "imports": 0,
+    "exports": 0,
+    "conflicts": 0,
+    "refused": 0,
+    "in_sync": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/requirements/trace?limit=0&project_idx=3",
+  "body": {
+   "ok": true,
+   "rows": [],
+   "coverage": {
+    "approved": 0,
+    "musts": {
+     "total": 0,
+     "tested": 0,
+     "proven": 0,
+     "passing": 0,
+     "linked": 0,
+     "tested_pct": 0,
+     "proven_pct": 0,
+     "passing_pct": 0,
+     "linked_pct": 0
+    },
+    "all": {
+     "total": 0,
+     "tested": 0,
+     "proven": 0,
+     "passing": 0,
+     "linked": 0,
+     "tested_pct": 0,
+     "proven_pct": 0,
+     "passing_pct": 0,
+     "linked_pct": 0
+    },
+    "stale": 0,
+    "gaps": {},
+    "verification": {}
+   },
+   "matched": 0,
+   "digest": "e3b0c44298fc1c149afbf4c8",
+   "filter": {},
+   "generated_at": "2026-11-16T09:39:06.756102225Z"
+  }
+ },
+ {
+  "request": "GET /api/requirements?project_idx=3",
+  "body": {
+   "ok": true,
+   "requirements": [],
+   "counts": {
+    "fulfilled": 0,
+    "unfulfilled": 0,
+    "unverified": 0,
+    "error": 0
+   },
+   "never": 0,
+   "stale": 0,
+   "runs": [],
+   "spec": {
+    "path": ".cloop/requirements.yaml",
+    "state": "missing",
+    "read": {
+     "read_at": "2026-11-16T09:39:16.232642Z",
+     "read_by": "dana@demo.example.com",
+     "executor_id": "local",
+     "path": ".cloop/requirements.yaml",
+     "found": false
+    },
+    "fresh": true,
+    "imports": 0,
+    "exports": 0,
+    "conflicts": 0,
+    "refused": 0,
+    "in_sync": 0
+   },
+   "targets": 0,
+   "must_gaps": 0
+  }
+ }
+]

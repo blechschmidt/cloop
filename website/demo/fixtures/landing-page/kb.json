@@ -1,0 +1,18 @@
+[
+ {
+  "request": "GET /api/kb?project_idx=1",
+  "body": {
+   "entries": [
+    {
+     "id": 1,
+     "title": "Brand voice",
+     "content": "Short sentences, no exclamation marks, 24-hour tide times. The button always says Start free.",
+     "tags": [
+      "copy"
+     ],
+     "created_at": "2026-11-16T09:36:38.857172811Z"
+    }
+   ]
+  }
+ }
+]

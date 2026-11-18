@@ -1,0 +1,31 @@
+[
+ {
+  "request": "GET /api/risk-matrix?project_idx=2",
+  "body": {
+   "entries": [
+    {
+     "task_id": 2,
+     "task_title": "Summarise sales by region",
+     "risk_score": 8,
+     "impact_score": 7,
+     "quadrant": "Critical"
+    },
+    {
+     "task_id": 3,
+     "task_title": "Write the summary as a Markdown report",
+     "risk_score": 1,
+     "impact_score": 6,
+     "quadrant": "Leverage"
+    },
+    {
+     "task_id": 4,
+     "task_title": "Send the report every Monday at 07:00",
+     "risk_score": 3,
+     "impact_score": 5,
+     "quadrant": "Defer"
+    }
+   ],
+   "goal": "Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning."
+  }
+ }
+]

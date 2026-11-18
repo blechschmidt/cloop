@@ -1,0 +1,8 @@
+[
+ {
+  "request": "GET /api/projects/1/moves?*",
+  "body": {
+   "moves": []
+  }
+ }
+]

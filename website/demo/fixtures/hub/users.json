@@ -1,0 +1,15 @@
+[
+ {
+  "request": "GET /api/users/holds?*",
+  "body": {
+   "holds": [
+    {
+     "identity": "sam@demo.example.com",
+     "reason": "Litigation hold LH-2026-014",
+     "placed_at": "2026-11-16T09:30:07Z",
+     "placed_by": "dana@demo.example.com"
+    }
+   ]
+  }
+ }
+]

@@ -1,0 +1,20 @@
+[
+ {
+  "request": "GET /api/claudecode/auth/status",
+  "body": {
+   "per_user": true,
+   "session": {
+    "active": false,
+    "started_at": "0001-01-01T00:00:00Z"
+   },
+   "status": {
+    "loggedIn": true,
+    "authMethod": "claude.ai",
+    "apiProvider": "firstParty",
+    "email": "dana@demo.example.com",
+    "orgName": "Demo Engineering",
+    "subscriptionType": "max"
+   }
+  }
+ }
+]

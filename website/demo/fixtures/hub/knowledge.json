@@ -1,0 +1,308 @@
+[
+ {
+  "request": "GET /api/knowledge/sources",
+  "body": {
+   "can_create_org": true,
+   "can_create_personal": true,
+   "connectors": [
+    "confluence",
+    "jira"
+   ],
+   "embeddings": {
+    "enabled": false
+   },
+   "sources": [
+    {
+     "id": 1,
+     "kind": "confluence",
+     "name": "Engineering wiki",
+     "scope": "org",
+     "mine": false,
+     "manageable": true,
+     "config": {
+      "deployment": "datacenter",
+      "base_url": "https://wiki.demo.example.com/confluence",
+      "spaces": [
+       "ENG",
+       "OPS"
+      ]
+     },
+     "secret_ref": "wiki-token",
+     "has_credential": true,
+     "enabled": true,
+     "sync": {
+      "status": "ok",
+      "at": "2026-11-16T09:30:02Z",
+      "resumes": true,
+      "interval_minutes": 1440,
+      "default_interval": false,
+      "started_at": "2026-11-16T09:30:02Z",
+      "duration_ms": 109,
+      "origin": "manual",
+      "counts": {
+       "pages": 1,
+       "listed": 6,
+       "created": 6,
+       "updated": 0,
+       "unchanged": 0,
+       "deleted": 0,
+       "rejected": 0,
+       "removed": 0,
+       "narrowed": 0,
+       "complete": true,
+       "full": true
+      },
+      "last_ok_at": "2026-11-16T09:30:02Z",
+      "next_at": "2026-11-17T09:30:02Z"
+     },
+     "documents": 6,
+     "chunks": 6,
+     "bindings": 3,
+     "vectors": 0,
+     "created_at": "2026-11-16T09:30:02Z",
+     "created_by": "dana@demo.example.com",
+     "updated_at": "2026-11-16T09:30:02Z",
+     "updated_by": "dana@demo.example.com"
+    },
+    {
+     "id": 2,
+     "kind": "jira",
+     "name": "Product tracker",
+     "scope": "org",
+     "mine": false,
+     "manageable": true,
+     "config": {
+      "deployment": "datacenter",
+      "base_url": "https://jira.demo.example.com/jira",
+      "projects": [
+       "TODO",
+       "WEB",
+       "SALES"
+      ]
+     },
+     "secret_ref": "tracker-token",
+     "has_credential": true,
+     "enabled": true,
+     "sync": {
+      "status": "ok",
+      "at": "2026-11-16T09:30:04Z",
+      "resumes": true,
+      "interval_minutes": 1440,
+      "default_interval": false,
+      "started_at": "2026-11-16T09:30:04Z",
+      "duration_ms": 73,
+      "origin": "manual",
+      "counts": {
+       "pages": 1,
+       "listed": 5,
+       "created": 5,
+       "updated": 0,
+       "unchanged": 0,
+       "deleted": 0,
+       "rejected": 0,
+       "removed": 0,
+       "narrowed": 0,
+       "complete": true,
+       "full": true
+      },
+      "last_ok_at": "2026-11-16T09:30:04Z",
+      "next_at": "2026-11-17T09:30:04Z"
+     },
+     "documents": 5,
+     "chunks": 12,
+     "bindings": 3,
+     "vectors": 0,
+     "created_at": "2026-11-16T09:30:02Z",
+     "created_by": "dana@demo.example.com",
+     "updated_at": "2026-11-16T09:30:02Z",
+     "updated_by": "dana@demo.example.com"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/knowledge/sources/1?*",
+  "body": {
+   "bindings": [
+    {
+     "id": 1,
+     "source_id": 1,
+     "project": "/home/demo/projects/todo-api",
+     "spaces": [
+      "ENG"
+     ],
+     "created_at": "2026-11-16T09:30:06Z",
+     "created_by": "static-token",
+     "updated_at": "2026-11-16T09:30:06Z"
+    },
+    {
+     "id": 2,
+     "source_id": 1,
+     "project": "/home/demo/projects/landing-page",
+     "spaces": [
+      "ENG"
+     ],
+     "created_at": "2026-11-16T09:30:06Z",
+     "created_by": "static-token",
+     "updated_at": "2026-11-16T09:30:06Z"
+    },
+    {
+     "id": 3,
+     "source_id": 1,
+     "project": "/home/demo/projects/csv-report",
+     "spaces": [
+      "ENG"
+     ],
+     "created_at": "2026-11-16T09:30:06Z",
+     "created_by": "static-token",
+     "updated_at": "2026-11-16T09:30:06Z"
+    }
+   ],
+   "source": {
+    "id": 1,
+    "kind": "confluence",
+    "name": "Engineering wiki",
+    "scope": "org",
+    "mine": false,
+    "manageable": true,
+    "config": {
+     "deployment": "datacenter",
+     "base_url": "https://wiki.demo.example.com/confluence",
+     "spaces": [
+      "ENG",
+      "OPS"
+     ]
+    },
+    "secret_ref": "wiki-token",
+    "has_credential": true,
+    "enabled": true,
+    "sync": {
+     "status": "ok",
+     "at": "2026-11-16T09:30:02Z",
+     "resumes": true,
+     "interval_minutes": 1440,
+     "default_interval": false,
+     "started_at": "2026-11-16T09:30:02Z",
+     "duration_ms": 109,
+     "origin": "manual",
+     "counts": {
+      "pages": 1,
+      "listed": 6,
+      "created": 6,
+      "updated": 0,
+      "unchanged": 0,
+      "deleted": 0,
+      "rejected": 0,
+      "removed": 0,
+      "narrowed": 0,
+      "complete": true,
+      "full": true
+     },
+     "last_ok_at": "2026-11-16T09:30:02Z",
+     "next_at": "2026-11-17T09:30:02Z"
+    },
+    "documents": 6,
+    "chunks": 6,
+    "bindings": 3,
+    "vectors": 0,
+    "created_at": "2026-11-16T09:30:02Z",
+    "created_by": "dana@demo.example.com",
+    "updated_at": "2026-11-16T09:30:02Z",
+    "updated_by": "dana@demo.example.com"
+   }
+  }
+ },
+ {
+  "request": "GET /api/knowledge/sources/2?*",
+  "body": {
+   "bindings": [
+    {
+     "id": 4,
+     "source_id": 2,
+     "project": "/home/demo/projects/todo-api",
+     "spaces": [
+      "TODO"
+     ],
+     "created_at": "2026-11-16T09:30:06Z",
+     "created_by": "static-token",
+     "updated_at": "2026-11-16T09:30:06Z"
+    },
+    {
+     "id": 5,
+     "source_id": 2,
+     "project": "/home/demo/projects/landing-page",
+     "spaces": [
+      "WEB"
+     ],
+     "created_at": "2026-11-16T09:30:06Z",
+     "created_by": "static-token",
+     "updated_at": "2026-11-16T09:30:06Z"
+    },
+    {
+     "id": 6,
+     "source_id": 2,
+     "project": "/home/demo/projects/csv-report",
+     "spaces": [
+      "SALES"
+     ],
+     "created_at": "2026-11-16T09:30:06Z",
+     "created_by": "static-token",
+     "updated_at": "2026-11-16T09:30:06Z"
+    }
+   ],
+   "source": {
+    "id": 2,
+    "kind": "jira",
+    "name": "Product tracker",
+    "scope": "org",
+    "mine": false,
+    "manageable": true,
+    "config": {
+     "deployment": "datacenter",
+     "base_url": "https://jira.demo.example.com/jira",
+     "projects": [
+      "TODO",
+      "WEB",
+      "SALES"
+     ]
+    },
+    "secret_ref": "tracker-token",
+    "has_credential": true,
+    "enabled": true,
+    "sync": {
+     "status": "ok",
+     "at": "2026-11-16T09:30:04Z",
+     "resumes": true,
+     "interval_minutes": 1440,
+     "default_interval": false,
+     "started_at": "2026-11-16T09:30:04Z",
+     "duration_ms": 73,
+     "origin": "manual",
+     "counts": {
+      "pages": 1,
+      "listed": 5,
+      "created": 5,
+      "updated": 0,
+      "unchanged": 0,
+      "deleted": 0,
+      "rejected": 0,
+      "removed": 0,
+      "narrowed": 0,
+      "complete": true,
+      "full": true
+     },
+     "last_ok_at": "2026-11-16T09:30:04Z",
+     "next_at": "2026-11-17T09:30:04Z"
+    },
+    "documents": 5,
+    "chunks": 12,
+    "bindings": 3,
+    "vectors": 0,
+    "created_at": "2026-11-16T09:30:02Z",
+    "created_by": "dana@demo.example.com",
+    "updated_at": "2026-11-16T09:30:02Z",
+    "updated_by": "dana@demo.example.com"
+   }
+  }
+ }
+]

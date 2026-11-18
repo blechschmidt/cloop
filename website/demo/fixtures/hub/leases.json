@@ -1,0 +1,12 @@
+[
+ {
+  "request": "GET /api/leases",
+  "body": {
+   "leases": [],
+   "broker": {
+    "secrets_available": true,
+    "egress_available": true
+   }
+  }
+ }
+]

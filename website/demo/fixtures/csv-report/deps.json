@@ -1,0 +1,54 @@
+[
+ {
+  "request": "GET /api/deps?project_idx=2",
+  "body": {
+   "edges": [
+    {
+     "from": 1,
+     "to": 2
+    },
+    {
+     "from": 2,
+     "to": 3
+    },
+    {
+     "from": 3,
+     "to": 4
+    }
+   ],
+   "nodes": [
+    {
+     "id": 1,
+     "title": "Parse the monthly sales export",
+     "status": "done",
+     "priority": 1,
+     "description": "Read data/sales-*.csv into typed rows; report and skip bad rows."
+    },
+    {
+     "id": 2,
+     "title": "Summarise sales by region",
+     "status": "pending",
+     "priority": 2,
+     "description": "Units and revenue per region and product for the week.",
+     "assignee": "priya@demo.example.com"
+    },
+    {
+     "id": 3,
+     "title": "Write the summary as a Markdown report",
+     "status": "pending",
+     "priority": 2,
+     "description": "A table per region and the week's top product.",
+     "assignee": "priya@demo.example.com"
+    },
+    {
+     "id": 4,
+     "title": "Send the report every Monday at 07:00",
+     "status": "pending",
+     "priority": 3,
+     "description": "A cron entry and a dry-run flag.",
+     "assignee": "priya@demo.example.com"
+    }
+   ]
+  }
+ }
+]

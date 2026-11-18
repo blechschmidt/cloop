@@ -1,0 +1,13 @@
+[
+ {
+  "request": "GET /api/projects/0/forwarders",
+  "body": {
+   "bindings": [],
+   "can_bind": true,
+   "can_request": true,
+   "forwarders": null,
+   "project": "/home/demo/projects/todo-api",
+   "requests": null
+  }
+ }
+]

@@ -108,6 +108,17 @@ that `GET /api/state` answers with.
 The build checks every fixture and stops on an unknown field, a request line it
 cannot read, two fixtures for the same request, or a reference to nothing.
 
-The current set is one project, `hello-api`, with five tasks, two of them done:
-enough for the Projects, Overview and Tasks tabs. The other tabs open with
-empty data.
+## Where the fixtures come from
+
+They are recorded, not written: `scripts/demo/record-fixtures.sh` runs three
+made-up projects (`todo-api`, `landing-page`, `csv-report`) through a
+throwaway hub with single sign-on, fills its admin surfaces through its own
+API, walks the dashboard as an administrator, and writes what the hub
+answered, scrubbed of paths, hosts, credentials and real times.
+[scripts/demo/README.md](../../scripts/demo/README.md) describes what it
+records and how, and how to record again.
+
+`tests/demo` fails when a GET route the dashboard's scripts name has no
+fixture, or a fixture holds a credential, a `/root` or `/tmp` path, or a host
+that is not made up or public. A dashboard change that adds a read therefore
+needs a new recording, or a fixture added by hand in the format above.

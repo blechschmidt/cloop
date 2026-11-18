@@ -1,0 +1,16 @@
+[
+ {
+  "request": "GET /api/projects/3/readers",
+  "body": {
+   "project": "landing-page/dark-mode",
+   "path": "/home/demo/projects/landing-page/.cloop/features/dark-mode",
+   "readers": [],
+   "hidden_readers": 0,
+   "readable": [],
+   "hidden_readable": 0,
+   "can_manage": false,
+   "feature": true,
+   "note": "A feature has no readers list of its own, and reads no other project by its project's list. The list of landing-page names the projects that may read it."
+  }
+ }
+]

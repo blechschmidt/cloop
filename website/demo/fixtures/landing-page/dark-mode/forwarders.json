@@ -1,0 +1,13 @@
+[
+ {
+  "request": "GET /api/projects/3/forwarders",
+  "body": {
+   "bindings": [],
+   "can_bind": true,
+   "can_request": true,
+   "forwarders": null,
+   "project": "/home/demo/projects/landing-page",
+   "requests": null
+  }
+ }
+]

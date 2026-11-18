@@ -1,0 +1,40 @@
+[
+ {
+  "request": "GET /api/livelog?project_idx=0",
+  "body": {
+   "lines": [
+    "warning: executor: 1 in-flight session(s) reattached to a still-running workload\n",
+    "\n",
+    "🏭 cloop Software Factory\n",
+    "   Provider: claudecode\n",
+    "   Goal: Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.\n",
+    "\n",
+    "time=2026-11-16T09:32:20.536Z level=INFO msg=\"session started\" project=/home/demo/projects/todo-api provider=claudecode event=session_start goal=\"Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.\" mode=pm trace_id=\"\"\n",
+    "Resuming plan: 5/6 tasks complete\n",
+    "\n",
+    "━━━ Task 5/6: Document the API in the README ━━━\n",
+    "       A table of every endpoint, how to run the service and what an error looks like.\n",
+    "\n",
+    "time=2026-11-16T09:32:20.552Z level=INFO msg=\"Document the API in the README\" project=/home/demo/projects/todo-api provider=claudecode event=task_start task_id=5 priority=3 description=\"A table of every endpoint, how to run the service and what an error looks like.\" role=docs trace_id=\"\" request_id=37e6d3dda5e670ec678ae75a\n",
+    "  knowledge: 5 reference passage(s) from 4 document(s)\n",
+    "→ Running claudecode on task 5...\n",
+    "  The README now has a table of the six endpoints, how to run the service and the error shape.\n",
+    "  \n",
+    "  Committed f604bb5: Document every endpoint in the README (Task 5).\n",
+    "  \n",
+    "  TASK_DONE\n",
+    "  [15s, provider: claudecode]\n",
+    "\n",
+    "✓ Task 5 complete: Document the API in the README\n",
+    "\n",
+    "time=2026-11-16T09:32:35.712Z level=INFO msg=\"Document the API in the README\" project=/home/demo/projects/todo-api provider=claudecode event=task_done task_id=5 duration_ms=15124 request_id=37e6d3dda5e670ec678ae75a\n",
+    "🎉 All tasks complete! Goal achieved.\n",
+    "   6/6 tasks complete\n",
+    "\n",
+    "time=2026-11-16T09:32:35.794Z level=INFO msg=\"all tasks complete\" project=/home/demo/projects/todo-api provider=claudecode event=session_done summary=\"6/6 tasks complete\"\n",
+    "Session: 1 step(s) in 15s\n"
+   ],
+   "running": false
+  }
+ }
+]

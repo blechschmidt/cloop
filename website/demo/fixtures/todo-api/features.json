@@ -1,0 +1,11 @@
+[
+ {
+  "request": "GET /api/projects/0/features?*",
+  "body": {
+   "features": [],
+   "max": 32,
+   "path": "/home/demo/projects/todo-api",
+   "project": "todo-api"
+  }
+ }
+]

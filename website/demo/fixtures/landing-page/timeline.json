@@ -1,0 +1,66 @@
+[
+ {
+  "request": "GET /api/timeline?project_idx=1",
+  "body": {
+   "bars": [
+    {
+     "taskId": 1,
+     "title": "Build the hero section",
+     "start": "2026-11-16T09:32:41Z",
+     "end": "2026-11-16T09:33:06Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 25,
+     "actualMinutes": 0,
+     "dependsOn": []
+    },
+    {
+     "taskId": 2,
+     "title": "Add the features and pricing sections",
+     "start": "2026-11-16T09:33:06Z",
+     "end": "2026-11-16T09:33:36Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 30,
+     "actualMinutes": 0,
+     "dependsOn": []
+    },
+    {
+     "taskId": 3,
+     "title": "Check that every in-page link resolves",
+     "start": "2026-11-16T09:34:47Z",
+     "end": "2026-11-16T09:35:02Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 15,
+     "actualMinutes": 0,
+     "dependsOn": []
+    },
+    {
+     "taskId": 4,
+     "title": "Add a meta description and an FAQ",
+     "start": "2026-11-16T09:34:22Z",
+     "end": "2026-11-16T09:34:42Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 20,
+     "actualMinutes": 0,
+     "dependsOn": []
+    },
+    {
+     "taskId": 5,
+     "title": "Translate the page into German",
+     "start": "2026-11-16T09:32:41Z",
+     "end": "2026-11-16T10:02:41Z",
+     "status": "pending",
+     "assignee": "",
+     "estimatedMinutes": 0,
+     "actualMinutes": 0,
+     "dependsOn": []
+    }
+   ],
+   "now": "2026-11-16T09:37:44Z",
+   "planStart": "2026-11-16T09:32:41Z"
+  }
+ }
+]

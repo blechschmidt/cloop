@@ -1,0 +1,17 @@
+[
+ {
+  "request": "GET /api/chat/history?project_idx=0",
+  "body": [
+   {
+    "role": "user",
+    "content": "what is left to do?",
+    "timestamp": "2026-11-16T09:36:38.905397373Z"
+   },
+   {
+    "role": "assistant",
+    "content": "cloop do — natural language dispatcher\n  Provider : claudecode\n  Input    : what is left to do?\n\nInterpreting...\n\nResolved command:\n  cloop status\n\nWhat it does: Show the goal and where every task stands.\n\nRunning: cloop status\n\nGoal:     Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.\nStatus:   complete\nProvider: claudecode\nModel:    claude-opus-5-5\nMode:     Software Factory\nTasks:    6/6 tasks complete\n          [x] Task 1: Scaffold the HTTP server with a health check [2 notes]\n          [x] Task 2: Add an in-memory store for to-do items [2 notes]\n          [x] Task 3: Implement the /todos CRUD handlers [2 notes]\n          [x] Task 4: Cover the handlers with tests [2 notes]\n          [x] Task 6: Review the API before the first release [1 notes]\n          [x] Task 5: Document the API in the README [2 notes]\nCreated:  2026-11-16 02:16\nUpdated:  2026-11-16 02:19\n\nLast step (#5): Task 5: Document the API in the README, 15s\nTrace:    last commit f604bb5 → task #5 (Document the API in the README) [high]",
+    "timestamp": "2026-11-16T09:36:39.261785548Z"
+   }
+  ]
+ }
+]

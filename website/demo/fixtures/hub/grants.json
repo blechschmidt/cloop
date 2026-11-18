@@ -1,0 +1,263 @@
+[
+ {
+  "request": "GET /api/grants",
+  "body": {
+   "grants": [
+    {
+     "id": "grant_d51fd74fa5f6e06cddbbd133",
+     "source": "secret",
+     "kind": "env",
+     "secret_id": "sec_32beab754c933b22242bda2c",
+     "secret_name": "datadog-api",
+     "subject": "project:/home/demo/projects/todo-api",
+     "summary": "env=DD_API_KEY",
+     "constraints": {
+      "env_keys": [
+       "DD_API_KEY"
+      ]
+     },
+     "expires_at": "2026-11-17T09:30:02.602468631Z",
+     "created_at": "2026-11-16T09:30:02.602468631Z",
+     "created_by": "dana@demo.example.com",
+     "status": "active",
+     "active": true,
+     "remaining_seconds": 85793
+    },
+    {
+     "id": "egress_c7447c54ac9f045d8c0fea6d",
+     "source": "egress",
+     "kind": "egress",
+     "subject": "project:/home/demo/projects/csv-report",
+     "summary": "hosts=files.pythonhosted.org|pypi.org ports=443 methods=GET",
+     "constraints": {
+      "hosts": [
+       "files.pythonhosted.org",
+       "pypi.org"
+      ],
+      "ports": [
+       443
+      ],
+      "methods": [
+       "GET"
+      ]
+     },
+     "expires_at": "2026-11-23T09:30:02.581049509Z",
+     "created_at": "2026-11-16T09:30:02.581049509Z",
+     "created_by": "dana@demo.example.com",
+     "status": "active",
+     "active": true,
+     "remaining_seconds": 604193
+    },
+    {
+     "id": "grant_aaaf4830a46ff5f1876ee8cf",
+     "source": "secret",
+     "kind": "env",
+     "secret_id": "sec_32beab754c933b22242bda2c",
+     "secret_name": "datadog-api",
+     "subject": "executor:BXWRDyhCGccKPnAH",
+     "summary": "env=DD_API_KEY",
+     "constraints": {
+      "env_keys": [
+       "DD_API_KEY"
+      ]
+     },
+     "expires_at": "2026-11-23T09:30:02.574426552Z",
+     "created_at": "2026-11-16T09:30:02.574426552Z",
+     "created_by": "dana@demo.example.com",
+     "status": "active",
+     "active": true,
+     "remaining_seconds": 604193
+    },
+    {
+     "id": "grant_f4b5e9cb7d17599872da8381",
+     "source": "secret",
+     "kind": "kubeconfig",
+     "secret_id": "sec_f37b3f20ffde7a96a519386d",
+     "secret_name": "staging-kubeconfig",
+     "scope": "staging",
+     "subject": "label:region=eu-central",
+     "summary": "ns=todo|web ctx=staging-eu",
+     "constraints": {
+      "namespaces": [
+       "todo",
+       "web"
+      ],
+      "contexts": [
+       "staging-eu"
+      ],
+      "read_only": true
+     },
+     "expires_at": "2026-11-23T09:30:02.559260017Z",
+     "created_at": "2026-11-16T09:30:02.559260017Z",
+     "created_by": "dana@demo.example.com",
+     "status": "active",
+     "active": true,
+     "remaining_seconds": 604193,
+     "enforcement": "unguarded",
+     "kube_delivery": "acknowledged",
+     "unguarded_ack": {
+      "at": "2026-11-16T09:30:02.567523431Z",
+      "by": "dana@demo.example.com",
+      "reason": "Staging only; the cluster's own RBAC limits cloop-bot to these namespaces."
+     },
+     "label_matches": {
+      "executors": [
+       {
+        "id": "BXWRDyhCGccKPnAH",
+        "name": "edge-fra-07",
+        "kind": "remote"
+       },
+       {
+        "id": "sandbox-eu",
+        "name": "sandbox-eu",
+        "kind": "container"
+       },
+       {
+        "id": "vx-yxe3zrwqex",
+        "name": "hsm-signing",
+        "kind": "virtual",
+        "device": "BXWRDyhCGccKPnAH"
+       }
+      ]
+     }
+    },
+    {
+     "id": "grant_bf2beb51a5bb5ec19af2a914",
+     "source": "secret",
+     "kind": "github_app",
+     "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+     "secret_name": "acme-github-app",
+     "subject": "project:/home/demo/projects/landing-page",
+     "summary": "repos=acme/tidewater-site perms=contents:read",
+     "constraints": {
+      "repos": [
+       "acme/tidewater-site"
+      ],
+      "permissions": [
+       "contents:read"
+      ]
+     },
+     "expires_at": "2026-11-17T09:30:02.552052096Z",
+     "created_at": "2026-11-16T09:30:02.552052096Z",
+     "created_by": "dana@demo.example.com",
+     "status": "active",
+     "active": true,
+     "remaining_seconds": 85793
+    },
+    {
+     "id": "grant_b59fbf057a7bc59ba47ba049",
+     "source": "secret",
+     "kind": "github_app",
+     "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+     "secret_name": "acme-github-app",
+     "subject": "project:/home/demo/projects/todo-api",
+     "summary": "repos=acme/todo-api perms=contents:write|pull_requests:write branches=cloop/*",
+     "constraints": {
+      "repos": [
+       "acme/todo-api"
+      ],
+      "permissions": [
+       "contents:write",
+       "pull_requests:write"
+      ],
+      "branches": [
+       "cloop/*"
+      ]
+     },
+     "expires_at": "2026-11-17T09:30:02.53553934Z",
+     "created_at": "2026-11-16T09:30:02.53553934Z",
+     "created_by": "dana@demo.example.com",
+     "status": "active",
+     "active": true,
+     "remaining_seconds": 85793,
+     "branch_enforcement": "read_only"
+    }
+   ],
+   "broker": {
+    "secrets_available": true,
+    "egress_available": true
+   }
+  }
+ },
+ {
+  "request": "GET /api/grants/egress_c7447c54ac9f045d8c0fea6d/holders?*",
+  "body": {
+   "grant_id": "egress_c7447c54ac9f045d8c0fea6d",
+   "workloads": [],
+   "in_environment": 0,
+   "terminated": 0
+  }
+ },
+ {
+  "request": "GET /api/grants/grant_aaaf4830a46ff5f1876ee8cf/holders?*",
+  "body": {
+   "grant_id": "grant_aaaf4830a46ff5f1876ee8cf",
+   "workloads": [],
+   "in_environment": 0,
+   "terminated": 0
+  }
+ },
+ {
+  "request": "GET /api/grants/grant_b59fbf057a7bc59ba47ba049/holders?*",
+  "body": {
+   "grant_id": "grant_b59fbf057a7bc59ba47ba049",
+   "workloads": [],
+   "in_environment": 0,
+   "terminated": 0
+  }
+ },
+ {
+  "request": "GET /api/grants/grant_bf2beb51a5bb5ec19af2a914/holders?*",
+  "body": {
+   "grant_id": "grant_bf2beb51a5bb5ec19af2a914",
+   "workloads": [],
+   "in_environment": 0,
+   "terminated": 0
+  }
+ },
+ {
+  "request": "GET /api/grants/grant_d51fd74fa5f6e06cddbbd133/holders?*",
+  "body": {
+   "grant_id": "grant_d51fd74fa5f6e06cddbbd133",
+   "workloads": [],
+   "in_environment": 0,
+   "terminated": 0
+  }
+ },
+ {
+  "request": "GET /api/grants/grant_f4b5e9cb7d17599872da8381/holders?*",
+  "body": {
+   "grant_id": "grant_f4b5e9cb7d17599872da8381",
+   "workloads": [],
+   "in_environment": 0,
+   "terminated": 0
+  }
+ },
+ {
+  "request": "GET /api/grants/matches?*",
+  "body": {
+   "subject": "label:region=eu-central",
+   "type": "label",
+   "matches": {
+    "executors": [
+     {
+      "id": "BXWRDyhCGccKPnAH",
+      "name": "edge-fra-07",
+      "kind": "remote"
+     },
+     {
+      "id": "sandbox-eu",
+      "name": "sandbox-eu",
+      "kind": "container"
+     },
+     {
+      "id": "vx-yxe3zrwqex",
+      "name": "hsm-signing",
+      "kind": "virtual",
+      "device": "BXWRDyhCGccKPnAH"
+     }
+    ]
+   }
+  }
+ }
+]

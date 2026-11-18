@@ -1,0 +1,30 @@
+[
+ {
+  "request": "GET /api/config?project_idx=2",
+  "body": {
+   "anthropic": {
+    "has_key": false,
+    "model": "claude-opus-4-6",
+    "base_url": ""
+   },
+   "claudecode": {
+    "effort": "",
+    "model": ""
+   },
+   "copilot": {
+    "effort": "",
+    "model": ""
+   },
+   "ollama": {
+    "base_url": "http://localhost:11434",
+    "model": "llama3.2"
+   },
+   "openai": {
+    "has_key": false,
+    "model": "gpt-4o",
+    "base_url": ""
+   },
+   "provider": "claudecode"
+  }
+ }
+]

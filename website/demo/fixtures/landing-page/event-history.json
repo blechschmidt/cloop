@@ -1,0 +1,485 @@
+[
+ {
+  "request": "GET /api/event-history?limit=50&project_idx=1",
+  "body": {
+   "entries": [
+    {
+     "id": -26,
+     "kind": "task_added",
+     "timestamp": "2026-11-16T09:36:39.455605207Z",
+     "task_id": 5,
+     "task_title": "Translate the page into German",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Task #5 added via UI: Translate the page into German"
+    },
+    {
+     "id": -25,
+     "kind": "feature_created",
+     "timestamp": "2026-11-16T09:35:14.774901577Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Feature \"Dark mode\" created on branch cloop/feature/dark-mode from main"
+    },
+    {
+     "id": -24,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:35:14.270243478Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_bf2beb51a5bb5ec19af2a914",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_f3725344793e2003890f016ab5679fdd",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    },
+    {
+     "id": -23,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:35:12.221656354Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_bf2beb51a5bb5ec19af2a914",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_b1b73464690a1ee756b6db2f7b6e01ff",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    },
+    {
+     "id": -22,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:35:10.183509127Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_bf2beb51a5bb5ec19af2a914",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_c2336350e287ce4a30be112b5ec99764",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    },
+    {
+     "id": -21,
+     "kind": "plan_complete",
+     "timestamp": "2026-11-16T09:35:02.809423359Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "All 4 tasks complete",
+     "details": {
+      "done": 4,
+      "duration": "15s",
+      "failed": 0,
+      "total": 4
+     }
+    },
+    {
+     "id": -20,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:35:02.725255627Z",
+     "task_id": 3,
+     "task_title": "Check that every in-page link resolves",
+     "step": 5,
+     "exit_code": 0,
+     "message": "Task #3 completed in 15s",
+     "details": {
+      "duration": "15s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 1,
+      "heal_attempts": 2,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 5,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:35:02.682792575Z",
+     "step": 4,
+     "exit_code": 0,
+     "message": "Task 3: Check that every in-page link resolves",
+     "output": "tests/links.sh passes: the navigation's #faq now has a section.\n\nCommitted 053346d: Add the FAQ section the navigation links to (Task 3).\n\nTASK_DONE",
+     "duration": "15s"
+    },
+    {
+     "id": -19,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:34:47.629002505Z",
+     "task_id": 3,
+     "task_title": "Check that every in-page link resolves",
+     "step": 4,
+     "exit_code": 0,
+     "message": "Task #3 started",
+     "details": {
+      "priority": 2,
+      "role": "testing"
+     }
+    },
+    {
+     "id": -18,
+     "kind": "session_started",
+     "timestamp": "2026-11-16T09:34:47.585352621Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Run started on dev+g0a796d2.dirty",
+     "details": {
+      "auto_evolve": false,
+      "build": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "follow_builds": false,
+      "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.",
+      "innovate": false,
+      "max_parallel": 0,
+      "model": "claude-sonnet-4-6",
+      "parallel": false,
+      "pid": 10,
+      "provider": "anthropic"
+     }
+    },
+    {
+     "id": -17,
+     "kind": "knowledge",
+     "timestamp": "2026-11-16T09:34:47.403558729Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "/home/demo/projects/todo-api is not given to it: it is the hub's own directory, whose .cloop holds the control plane."
+    },
+    {
+     "id": -16,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:34:47.357596445Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_bf2beb51a5bb5ec19af2a914",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_5054131f73be1c87fcc3147d30d77498",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    },
+    {
+     "id": -15,
+     "kind": "task_status_change",
+     "timestamp": "2026-11-16T09:34:47.066430358Z",
+     "task_id": 3,
+     "task_title": "Check that every in-page link resolves",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Task #3 status changed: failed → pending (via UI)",
+     "details": {
+      "new_status": "pending",
+      "old_status": "failed"
+     }
+    },
+    {
+     "id": -14,
+     "kind": "plan_complete",
+     "timestamp": "2026-11-16T09:34:42.417549254Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "All 4 tasks complete",
+     "details": {
+      "done": 3,
+      "duration": "2m1s",
+      "failed": 1,
+      "total": 4
+     }
+    },
+    {
+     "id": -13,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:34:42.37313792Z",
+     "task_id": 4,
+     "task_title": "Add a meta description and an FAQ",
+     "step": 4,
+     "exit_code": 0,
+     "message": "Task #4 completed in 20s",
+     "details": {
+      "duration": "20s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 4,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:34:42.342540905Z",
+     "step": 3,
+     "exit_code": 0,
+     "message": "Task 4: Add a meta description and an FAQ",
+     "output": "Added a 78-character meta description. The FAQ answers where the tide times come from.\n\nCommitted 64ec30e: Describe the page for search engines (Task 4).\n\nTASK_DONE",
+     "duration": "20s"
+    },
+    {
+     "id": -12,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:34:22.272659229Z",
+     "task_id": 4,
+     "task_title": "Add a meta description and an FAQ",
+     "step": 3,
+     "exit_code": 0,
+     "message": "Task #4 started",
+     "details": {
+      "priority": 3,
+      "role": "frontend"
+     }
+    },
+    {
+     "id": -11,
+     "kind": "task_failed",
+     "timestamp": "2026-11-16T09:34:22.170490512Z",
+     "task_id": 3,
+     "task_title": "Check that every in-page link resolves",
+     "step": 3,
+     "exit_code": 0,
+     "message": "Task #3 failed after 45s",
+     "details": {
+      "duration": "45s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 1,
+      "heal_attempts": 2,
+      "isolation": "none",
+      "status": "failed",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": -10,
+     "kind": "task_heal",
+     "timestamp": "2026-11-16T09:34:07.022233635Z",
+     "task_id": 3,
+     "task_title": "Check that every in-page link resolves",
+     "step": 3,
+     "exit_code": 0,
+     "message": "Heal attempt 2/2 for task #3",
+     "details": {
+      "attempt": 2,
+      "max": 2,
+      "variant_id": "testing-concise"
+     }
+    },
+    {
+     "id": -9,
+     "kind": "task_heal",
+     "timestamp": "2026-11-16T09:33:51.905556342Z",
+     "task_id": 3,
+     "task_title": "Check that every in-page link resolves",
+     "step": 3,
+     "exit_code": 0,
+     "message": "Heal attempt 1/2 for task #3",
+     "details": {
+      "attempt": 1,
+      "max": 2,
+      "variant_id": "testing-default"
+     }
+    },
+    {
+     "id": 3,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:33:51.892749231Z",
+     "step": 2,
+     "exit_code": 0,
+     "message": "Task 3: Check that every in-page link resolves",
+     "output": "tests/links.sh failed:\n  index.html: #faq has no element with that id\nThe navigation links to an FAQ section that was never written. I am not going to remove the link without knowing whether the FAQ is wanted.\n\nTASK_FAILED",
+     "duration": "15s"
+    },
+    {
+     "id": -8,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:33:36.844373966Z",
+     "task_id": 3,
+     "task_title": "Check that every in-page link resolves",
+     "step": 2,
+     "exit_code": 0,
+     "message": "Task #3 started",
+     "details": {
+      "priority": 2,
+      "role": "testing"
+     }
+    },
+    {
+     "id": -7,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:33:36.733102402Z",
+     "task_id": 2,
+     "task_title": "Add the features and pricing sections",
+     "step": 2,
+     "exit_code": 0,
+     "message": "Task #2 completed in 30s",
+     "details": {
+      "duration": "30s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 2,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:33:36.696388542Z",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task 2: Add the features and pricing sections",
+     "output": "Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.\n\nCommitted ea3fba7: Add the features and pricing sections (Task 2).\n\nTASK_DONE",
+     "duration": "30s"
+    },
+    {
+     "id": -6,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:33:06.628479523Z",
+     "task_id": 2,
+     "task_title": "Add the features and pricing sections",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task #2 started",
+     "details": {
+      "priority": 2,
+      "role": "frontend"
+     }
+    },
+    {
+     "id": -5,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:33:06.510031832Z",
+     "task_id": 1,
+     "task_title": "Build the hero section",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task #1 completed in 25s",
+     "details": {
+      "duration": "25s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 1,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:33:06.469737757Z",
+     "step": 0,
+     "exit_code": 0,
+     "message": "Task 1: Build the hero section",
+     "output": "The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.\n\nCommitted 42c66ef: Add the hero with the Start free button (Task 1).\n\nTASK_DONE",
+     "duration": "25s"
+    },
+    {
+     "id": -4,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:32:41.420345963Z",
+     "task_id": 1,
+     "task_title": "Build the hero section",
+     "step": 0,
+     "exit_code": 0,
+     "message": "Task #1 started",
+     "details": {
+      "priority": 1,
+      "role": "frontend"
+     }
+    },
+    {
+     "id": -3,
+     "kind": "session_started",
+     "timestamp": "2026-11-16T09:32:41.385579755Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Run started on dev+g0a796d2.dirty",
+     "details": {
+      "auto_evolve": false,
+      "build": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "follow_builds": false,
+      "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.",
+      "innovate": false,
+      "max_parallel": 0,
+      "model": "claude-sonnet-4-6",
+      "parallel": false,
+      "pid": 11,
+      "provider": "anthropic"
+     }
+    },
+    {
+     "id": -2,
+     "kind": "knowledge",
+     "timestamp": "2026-11-16T09:32:41.224811847Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "/home/demo/projects/todo-api is not given to it: it is the hub's own directory, whose .cloop holds the control plane."
+    },
+    {
+     "id": -1,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:32:41.174439501Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_bf2beb51a5bb5ec19af2a914",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_5a24c09f95726251b577f80833e8b8cf",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    }
+   ],
+   "top": [
+    4,
+    26
+   ],
+   "bottom": [
+    2461362.596599236,
+    1,
+    1
+   ],
+   "more": false,
+   "offset": 0,
+   "limit": 50
+  }
+ }
+]

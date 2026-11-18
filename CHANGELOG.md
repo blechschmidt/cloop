@@ -356,6 +356,22 @@ schema and the hub's HTTP API may change in any release.
   the Projects, Overview and Tasks tabs; `website/demo/README.md` describes
   their format. The hub is unchanged and does not serve any of this
   (Task 20505).
+- **The dashboard demo now shows a whole hub, recorded from a real one.**
+  `make demo-fixtures` (`scripts/demo/record-fixtures.sh`) runs three small
+  made-up projects through a throwaway hub with single sign-on: a Go service
+  with a human review gate and attachments, a static site with requirements,
+  a red-green proof, a retried task and a parallel feature, and a script
+  whose run is paused at the Claude usage limit. It fills the admin surfaces
+  through the hub's API (an edge device with a virtual executor and a USB
+  device, an executor pool, secrets and grants, an access request waiting
+  for approval, Confluence and Jira sources, readers, teams, shares, tokens,
+  quotas, budget and Claude caps), walks the dashboard as an administrator
+  in headless Chrome, and writes what the hub answered into
+  `website/demo/fixtures`, with paths, hosts, credentials and times replaced.
+  Every tab of the demo has data now. `tests/demo` fails when the dashboard
+  gains a GET route no fixture answers, or when a fixture holds a credential,
+  a `/root` or `/tmp` path, or a real host name. `scripts/build-demo.py`
+  takes `--fixtures` to build from another directory (Task 20506).
 - **A conformance suite now attacks project isolation from a hostile run, on
   every kind of executor two projects can share.** `tests/isolation` starts a
   real hub with three projects and replaces the attacking project's `claude`

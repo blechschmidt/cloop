@@ -1,0 +1,16 @@
+[
+ {
+  "request": "GET /api/suggest/status?project_idx=0&*",
+  "body": {
+   "depends_on": [],
+   "done": false,
+   "error": "",
+   "gen": 0,
+   "priority": 0,
+   "request": "",
+   "running": false,
+   "suggestions": [],
+   "summary": ""
+  }
+ }
+]

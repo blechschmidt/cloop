@@ -1,0 +1,28 @@
+[
+ {
+  "request": "GET /api/steps?project_idx=2&*",
+  "body": {
+   "limit": 50,
+   "offset": 0,
+   "steps": [
+    {
+     "step": 1,
+     "task": "Task 2: Summarise sales by region",
+     "output": "You've hit your session limit · resets 8:00am (UTC)",
+     "exit_code": 0,
+     "duration": "30s",
+     "time": "2026-11-16T09:36:32.331895637Z"
+    },
+    {
+     "step": 0,
+     "task": "Task 1: Parse the monthly sales export",
+     "output": "read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.\n\nCommitted be34630: Read the sales export into typed rows (Task 1).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "20s",
+     "time": "2026-11-16T09:36:02.075642277Z"
+    }
+   ],
+   "total": 2
+  }
+ }
+]

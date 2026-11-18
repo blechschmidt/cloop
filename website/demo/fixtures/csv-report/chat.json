@@ -1,0 +1,17 @@
+[
+ {
+  "request": "GET /api/chat/history?project_idx=2",
+  "body": [
+   {
+    "role": "user",
+    "content": "show me the tasks",
+    "timestamp": "2026-11-16T09:36:39.281235804Z"
+   },
+   {
+    "role": "assistant",
+    "content": "cloop do — natural language dispatcher\n  Provider : claudecode\n  Input    : show me the tasks\n\nInterpreting...\n\nResolved command:\n  cloop status\n\nWhat it does: Show the goal and where every task stands.\n\nRunning: cloop status\n\nGoal:     Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.\nStatus:   paused\nReason:   five-hour session limit reached, resumes 08:00\nProvider: claudecode\nModel:    claude-opus-5-5\nMode:     Software Factory\nTasks:    1/4 tasks complete\n          [x] Task 1: Parse the monthly sales export [2 notes]\n          [ ] Task 2: Summarise sales by region [2 notes] [@priya@demo.example.com]\n          [ ] Task 3: Write the summary as a Markdown report [@priya@demo.example.com]\n          [ ] Task 4: Send the report every Monday at 07:00 [@priya@demo.example.com]\nCreated:  2026-11-16 02:16\nUpdated:  2026-11-16 02:22\n\nLast step (#2): Task 2: Summarise sales by region, 30s",
+    "timestamp": "2026-11-16T09:36:39.43123416Z"
+   }
+  ]
+ }
+]

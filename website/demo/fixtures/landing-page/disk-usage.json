@@ -1,0 +1,134 @@
+[
+ {
+  "request": "GET /api/disk-usage?project_idx=1",
+  "body": {
+   "dir": "/home/demo/projects/landing-page/.cloop",
+   "total_bytes": 1873018,
+   "entries": [
+    {
+     "name": "state.db",
+     "bytes": 1736704,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "plan-history",
+     "bytes": 117566,
+     "files": 13,
+     "is_dir": true
+    },
+    {
+     "name": "task-checkpoints",
+     "bytes": 4428,
+     "files": 10,
+     "is_dir": true
+    },
+    {
+     "name": "artifacts",
+     "bytes": 3234,
+     "files": 8,
+     "is_dir": true
+    },
+    {
+     "name": "tasks",
+     "bytes": 1811,
+     "files": 4,
+     "is_dir": true
+    },
+    {
+     "name": "replay.jsonl",
+     "bytes": 1578,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "cache",
+     "bytes": 1486,
+     "files": 5,
+     "is_dir": true
+    },
+    {
+     "name": "plan-import.json",
+     "bytes": 1329,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "trace.json",
+     "bytes": 1310,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "costs.jsonl",
+     "bytes": 1296,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "prompt-variants.jsonl",
+     "bytes": 617,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "prompt-stats.jsonl",
+     "bytes": 590,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "config.yaml",
+     "bytes": 516,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "kb.json",
+     "bytes": 286,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "sandbox-run.json",
+     "bytes": 228,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "retention-last-run",
+     "bytes": 21,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "demo-retry-allowed",
+     "bytes": 18,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "worktrees",
+     "bytes": 0,
+     "files": 0,
+     "is_dir": true
+    }
+   ],
+   "db_bytes": 1736704,
+   "reclaimable_bytes": 0,
+   "free_ratio": 0,
+   "policy": {
+    "enabled": true,
+    "interval_hours": 24,
+    "keep_snapshots": 50,
+    "archive_max_bytes": 0,
+    "archive_max_age_days": 0,
+    "vacuum_free_ratio": 0.3,
+    "vacuum_min_free_bytes": 67108864
+   },
+   "last_run": "2026-11-16T09:30:31.413949829Z",
+   "next_due": "2026-11-17T09:30:31.413949829Z",
+   "will_vacuum": false
+  }
+ }
+]

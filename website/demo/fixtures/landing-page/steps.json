@@ -1,0 +1,62 @@
+[
+ {
+  "request": "GET /api/steps?project_idx=1&*",
+  "body": {
+   "limit": 50,
+   "offset": 0,
+   "steps": [
+    {
+     "step": 4,
+     "task": "Task 3: Check that every in-page link resolves",
+     "output": "tests/links.sh passes: the navigation's #faq now has a section.\n\nCommitted 053346d: Add the FAQ section the navigation links to (Task 3).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "15s",
+     "time": "2026-11-16T09:35:02.682792575Z",
+     "input_tokens": 2728,
+     "output_tokens": 710
+    },
+    {
+     "step": 3,
+     "task": "Task 4: Add a meta description and an FAQ",
+     "output": "Added a 78-character meta description. The FAQ answers where the tide times come from.\n\nCommitted 64ec30e: Describe the page for search engines (Task 4).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "20s",
+     "time": "2026-11-16T09:34:42.342540905Z",
+     "input_tokens": 2419,
+     "output_tokens": 977
+    },
+    {
+     "step": 2,
+     "task": "Task 3: Check that every in-page link resolves",
+     "output": "tests/links.sh failed:\n  index.html: #faq has no element with that id\nThe navigation links to an FAQ section that was never written. I am not going to remove the link without knowing whether the FAQ is wanted.\n\nTASK_FAILED",
+     "exit_code": 0,
+     "duration": "15s",
+     "time": "2026-11-16T09:33:51.892749231Z",
+     "input_tokens": 2524,
+     "output_tokens": 806
+    },
+    {
+     "step": 1,
+     "task": "Task 2: Add the features and pricing sections",
+     "output": "Added #features (three bullet points) and #pricing; the navigation links to both, and to an FAQ that does not exist yet.\n\nCommitted ea3fba7: Add the features and pricing sections (Task 2).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "30s",
+     "time": "2026-11-16T09:33:36.696388542Z",
+     "input_tokens": 2385,
+     "output_tokens": 763
+    },
+    {
+     "step": 0,
+     "task": "Task 1: Build the hero section",
+     "output": "The hero names Tidewater, says what it does in one sentence and has the #signup button. The page still loads no remote script.\n\nCommitted 42c66ef: Add the hero with the Start free button (Task 1).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "25s",
+     "time": "2026-11-16T09:33:06.469737757Z",
+     "input_tokens": 2378,
+     "output_tokens": 728
+    }
+   ],
+   "total": 5
+  }
+ }
+]

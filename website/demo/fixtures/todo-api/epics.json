@@ -1,0 +1,25 @@
+[
+ {
+  "request": "GET /api/epics?project_idx=0",
+  "body": {
+   "epics": [
+    {
+     "name": "api",
+     "description": "",
+     "task_ids": [
+      1,
+      2,
+      3,
+      4,
+      5
+     ],
+     "total": 5,
+     "done": 5,
+     "failed": 0,
+     "skipped": 0,
+     "pending": 0
+    }
+   ]
+  }
+ }
+]

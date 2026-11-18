@@ -1,0 +1,8 @@
+[
+ {
+  "request": "GET /api/goal?project_idx=3&*",
+  "body": {
+   "goal": "A dark colour scheme that follows the reader's system setting."
+  }
+ }
+]

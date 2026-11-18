@@ -1,0 +1,34 @@
+[
+ {
+  "request": "GET /api/projects/3/members",
+  "body": {
+   "project": "landing-page",
+   "path": "/home/demo/projects/landing-page",
+   "members": [
+    {
+     "identity": "team:web",
+     "kind": "team",
+     "team": {
+      "slug": "web",
+      "name": "Web team",
+      "members": 1,
+      "idp_group": "engineers"
+     },
+     "role": "operator",
+     "reason": "They run the launch.",
+     "granted_at": "2026-11-16T09:30:06.966003979Z",
+     "granted_by": "dana@demo.example.com",
+     "self": false,
+     "manageable": false
+    }
+   ],
+   "visibility": "policy",
+   "inherited_from": "landing-page",
+   "your_role": "admin",
+   "can_share": false,
+   "grantable_roles": [],
+   "available": true,
+   "note": "This project has no owner, so the hub's role mappings decide who else can reach it; the people and teams below are added to what they give."
+  }
+ }
+]

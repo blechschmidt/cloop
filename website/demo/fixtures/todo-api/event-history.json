@@ -1,0 +1,445 @@
+[
+ {
+  "request": "GET /api/event-history?limit=50&project_idx=0",
+  "body": {
+   "entries": [
+    {
+     "id": -21,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:36:39.084182728Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_b59fbf057a7bc59ba47ba049",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_86f397c4b44444ef669a47b485623fbf",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    },
+    {
+     "id": -20,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:35:08.096984556Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_b59fbf057a7bc59ba47ba049",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_9b3bc1ddbbe2d677dd540257c8120774",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    },
+    {
+     "id": -19,
+     "kind": "plan_complete",
+     "timestamp": "2026-11-16T09:32:35.797713136Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "All 6 tasks complete",
+     "details": {
+      "done": 6,
+      "duration": "15s",
+      "failed": 0,
+      "total": 6
+     }
+    },
+    {
+     "id": -18,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:32:35.723882833Z",
+     "task_id": 5,
+     "task_title": "Document the API in the README",
+     "step": 5,
+     "exit_code": 0,
+     "message": "Task #5 completed in 15s",
+     "details": {
+      "duration": "15s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 5,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:32:35.676452125Z",
+     "step": 4,
+     "exit_code": 0,
+     "message": "Task 5: Document the API in the README",
+     "output": "The README now has a table of the six endpoints, how to run the service and the error shape.\n\nCommitted f604bb5: Document every endpoint in the README (Task 5).\n\nTASK_DONE",
+     "duration": "15s"
+    },
+    {
+     "id": -17,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:32:20.587039662Z",
+     "task_id": 5,
+     "task_title": "Document the API in the README",
+     "step": 4,
+     "exit_code": 0,
+     "message": "Task #5 started",
+     "details": {
+      "priority": 3,
+      "role": "docs"
+     }
+    },
+    {
+     "id": -16,
+     "kind": "session_started",
+     "timestamp": "2026-11-16T09:32:20.538932301Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Run started on dev+g0a796d2.dirty",
+     "details": {
+      "auto_evolve": false,
+      "build": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "follow_builds": false,
+      "goal": "Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.",
+      "innovate": false,
+      "max_parallel": 0,
+      "model": "claude-opus-5-5",
+      "parallel": false,
+      "pid": 89,
+      "provider": "claudecode"
+     }
+    },
+    {
+     "id": -15,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:32:20.387476982Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_b59fbf057a7bc59ba47ba049",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_296945b3ce38ec821b15e5a960b1cd81",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    },
+    {
+     "id": -14,
+     "kind": "review_gate",
+     "timestamp": "2026-11-16T09:32:20.143767198Z",
+     "task_id": 6,
+     "task_title": "Review the API before the first release",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Review gate #6 approved by dana@demo.example.com: Review the API before the first release",
+     "details": {
+      "action": "approved",
+      "by": "dana@demo.example.com",
+      "kind": "human_gate",
+      "waiting": true
+     }
+    },
+    {
+     "id": -13,
+     "kind": "review_gate",
+     "timestamp": "2026-11-16T09:32:14.251605484Z",
+     "task_id": 6,
+     "task_title": "Review the API before the first release",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Run stopped at review gate #6 (Review the API before the first release): 1 task(s) wait behind it",
+     "details": {
+      "action": "reached",
+      "held": 1
+     }
+    },
+    {
+     "id": -12,
+     "kind": "task_attachments",
+     "timestamp": "2026-11-16T09:32:14.194373393Z",
+     "task_id": 4,
+     "task_title": "Cover the handlers with tests",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Attached 2 files to task #4: coverage.txt (603 B), requests-by-endpoint.svg (833 B)",
+     "details": {
+      "added": [
+       {
+        "id": "620ac99bb9ff99e6c3a2751c7c4d72de",
+        "media_type": "text/plain",
+        "name": "coverage.txt",
+        "sha256": "e55852066172ed62e385259caabf1546a1e8d85cfc828bb2ade28254f5ccca89",
+        "size": 603
+       },
+       {
+        "id": "87822ade5ab3bce436cf68a15658d210",
+        "media_type": "image/svg+xml",
+        "name": "requests-by-endpoint.svg",
+        "sha256": "5253afd383d29887b74a31d014b7e4142288c73b57bff30f897a79feb90f88b4",
+        "size": 833
+       }
+      ],
+      "refused": null,
+      "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+     }
+    },
+    {
+     "id": -11,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:32:14.173633086Z",
+     "task_id": 4,
+     "task_title": "Cover the handlers with tests",
+     "step": 4,
+     "exit_code": 0,
+     "message": "Task #4 completed in 30s",
+     "details": {
+      "duration": "30s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 4,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:32:14.128121901Z",
+     "step": 3,
+     "exit_code": 0,
+     "message": "Task 4: Cover the handlers with tests",
+     "output": "Three httptest tests pass; coverage is 86.7% (main is the only uncovered function). The coverage report and a chart of the load test are attached.\n\nCommitted 034e2f9: Test the handlers: create, complete, list, 400 and 404 (Task 4).\n\nTASK_DONE",
+     "duration": "30s"
+    },
+    {
+     "id": -10,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:31:44.048582513Z",
+     "task_id": 4,
+     "task_title": "Cover the handlers with tests",
+     "step": 3,
+     "exit_code": 0,
+     "message": "Task #4 started",
+     "details": {
+      "priority": 2,
+      "role": "testing"
+     }
+    },
+    {
+     "id": -9,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:31:43.94525961Z",
+     "task_id": 3,
+     "task_title": "Implement the /todos CRUD handlers",
+     "step": 3,
+     "exit_code": 0,
+     "message": "Task #3 completed in 45s",
+     "details": {
+      "duration": "45s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 3,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:31:43.902919225Z",
+     "step": 2,
+     "exit_code": 0,
+     "message": "Task 3: Implement the /todos CRUD handlers",
+     "output": "handlers.go registers the five /todos routes on the 1.22 ServeMux patterns. Bad input is a 400 and an unknown id a 404, both as {\"error\": ...}.\n\nCommitted 9a1ae7f: Serve /todos: list, create, read, complete and delete (Task 3).\n\nTASK_DONE",
+     "duration": "45s"
+    },
+    {
+     "id": -8,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:30:58.786923754Z",
+     "task_id": 3,
+     "task_title": "Implement the /todos CRUD handlers",
+     "step": 2,
+     "exit_code": 0,
+     "message": "Task #3 started",
+     "details": {
+      "priority": 2,
+      "role": "backend"
+     }
+    },
+    {
+     "id": -7,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:30:58.670353387Z",
+     "task_id": 2,
+     "task_title": "Add an in-memory store for to-do items",
+     "step": 2,
+     "exit_code": 0,
+     "message": "Task #2 completed in 30s",
+     "details": {
+      "duration": "30s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 2,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:30:58.626702295Z",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task 2: Add an in-memory store for to-do items",
+     "output": "Added store.go with Add, Get, List (sorted by id), SetDone and Delete behind one mutex; an unknown id returns ErrNotFound.\n\nCommitted e148e51: Add an in-memory, mutex-guarded to-do store (Task 2).\n\nTASK_DONE",
+     "duration": "30s"
+    },
+    {
+     "id": -6,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:30:28.532105298Z",
+     "task_id": 2,
+     "task_title": "Add an in-memory store for to-do items",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task #2 started",
+     "details": {
+      "priority": 1,
+      "role": "backend"
+     }
+    },
+    {
+     "id": -5,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:30:28.449559032Z",
+     "task_id": 1,
+     "task_title": "Scaffold the HTTP server with a health check",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task #1 completed in 20s",
+     "details": {
+      "duration": "20s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 1,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:30:28.417814036Z",
+     "step": 0,
+     "exit_code": 0,
+     "message": "Task 1: Scaffold the HTTP server with a health check",
+     "output": "Added main.go: the server listens on $ADDR (default :8080) and GET /healthz answers 200 ok. `go vet ./...` is clean.\n\nCommitted 36e3b86: Scaffold the HTTP server with GET /healthz (Task 1).\n\nTASK_DONE",
+     "duration": "20s"
+    },
+    {
+     "id": -4,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:30:08.323341543Z",
+     "task_id": 1,
+     "task_title": "Scaffold the HTTP server with a health check",
+     "step": 0,
+     "exit_code": 0,
+     "message": "Task #1 started",
+     "details": {
+      "priority": 1,
+      "role": "backend"
+     }
+    },
+    {
+     "id": -3,
+     "kind": "session_started",
+     "timestamp": "2026-11-16T09:30:08.275803265Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Run started on dev+g0a796d2.dirty",
+     "details": {
+      "auto_evolve": false,
+      "build": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "follow_builds": false,
+      "goal": "Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.",
+      "innovate": false,
+      "max_parallel": 0,
+      "model": "claude-opus-5-5",
+      "parallel": false,
+      "pid": 31,
+      "provider": "claudecode"
+     }
+    },
+    {
+     "id": -2,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:30:08.117698776Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_b59fbf057a7bc59ba47ba049",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_7e90556ea15008190be0c8147a6b65cb",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    },
+    {
+     "id": -1,
+     "kind": "task_added",
+     "timestamp": "2026-11-16T09:29:59.936004447Z",
+     "task_id": 6,
+     "task_title": "Review the API before the first release",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Review gate #6 added via CLI: Review the API before the first release"
+    }
+   ],
+   "top": [
+    4,
+    21
+   ],
+   "bottom": [
+    2461362.5947330557,
+    1,
+    1
+   ],
+   "more": false,
+   "offset": 0,
+   "limit": 50
+  }
+ }
+]

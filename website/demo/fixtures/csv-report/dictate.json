@@ -1,0 +1,10 @@
+[
+ {
+  "request": "GET /api/dictate?project_idx=2&*",
+  "body": {
+   "available": true,
+   "backend": "groq",
+   "can_add_tasks": true
+  }
+ }
+]

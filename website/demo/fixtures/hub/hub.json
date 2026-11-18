@@ -1,0 +1,960 @@
+[
+ {
+  "request": "GET /api/hub/ca",
+  "body": {
+   "phase": "none",
+   "members": [],
+   "leaves": [],
+   "running": 0,
+   "next_step": "There is no hub CA: no credential monitor has run under tls: auto here.",
+   "ready": false,
+   "configured": false,
+   "longest_session_minutes": 0,
+   "step_age_seconds": 0,
+   "config_names": null,
+   "history": []
+  }
+ },
+ {
+  "request": "GET /api/hub/health",
+  "body": {
+   "member": {
+    "id": "hub_8211a25a46bd68b97203f6023060708b",
+    "hostname": "demo.example.com",
+    "port": 8080,
+    "clustered": true,
+    "leader": true
+   },
+   "generation": 2,
+   "checked_at": "2026-11-16T09:35:31.222576972Z",
+   "expires_at": "2026-11-16T09:40:31.222576972Z",
+   "served_at": "2026-11-16T09:40:12.926542768Z",
+   "duration_ms": 153,
+   "config": {
+    "files": [
+     ".cloop/config.yaml",
+     ".cloop/config.ui-8080.yaml"
+    ]
+   },
+   "strict_mode": false,
+   "counts": {
+    "pass": 47,
+    "warn": 17,
+    "fail": 0
+   },
+   "failing": 0,
+   "findings": [
+    {
+     "check": "policy.host_execution",
+     "title": "Host execution policy",
+     "severity": "warn",
+     "message": "host execution is explicitly allowed: a run forks a harness beside the control plane",
+     "remediation": "Set executors.allow_host_process: false unless this hub is single-user",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-policy"
+    },
+    {
+     "check": "executors.host_sandbox.opt_out",
+     "title": "Host sandbox",
+     "severity": "warn",
+     "message": "1 project(s) opted out of executors.host_sandbox: their runs on this host are not kept to their own project, and can open, list and write every other project here: /home/demo/projects/todo-api",
+     "remediation": "Remove a project from executors.host_sandbox.opt_out once its runs work in the host sandbox — grant what they need with executors.host_sandbox.read_only and pass_env — or move it to a container executor",
+     "details": {
+      "mode": "auto",
+      "opt_out": [
+       "/home/demo/projects/todo-api"
+      ],
+      "unknown": null
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.host_sandbox",
+     "title": "Host sandbox",
+     "severity": "warn",
+     "message": "every run on this host, administrators' included, since it serves 3 projects (and every person's but an administrator's whatever it serves), runs in the host sandbox (Landlock ABI 4 with private mount, PID and IPC namespaces), but below Landlock ABI 6 a sandboxed run on a hub running as root can still connect to the abstract sockets of the host's daemons, some of which trust a caller for being root",
+     "remediation": "Run the hub as a non-root user, or on Linux 6.12 or later, whose Landlock scopes abstract sockets",
+     "details": {
+      "mode": "auto"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "oidc.enabled",
+     "title": "Single sign-on",
+     "severity": "pass",
+     "message": "enabled for issuer https://login.demo.example.com",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-oidc"
+    },
+    {
+     "check": "oidc.startup",
+     "title": "Single sign-on settings",
+     "severity": "pass",
+     "message": "oidcauth.New, which `cloop ui` runs at startup, accepts ui.oidc",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-oidc"
+    },
+    {
+     "check": "oidc.client_secret",
+     "title": "OIDC client secret",
+     "severity": "pass",
+     "message": "no client secret, so the hub authenticates the code exchange with PKCE (S256) as a public client; if this client is registered as confidential at the issuer, export CLOOP_OIDC_CLIENT_SECRET instead",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-oidc"
+    },
+    {
+     "check": "oidc.external_url",
+     "title": "External URL",
+     "severity": "warn",
+     "message": "ui.external_url is unset, so the redirect URI could not be cross-checked and enrollment bundles will carry no server address",
+     "remediation": "Set ui.external_url to https://demo.example.com",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-oidc"
+    },
+    {
+     "check": "oidc.redirect_uri",
+     "title": "Redirect URI",
+     "severity": "pass",
+     "message": "the hub serves its callback at /auth/callback; with no usable ui.external_url, the origin https://demo.example.com was not cross-checked",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-oidc"
+    },
+    {
+     "check": "oidc.sudo",
+     "title": "Recent sign-in for privileged actions",
+     "severity": "pass",
+     "message": "privileged actions ask for a sign-in from the last 120 minutes",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-oidc"
+    },
+    {
+     "check": "oidc.discovery",
+     "title": "Issuer discovery",
+     "severity": "pass",
+     "message": "this hub's sign-in client resolved the issuer at 2026-11-16T09:30:01Z, and its document agrees on the issuer name",
+     "details": {
+      "authorization_endpoint": "https://login.demo.example.com/authorize",
+      "jwks_uri": "https://login.demo.example.com/jwks",
+      "token_endpoint": "https://login.demo.example.com/token"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-oidc"
+    },
+    {
+     "check": "oidc.jwks",
+     "title": "Signing keys (JWKS)",
+     "severity": "pass",
+     "message": "this hub's sign-in client holds 1 usable signing key(s) from https://login.demo.example.com/jwks, fetched at 2026-11-16T09:30:01Z",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-oidc"
+    },
+    {
+     "check": "tls.termination",
+     "title": "TLS termination",
+     "severity": "warn",
+     "message": "no ui.tls certificate and no ui.external_url: this hub serves plaintext and does not know whether something in front of it does not",
+     "remediation": "Run `cloop hub tls-init` for a development certificate, or set ui.external_url if a proxy terminates TLS",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-tls"
+    },
+    {
+     "check": "ui.exposure",
+     "title": "Network exposure",
+     "severity": "pass",
+     "message": "listens on demo.example.com only, so nothing beyond this machine reaches it",
+     "details": {
+      "listening": [
+       "demo.example.com"
+      ],
+      "observed": true,
+      "port": 8080,
+      "this_build_would_bind": "*:8080"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-ui"
+    },
+    {
+     "check": "secret_key.source",
+     "title": "Sealing key source",
+     "severity": "pass",
+     "message": "the root key is read from the file /home/demo/work/secret.key (CLOOP_SECRET_KEY_FILE)",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-secret_key"
+    },
+    {
+     "check": "secret_key.entropy",
+     "title": "Sealing key strength",
+     "severity": "pass",
+     "message": "64 characters of high-entropy key material",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-secret_key"
+    },
+    {
+     "check": "secret_key.matches",
+     "title": "Sealing key matches",
+     "severity": "pass",
+     "message": "the current root opens this hub's primary sealing key, kek_5abe150491d2131675b50ce1",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-secret_key"
+    },
+    {
+     "check": "secret_key.escrow",
+     "title": "Sealing key escrow",
+     "severity": "warn",
+     "message": "no escrow of CLOOP_SECRET_KEY is recorded: lose the key and every sealed secret, session and hub CA key is lost with it — no rotation can help, since every key derives from it",
+     "remediation": "`cloop hub key escrow export --output <file off this host>`, and keep the passphrase apart from the file. After restoring a backup taken before an existing escrow, record it again: `cloop hub key escrow verify <file> --record`",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-secret_key"
+    },
+    {
+     "check": "rbac.policy",
+     "title": "Role mappings",
+     "severity": "pass",
+     "message": "4 role mapping(s) and 1 admin email(s) parse",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-rbac"
+    },
+    {
+     "check": "rbac.enforced",
+     "title": "RBAC enforcement",
+     "severity": "pass",
+     "message": "RBAC is in force: a signed-in identity matching no role mapping gets \"none\"",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-rbac"
+    },
+    {
+     "check": "rbac.default_role",
+     "title": "Default role",
+     "severity": "pass",
+     "message": "deny-by-default: a user matching no mapping gets \"none\"",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-rbac"
+    },
+    {
+     "check": "rbac.admin",
+     "title": "Administrator access",
+     "severity": "pass",
+     "message": "2 route(s) grant hub admin",
+     "details": {
+      "granted_by": "group=platform-admins, email=dana@demo.example.com"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-rbac"
+    },
+    {
+     "check": "scim.config",
+     "title": "SCIM provisioning",
+     "severity": "pass",
+     "message": "1 live credential(s), never used; matching on email, offboarding after a DELETE only",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-scim"
+    },
+    {
+     "check": "scim.directory",
+     "title": "Provisioned directory",
+     "severity": "pass",
+     "message": "0 user(s) — 0 active, 0 suspended — and 0 group(s), every user matched by email",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-scim"
+    },
+    {
+     "check": "ui.static_token",
+     "title": "Static admin token",
+     "severity": "warn",
+     "message": "a static token is still accepted beside single sign-on with an enforced role policy: 55e605a4b7d0 (held by a running hub, and CLOOP_UI_TOKEN in this hub's environment; unused for 5 minute(s), last from 198.51.100.24 at 2026-11-16 02:16Z). Whoever holds it is an administrator outside RBAC, and it never expires",
+     "remediation": "Retire it — `cloop hub token static retire --reason \"single sign-on is live\"`, or Settings → Static admin token → Retire — and every member refuses it without a restart; then remove CLOOP_UI_TOKEN / --token from the deployment (in Helm, secrets.uiToken or the key in secrets.existingSecret)",
+     "details": {
+      "accepted": 1,
+      "fingerprint": "55e605a4b7d0",
+      "last_used_at": "2026-11-16T09:30:07Z",
+      "unused_seconds": 324
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-ui"
+    },
+    {
+     "check": "api_tokens.unapproved",
+     "title": "API tokens minted with no role policy in force",
+     "severity": "pass",
+     "message": "every live API token was minted under the role policy, at the control plane, or approved since, or acts for an owner the policy decides",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-rbac"
+    },
+    {
+     "check": "offboard.claude_homes",
+     "title": "Claude Code homes of denied identities",
+     "severity": "pass",
+     "message": "the control plane denies no identity whose Claude home a hub member would remove",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-offboard"
+    },
+    {
+     "check": "images.policy",
+     "title": "Image trust policy",
+     "severity": "warn",
+     "message": "project images run on this hub — an image-running executor is enabled, or a device's sandbox runs a container — but sandbox.image_policy is empty, so a project's .cloop/sandbox.yaml may name any image from any registry",
+     "remediation": "Set sandbox.image_policy.allowed_registries (and require_digest: true)",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-images"
+    },
+    {
+     "check": "executors.configured",
+     "title": "Configured executor sandbox-eu",
+     "severity": "pass",
+     "message": "registered: docker running ghcr.io/blechschmidt/cloop-harness:latest",
+     "details": {
+      "preflight": "rootless: the control plane runs as root, so containers are created by a root-owned runtime; egress: network \"bridge\" has unrestricted outbound access; cloop does not filter it; devices: a host_device grant's access mode (r/rw/rwm) is programmed into the container's device cgroup, whose enforcement depends on this host's cgroup version and runtime build and cannot be verified from here — on a host where it is not attached, a device granted \"r\" is writable because the node keeps its host file mode; network: network \"bridge\" gives the workload outbound access; cloop does not filter egress itself"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.available",
+     "title": "Dispatch targets",
+     "severity": "pass",
+     "message": "4 executor(s) registered, 3 of them isolating",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.health",
+     "title": "Executor BXWRDyhCGccKPnAH",
+     "severity": "pass",
+     "message": "reachable, isolation \"remote\"",
+     "details": {
+      "disk_limits": "enforced (sampled)",
+      "isolation": "remote",
+      "kind": "remote",
+      "max_concurrent": 4,
+      "network_egress": true,
+      "platform": "linux/amd64",
+      "probed": "as the hub's supervisor last probed it, at 2026-11-16T09:35:24Z",
+      "resource_limits": true,
+      "secret_files": true,
+      "virtualized": false,
+      "workspace": true,
+      "write_back": true
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.health",
+     "title": "Executor local",
+     "severity": "pass",
+     "message": "reachable, isolation \"none\"",
+     "details": {
+      "disk_limits": "not supported",
+      "isolation": "none",
+      "kind": "localprocess",
+      "network_egress": true,
+      "platform": "linux/amd64",
+      "probed": "as the hub's supervisor last probed it, at 2026-11-16T09:35:24Z",
+      "resource_limits": false,
+      "secret_files": true,
+      "virtualized": false,
+      "workspace": false,
+      "write_back": false
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.health",
+     "title": "Executor sandbox-eu",
+     "severity": "pass",
+     "message": "reachable, isolation \"container\"",
+     "details": {
+      "disk_limits": "enforced (sampled)",
+      "isolation": "container",
+      "kind": "container",
+      "network_egress": true,
+      "platform": "linux/amd64",
+      "probed": "as the hub's supervisor last probed it, at 2026-11-16T09:35:24Z",
+      "resource_limits": true,
+      "secret_files": true,
+      "virtualized": false,
+      "workspace": false,
+      "write_back": true
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.health",
+     "title": "Executor vx-yxe3zrwqex",
+     "severity": "pass",
+     "message": "reachable, isolation \"remote\"",
+     "details": {
+      "disk_limits": "enforced (sampled)",
+      "isolation": "remote",
+      "kind": "virtual",
+      "max_concurrent": 4,
+      "network_egress": true,
+      "platform": "linux/amd64",
+      "probed": "as the hub's supervisor last probed it, at 2026-11-16T09:35:24Z",
+      "resource_limits": true,
+      "secret_files": true,
+      "virtualized": false,
+      "workspace": true,
+      "write_back": true
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.rollback_protection",
+     "title": "Rollback protection of edge-fra-07",
+     "severity": "warn",
+     "message": "edge-fra-07 runs dev+g0a796d2.dirty, a build that carries no place on main, so its installer has nothing to order an upgrade by: rollback protection does not cover it, and a forced upgrade could still move it to any older release.",
+     "remediation": "Its agent cannot carry out an upgrade the hub asks for, so upgrade it once on the device, as root: `cloop upgrade` fetches the latest release (v0.0.7 or later) and verifies its signature, then `cloop executor agent install --upgrade --remote-upgrade` restarts the agent on it and installs the helper the Upgrade button needs. From then on its installer refuses any build earlier than the one it runs.",
+     "details": {
+      "channel": "stable",
+      "device": "BXWRDyhCGccKPnAH",
+      "version": "dev+g0a796d2.dirty"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.isolation",
+     "title": "Executor isolation evidence",
+     "severity": "pass",
+     "message": "every executor claiming isolation has it verified: BXWRDyhCGccKPnAH (runtime \"runsc\")",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "executors.pools",
+     "title": "Executor pool ci-runners-eu",
+     "severity": "pass",
+     "message": "executor pool ci-runners-eu is live: 2 of 12 runners, 0 run(s) waiting; its controller (dev+g0a796d2.dirty, protocol 4) last contacted the hub at 2026-11-16 02:16 UTC",
+     "details": {
+      "max_runners": 12,
+      "pool": "ci-runners-eu",
+      "pool_id": "pool-7w0u9ra1nd4cvpo7",
+      "runners": 2,
+      "waiting": 0
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-executors"
+    },
+    {
+     "check": "images.provenance",
+     "title": "Image provenance",
+     "severity": "warn",
+     "message": "cosign is not on this host's PATH, so cloop's own images run unverified, with a warning on every run",
+     "remediation": "Install cosign on the hub — the published hub image bundles it (https://docs.sigstore.dev/cosign/system_config/installation/)",
+     "details": {
+      "image_provenance": "warn"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-images"
+    },
+    {
+     "check": "images.provenance",
+     "title": "Image provenance",
+     "severity": "warn",
+     "message": "ghcr.io/blechschmidt/cloop-harness:latest on sandbox-eu could not be verified (ghcr.io/blechschmidt/cloop-harness:latest has no registry digest — it was built locally or loaded from a tarball — so no signature can be verified for it); it runs with a warning on the run",
+     "remediation": "Install cosign on the hub (the published hub image bundles it) and let the hub reach the registry and Sigstore (rekor.sigstore.dev, tuf-repo-cdn.sigstore.dev), or pin executors.container.image by digest; `cloop hub doctor` reports what is missing",
+     "details": {
+      "checked_at": "2026-11-16T09:30:01.049865061Z",
+      "executor": "sandbox-eu",
+      "identity": "^https://github\\.com/blechschmidt/cloop/\\.github/workflows/publish-images\\.yml@refs/(heads/main|tags/v[^/]+)$",
+      "image": "ghcr.io/blechschmidt/cloop-harness:latest",
+      "ref": "ghcr.io/blechschmidt/cloop-harness:latest",
+      "status": "unverifiable"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-images"
+    },
+    {
+     "check": "images.provenance",
+     "title": "Image provenance",
+     "severity": "pass",
+     "message": "the sandbox image of edge-fra-07 on BXWRDyhCGccKPnAH is ghcr.io/blechschmidt/cloop-harness:latest, one of cloop's own; no dispatch from this process has checked it yet, and the first one will",
+     "details": {
+      "executor": "BXWRDyhCGccKPnAH",
+      "image": "ghcr.io/blechschmidt/cloop-harness:latest"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-images"
+    },
+    {
+     "check": "runs.lease_takeovers",
+     "title": "Credentials of adopted runs",
+     "severity": "pass",
+     "message": "no adopted run waits on a credential its hub process could not take over",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-runs"
+    },
+    {
+     "check": "firewall.metadata",
+     "title": "Metadata services in allow lists",
+     "severity": "pass",
+     "message": "no allowlist opens a cloud metadata service by containing it",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-firewall"
+    },
+    {
+     "check": "gitproxy.enabled",
+     "title": "Git interception proxy",
+     "severity": "warn",
+     "message": "disabled while executors that clone the project source, or GitHub grants, are configured, so a sandbox is handed the forge credential and the cloop/ branch rule is enforced only by code the sandbox itself runs",
+     "remediation": "Set executors.git_proxy.enabled: true with tls: auto and an advertise_url your executors reach (or a cert_file and key_file), so the credential stays on the hub and the branch allowlist is enforced on the push. See docs/git-interception-proxy.md",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-gitproxy",
+     "as_of": "2026-11-16T09:30:31.237905358Z"
+    },
+    {
+     "check": "gitproxy.branch_grants",
+     "title": "Branch-restricted GitHub grants",
+     "severity": "warn",
+     "message": "1 active grant(s) limit pushes to particular branches, which only the git proxy can enforce, and it is disabled: 1 github_app grant(s) are delivered read-only",
+     "remediation": "Enable executors.git_proxy so the branch lists are enforced on the push, or re-grant without --branches if an unrestricted push is what was meant. See docs/guides/secrets.md#limiting-pushes-to-particular-branches",
+     "details": {
+      "github_app": 1,
+      "github_pat": 0
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-gitproxy"
+    },
+    {
+     "check": "kubeguard.enabled",
+     "title": "Kubernetes access monitor",
+     "severity": "warn",
+     "message": "disabled; 1 kubeconfig grant(s) are delivered without it on an administrator's acknowledgement, so the sandbox holds the cluster credential and their limits are not enforced: grant_f4b5e9cb7d17599872da8381 to label:region=eu-central (staging-kubeconfig: namespaces todo, web and read-only access (get, list, watch)), acknowledged by dana@demo.example.com on 2026-11-18: \"Staging only; the cluster's own RBAC limits cloop-bot to these namespaces.\"",
+     "remediation": "Set executors.kube_guard.enabled: true with tls: auto, then withdraw each acknowledgement with `cloop hub grant unguarded <grant-id> --withdraw`",
+     "details": {
+      "acknowledged": [
+       "grant_f4b5e9cb7d17599872da8381"
+      ]
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-kubeguard",
+     "as_of": "2026-11-16T09:30:31.237913721Z"
+    },
+    {
+     "check": "egress.enabled",
+     "title": "Egress broker",
+     "severity": "pass",
+     "message": "disabled; no sandbox is leased the hub's Internet connection",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-egress",
+     "as_of": "2026-11-16T09:30:31.237920291Z"
+    },
+    {
+     "check": "knowledge.embeddings",
+     "title": "Knowledge embeddings",
+     "severity": "pass",
+     "message": "off: no chunk text or search query leaves this hub for an embedding endpoint, and searches rank by words (BM25)",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-knowledge"
+    },
+    {
+     "check": "projects.confinement",
+     "title": "Project directories",
+     "severity": "pass",
+     "message": "2 registered project(s); none overlaps the control plane, the projects root, another hub or another project",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-projects",
+     "as_of": "2026-11-16T09:30:31.237931217Z"
+    },
+    {
+     "check": "storage.integrity",
+     "title": "Database integrity",
+     "severity": "pass",
+     "message": "quick_check and foreign_key_check both passed",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-storage",
+     "as_of": "2026-11-16T09:30:31.237934032Z"
+    },
+    {
+     "check": "storage.schema",
+     "title": "Schema version",
+     "severity": "pass",
+     "message": "at version 103, matching this binary",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-storage"
+    },
+    {
+     "check": "statedb.wal",
+     "title": "Write-ahead log",
+     "severity": "pass",
+     "message": "state.db-wal is 3.9 MB; warned about above 64.0 MB (the larger of 64.0 MB and a quarter of the 1.7 MB database)",
+     "details": {
+      "db_bytes": 1814528,
+      "wal_bytes": 4132392,
+      "warn_above_bytes": 67108864
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-storage"
+    },
+    {
+     "check": "storage.free_space",
+     "title": "Free disk space",
+     "severity": "pass",
+     "message": "volume / has 23.10 GB free; runs pause below 2.00 GB",
+     "details": {
+      "floor_bytes": 2147483648,
+      "free_bytes": 24798089216,
+      "volume": "/"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-storage"
+    },
+    {
+     "check": "config.drift",
+     "title": "Config drift (yaml vs state.db)",
+     "severity": "pass",
+     "message": "config.yaml and the state.db mirror agree",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-config"
+    },
+    {
+     "check": "retention.janitor",
+     "title": "Retention janitor",
+     "severity": "pass",
+     "message": "every 24h0m0s: keeping 50 plan snapshots, vacuuming above 30% free pages",
+     "details": {
+      "interval": "24h0m0s",
+      "keep_snapshots": 50,
+      "vacuum_free_ratio": 0.3
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-retention",
+     "as_of": "2026-11-16T09:30:31.237945238Z"
+    },
+    {
+     "check": "retention.disk",
+     "title": "Disk usage",
+     "severity": "pass",
+     "message": ".cloop uses 5.6 MB across 20 entries",
+     "details": {
+      "total": "5.6 MB"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-retention",
+     "as_of": "2026-11-16T09:30:31.237945238Z"
+    },
+    {
+     "check": "retention.freelist",
+     "title": "Reclaimable pages",
+     "severity": "pass",
+     "message": "0 B free pages in a 1.6 MB database (0%)",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-retention",
+     "as_of": "2026-11-16T09:30:31.237945238Z"
+    },
+    {
+     "check": "retention.history",
+     "title": "Plan history",
+     "severity": "pass",
+     "message": "18.8 KB in 5 snapshot(s)",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-retention",
+     "as_of": "2026-11-16T09:30:31.237945238Z"
+    },
+    {
+     "check": "retention.tables",
+     "title": "Row tables",
+     "severity": "pass",
+     "message": "9 rows across 5 tables (6.6 KB), all bounded by the active policy",
+     "details": {
+      "costs": "1 rows, 99 B",
+      "events": "6 rows, 1.7 KB",
+      "provider_calls": "1 rows, 4.5 KB",
+      "steps": "1 rows, 285 B",
+      "telemetry_events": "0 rows, 0 B"
+     },
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-retention",
+     "as_of": "2026-11-16T09:30:31.237945238Z"
+    },
+    {
+     "check": "audit.unrecorded",
+     "title": "Unrecorded audit losses",
+     "severity": "pass",
+     "message": "no hub process reports audit events it failed to append and has not recorded",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-audit"
+    },
+    {
+     "check": "audit.gaps",
+     "title": "Audit trail completeness",
+     "severity": "pass",
+     "message": "the control-plane chain records no lost audit events",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-audit"
+    },
+    {
+     "check": "audit.checkpoints.signed",
+     "title": "Audit checkpoint seals",
+     "severity": "pass",
+     "message": "checkpoints are sealed under the key CLOOP_SECRET_KEY derives (fingerprint eabdb7aa710fdaa1)",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-audit"
+    },
+    {
+     "check": "audit.checkpoints",
+     "title": "Audit head checkpoints",
+     "severity": "warn",
+     "message": "every 5m0s, to stderr only: they pin the trail only if a log pipeline ships this hub's stderr off the machine",
+     "remediation": "Also set audit.checkpoints.file to a path on storage the database does not share, unless this hub's stderr already leaves the machine",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-audit"
+    },
+    {
+     "check": "audit.forward",
+     "title": "Audit forwarding",
+     "severity": "warn",
+     "message": "no audit sink is configured: the trail's content leaves this hub only when someone runs `cloop audit-log export`, and rows deleted from state.db before then are gone — checkpoints say that they were deleted, not what they said",
+     "remediation": "Configure audit.forward.sinks (syslog over TLS, an HTTPS collector or Splunk HEC, or a file off this volume); see the runbook's \"Forwarding the trail off the box\"",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-audit"
+    },
+    {
+     "check": "quotas.policy",
+     "title": "Quota policy",
+     "severity": "warn",
+     "message": "single sign-on is on but no quota bounds anything (ui.quotas sets nothing, or only ceilings that mean unlimited — a negative one, or max_sessions: 0), so every authenticated identity may create unlimited projects and run unlimited concurrent tasks",
+     "remediation": "Set ui.quotas.defaults (max_projects, max_concurrent_tasks, daily_token_budget are the ones that bound a shared hub)",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-quotas"
+    },
+    {
+     "check": "budget.limits",
+     "title": "Spend budget",
+     "severity": "pass",
+     "message": "every run is held to $5.00 and 400000 token(s) a day per project (0 = no cap); runs on this host's own driver are also held to $25.00 and 2000000 token(s) a day across the host, from this user's ~/.config/cloop — when the hub runs as this user; an isolated run is not given them; budget.monthly_usd ($100.00) is reported by `cloop cost report` and enforced nowhere",
+     "docs": "https://blechschmidt.github.io/cloop/docs/operations/runbook/#doctor-quotas"
+    }
+   ],
+   "steps": [
+    {
+     "id": "policy",
+     "title": "Host execution policy",
+     "outcome": "finished",
+     "duration_ms": 1
+    },
+    {
+     "id": "executors.host_sandbox",
+     "title": "Host sandbox",
+     "outcome": "finished",
+     "duration_ms": 1
+    },
+    {
+     "id": "config.repaired",
+     "title": "Configuration repairs",
+     "outcome": "finished",
+     "duration_ms": 0
+    },
+    {
+     "id": "oidc",
+     "title": "Single sign-on",
+     "outcome": "finished",
+     "duration_ms": 0
+    },
+    {
+     "id": "oidc.preflight",
+     "title": "Issuer discovery",
+     "outcome": "reused",
+     "duration_ms": 0,
+     "ran_at": "2026-11-16T09:30:31.237843585Z"
+    },
+    {
+     "id": "tls",
+     "title": "Transport security",
+     "outcome": "finished",
+     "duration_ms": 0
+    },
+    {
+     "id": "ui.exposure",
+     "title": "Network exposure",
+     "outcome": "finished",
+     "duration_ms": 29
+    },
+    {
+     "id": "secret_key",
+     "title": "Sealing key",
+     "outcome": "finished",
+     "duration_ms": 140
+    },
+    {
+     "id": "rbac",
+     "title": "Role policy",
+     "outcome": "finished",
+     "duration_ms": 2
+    },
+    {
+     "id": "scim",
+     "title": "SCIM provisioning",
+     "outcome": "finished",
+     "duration_ms": 122
+    },
+    {
+     "id": "ui.static_token",
+     "title": "Static admin token",
+     "outcome": "finished",
+     "duration_ms": 102
+    },
+    {
+     "id": "api_tokens.unapproved",
+     "title": "API tokens awaiting approval",
+     "outcome": "finished",
+     "duration_ms": 129
+    },
+    {
+     "id": "offboard.claude_homes",
+     "title": "Claude homes of denied identities",
+     "outcome": "finished",
+     "duration_ms": 126
+    },
+    {
+     "id": "images",
+     "title": "Image trust",
+     "outcome": "finished",
+     "duration_ms": 107
+    },
+    {
+     "id": "executors",
+     "title": "Executors",
+     "outcome": "finished",
+     "duration_ms": 130
+    },
+    {
+     "id": "executors.edge_lag",
+     "title": "Edge devices against this hub's build",
+     "outcome": "finished",
+     "duration_ms": 125
+    },
+    {
+     "id": "executors.rollback_protection",
+     "title": "Rollback protection of enrolled devices",
+     "outcome": "finished",
+     "duration_ms": 91
+    },
+    {
+     "id": "executors.isolation",
+     "title": "Executor isolation evidence",
+     "outcome": "finished",
+     "duration_ms": 88
+    },
+    {
+     "id": "executors.pools",
+     "title": "Executor pools",
+     "outcome": "finished",
+     "duration_ms": 120
+    },
+    {
+     "id": "images.provenance",
+     "title": "Image provenance",
+     "outcome": "finished",
+     "duration_ms": 99
+    },
+    {
+     "id": "runs.build_lag",
+     "title": "Builds of the runs on this host",
+     "outcome": "finished",
+     "duration_ms": 20
+    },
+    {
+     "id": "runs.lease_takeovers",
+     "title": "Credentials of adopted runs",
+     "outcome": "finished",
+     "duration_ms": 91
+    },
+    {
+     "id": "firewall.metadata",
+     "title": "Cloud metadata services in allowlists",
+     "outcome": "finished",
+     "duration_ms": 111
+    },
+    {
+     "id": "gitproxy",
+     "title": "Git proxy",
+     "outcome": "reused",
+     "duration_ms": 0,
+     "ran_at": "2026-11-16T09:30:31.237905358Z"
+    },
+    {
+     "id": "gitproxy.forge_credentials",
+     "title": "Forge credentials without the git proxy",
+     "outcome": "finished",
+     "duration_ms": 20
+    },
+    {
+     "id": "gitproxy.branch_grants",
+     "title": "Branch-restricted grants",
+     "outcome": "finished",
+     "duration_ms": 130
+    },
+    {
+     "id": "kubeguard",
+     "title": "Kubernetes access monitor",
+     "outcome": "reused",
+     "duration_ms": 0,
+     "ran_at": "2026-11-16T09:30:31.237913721Z"
+    },
+    {
+     "id": "hubca",
+     "title": "Hub certificate authority",
+     "outcome": "finished",
+     "duration_ms": 125
+    },
+    {
+     "id": "egress",
+     "title": "Egress proxy",
+     "outcome": "reused",
+     "duration_ms": 0,
+     "ran_at": "2026-11-16T09:30:31.237920291Z"
+    },
+    {
+     "id": "knowledge.embeddings",
+     "title": "Knowledge embeddings",
+     "outcome": "finished",
+     "duration_ms": 4
+    },
+    {
+     "id": "projects.confinement",
+     "title": "Project directories",
+     "outcome": "reused",
+     "duration_ms": 0,
+     "ran_at": "2026-11-16T09:30:31.237931217Z"
+    },
+    {
+     "id": "storage.integrity",
+     "title": "Database integrity",
+     "outcome": "reused",
+     "duration_ms": 0,
+     "ran_at": "2026-11-16T09:30:31.237934032Z"
+    },
+    {
+     "id": "storage",
+     "title": "State database",
+     "outcome": "finished",
+     "duration_ms": 126
+    },
+    {
+     "id": "storage.free_space",
+     "title": "Free disk space",
+     "outcome": "finished",
+     "duration_ms": 11
+    },
+    {
+     "id": "config.drift",
+     "title": "Configuration drift",
+     "outcome": "finished",
+     "duration_ms": 116
+    },
+    {
+     "id": "retention",
+     "title": "Disk retention",
+     "outcome": "reused",
+     "duration_ms": 0,
+     "ran_at": "2026-11-16T09:30:31.237945238Z"
+    },
+    {
+     "id": "audit",
+     "title": "Audit trail",
+     "outcome": "finished",
+     "duration_ms": 119
+    },
+    {
+     "id": "audit.forward",
+     "title": "Audit forwarding",
+     "outcome": "finished",
+     "duration_ms": 15
+    },
+    {
+     "id": "admission",
+     "title": "Quotas and budgets",
+     "outcome": "finished",
+     "duration_ms": 0
+    }
+   ],
+   "not_run": [
+    {
+     "check": "executors.network_policy_probe",
+     "why": "creates two Pods and a default-deny NetworkPolicy in each Kubernetes executor's cluster",
+     "command": "cloop hub doctor --probe-network-policy --port 8080"
+    },
+    {
+     "check": "smoke",
+     "why": "starts a workload on every executor and mints a throwaway credential for it",
+     "command": "cloop hub doctor --smoke --port 8080"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/hub/health?summary=1",
+  "body": {
+   "member": {
+    "id": "hub_8211a25a46bd68b97203f6023060708b",
+    "hostname": "demo.example.com",
+    "port": 8080,
+    "clustered": true,
+    "leader": true
+   },
+   "generation": 2,
+   "checked_at": "2026-11-16T09:35:31.222576972Z",
+   "expires_at": "2026-11-16T09:40:31.222576972Z",
+   "served_at": "2026-11-16T09:39:05.737950805Z",
+   "duration_ms": 153,
+   "config": {
+    "files": [
+     ".cloop/config.yaml",
+     ".cloop/config.ui-8080.yaml"
+    ]
+   },
+   "strict_mode": false,
+   "counts": {
+    "pass": 47,
+    "warn": 17,
+    "fail": 0
+   },
+   "failing": 0
+  }
+ }
+]

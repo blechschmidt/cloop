@@ -1,0 +1,46 @@
+[
+ {
+  "request": "GET /api/claudecode-limits?project_idx=1&*",
+  "body": {
+   "limits": {
+    "max_five_hour_pct": 85,
+    "max_weekly_opus_pct": 40,
+    "max_weekly_pct": 90,
+    "max_weekly_sonnet_pct": 80
+   },
+   "usage": {
+    "five_hour": {
+     "utilization": 37,
+     "resets_at": "2026-11-16T12:39:35Z"
+    },
+    "seven_day": {
+     "utilization": 61,
+     "resets_at": "2026-11-20T14:39:35Z"
+    },
+    "seven_day_opus": {
+     "utilization": 18,
+     "resets_at": "2026-11-20T14:39:35Z"
+    },
+    "seven_day_sonnet": {
+     "utilization": 44,
+     "resets_at": "2026-11-20T14:39:35Z"
+    },
+    "seven_day_models": [
+     {
+      "model": "Fable",
+      "utilization": 7,
+      "resets_at": "2026-11-20T14:39:35Z"
+     }
+    ],
+    "extra_usage": {
+     "is_enabled": true,
+     "monthly_limit": 5000,
+     "used_credits": 1240,
+     "utilization": 24.8
+    },
+    "fetched_at": "2026-11-16T09:40:15.549680278Z"
+   },
+   "violations": []
+  }
+ }
+]

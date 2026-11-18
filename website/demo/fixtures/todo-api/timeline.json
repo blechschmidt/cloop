@@ -1,0 +1,85 @@
+[
+ {
+  "request": "GET /api/timeline?project_idx=0",
+  "body": {
+   "bars": [
+    {
+     "taskId": 1,
+     "title": "Scaffold the HTTP server with a health check",
+     "start": "2026-11-16T09:30:08Z",
+     "end": "2026-11-16T09:30:28Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 20,
+     "actualMinutes": 0,
+     "dependsOn": []
+    },
+    {
+     "taskId": 2,
+     "title": "Add an in-memory store for to-do items",
+     "start": "2026-11-16T09:30:28Z",
+     "end": "2026-11-16T09:30:58Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 30,
+     "actualMinutes": 0,
+     "dependsOn": [
+      1
+     ]
+    },
+    {
+     "taskId": 3,
+     "title": "Implement the /todos CRUD handlers",
+     "start": "2026-11-16T09:30:58Z",
+     "end": "2026-11-16T09:31:43Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 45,
+     "actualMinutes": 0,
+     "dependsOn": [
+      2
+     ]
+    },
+    {
+     "taskId": 4,
+     "title": "Cover the handlers with tests",
+     "start": "2026-11-16T09:31:44Z",
+     "end": "2026-11-16T09:32:14Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 30,
+     "actualMinutes": 0,
+     "dependsOn": [
+      3
+     ]
+    },
+    {
+     "taskId": 5,
+     "title": "Document the API in the README",
+     "start": "2026-11-16T09:32:20Z",
+     "end": "2026-11-16T09:32:35Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 15,
+     "actualMinutes": 0,
+     "dependsOn": [
+      4
+     ]
+    },
+    {
+     "taskId": 6,
+     "title": "Review the API before the first release",
+     "start": "2026-11-16T09:30:08Z",
+     "end": "2026-11-16T09:32:20Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 0,
+     "actualMinutes": 0,
+     "dependsOn": []
+    }
+   ],
+   "now": "2026-11-16T09:36:58Z",
+   "planStart": "2026-11-16T09:30:08Z"
+  }
+ }
+]

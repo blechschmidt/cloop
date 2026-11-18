@@ -1,0 +1,9 @@
+[
+ {
+  "request": "GET /api/risk-matrix?project_idx=3",
+  "body": {
+   "entries": null,
+   "goal": "A dark colour scheme that follows the reader's system setting."
+  }
+ }
+]

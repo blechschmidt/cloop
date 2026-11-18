@@ -1,0 +1,22 @@
+[
+ {
+  "request": "GET /api/timeline?project_idx=3",
+  "body": {
+   "bars": [
+    {
+     "taskId": 1,
+     "title": "Add a dark colour scheme",
+     "start": "2026-11-16T09:35:15Z",
+     "end": "2026-11-16T09:35:35Z",
+     "status": "done",
+     "assignee": "",
+     "estimatedMinutes": 0,
+     "actualMinutes": 0,
+     "dependsOn": []
+    }
+   ],
+   "now": "2026-11-16T09:39:26Z",
+   "planStart": "2026-11-16T09:35:15Z"
+  }
+ }
+]

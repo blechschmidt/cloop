@@ -1,0 +1,8 @@
+[
+ {
+  "request": "GET /api/instructions?project_idx=1&*",
+  "body": {
+   "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB."
+  }
+ }
+]

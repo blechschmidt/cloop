@@ -1,0 +1,40 @@
+[
+ {
+  "request": "GET /api/livelog?project_idx=3",
+  "body": {
+   "lines": [
+    "warning: executor: could not prune worktrees in /home/demo/projects/landing-page/.cloop/features/dark-mode: worktree: /home/demo/projects/landing-page/.cloop/features/dark-mode/.git is not a directory (a gitdir file or a link would point git at another repository), so the sweep does not run git in it\n",
+    "\n",
+    "🏭 cloop Software Factory\n",
+    "   Provider: anthropic\n",
+    "   Goal: A dark colour scheme that follows the reader's system setting.\n",
+    "\n",
+    "time=2026-11-16T09:35:15.237Z level=INFO msg=\"session started\" project=/home/demo/projects/landing-page/.cloop/features/dark-mode provider=anthropic event=session_start goal=\"A dark colour scheme that follows the reader's system setting.\" mode=pm trace_id=\"\"\n",
+    "Resuming plan: 0/1 tasks complete\n",
+    "\n",
+    "time=2026-11-16T09:35:15.258Z level=INFO msg=\"free-space reserve in place\" project=/home/demo/projects/landing-page/.cloop/features/dark-mode provider=anthropic event=disk_space path=/home/demo/projects/landing-page/.cloop/features/dark-mode/.cloop/reserve bytes=16777216\n",
+    "━━━ Task 1/1: Add a dark colour scheme ━━━\n",
+    "       \n",
+    "\n",
+    "time=2026-11-16T09:35:15.260Z level=INFO msg=\"Add a dark colour scheme\" project=/home/demo/projects/landing-page/.cloop/features/dark-mode provider=anthropic event=task_start task_id=1 priority=1 description=\"\" role=\"\" trace_id=\"\" request_id=0bce375e3474323227c3e5b7\n",
+    "→ Running anthropic on task 1...\n",
+    "  dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\n",
+    "  \n",
+    "  Committed d74dd26: Add a dark colour scheme (Task 1).\n",
+    "  \n",
+    "  TASK_DONE\n",
+    "  [20s, provider: anthropic]\n",
+    "\n",
+    "✓ Task 1 complete: Add a dark colour scheme\n",
+    "\n",
+    "time=2026-11-16T09:35:35.347Z level=INFO msg=\"Add a dark colour scheme\" project=/home/demo/projects/landing-page/.cloop/features/dark-mode provider=anthropic event=task_done task_id=1 request_id=0bce375e3474323227c3e5b7 duration_ms=20070\n",
+    "🎉 All tasks complete! Goal achieved.\n",
+    "   1/1 tasks complete\n",
+    "\n",
+    "time=2026-11-16T09:35:35.415Z level=INFO msg=\"all tasks complete\" project=/home/demo/projects/landing-page/.cloop/features/dark-mode provider=anthropic event=session_done summary=\"1/1 tasks complete\"\n",
+    "Session: 1 step(s) in 20s, 1499 in / 746 out tokens (cumulative) ≈ $0.02\n"
+   ],
+   "running": false
+  }
+ }
+]

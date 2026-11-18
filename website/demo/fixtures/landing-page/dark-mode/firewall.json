@@ -1,0 +1,28 @@
+[
+ {
+  "request": "GET /api/firewall/blocked?project_idx=3&*",
+  "body": {
+   "visible": true,
+   "observable": false,
+   "blocked": [],
+   "can_propose": true
+  }
+ },
+ {
+  "request": "GET /api/firewall?project_idx=3&*",
+  "body": {
+   "project": "/home/demo/projects/landing-page/.cloop/features/dark-mode",
+   "visible": true,
+   "policy_project": "/home/demo/projects/landing-page",
+   "configured": false,
+   "rules": {},
+   "describe": "no network",
+   "executor_id": "local",
+   "executor_kind": "localprocess",
+   "levels": [],
+   "governing": null,
+   "fits": true,
+   "enforced": false
+  }
+ }
+]

@@ -1,0 +1,8 @@
+[
+ {
+  "request": "GET /api/instructions?project_idx=0&*",
+  "body": {
+   "instructions": "Standard library only. Every handler answers JSON, errors as {\"error\": \"...\"}."
+  }
+ }
+]

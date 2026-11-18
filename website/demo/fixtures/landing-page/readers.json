@@ -1,0 +1,35 @@
+[
+ {
+  "request": "GET /api/projects/1/readers",
+  "body": {
+   "project": "landing-page",
+   "path": "/home/demo/projects/landing-page",
+   "readers": [],
+   "hidden_readers": 0,
+   "readable": [
+    {
+     "id": "prd_999880e06b60857903f2a7d6",
+     "project": "todo-api",
+     "path": "/home/demo/projects/todo-api",
+     "idx": 0,
+     "added_by": "dana@demo.example.com",
+     "added_at": "2026-11-16T09:30:06.92750908Z"
+    }
+   ],
+   "hidden_readable": 0,
+   "can_manage": true,
+   "candidates": [
+    {
+     "project": "todo-api",
+     "path": "/home/demo/projects/todo-api",
+     "idx": 0
+    },
+    {
+     "project": "csv-report",
+     "path": "/home/demo/projects/csv-report",
+     "idx": 2
+    }
+   ]
+  }
+ }
+]

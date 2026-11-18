@@ -1,0 +1,97 @@
+[
+ {
+  "request": "GET /api/state?project_idx=3&*",
+  "body": {
+   "goal": "A dark colour scheme that follows the reader's system setting.",
+   "workdir": "/home/demo/projects/landing-page/.cloop/features/dark-mode",
+   "max_steps": 0,
+   "current_step": 1,
+   "status": "complete",
+   "steps": null,
+   "created_at": "2026-11-16T09:35:14.446686936Z",
+   "updated_at": "2026-11-16T09:35:35.398491623Z",
+   "model": "claude-sonnet-4-6",
+   "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## Feature branch\nThis project is the feature \"Dark mode\" of landing-page. It is developed in its own git worktree on branch `cloop/feature/dark-mode`, cut from `main`, while other features of the same project are developed in parallel in their own worktrees.\n- Commit your work to this branch. Do not switch branches, and never merge into or push to `main`.\n- A plain `git push` publishes this branch only. When the feature is complete, a pull request into `main` is opened from it.\n- Change only files inside this worktree.",
+   "auto_evolve": false,
+   "evolve_step": 0,
+   "provider": "anthropic",
+   "pm_mode": true,
+   "plan": {
+    "goal": "A dark colour scheme that follows the reader's system setting.",
+    "tasks": [
+     {
+      "id": 1,
+      "title": "Add a dark colour scheme",
+      "description": "",
+      "priority": 1,
+      "status": "done",
+      "result": "dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\n\nCommitted d74dd26: Add a dark colour scheme (Task 1).\n\nTASK_DONE",
+      "started_at": "2026-11-16T09:35:15.260260463Z",
+      "completed_at": "2026-11-16T09:35:35.331068786Z",
+      "artifact_path": ".cloop/tasks/1-add-a-dark-colour-scheme.md",
+      "annotations": [
+       {
+        "timestamp": "2026-11-16T09:35:15.260641809Z",
+        "author": "ai",
+        "text": "Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)"
+       },
+       {
+        "timestamp": "2026-11-16T09:35:35.333598271Z",
+        "author": "ai",
+        "text": "Task completed successfully in 20s."
+       }
+      ],
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "isolation": "none",
+      "run_id": "run_adef774f77421e084e0b67fb78b7c75d"
+     }
+    ],
+    "version": 3
+   },
+   "total_input_tokens": 1499,
+   "total_output_tokens": 746,
+   "skip_clarify": true,
+   "run_owner": {
+    "pid": 9,
+    "start_ticks": 551336604,
+    "boot_id": "bbcf604a-1603-4bdb-a64e-5c620bd32b6e",
+    "host": "demo.example.com",
+    "exe": "/usr/local/bin/cloop",
+    "executor": "localprocess",
+    "adoptable": true,
+    "run_id": "run_adef774f77421e084e0b67fb78b7c75d",
+    "started_at": "2026-11-16T09:35:15.178670052Z",
+    "build": {
+     "version": "dev+g0a796d2.dirty",
+     "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+     "schema": 103
+    },
+    "build_since": "2026-11-16T09:35:15.223071477Z"
+   },
+   "run_build": {
+    "build": {
+     "version": "dev+g0a796d2.dirty",
+     "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+     "schema": 103
+    },
+    "reference": {
+     "version": "dev+g0a796d2.dirty",
+     "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+     "schema": 103
+    },
+    "behind": 0,
+    "comparable": true,
+    "live": false,
+    "live_known": true,
+    "pid": 9,
+    "since": "2026-11-16T09:35:15.223071477Z",
+    "started_at": "2026-11-16T09:35:15.178670052Z",
+    "executor": "localprocess",
+    "adoptable": true
+   },
+   "steps_count": 1,
+   "step_timeout": "0"
+  }
+ }
+]

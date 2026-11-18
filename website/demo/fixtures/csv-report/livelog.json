@@ -1,0 +1,48 @@
+[
+ {
+  "request": "GET /api/livelog?project_idx=2",
+  "body": {
+   "lines": [
+    "\n",
+    "🏭 cloop Software Factory\n",
+    "   Provider: claudecode\n",
+    "   Goal: Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.\n",
+    "\n",
+    "time=2026-11-16T09:35:41.889Z level=INFO msg=\"session started\" project=/home/demo/projects/csv-report provider=claudecode event=session_start goal=\"Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.\" mode=pm trace_id=\"\"\n",
+    "Resuming plan: 0/4 tasks complete\n",
+    "\n",
+    "time=2026-11-16T09:35:41.905Z level=INFO msg=\"free-space reserve in place\" project=/home/demo/projects/csv-report provider=claudecode event=disk_space path=/home/demo/projects/csv-report/.cloop/reserve bytes=16777216\n",
+    "━━━ Task 1/4: Parse the monthly sales export ━━━\n",
+    "       Read data/sales-*.csv into typed rows; report and skip bad rows.\n",
+    "\n",
+    "time=2026-11-16T09:35:41.906Z level=INFO msg=\"Parse the monthly sales export\" project=/home/demo/projects/csv-report provider=claudecode event=task_start task_id=1 role=data trace_id=\"\" request_id=2349f058a629e3faaa511f74 priority=1 description=\"Read data/sales-*.csv into typed rows; report and skip bad rows.\"\n",
+    "  knowledge: 3 reference passage(s) from 2 document(s)\n",
+    "→ Running claudecode on task 1...\n",
+    "  read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.\n",
+    "  \n",
+    "  Committed be34630: Read the sales export into typed rows (Task 1).\n",
+    "  \n",
+    "  TASK_DONE\n",
+    "  [20s, provider: claudecode]\n",
+    "\n",
+    "✓ Task 1 complete: Parse the monthly sales export\n",
+    "\n",
+    "time=2026-11-16T09:36:02.106Z level=INFO msg=\"Parse the monthly sales export\" project=/home/demo/projects/csv-report provider=claudecode event=task_done task_id=1 duration_ms=20169 request_id=2349f058a629e3faaa511f74\n",
+    "━━━ Task 2/4: Summarise sales by region ━━━\n",
+    "       Units and revenue per region and product for the week.\n",
+    "\n",
+    "time=2026-11-16T09:36:02.182Z level=INFO msg=\"Summarise sales by region\" project=/home/demo/projects/csv-report provider=claudecode event=task_start task_id=2 priority=2 description=\"Units and revenue per region and product for the week.\" role=data trace_id=\"\" request_id=851791ef98e64880ded1c4b9\n",
+    "  knowledge: 3 reference passage(s) from 2 document(s)\n",
+    "→ Running claudecode on task 2...\n",
+    "  You've hit your session limit · resets 8:00am (UTC)\n",
+    "  [30s, provider: claudecode]\n",
+    "\n",
+    "⚠ Task 2 aborted (usage_limit): five-hour session limit reached — reset to pending, not done\n",
+    "time=2026-11-16T09:36:32.378Z level=WARN msg=\"Summarise sales by region\" project=/home/demo/projects/csv-report provider=claudecode event=task_aborted task_id=2 evidence=\"You've hit your session limit · resets 8:00am (UTC)\" retry_after=2026-11-16T15:13:35Z abort_class=usage_limit reason=\"five-hour session limit reached\" retryable=true\n",
+    "⏸ Pausing run: five-hour session limit reached; it does not reset until Wed, 18 Nov 2026 08:00:00 UTC (5h37m0s away). A hub resumes it then (ui.auto_resume_on_cap_reset); without one, run cloop again after that.\n",
+    "Session: 2 step(s) in 51s\n"
+   ],
+   "running": false
+  }
+ }
+]

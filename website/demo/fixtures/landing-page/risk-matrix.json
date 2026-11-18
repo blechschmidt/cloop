@@ -1,0 +1,17 @@
+[
+ {
+  "request": "GET /api/risk-matrix?project_idx=1",
+  "body": {
+   "entries": [
+    {
+     "task_id": 5,
+     "task_title": "Translate the page into German",
+     "risk_score": 0,
+     "impact_score": 0,
+     "quadrant": ""
+    }
+   ],
+   "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working."
+  }
+ }
+]

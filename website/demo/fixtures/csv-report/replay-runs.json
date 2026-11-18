@@ -1,0 +1,9 @@
+[
+ {
+  "request": "GET /api/replay-runs?limit=50&project_idx=2",
+  "body": {
+   "count": 0,
+   "runs": []
+  }
+ }
+]

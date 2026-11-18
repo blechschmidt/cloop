@@ -1,0 +1,51 @@
+[
+ {
+  "request": "GET /api/projects/0/members",
+  "body": {
+   "project": "todo-api",
+   "path": "/home/demo/projects/todo-api",
+   "members": [
+    {
+     "identity": "sam@demo.example.com",
+     "kind": "person",
+     "role": "viewer",
+     "reason": "Reviews the API docs.",
+     "granted_at": "2026-11-16T09:30:06.984784539Z",
+     "granted_by": "dana@demo.example.com",
+     "self": false,
+     "manageable": true
+    }
+   ],
+   "visibility": "policy",
+   "teams": [
+    {
+     "slug": "everyone",
+     "name": "Everyone on this hub",
+     "members": 0,
+     "builtin": true
+    },
+    {
+     "slug": "finance-analytics",
+     "name": "Finance analytics",
+     "members": 1
+    },
+    {
+     "slug": "web",
+     "name": "Web team",
+     "members": 1,
+     "idp_group": "engineers"
+    }
+   ],
+   "your_role": "admin",
+   "can_share": true,
+   "grantable_roles": [
+    "viewer",
+    "operator",
+    "maintainer",
+    "admin"
+   ],
+   "available": true,
+   "note": "This project has no owner, so the hub's role mappings decide who else can reach it; the people and teams below are added to what they give."
+  }
+ }
+]

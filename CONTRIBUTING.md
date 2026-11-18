@@ -503,7 +503,11 @@ every change refused. `make docs-site` builds it from the dashboard's own files
 in `pkg/ui/assets`, so a dashboard change shows up there without any edit to
 the demo. Its fixtures, and the stand-in for the hub that answers from them,
 are in `website/demo/`. [`website/demo/README.md`](website/demo/README.md)
-explains how to add a fixture and how to find requests that have none.
+explains how to add a fixture and how to find requests that have none. The
+fixtures are recorded from a throwaway hub by `make demo-fixtures`
+([`scripts/demo/README.md`](scripts/demo/README.md)); `tests/demo` fails when
+the dashboard gains a GET route no fixture answers, so record again after
+adding one.
 
 Every build is stamped: `build.json` at the site root names the commit it was
 built from. A deploy can stall without anything failing. On 2026-09-30 GitHub

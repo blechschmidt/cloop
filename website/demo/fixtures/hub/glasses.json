@@ -1,0 +1,12 @@
+[
+ {
+  "request": "GET /api/glasses/link",
+  "body": {
+   "link": {
+    "exists": false,
+    "per_user": true,
+    "can_add_tasks": false
+   }
+  }
+ }
+]

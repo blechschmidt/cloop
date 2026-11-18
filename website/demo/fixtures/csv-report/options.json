@@ -1,0 +1,17 @@
+[
+ {
+  "request": "GET /api/options/review-gate?project_idx=2&*",
+  "body": {
+   "default_fix_rounds": 2,
+   "max_fix_rounds": 5,
+   "modes": [
+    "fix",
+    "block",
+    "advisory"
+   ],
+   "review_gate": {
+    "enabled": false
+   }
+  }
+ }
+]

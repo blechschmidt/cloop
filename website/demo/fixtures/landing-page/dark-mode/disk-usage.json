@@ -1,0 +1,102 @@
+[
+ {
+  "request": "GET /api/disk-usage?project_idx=3",
+  "body": {
+   "dir": "/home/demo/projects/landing-page/.cloop/features/dark-mode/.cloop",
+   "total_bytes": 1570869,
+   "entries": [
+    {
+     "name": "state.db",
+     "bytes": 1564672,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "plan-history",
+     "bytes": 2420,
+     "files": 3,
+     "is_dir": true
+    },
+    {
+     "name": "task-checkpoints",
+     "bytes": 797,
+     "files": 2,
+     "is_dir": true
+    },
+    {
+     "name": "artifacts",
+     "bytes": 705,
+     "files": 2,
+     "is_dir": true
+    },
+    {
+     "name": "config.yaml",
+     "bytes": 516,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "feature.json",
+     "bytes": 422,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "tasks",
+     "bytes": 373,
+     "files": 1,
+     "is_dir": true
+    },
+    {
+     "name": "replay.jsonl",
+     "bytes": 263,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "costs.jsonl",
+     "bytes": 250,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "sandbox-run.json",
+     "bytes": 228,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "prompt-variants.jsonl",
+     "bytes": 115,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "prompt-stats.jsonl",
+     "bytes": 108,
+     "files": 1,
+     "is_dir": false
+    },
+    {
+     "name": "cache",
+     "bytes": 0,
+     "files": 0,
+     "is_dir": true
+    }
+   ],
+   "db_bytes": 1564672,
+   "reclaimable_bytes": 0,
+   "free_ratio": 0,
+   "policy": {
+    "enabled": true,
+    "interval_hours": 24,
+    "keep_snapshots": 50,
+    "archive_max_bytes": 0,
+    "archive_max_age_days": 0,
+    "vacuum_free_ratio": 0.3,
+    "vacuum_min_free_bytes": 67108864
+   },
+   "will_vacuum": false
+  }
+ }
+]

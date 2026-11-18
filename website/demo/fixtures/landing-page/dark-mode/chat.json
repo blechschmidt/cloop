@@ -1,0 +1,6 @@
+[
+ {
+  "request": "GET /api/chat/history?project_idx=3",
+  "body": []
+ }
+]

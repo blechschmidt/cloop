@@ -1,0 +1,22 @@
+[
+ {
+  "request": "GET /api/steps?project_idx=3&*",
+  "body": {
+   "limit": 50,
+   "offset": 0,
+   "steps": [
+    {
+     "step": 0,
+     "task": "Task 1: Add a dark colour scheme",
+     "output": "dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\n\nCommitted d74dd26: Add a dark colour scheme (Task 1).\n\nTASK_DONE",
+     "exit_code": 0,
+     "duration": "20s",
+     "time": "2026-11-16T09:35:35.330982315Z",
+     "input_tokens": 1499,
+     "output_tokens": 746
+    }
+   ],
+   "total": 1
+  }
+ }
+]

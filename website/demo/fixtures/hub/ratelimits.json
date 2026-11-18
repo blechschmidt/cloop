@@ -1,0 +1,9 @@
+[
+ {
+  "request": "GET /api/ratelimits?*",
+  "body": {
+   "count": 0,
+   "models": []
+  }
+ }
+]

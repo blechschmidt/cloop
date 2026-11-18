@@ -1,0 +1,121 @@
+[
+ {
+  "request": "GET /api/event-history?limit=50&project_idx=3",
+  "body": {
+   "entries": [
+    {
+     "id": -5,
+     "kind": "plan_complete",
+     "timestamp": "2026-11-16T09:35:35.420743748Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "All 1 tasks complete",
+     "details": {
+      "done": 1,
+      "duration": "20s",
+      "failed": 0,
+      "total": 1
+     }
+    },
+    {
+     "id": -4,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:35:35.353075029Z",
+     "task_id": 1,
+     "task_title": "Add a dark colour scheme",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task #1 completed in 20s",
+     "details": {
+      "duration": "20s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 1,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:35:35.330982315Z",
+     "step": 0,
+     "exit_code": 0,
+     "message": "Task 1: Add a dark colour scheme",
+     "output": "dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\n\nCommitted d74dd26: Add a dark colour scheme (Task 1).\n\nTASK_DONE",
+     "duration": "20s"
+    },
+    {
+     "id": -3,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:35:15.287838753Z",
+     "task_id": 1,
+     "task_title": "Add a dark colour scheme",
+     "step": 0,
+     "exit_code": 0,
+     "message": "Task #1 started",
+     "details": {
+      "priority": 1,
+      "role": ""
+     }
+    },
+    {
+     "id": -2,
+     "kind": "session_started",
+     "timestamp": "2026-11-16T09:35:15.245407098Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Run started on dev+g0a796d2.dirty",
+     "details": {
+      "auto_evolve": false,
+      "build": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "follow_builds": false,
+      "goal": "A dark colour scheme that follows the reader's system setting.",
+      "innovate": false,
+      "max_parallel": 0,
+      "model": "claude-sonnet-4-6",
+      "parallel": false,
+      "pid": 9,
+      "provider": "anthropic"
+     }
+    },
+    {
+     "id": -1,
+     "kind": "credential_refused",
+     "timestamp": "2026-11-16T09:35:15.043345268Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "This run goes without github_app \"acme-github-app\", which the project was granted, because the hub could not deliver it: github app token mint failed: secretbroker: github refused the installation token: create installation token: github returned 401 Unauthorized: Integration must generate a public key",
+     "details": {
+      "deleted_at": "0001-01-01T00:00:00Z",
+      "delivery": true,
+      "grant_id": "grant_bf2beb51a5bb5ec19af2a914",
+      "kind": "github_app",
+      "owner": "",
+      "run_id": "run_adef774f77421e084e0b67fb78b7c75d",
+      "secret_id": "sec_35438dbeecda445b7bbb5ce4",
+      "secret_name": "acme-github-app"
+     }
+    }
+   ],
+   "top": [
+    0,
+    5
+   ],
+   "bottom": [
+    2461362.5983801275,
+    1,
+    1
+   ],
+   "more": false,
+   "offset": 0,
+   "limit": 50
+  }
+ }
+]

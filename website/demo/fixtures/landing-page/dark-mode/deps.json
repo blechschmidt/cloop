@@ -1,0 +1,17 @@
+[
+ {
+  "request": "GET /api/deps?project_idx=3",
+  "body": {
+   "edges": [],
+   "nodes": [
+    {
+     "id": 1,
+     "title": "Add a dark colour scheme",
+     "status": "done",
+     "priority": 1,
+     "description": ""
+    }
+   ]
+  }
+ }
+]

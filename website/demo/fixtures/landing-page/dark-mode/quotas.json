@@ -1,0 +1,79 @@
+[
+ {
+  "request": "GET /api/quotas?project_idx=3",
+  "body": {
+   "enabled": true,
+   "quotas": [
+    {
+     "identity": "dana@demo.example.com",
+     "limits": {},
+     "usage": {
+      "daily_cost_usd": 0.11274899999999999,
+      "daily_token_budget": 18663,
+      "max_concurrent_reproductions": 0,
+      "max_concurrent_tasks": 0,
+      "max_executors": 0,
+      "max_projects": 0,
+      "max_sessions": 0
+     },
+     "overridden": false
+    },
+    {
+     "identity": "priya@demo.example.com",
+     "limits": {
+      "daily_cost_usd": 40,
+      "max_concurrent_tasks": 2,
+      "max_projects": 5
+     },
+     "usage": {
+      "daily_cost_usd": 0,
+      "daily_token_budget": 0,
+      "max_concurrent_reproductions": 0,
+      "max_concurrent_tasks": 0,
+      "max_executors": 0,
+      "max_projects": 0,
+      "max_sessions": 0
+     },
+     "sources": {
+      "daily_cost_usd": "override",
+      "max_concurrent_tasks": "override",
+      "max_projects": "override"
+     },
+     "overridden": true
+    },
+    {
+     "identity": "sam@demo.example.com",
+     "limits": {
+      "daily_cost_usd": 5,
+      "max_concurrent_tasks": 1,
+      "max_projects": 1
+     },
+     "usage": {
+      "daily_cost_usd": 0,
+      "daily_token_budget": 0,
+      "max_concurrent_reproductions": 0,
+      "max_concurrent_tasks": 0,
+      "max_executors": 0,
+      "max_projects": 0,
+      "max_sessions": 0
+     },
+     "sources": {
+      "daily_cost_usd": "override",
+      "max_concurrent_tasks": "override",
+      "max_projects": "override"
+     },
+     "overridden": true
+    }
+   ],
+   "resources": [
+    "max_projects",
+    "max_concurrent_tasks",
+    "max_concurrent_reproductions",
+    "max_executors",
+    "max_sessions",
+    "daily_token_budget",
+    "daily_cost_usd"
+   ]
+  }
+ }
+]

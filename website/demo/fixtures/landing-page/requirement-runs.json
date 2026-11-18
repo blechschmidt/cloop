@@ -1,0 +1,31 @@
+[
+ {
+  "request": "GET /api/requirement-runs/run_9bdffed2f973180398cef6b3e10f59f1?project_idx=1&*",
+  "body": {
+   "ok": true,
+   "run": {
+    "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+    "state": "done",
+    "source": "dashboard",
+    "started_by": "dana@demo.example.com",
+    "started_at": "2026-11-16T09:35:10.0226Z",
+    "deadline": "2026-11-16T09:40:10.022598Z",
+    "finished_at": "2026-11-16T09:35:10.395873Z",
+    "executor_id": "local",
+    "requirement_ids": [
+     1,
+     2,
+     3,
+     4
+    ],
+    "counts": {
+     "fulfilled": 3,
+     "unfulfilled": 1,
+     "unverified": 0,
+     "error": 0
+    },
+    "kind": "check"
+   }
+  }
+ }
+]

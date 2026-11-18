@@ -1,0 +1,56 @@
+[
+ {
+  "request": "GET /api/projects/2/members",
+  "body": {
+   "project": "csv-report",
+   "path": "/home/demo/projects/csv-report",
+   "members": [
+    {
+     "identity": "team:finance-analytics",
+     "kind": "team",
+     "team": {
+      "slug": "finance-analytics",
+      "name": "Finance analytics",
+      "members": 1
+     },
+     "role": "viewer",
+     "reason": "They read the report.",
+     "granted_at": "2026-11-16T09:30:06.976112018Z",
+     "granted_by": "dana@demo.example.com",
+     "self": false,
+     "manageable": true
+    }
+   ],
+   "visibility": "policy",
+   "teams": [
+    {
+     "slug": "everyone",
+     "name": "Everyone on this hub",
+     "members": 0,
+     "builtin": true
+    },
+    {
+     "slug": "finance-analytics",
+     "name": "Finance analytics",
+     "members": 1
+    },
+    {
+     "slug": "web",
+     "name": "Web team",
+     "members": 1,
+     "idp_group": "engineers"
+    }
+   ],
+   "your_role": "admin",
+   "can_share": true,
+   "grantable_roles": [
+    "viewer",
+    "operator",
+    "maintainer",
+    "admin"
+   ],
+   "available": true,
+   "note": "This project has no owner, so the hub's role mappings decide who else can reach it; the people and teams below are added to what they give."
+  }
+ }
+]

@@ -1,0 +1,535 @@
+[
+ {
+  "request": "GET /api/tasks/1/attach/info?project_idx=2",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 1 is not running on any executor",
+   "task_id": 1
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/attachments?project_idx=2&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 1,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/details?project_idx=2",
+  "body": {
+   "artifact_body": "read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.\n\nCommitted be34630: Read the sales export into typed rows (Task 1).\n\nTASK_DONE\n",
+   "artifact_path": ".cloop/tasks/1-parse-the-monthly-sales-export.md",
+   "artifact_truncated": false,
+   "citations": [
+    {
+     "kind": "injected",
+     "title": "SALES-8 The weekly report should start on Monday",
+     "url": "https://jira.demo.example.com/jira/browse/SALES-8",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 11,
+     "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82"
+    },
+    {
+     "kind": "injected",
+     "title": "Sales report definitions",
+     "url": "https://wiki.demo.example.com/confluence/display/ENG/Sales+report+definitions",
+     "source": "Engineering wiki",
+     "source_kind": "confluence",
+     "document_id": 3,
+     "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82"
+    }
+   ],
+   "live_body": "read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.\n\nCommitted be34630: Read the sales export into typed rows (Task 1).\n\nTASK_DONE",
+   "live_path": ".cloop/artifacts/1_output.txt",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 1,
+    "title": "Parse the monthly sales export",
+    "description": "Read data/sales-*.csv into typed rows; report and skip bad rows.",
+    "priority": 1,
+    "status": "done",
+    "role": "data",
+    "result": "read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.\n\nCommitted be34630: Read the sales export into typed rows (Task 1).\n\nTASK_DONE",
+    "started_at": "2026-11-16T09:35:41.906067853Z",
+    "completed_at": "2026-11-16T09:36:02.075877341Z",
+    "estimated_minutes": 20,
+    "artifact_path": ".cloop/tasks/1-parse-the-monthly-sales-export.md",
+    "tags": [
+     "parsing",
+     "epic:reporting"
+    ],
+    "annotations": [
+     {
+      "timestamp": "2026-11-16T09:35:41.906746717Z",
+      "author": "ai",
+      "text": "Task started on executor local (kind: localprocess, isolation: none, provider: claudecode)"
+     },
+     {
+      "timestamp": "2026-11-16T09:36:02.079400736Z",
+      "author": "ai",
+      "text": "Task completed successfully in 20s."
+     }
+    ],
+    "risk_score": 6,
+    "impact_score": 8,
+    "requirements": [
+     1
+    ],
+    "executor_id": "local",
+    "executor_kind": "localprocess",
+    "isolation": "none",
+    "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82",
+    "citations": [
+     {
+      "kind": "injected",
+      "title": "SALES-8 The weekly report should start on Monday",
+      "url": "https://jira.demo.example.com/jira/browse/SALES-8",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 11,
+      "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82"
+     },
+     {
+      "kind": "injected",
+      "title": "Sales report definitions",
+      "url": "https://wiki.demo.example.com/confluence/display/ENG/Sales+report+definitions",
+      "source": "Engineering wiki",
+      "source_kind": "confluence",
+      "document_id": 3,
+      "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/network?project_idx=2&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/provenance?project_idx=2",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 1,
+    "task_title": "Parse the monthly sales export",
+    "status": "done",
+    "goal": "Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.",
+    "instructions": "Python 3.12, standard library only.",
+    "prompt": "You are a data engineer. Focus on data integrity, query performance, and schema correctness. Design schemas with normalization and indexing in mind. Write efficient queries and safe migrations that can be rolled back. Document data models clearly.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nTurn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.\n\n## CONSTRAINTS\nPython 3.12, standard library only.\n\n## CURRENT TASK\n**Task 1: Parse the monthly sales export** [role: data]\nRead data/sales-*.csv into typed rows; report and skip bad rows.\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Parse the monthly sales export\n  Summary: read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.  Committed be34630: Read the sales export into typed rows (Task 1).  TASK_DONE\n\n## UPCOMING TASKS (do not work on these now)\n- [ ] Task 2: Summarise sales by region\n- [ ] Task 3: Write the summary as a Markdown report\n- [ ] Task 4: Send the report every Monday at 07:00\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "47a39a4e315c5280797f68e954381f3d9c049b9d091c0f9e3eebba2fcfecd779",
+    "provider": "claudecode",
+    "model": "claude-opus-5-5",
+    "sandbox": {
+     "executor_id": "local",
+     "executor_kind": "localprocess",
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/1/reproductions?project_idx=2",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/attach/info?project_idx=2",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 2 is not running on any executor",
+   "task_id": 2
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/attachments?project_idx=2&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 2,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/details?project_idx=2",
+  "body": {
+   "artifact_body": "",
+   "artifact_path": "",
+   "artifact_truncated": false,
+   "citations": [
+    {
+     "kind": "injected",
+     "title": "SALES-8 The weekly report should start on Monday",
+     "url": "https://jira.demo.example.com/jira/browse/SALES-8",
+     "source": "Product tracker",
+     "source_kind": "jira",
+     "document_id": 11,
+     "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82"
+    },
+    {
+     "kind": "injected",
+     "title": "Sales report definitions",
+     "url": "https://wiki.demo.example.com/confluence/display/ENG/Sales+report+definitions",
+     "source": "Engineering wiki",
+     "source_kind": "confluence",
+     "document_id": 3,
+     "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82"
+    }
+   ],
+   "live_body": "You've hit your session limit · resets 8:00am (UTC)",
+   "live_path": ".cloop/artifacts/2_output.txt",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 2,
+    "title": "Summarise sales by region",
+    "description": "Units and revenue per region and product for the week.",
+    "priority": 2,
+    "status": "pending",
+    "role": "data",
+    "depends_on": [
+     1
+    ],
+    "result": "You've hit your session limit · resets 8:00am (UTC)",
+    "started_at": "2026-11-16T09:36:02.182717116Z",
+    "estimated_minutes": 30,
+    "tags": [
+     "summary",
+     "epic:reporting"
+    ],
+    "annotations": [
+     {
+      "timestamp": "2026-11-16T09:36:02.183932659Z",
+      "author": "ai",
+      "text": "Task started on executor local (kind: localprocess, isolation: none, provider: claudecode)"
+     },
+     {
+      "timestamp": "2026-11-16T09:36:32.341191368Z",
+      "author": "cloop",
+      "text": "Task aborted before completion (usage_limit): five-hour session limit reached. Reset to pending — it never ran, so it is not done. Retry scheduled after Wed, 18 Nov 2026 08:00:00 UTC."
+     }
+    ],
+    "assignee": "priya@demo.example.com",
+    "risk_score": 8,
+    "impact_score": 7,
+    "requirements": [
+     2
+    ],
+    "executor_id": "local",
+    "executor_kind": "localprocess",
+    "isolation": "none",
+    "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82",
+    "citations": [
+     {
+      "kind": "injected",
+      "title": "SALES-8 The weekly report should start on Monday",
+      "url": "https://jira.demo.example.com/jira/browse/SALES-8",
+      "source": "Product tracker",
+      "source_kind": "jira",
+      "document_id": 11,
+      "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82"
+     },
+     {
+      "kind": "injected",
+      "title": "Sales report definitions",
+      "url": "https://wiki.demo.example.com/confluence/display/ENG/Sales+report+definitions",
+      "source": "Engineering wiki",
+      "source_kind": "confluence",
+      "document_id": 3,
+      "run_id": "run_67d8e4fe7ce624aaa83e3a77f2425d82"
+     }
+    ]
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/network?project_idx=2&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/provenance?project_idx=2",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 2,
+    "task_title": "Summarise sales by region",
+    "status": "pending",
+    "goal": "Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.",
+    "instructions": "Python 3.12, standard library only.",
+    "prompt": "You are a data engineer. Focus on data integrity, query performance, and schema correctness. Design schemas with normalization and indexing in mind. Write efficient queries and safe migrations that can be rolled back. Document data models clearly.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nTurn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.\n\n## CONSTRAINTS\nPython 3.12, standard library only.\n\n## CURRENT TASK\n**Task 2: Summarise sales by region** [role: data]\nUnits and revenue per region and product for the week.\n*Depends on: #1 Parse the monthly sales export*\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Parse the monthly sales export\n  Summary: read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.  Committed be34630: Read the sales export into typed rows (Task 1).  TASK_DONE\n\n## UPCOMING TASKS (do not work on these now)\n- [ ] Task 3: Write the summary as a Markdown report\n- [ ] Task 4: Send the report every Monday at 07:00\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "970cc322ca3ecf34a5ab003a376ffaa351f45cce9065086b2c10e5e9f62e1522",
+    "provider": "claudecode",
+    "model": "claude-opus-5-5",
+    "sandbox": {
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false,
+    "warnings": [
+     "no sandbox stamp on the task artifact: the executor and image this task ran on are unknown"
+    ]
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/2/reproductions?project_idx=2",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/attach/info?project_idx=2",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 3 is not running on any executor",
+   "task_id": 3
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/attachments?project_idx=2&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 3,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/details?project_idx=2",
+  "body": {
+   "artifact_body": "",
+   "artifact_path": "",
+   "artifact_truncated": false,
+   "citations": [],
+   "live_body": "",
+   "live_path": "",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 3,
+    "title": "Write the summary as a Markdown report",
+    "description": "A table per region and the week's top product.",
+    "priority": 2,
+    "status": "pending",
+    "role": "data",
+    "depends_on": [
+     2
+    ],
+    "estimated_minutes": 25,
+    "tags": [
+     "report",
+     "epic:reporting"
+    ],
+    "assignee": "priya@demo.example.com",
+    "risk_score": 1,
+    "impact_score": 6
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/network?project_idx=2&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/provenance?project_idx=2",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 3,
+    "task_title": "Write the summary as a Markdown report",
+    "status": "pending",
+    "goal": "Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.",
+    "instructions": "Python 3.12, standard library only.",
+    "prompt": "You are a data engineer. Focus on data integrity, query performance, and schema correctness. Design schemas with normalization and indexing in mind. Write efficient queries and safe migrations that can be rolled back. Document data models clearly.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nTurn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.\n\n## CONSTRAINTS\nPython 3.12, standard library only.\n\n## CURRENT TASK\n**Task 3: Write the summary as a Markdown report** [role: data]\nA table per region and the week's top product.\n*Depends on: #2 Summarise sales by region*\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Parse the monthly sales export\n  Summary: read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.  Committed be34630: Read the sales export into typed rows (Task 1).  TASK_DONE\n\n## UPCOMING TASKS (do not work on these now)\n- [ ] Task 2: Summarise sales by region\n- [ ] Task 4: Send the report every Monday at 07:00\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "614ed2db2ec4215e99011d8a97e1bcf0469a691cd6a07f47834beb4601301aa9",
+    "provider": "claudecode",
+    "model": "claude-opus-5-5",
+    "sandbox": {
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false,
+    "warnings": [
+     "no sandbox stamp on the task artifact: the executor and image this task ran on are unknown"
+    ]
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/3/reproductions?project_idx=2",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/attach/info?project_idx=2",
+  "body": {
+   "attachable": false,
+   "can_read": true,
+   "can_write": true,
+   "ok": true,
+   "reason": "executor: attach: unknown handle: task 4 is not running on any executor",
+   "task_id": 4
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/attachments?project_idx=2&*",
+  "body": {
+   "attachments": [],
+   "limits": {
+    "file_bytes": 33554432,
+    "project_bytes": 1073741824,
+    "task_bytes": 134217728,
+    "task_files": 100
+   },
+   "ok": true,
+   "task_id": 4,
+   "usage": {
+    "project_bytes": 0,
+    "project_files": 0,
+    "task_bytes": 0,
+    "task_files": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/details?project_idx=2",
+  "body": {
+   "artifact_body": "",
+   "artifact_path": "",
+   "artifact_truncated": false,
+   "citations": [],
+   "live_body": "",
+   "live_path": "",
+   "live_truncated": false,
+   "ok": true,
+   "task": {
+    "id": 4,
+    "title": "Send the report every Monday at 07:00",
+    "description": "A cron entry and a dry-run flag.",
+    "priority": 3,
+    "status": "pending",
+    "role": "devops",
+    "depends_on": [
+     3
+    ],
+    "estimated_minutes": 15,
+    "tags": [
+     "schedule",
+     "epic:reporting"
+    ],
+    "assignee": "priya@demo.example.com",
+    "risk_score": 3,
+    "impact_score": 5
+   }
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/network?project_idx=2&*",
+  "body": {
+   "observable": false,
+   "denials": [],
+   "egress": []
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/provenance?project_idx=2",
+  "body": {
+   "ok": true,
+   "provenance": {
+    "task_id": 4,
+    "task_title": "Send the report every Monday at 07:00",
+    "status": "pending",
+    "goal": "Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.",
+    "instructions": "Python 3.12, standard library only.",
+    "prompt": "You are a DevOps/platform engineer. Focus on reliability, repeatability, and observability. Apply best practices for containerization, CI/CD pipelines, infrastructure-as-code, and monitoring. Ensure configurations are idempotent and rollback-safe.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nTurn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.\n\n## CONSTRAINTS\nPython 3.12, standard library only.\n\n## CURRENT TASK\n**Task 4: Send the report every Monday at 07:00** [role: devops]\nA cron entry and a dry-run flag.\n*Depends on: #3 Write the summary as a Markdown report*\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Parse the monthly sales export\n  Summary: read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.  Committed be34630: Read the sales export into typed rows (Task 1).  TASK_DONE\n\n## UPCOMING TASKS (do not work on these now)\n- [ ] Task 2: Summarise sales by region\n- [ ] Task 3: Write the summary as a Markdown report\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+    "prompt_sha256": "aa93885fd9b66969c4ad88253017bc753300a10b363e5d7ca66c4f17fd56779f",
+    "provider": "claudecode",
+    "model": "claude-opus-5-5",
+    "sandbox": {
+     "started_at": "0001-01-01T00:00:00Z"
+    },
+    "sandbox_drift": false,
+    "warnings": [
+     "no sandbox stamp on the task artifact: the executor and image this task ran on are unknown"
+    ]
+   },
+   "reason": "this task has no recorded write-back commit — it ran on the host, so its changes went straight into the working tree and there is no commit of its own to reproduce against",
+   "reproducible": false
+  }
+ },
+ {
+  "request": "GET /api/tasks/4/reproductions?project_idx=2",
+  "body": {
+   "ok": true,
+   "reproductions": []
+  }
+ }
+]

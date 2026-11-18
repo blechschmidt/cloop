@@ -1,0 +1,358 @@
+[
+ {
+  "request": "GET /api/requirements/1/checks?project_idx=0&*",
+  "body": {
+   "checks": [
+    {
+     "id": 1,
+     "requirement_id": 1,
+     "run_id": "run_243fe65e6c93fe6ecbd9a10d7e6402d4",
+     "method": "tests",
+     "verdict": "fulfilled",
+     "summary": "1 test passed",
+     "tests": [
+      {
+       "name": "handlers answer JSON errors",
+       "command": "grep -q 'writeJSON(w, http.StatusNotFound' handlers.go",
+       "outcome": "pass",
+       "exit_code": 0,
+       "duration_ms": 4
+      }
+     ],
+     "fingerprint": "3460c04256cad26223edaad3d304bb0d",
+     "commit": "f604bb54a4e509d657c15587fcab7e7236f5147a",
+     "executor_id": "local",
+     "checked_by": "dana@demo.example.com",
+     "checked_at": "2026-11-16T09:35:08.203027Z",
+     "duration_ms": 4
+    }
+   ],
+   "fingerprint": "3460c04256cad26223edaad3d304bb0d",
+   "ok": true,
+   "proofs": [],
+   "requirement": {
+    "id": 1,
+    "title": "Every error is JSON with a 4xx status",
+    "description": "A client never has to parse an HTML error page.",
+    "priority": "must",
+    "status": "approved",
+    "tests": [
+     {
+      "name": "handlers answer JSON errors",
+      "command": "grep -q 'writeJSON(w, http.StatusNotFound' handlers.go",
+      "timeout_seconds": 30
+     }
+    ],
+    "created_at": "2026-11-16T09:30:07.45906Z",
+    "updated_at": "2026-11-16T09:30:07.45906Z",
+    "created_by": "dana@demo.example.com",
+    "updated_by": "dana@demo.example.com",
+    "approved_by": "dana@demo.example.com",
+    "approved_at": "2026-11-16T09:30:07.45906Z"
+   },
+   "tasks": [
+    {
+     "id": 3,
+     "title": "Implement the /todos CRUD handlers",
+     "status": "done"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/requirements/2/checks?project_idx=0&*",
+  "body": {
+   "checks": [
+    {
+     "id": 2,
+     "requirement_id": 2,
+     "run_id": "run_243fe65e6c93fe6ecbd9a10d7e6402d4",
+     "method": "tests",
+     "verdict": "fulfilled",
+     "summary": "1 test passed",
+     "tests": [
+      {
+       "name": "every route in the README",
+       "command": "test $(grep -c '^| [A-Z]* | /' README.md) -ge 6",
+       "outcome": "pass",
+       "exit_code": 0,
+       "duration_ms": 5
+      }
+     ],
+     "fingerprint": "6d0795ae64bc526f9522cbe8f15d88d0",
+     "commit": "f604bb54a4e509d657c15587fcab7e7236f5147a",
+     "executor_id": "local",
+     "checked_by": "dana@demo.example.com",
+     "checked_at": "2026-11-16T09:35:08.207994Z",
+     "duration_ms": 5
+    }
+   ],
+   "fingerprint": "6d0795ae64bc526f9522cbe8f15d88d0",
+   "ok": true,
+   "proofs": [],
+   "requirement": {
+    "id": 2,
+    "title": "The README documents every endpoint",
+    "description": "Six routes, six rows in the table.",
+    "priority": "should",
+    "status": "approved",
+    "tests": [
+     {
+      "name": "every route in the README",
+      "command": "test $(grep -c '^| [A-Z]* | /' README.md) -ge 6",
+      "timeout_seconds": 30
+     }
+    ],
+    "created_at": "2026-11-16T09:30:07.472426Z",
+    "updated_at": "2026-11-16T09:30:07.472426Z",
+    "created_by": "dana@demo.example.com",
+    "updated_by": "dana@demo.example.com",
+    "approved_by": "dana@demo.example.com",
+    "approved_at": "2026-11-16T09:30:07.472426Z"
+   },
+   "tasks": [
+    {
+     "id": 5,
+     "title": "Document the API in the README",
+     "status": "done"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/requirements/export?project_idx=0&*",
+  "body": {
+   "content": "# What this project must keep doing, kept beside its code (cloop requirements).\n#\n# Review changes here like code. `cloop requirements import` brings them into the\n# hub, `cloop requirements export` writes the hub's back, and\n# `cloop requirements check --file .cloop/requirements.yaml` runs the approved\n# requirements' tests without a hub. An id is never given to a second\n# requirement. Format: docs/guides/requirements.md#requirements-as-code\n\nversion: 1\nrequirements:\n  - id: R-1\n    title: Every error is JSON with a 4xx status\n    status: approved\n    priority: must\n    details: A client never has to parse an HTML error page.\n    tests:\n      - name: handlers answer JSON errors\n        command: grep -q 'writeJSON(w, http.StatusNotFound' handlers.go\n        timeout: 30s\n  - id: R-2\n    title: The README documents every endpoint\n    status: approved\n    priority: should\n    details: Six routes, six rows in the table.\n    tests:\n      - name: every route in the README\n        command: test $(grep -c '^| [A-Z]* | /' README.md) -ge 6\n        timeout: 30s\n",
+   "ok": true,
+   "path": ".cloop/requirements.yaml",
+   "requirements": 2,
+   "sha256": "6ee8a4220c6cec0720126eb0357a5315aaf7a87b1fc49a48af844b8b51cc6e2d"
+  }
+ },
+ {
+  "request": "GET /api/requirements/lint?project_idx=0&*",
+  "body": {
+   "checked": 2,
+   "findings": [],
+   "notes": [],
+   "ok": true
+  }
+ },
+ {
+  "request": "GET /api/requirements/spec?project_idx=0&*",
+  "body": {
+   "ok": true,
+   "reading": false,
+   "spec": {
+    "path": ".cloop/requirements.yaml",
+    "state": "missing",
+    "read": {
+     "read_at": "2026-11-16T09:36:53.340661Z",
+     "read_by": "dana@demo.example.com",
+     "executor_id": "local",
+     "path": ".cloop/requirements.yaml",
+     "found": false
+    },
+    "fresh": true,
+    "imports": 0,
+    "exports": 0,
+    "conflicts": 0,
+    "refused": 0,
+    "in_sync": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/requirements/trace?limit=0&project_idx=0",
+  "body": {
+   "ok": true,
+   "rows": [],
+   "coverage": {
+    "approved": 2,
+    "musts": {
+     "total": 1,
+     "tested": 1,
+     "proven": 0,
+     "passing": 1,
+     "linked": 1,
+     "tested_pct": 100,
+     "proven_pct": 0,
+     "passing_pct": 100,
+     "linked_pct": 100
+    },
+    "all": {
+     "total": 2,
+     "tested": 2,
+     "proven": 0,
+     "passing": 2,
+     "linked": 2,
+     "tested_pct": 100,
+     "proven_pct": 0,
+     "passing_pct": 100,
+     "linked_pct": 100
+    },
+    "stale": 0,
+    "gaps": {},
+    "verification": {
+     "tested": 2
+    }
+   },
+   "matched": 2,
+   "digest": "a17a04f97fb2eeb63b4a794f",
+   "filter": {},
+   "generated_at": "2026-11-16T09:36:43.946101055Z"
+  }
+ },
+ {
+  "request": "GET /api/requirements?project_idx=0",
+  "body": {
+   "ok": true,
+   "requirements": [
+    {
+     "id": 1,
+     "title": "Every error is JSON with a 4xx status",
+     "description": "A client never has to parse an HTML error page.",
+     "priority": "must",
+     "status": "approved",
+     "tests": [
+      {
+       "name": "handlers answer JSON errors",
+       "command": "grep -q 'writeJSON(w, http.StatusNotFound' handlers.go",
+       "timeout_seconds": 30
+      }
+     ],
+     "created_at": "2026-11-16T09:30:07.45906Z",
+     "updated_at": "2026-11-16T09:30:07.45906Z",
+     "created_by": "dana@demo.example.com",
+     "updated_by": "dana@demo.example.com",
+     "approved_by": "dana@demo.example.com",
+     "approved_at": "2026-11-16T09:30:07.45906Z",
+     "fingerprint": "3460c04256cad26223edaad3d304bb0d",
+     "last_check": {
+      "id": 1,
+      "requirement_id": 1,
+      "run_id": "run_243fe65e6c93fe6ecbd9a10d7e6402d4",
+      "method": "tests",
+      "verdict": "fulfilled",
+      "summary": "1 test passed",
+      "tests": [
+       {
+        "name": "handlers answer JSON errors",
+        "command": "grep -q 'writeJSON(w, http.StatusNotFound' handlers.go",
+        "outcome": "pass",
+        "exit_code": 0,
+        "duration_ms": 4
+       }
+      ],
+      "fingerprint": "3460c04256cad26223edaad3d304bb0d",
+      "commit": "f604bb54a4e509d657c15587fcab7e7236f5147a",
+      "executor_id": "local",
+      "checked_by": "dana@demo.example.com",
+      "checked_at": "2026-11-16T09:35:08.203027Z",
+      "duration_ms": 4
+     },
+     "tasks": [
+      3
+     ]
+    },
+    {
+     "id": 2,
+     "title": "The README documents every endpoint",
+     "description": "Six routes, six rows in the table.",
+     "priority": "should",
+     "status": "approved",
+     "tests": [
+      {
+       "name": "every route in the README",
+       "command": "test $(grep -c '^| [A-Z]* | /' README.md) -ge 6",
+       "timeout_seconds": 30
+      }
+     ],
+     "created_at": "2026-11-16T09:30:07.472426Z",
+     "updated_at": "2026-11-16T09:30:07.472426Z",
+     "created_by": "dana@demo.example.com",
+     "updated_by": "dana@demo.example.com",
+     "approved_by": "dana@demo.example.com",
+     "approved_at": "2026-11-16T09:30:07.472426Z",
+     "fingerprint": "6d0795ae64bc526f9522cbe8f15d88d0",
+     "last_check": {
+      "id": 2,
+      "requirement_id": 2,
+      "run_id": "run_243fe65e6c93fe6ecbd9a10d7e6402d4",
+      "method": "tests",
+      "verdict": "fulfilled",
+      "summary": "1 test passed",
+      "tests": [
+       {
+        "name": "every route in the README",
+        "command": "test $(grep -c '^| [A-Z]* | /' README.md) -ge 6",
+        "outcome": "pass",
+        "exit_code": 0,
+        "duration_ms": 5
+       }
+      ],
+      "fingerprint": "6d0795ae64bc526f9522cbe8f15d88d0",
+      "commit": "f604bb54a4e509d657c15587fcab7e7236f5147a",
+      "executor_id": "local",
+      "checked_by": "dana@demo.example.com",
+      "checked_at": "2026-11-16T09:35:08.207994Z",
+      "duration_ms": 5
+     },
+     "tasks": [
+      5
+     ]
+    }
+   ],
+   "counts": {
+    "fulfilled": 2,
+    "unfulfilled": 0,
+    "unverified": 0,
+    "error": 0
+   },
+   "never": 0,
+   "stale": 0,
+   "runs": [
+    {
+     "run_id": "run_243fe65e6c93fe6ecbd9a10d7e6402d4",
+     "state": "done",
+     "source": "dashboard",
+     "started_by": "dana@demo.example.com",
+     "started_at": "2026-11-16T09:35:07.93742Z",
+     "deadline": "2026-11-16T09:39:07.937418Z",
+     "finished_at": "2026-11-16T09:35:08.240403Z",
+     "executor_id": "local",
+     "requirement_ids": [
+      1,
+      2
+     ],
+     "counts": {
+      "fulfilled": 2,
+      "unfulfilled": 0,
+      "unverified": 0,
+      "error": 0
+     },
+     "kind": "check"
+    }
+   ],
+   "spec": {
+    "path": ".cloop/requirements.yaml",
+    "state": "missing",
+    "read": {
+     "read_at": "2026-11-16T09:36:53.340661Z",
+     "read_by": "dana@demo.example.com",
+     "executor_id": "local",
+     "path": ".cloop/requirements.yaml",
+     "found": false
+    },
+    "fresh": true,
+    "imports": 0,
+    "exports": 0,
+    "conflicts": 0,
+    "refused": 0,
+    "in_sync": 0
+   },
+   "targets": 0,
+   "must_gaps": 0
+  }
+ }
+]

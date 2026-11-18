@@ -1,0 +1,693 @@
+[
+ {
+  "request": "GET /api/requirements/1/checks?project_idx=1&*",
+  "body": {
+   "checks": [
+    {
+     "id": 1,
+     "requirement_id": 1,
+     "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+     "method": "tests",
+     "verdict": "fulfilled",
+     "summary": "1 test passed",
+     "tests": [
+      {
+       "name": "hero has a sign-up button",
+       "command": "grep -q 'id=\"signup\"' index.html",
+       "outcome": "pass",
+       "exit_code": 0,
+       "duration_ms": 4
+      }
+     ],
+     "fingerprint": "8c893d22ffed11dd24f65dbc2c8b8e67",
+     "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+     "executor_id": "local",
+     "checked_by": "dana@demo.example.com",
+     "checked_at": "2026-11-16T09:35:10.362935Z",
+     "duration_ms": 4
+    }
+   ],
+   "fingerprint": "8c893d22ffed11dd24f65dbc2c8b8e67",
+   "ok": true,
+   "proofs": [
+    {
+     "id": 1,
+     "requirement_id": 1,
+     "fingerprint": "8c893d22ffed11dd24f65dbc2c8b8e67",
+     "outcome": "proven",
+     "summary": "the tests fail at the base 986efbfd07e6 and pass on the change",
+     "base_from": "given",
+     "before": {
+      "commit": "986efbfd07e6e6563727e1320392f6ce1dbb5446",
+      "verdict": "unfulfilled",
+      "summary": "test \"hero has a sign-up button\" failed (exit 1)",
+      "tests": [
+       {
+        "name": "hero has a sign-up button",
+        "command": "grep -q 'id=\"signup\"' index.html",
+        "outcome": "fail",
+        "exit_code": 1,
+        "duration_ms": 4
+       }
+      ]
+     },
+     "after": {
+      "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+      "verdict": "fulfilled",
+      "summary": "1 test passed",
+      "tests": [
+       {
+        "name": "hero has a sign-up button",
+        "command": "grep -q 'id=\"signup\"' index.html",
+        "outcome": "pass",
+        "exit_code": 0,
+        "duration_ms": 4
+       }
+      ]
+     },
+     "code_changed": true,
+     "started_at": "2026-11-16T09:35:12.378254Z",
+     "duration_ms": 50,
+     "run_id": "run_bc6048e796234864f46e877aea752c29",
+     "executor_id": "local",
+     "proved_by": "dana@demo.example.com",
+     "proved_at": "2026-11-16T09:35:12.378254Z"
+    }
+   ],
+   "requirement": {
+    "id": 1,
+    "title": "The hero names the product and offers a sign-up button",
+    "description": "Visitors see what Tidewater is and can start straight away.",
+    "priority": "must",
+    "status": "approved",
+    "tests": [
+     {
+      "name": "hero has a sign-up button",
+      "command": "grep -q 'id=\"signup\"' index.html",
+      "timeout_seconds": 30
+     }
+    ],
+    "created_at": "2026-11-16T09:30:07.556227Z",
+    "updated_at": "2026-11-16T09:30:07.556227Z",
+    "created_by": "dana@demo.example.com",
+    "updated_by": "dana@demo.example.com",
+    "approved_by": "dana@demo.example.com",
+    "approved_at": "2026-11-16T09:30:07.556227Z"
+   },
+   "tasks": [
+    {
+     "id": 1,
+     "title": "Build the hero section",
+     "status": "done"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/requirements/2/checks?project_idx=1&*",
+  "body": {
+   "checks": [
+    {
+     "id": 2,
+     "requirement_id": 2,
+     "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+     "method": "tests",
+     "verdict": "fulfilled",
+     "summary": "1 test passed",
+     "tests": [
+      {
+       "name": "in-page links resolve",
+       "command": "sh tests/links.sh",
+       "outcome": "pass",
+       "exit_code": 0,
+       "duration_ms": 9
+      }
+     ],
+     "fingerprint": "9b07cb92eec3020daa215d54225ec6d4",
+     "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+     "executor_id": "local",
+     "checked_by": "dana@demo.example.com",
+     "checked_at": "2026-11-16T09:35:10.367016Z",
+     "duration_ms": 9
+    }
+   ],
+   "fingerprint": "9b07cb92eec3020daa215d54225ec6d4",
+   "ok": true,
+   "proofs": [],
+   "requirement": {
+    "id": 2,
+    "title": "Every in-page link points at a section that exists",
+    "description": "No dead #anchors in the navigation or the buttons.",
+    "priority": "must",
+    "status": "approved",
+    "tests": [
+     {
+      "name": "in-page links resolve",
+      "command": "sh tests/links.sh",
+      "timeout_seconds": 30
+     }
+    ],
+    "created_at": "2026-11-16T09:30:07.581589Z",
+    "updated_at": "2026-11-16T09:30:07.581589Z",
+    "created_by": "dana@demo.example.com",
+    "updated_by": "dana@demo.example.com",
+    "approved_by": "dana@demo.example.com",
+    "approved_at": "2026-11-16T09:30:07.581589Z"
+   },
+   "tasks": [
+    {
+     "id": 3,
+     "title": "Check that every in-page link resolves",
+     "status": "done"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/requirements/3/checks?project_idx=1&*",
+  "body": {
+   "checks": [
+    {
+     "id": 3,
+     "requirement_id": 3,
+     "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+     "method": "tests",
+     "verdict": "fulfilled",
+     "summary": "1 test passed",
+     "tests": [
+      {
+       "name": "no remote scripts",
+       "command": "! grep -Eq '<script[^>]+src=\"https?://' index.html",
+       "outcome": "pass",
+       "exit_code": 0,
+       "duration_ms": 1
+      }
+     ],
+     "fingerprint": "5aaeae0631521baf8ecc913280348fef",
+     "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+     "executor_id": "local",
+     "checked_by": "dana@demo.example.com",
+     "checked_at": "2026-11-16T09:35:10.376856Z",
+     "duration_ms": 1
+    }
+   ],
+   "fingerprint": "5aaeae0631521baf8ecc913280348fef",
+   "ok": true,
+   "proofs": [],
+   "requirement": {
+    "id": 3,
+    "title": "The page loads no third-party scripts",
+    "description": "Nothing is fetched from another origin when the page loads.",
+    "priority": "must",
+    "status": "approved",
+    "tests": [
+     {
+      "name": "no remote scripts",
+      "command": "! grep -Eq '<script[^>]+src=\"https?://' index.html",
+      "timeout_seconds": 30
+     }
+    ],
+    "created_at": "2026-11-16T09:30:07.60436Z",
+    "updated_at": "2026-11-16T09:30:07.60436Z",
+    "created_by": "dana@demo.example.com",
+    "updated_by": "dana@demo.example.com",
+    "approved_by": "dana@demo.example.com",
+    "approved_at": "2026-11-16T09:30:07.60436Z"
+   },
+   "tasks": [
+    {
+     "id": 1,
+     "title": "Build the hero section",
+     "status": "done"
+    },
+    {
+     "id": 2,
+     "title": "Add the features and pricing sections",
+     "status": "done"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/requirements/4/checks?project_idx=1&*",
+  "body": {
+   "checks": [
+    {
+     "id": 4,
+     "requirement_id": 4,
+     "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+     "method": "tests",
+     "verdict": "unfulfilled",
+     "summary": "test \"meta description present\" failed (exit 1)",
+     "tests": [
+      {
+       "name": "meta description present",
+       "command": "grep -q '<meta name=\"description\"' index.html",
+       "outcome": "fail",
+       "exit_code": 1,
+       "duration_ms": 2
+      }
+     ],
+     "fingerprint": "8bab4a9b0e6d0129dc1ec49686a8aaf4",
+     "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+     "executor_id": "local",
+     "checked_by": "dana@demo.example.com",
+     "checked_at": "2026-11-16T09:35:10.378739Z",
+     "duration_ms": 2
+    }
+   ],
+   "fingerprint": "8bab4a9b0e6d0129dc1ec49686a8aaf4",
+   "ok": true,
+   "proofs": [],
+   "requirement": {
+    "id": 4,
+    "title": "Search engines get a description of the page",
+    "description": "A meta description of at most 160 characters.",
+    "priority": "should",
+    "status": "approved",
+    "tests": [
+     {
+      "name": "meta description present",
+      "command": "grep -q '<meta name=\"description\"' index.html",
+      "timeout_seconds": 30
+     }
+    ],
+    "created_at": "2026-11-16T09:30:07.625428Z",
+    "updated_at": "2026-11-16T09:30:07.625428Z",
+    "created_by": "dana@demo.example.com",
+    "updated_by": "dana@demo.example.com",
+    "approved_by": "dana@demo.example.com",
+    "approved_at": "2026-11-16T09:30:07.625428Z"
+   },
+   "tasks": [
+    {
+     "id": 4,
+     "title": "Add a meta description and an FAQ",
+     "status": "done"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/requirements/export?project_idx=1&*",
+  "body": {
+   "content": "# What this project must keep doing, kept beside its code (cloop requirements).\n#\n# Review changes here like code. `cloop requirements import` brings them into the\n# hub, `cloop requirements export` writes the hub's back, and\n# `cloop requirements check --file .cloop/requirements.yaml` runs the approved\n# requirements' tests without a hub. An id is never given to a second\n# requirement. Format: docs/guides/requirements.md#requirements-as-code\n\nversion: 1\nrequirements:\n  - id: R-1\n    title: The hero names the product and offers a sign-up button\n    status: approved\n    priority: must\n    details: Visitors see what Tidewater is and can start straight away.\n    tests:\n      - name: hero has a sign-up button\n        command: grep -q 'id=\"signup\"' index.html\n        timeout: 30s\n  - id: R-2\n    title: Every in-page link points at a section that exists\n    status: approved\n    priority: must\n    details: 'No dead #anchors in the navigation or the buttons.'\n    tests:\n      - name: in-page links resolve\n        command: sh tests/links.sh\n        timeout: 30s\n  - id: R-3\n    title: The page loads no third-party scripts\n    status: approved\n    priority: must\n    details: Nothing is fetched from another origin when the page loads.\n    tests:\n      - name: no remote scripts\n        command: '! grep -Eq ''<script[^>]+src=\"https?://'' index.html'\n        timeout: 30s\n  - id: R-4\n    title: Search engines get a description of the page\n    status: approved\n    priority: should\n    details: A meta description of at most 160 characters.\n    tests:\n      - name: meta description present\n        command: grep -q '<meta name=\"description\"' index.html\n        timeout: 30s\n",
+   "ok": true,
+   "path": ".cloop/requirements.yaml",
+   "requirements": 4,
+   "sha256": "120a8349bd558f6bea369dec78a8dcd7851beff820251ec370045e49d12c1ddd"
+  }
+ },
+ {
+  "request": "GET /api/requirements/lint?project_idx=1&*",
+  "body": {
+   "checked": 4,
+   "findings": [],
+   "notes": [],
+   "ok": true
+  }
+ },
+ {
+  "request": "GET /api/requirements/spec?project_idx=1&*",
+  "body": {
+   "ok": true,
+   "reading": false,
+   "spec": {
+    "path": ".cloop/requirements.yaml",
+    "state": "missing",
+    "read": {
+     "read_at": "2026-11-16T09:37:40.093191Z",
+     "read_by": "dana@demo.example.com",
+     "executor_id": "local",
+     "path": ".cloop/requirements.yaml",
+     "found": false
+    },
+    "fresh": true,
+    "imports": 0,
+    "exports": 0,
+    "conflicts": 0,
+    "refused": 0,
+    "in_sync": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/requirements/trace?limit=0&project_idx=1",
+  "body": {
+   "ok": true,
+   "rows": [],
+   "coverage": {
+    "approved": 4,
+    "musts": {
+     "total": 3,
+     "tested": 3,
+     "proven": 1,
+     "passing": 3,
+     "linked": 3,
+     "tested_pct": 100,
+     "proven_pct": 33,
+     "passing_pct": 100,
+     "linked_pct": 100
+    },
+    "all": {
+     "total": 4,
+     "tested": 4,
+     "proven": 1,
+     "passing": 3,
+     "linked": 4,
+     "tested_pct": 100,
+     "proven_pct": 25,
+     "passing_pct": 75,
+     "linked_pct": 100
+    },
+    "stale": 0,
+    "gaps": {
+     "unfulfilled": 1
+    },
+    "verification": {
+     "tested": 4
+    }
+   },
+   "matched": 4,
+   "digest": "62d079f8244117e619a99b33",
+   "filter": {},
+   "generated_at": "2026-11-16T09:37:38.734605954Z"
+  }
+ },
+ {
+  "request": "GET /api/requirements?project_idx=1",
+  "body": {
+   "ok": true,
+   "requirements": [
+    {
+     "id": 1,
+     "title": "The hero names the product and offers a sign-up button",
+     "description": "Visitors see what Tidewater is and can start straight away.",
+     "priority": "must",
+     "status": "approved",
+     "tests": [
+      {
+       "name": "hero has a sign-up button",
+       "command": "grep -q 'id=\"signup\"' index.html",
+       "timeout_seconds": 30
+      }
+     ],
+     "created_at": "2026-11-16T09:30:07.556227Z",
+     "updated_at": "2026-11-16T09:30:07.556227Z",
+     "created_by": "dana@demo.example.com",
+     "updated_by": "dana@demo.example.com",
+     "approved_by": "dana@demo.example.com",
+     "approved_at": "2026-11-16T09:30:07.556227Z",
+     "fingerprint": "8c893d22ffed11dd24f65dbc2c8b8e67",
+     "last_check": {
+      "id": 1,
+      "requirement_id": 1,
+      "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+      "method": "tests",
+      "verdict": "fulfilled",
+      "summary": "1 test passed",
+      "tests": [
+       {
+        "name": "hero has a sign-up button",
+        "command": "grep -q 'id=\"signup\"' index.html",
+        "outcome": "pass",
+        "exit_code": 0,
+        "duration_ms": 4
+       }
+      ],
+      "fingerprint": "8c893d22ffed11dd24f65dbc2c8b8e67",
+      "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+      "executor_id": "local",
+      "checked_by": "dana@demo.example.com",
+      "checked_at": "2026-11-16T09:35:10.362935Z",
+      "duration_ms": 4
+     },
+     "tasks": [
+      1
+     ],
+     "last_proof": {
+      "id": 1,
+      "requirement_id": 1,
+      "fingerprint": "8c893d22ffed11dd24f65dbc2c8b8e67",
+      "outcome": "proven",
+      "summary": "the tests fail at the base 986efbfd07e6 and pass on the change",
+      "base_from": "given",
+      "before": {
+       "commit": "986efbfd07e6e6563727e1320392f6ce1dbb5446",
+       "verdict": "unfulfilled",
+       "summary": "test \"hero has a sign-up button\" failed (exit 1)",
+       "tests": [
+        {
+         "name": "hero has a sign-up button",
+         "command": "grep -q 'id=\"signup\"' index.html",
+         "outcome": "fail",
+         "exit_code": 1,
+         "duration_ms": 4
+        }
+       ]
+      },
+      "after": {
+       "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+       "verdict": "fulfilled",
+       "summary": "1 test passed",
+       "tests": [
+        {
+         "name": "hero has a sign-up button",
+         "command": "grep -q 'id=\"signup\"' index.html",
+         "outcome": "pass",
+         "exit_code": 0,
+         "duration_ms": 4
+        }
+       ]
+      },
+      "code_changed": true,
+      "started_at": "2026-11-16T09:35:12.378254Z",
+      "duration_ms": 50,
+      "run_id": "run_bc6048e796234864f46e877aea752c29",
+      "executor_id": "local",
+      "proved_by": "dana@demo.example.com",
+      "proved_at": "2026-11-16T09:35:12.378254Z"
+     }
+    },
+    {
+     "id": 2,
+     "title": "Every in-page link points at a section that exists",
+     "description": "No dead #anchors in the navigation or the buttons.",
+     "priority": "must",
+     "status": "approved",
+     "tests": [
+      {
+       "name": "in-page links resolve",
+       "command": "sh tests/links.sh",
+       "timeout_seconds": 30
+      }
+     ],
+     "created_at": "2026-11-16T09:30:07.581589Z",
+     "updated_at": "2026-11-16T09:30:07.581589Z",
+     "created_by": "dana@demo.example.com",
+     "updated_by": "dana@demo.example.com",
+     "approved_by": "dana@demo.example.com",
+     "approved_at": "2026-11-16T09:30:07.581589Z",
+     "fingerprint": "9b07cb92eec3020daa215d54225ec6d4",
+     "last_check": {
+      "id": 2,
+      "requirement_id": 2,
+      "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+      "method": "tests",
+      "verdict": "fulfilled",
+      "summary": "1 test passed",
+      "tests": [
+       {
+        "name": "in-page links resolve",
+        "command": "sh tests/links.sh",
+        "outcome": "pass",
+        "exit_code": 0,
+        "duration_ms": 9
+       }
+      ],
+      "fingerprint": "9b07cb92eec3020daa215d54225ec6d4",
+      "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+      "executor_id": "local",
+      "checked_by": "dana@demo.example.com",
+      "checked_at": "2026-11-16T09:35:10.367016Z",
+      "duration_ms": 9
+     },
+     "tasks": [
+      3
+     ]
+    },
+    {
+     "id": 3,
+     "title": "The page loads no third-party scripts",
+     "description": "Nothing is fetched from another origin when the page loads.",
+     "priority": "must",
+     "status": "approved",
+     "tests": [
+      {
+       "name": "no remote scripts",
+       "command": "! grep -Eq '<script[^>]+src=\"https?://' index.html",
+       "timeout_seconds": 30
+      }
+     ],
+     "created_at": "2026-11-16T09:30:07.60436Z",
+     "updated_at": "2026-11-16T09:30:07.60436Z",
+     "created_by": "dana@demo.example.com",
+     "updated_by": "dana@demo.example.com",
+     "approved_by": "dana@demo.example.com",
+     "approved_at": "2026-11-16T09:30:07.60436Z",
+     "fingerprint": "5aaeae0631521baf8ecc913280348fef",
+     "last_check": {
+      "id": 3,
+      "requirement_id": 3,
+      "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+      "method": "tests",
+      "verdict": "fulfilled",
+      "summary": "1 test passed",
+      "tests": [
+       {
+        "name": "no remote scripts",
+        "command": "! grep -Eq '<script[^>]+src=\"https?://' index.html",
+        "outcome": "pass",
+        "exit_code": 0,
+        "duration_ms": 1
+       }
+      ],
+      "fingerprint": "5aaeae0631521baf8ecc913280348fef",
+      "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+      "executor_id": "local",
+      "checked_by": "dana@demo.example.com",
+      "checked_at": "2026-11-16T09:35:10.376856Z",
+      "duration_ms": 1
+     },
+     "tasks": [
+      1,
+      2
+     ]
+    },
+    {
+     "id": 4,
+     "title": "Search engines get a description of the page",
+     "description": "A meta description of at most 160 characters.",
+     "priority": "should",
+     "status": "approved",
+     "tests": [
+      {
+       "name": "meta description present",
+       "command": "grep -q '<meta name=\"description\"' index.html",
+       "timeout_seconds": 30
+      }
+     ],
+     "created_at": "2026-11-16T09:30:07.625428Z",
+     "updated_at": "2026-11-16T09:30:07.625428Z",
+     "created_by": "dana@demo.example.com",
+     "updated_by": "dana@demo.example.com",
+     "approved_by": "dana@demo.example.com",
+     "approved_at": "2026-11-16T09:30:07.625428Z",
+     "fingerprint": "8bab4a9b0e6d0129dc1ec49686a8aaf4",
+     "last_check": {
+      "id": 4,
+      "requirement_id": 4,
+      "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+      "method": "tests",
+      "verdict": "unfulfilled",
+      "summary": "test \"meta description present\" failed (exit 1)",
+      "tests": [
+       {
+        "name": "meta description present",
+        "command": "grep -q '<meta name=\"description\"' index.html",
+        "outcome": "fail",
+        "exit_code": 1,
+        "duration_ms": 2
+       }
+      ],
+      "fingerprint": "8bab4a9b0e6d0129dc1ec49686a8aaf4",
+      "commit": "053346d8bf90d7ee57cd78070e9f40292e7075f9",
+      "executor_id": "local",
+      "checked_by": "dana@demo.example.com",
+      "checked_at": "2026-11-16T09:35:10.378739Z",
+      "duration_ms": 2
+     },
+     "tasks": [
+      4
+     ],
+     "gaps": [
+      "unfulfilled"
+     ],
+     "action": "fix"
+    }
+   ],
+   "counts": {
+    "fulfilled": 3,
+    "unfulfilled": 1,
+    "unverified": 0,
+    "error": 0
+   },
+   "never": 0,
+   "stale": 0,
+   "runs": [
+    {
+     "run_id": "run_bc6048e796234864f46e877aea752c29",
+     "state": "done",
+     "source": "dashboard",
+     "started_by": "dana@demo.example.com",
+     "started_at": "2026-11-16T09:35:12.066311Z",
+     "deadline": "2026-11-16T09:39:12.06631Z",
+     "finished_at": "2026-11-16T09:35:12.453986Z",
+     "executor_id": "local",
+     "requirement_ids": [
+      1
+     ],
+     "counts": {
+      "fulfilled": 0,
+      "unfulfilled": 0,
+      "unverified": 0,
+      "error": 0
+     },
+     "kind": "prove"
+    },
+    {
+     "run_id": "run_9bdffed2f973180398cef6b3e10f59f1",
+     "state": "done",
+     "source": "dashboard",
+     "started_by": "dana@demo.example.com",
+     "started_at": "2026-11-16T09:35:10.0226Z",
+     "deadline": "2026-11-16T09:40:10.022598Z",
+     "finished_at": "2026-11-16T09:35:10.395873Z",
+     "executor_id": "local",
+     "requirement_ids": [
+      1,
+      2,
+      3,
+      4
+     ],
+     "counts": {
+      "fulfilled": 3,
+      "unfulfilled": 1,
+      "unverified": 0,
+      "error": 0
+     },
+     "kind": "check"
+    }
+   ],
+   "spec": {
+    "path": ".cloop/requirements.yaml",
+    "state": "missing",
+    "read": {
+     "read_at": "2026-11-16T09:37:40.093191Z",
+     "read_by": "dana@demo.example.com",
+     "executor_id": "local",
+     "path": ".cloop/requirements.yaml",
+     "found": false
+    },
+    "fresh": true,
+    "imports": 0,
+    "exports": 0,
+    "conflicts": 0,
+    "refused": 0,
+    "in_sync": 0
+   },
+   "targets": 1,
+   "must_gaps": 0
+  }
+ }
+]

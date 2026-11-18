@@ -1,0 +1,19 @@
+[
+ {
+  "request": "GET /api/projects/2/repositories",
+  "body": {
+   "apps": [
+    {
+     "id": "sec_35438dbeecda445b7bbb5ce4",
+     "name": "acme-github-app"
+    }
+   ],
+   "assignments": [],
+   "git_proxy": {
+    "running": false,
+    "required": false
+   },
+   "project": "csv-report"
+  }
+ }
+]

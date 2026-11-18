@@ -1,0 +1,16 @@
+[
+ {
+  "request": "GET /api/fleet/autoupdate",
+  "body": {
+   "enabled": false,
+   "target_version": "",
+   "max_in_flight": 0,
+   "effective": {
+    "enabled": false,
+    "target_version": "dev+g0a796d2.dirty",
+    "max_in_flight": 1
+   },
+   "hub_version": "dev+g0a796d2.dirty"
+  }
+ }
+]

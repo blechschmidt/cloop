@@ -1,0 +1,16 @@
+[
+ {
+  "request": "GET /api/static-token",
+  "body": {
+   "configured": true,
+   "fingerprint": "55e605a4b7d0",
+   "status": "accepted",
+   "last_used_at": "2026-11-16T09:30:07Z",
+   "last_used_ip": "198.51.100.24",
+   "sso": true,
+   "admin_tokens": 0,
+   "strands": false,
+   "self": false
+  }
+ }
+]

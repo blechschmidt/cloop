@@ -1,5 +1,5 @@
 .PHONY: build test test-unit test-e2e test-e2e-update test-isolation test-projectmove e2e-stack fuzz bench lint lint-tool lint-version clean \
-        docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-demo docs-serve docs-freshness \
+        docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-demo demo-fixtures docs-serve docs-freshness \
         release-dist changelog-check requirements-check \
         terraform-test terraform-validate
 
@@ -346,6 +346,18 @@ docs-site: $(DOCS_VENV) docs-check docs-stage
 ##     python3 -m http.server -d dist/docs-site 8000
 docs-demo:
 	@python3 scripts/build-demo.py --out $(DIST)/docs-site/demo
+
+## demo-fixtures: record the demo's fixtures (website/demo/fixtures) again
+##
+## Runs three made-up projects through a throwaway hub with single sign-on in
+## a fresh directory under /tmp, fills its admin surfaces through its API,
+## walks the dashboard as an administrator in headless Chrome, and writes what
+## the hub answered, scrubbed of paths, hosts, credentials and real times.
+## Needs root, Chrome and node 22, and about ten minutes; see
+## scripts/demo/README.md. tests/demo fails when the dashboard gains a read
+## the fixtures do not answer. Not a CI job, for the reason screenshots is not.
+demo-fixtures:
+	@./scripts/demo/record-fixtures.sh
 
 ## docs-freshness: fail when the published site lags main's docs-touching
 ##                 commits by more than DOCS_MAX_LAG_HOURS (default 6)

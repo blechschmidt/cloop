@@ -1,0 +1,45 @@
+[
+ {
+  "request": "GET /api/deps?project_idx=1",
+  "body": {
+   "edges": [],
+   "nodes": [
+    {
+     "id": 1,
+     "title": "Build the hero section",
+     "status": "done",
+     "priority": 1,
+     "description": "The product name, one sentence on what it does and a Start free button."
+    },
+    {
+     "id": 2,
+     "title": "Add the features and pricing sections",
+     "status": "done",
+     "priority": 2,
+     "description": "Three features as a list; one paragraph on pricing."
+    },
+    {
+     "id": 3,
+     "title": "Check that every in-page link resolves",
+     "status": "done",
+     "priority": 2,
+     "description": "Run tests/links.sh and fix the page until it passes."
+    },
+    {
+     "id": 4,
+     "title": "Add a meta description and an FAQ",
+     "status": "done",
+     "priority": 3,
+     "description": "Describe the page for search engines; answer where the tide times come from."
+    },
+    {
+     "id": 5,
+     "title": "Translate the page into German",
+     "status": "pending",
+     "priority": 3,
+     "description": "A /de/ copy of the page with the same sections; the button says Kostenlos starten."
+    }
+   ]
+  }
+ }
+]

@@ -1,0 +1,162 @@
+[
+ {
+  "request": "GET /api/event-history?limit=50&project_idx=2",
+  "body": {
+   "entries": [
+    {
+     "id": -9,
+     "kind": "egress",
+     "timestamp": "2026-11-16T09:36:39.30054777Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "egress: this project holds the egress grant egress_c7447c54ac9f045d8c0fea6d, but this run on executor local gets no proxy session: executors.egress is not enabled on this hub, so it hosts no egress proxy. Set executors.egress.enabled on the hub and restart it."
+    },
+    {
+     "id": -8,
+     "kind": "egress",
+     "timestamp": "2026-11-16T09:36:36.797962391Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "egress: this project holds the egress grant egress_c7447c54ac9f045d8c0fea6d, but this run on executor local gets no proxy session: executors.egress is not enabled on this hub, so it hosts no egress proxy. Set executors.egress.enabled on the hub and restart it."
+    },
+    {
+     "id": -7,
+     "kind": "task_aborted",
+     "timestamp": "2026-11-16T09:36:32.37784558Z",
+     "task_id": 2,
+     "task_title": "Summarise sales by region",
+     "step": 2,
+     "exit_code": 0,
+     "message": "Task #2 aborted (usage_limit): five-hour session limit reached — reset to pending",
+     "details": {
+      "abort_class": "usage_limit",
+      "evidence": "You've hit your session limit · resets 8:00am (UTC)",
+      "reason": "five-hour session limit reached",
+      "retry_after": "2026-11-16T15:13:35Z",
+      "retryable": true
+     }
+    },
+    {
+     "id": 2,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:36:32.331895637Z",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task 2: Summarise sales by region",
+     "output": "You've hit your session limit · resets 8:00am (UTC)",
+     "duration": "30s"
+    },
+    {
+     "id": -6,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:36:02.235479487Z",
+     "task_id": 2,
+     "task_title": "Summarise sales by region",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task #2 started",
+     "details": {
+      "priority": 2,
+      "role": "data"
+     }
+    },
+    {
+     "id": -5,
+     "kind": "task_done",
+     "timestamp": "2026-11-16T09:36:02.11897165Z",
+     "task_id": 1,
+     "task_title": "Parse the monthly sales export",
+     "step": 1,
+     "exit_code": 0,
+     "message": "Task #1 completed in 20s",
+     "details": {
+      "duration": "20s",
+      "executor_id": "local",
+      "executor_kind": "localprocess",
+      "fail_count": 0,
+      "heal_attempts": 0,
+      "isolation": "none",
+      "status": "done",
+      "verify_retries": 0
+     }
+    },
+    {
+     "id": 1,
+     "kind": "step",
+     "timestamp": "2026-11-16T09:36:02.075642277Z",
+     "step": 0,
+     "exit_code": 0,
+     "message": "Task 1: Parse the monthly sales export",
+     "output": "read_sales() parses data/sales-2026-10.csv into 10 Sale rows; a malformed number is reported with its line and skipped.\n\nCommitted be34630: Read the sales export into typed rows (Task 1).\n\nTASK_DONE",
+     "duration": "20s"
+    },
+    {
+     "id": -4,
+     "kind": "task_started",
+     "timestamp": "2026-11-16T09:35:41.971730725Z",
+     "task_id": 1,
+     "task_title": "Parse the monthly sales export",
+     "step": 0,
+     "exit_code": 0,
+     "message": "Task #1 started",
+     "details": {
+      "priority": 1,
+      "role": "data"
+     }
+    },
+    {
+     "id": -3,
+     "kind": "session_started",
+     "timestamp": "2026-11-16T09:35:41.892231533Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "Run started on dev+g0a796d2.dirty",
+     "details": {
+      "auto_evolve": false,
+      "build": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "follow_builds": false,
+      "goal": "Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.",
+      "innovate": false,
+      "max_parallel": 0,
+      "model": "claude-opus-5-5",
+      "parallel": false,
+      "pid": 9,
+      "provider": "claudecode"
+     }
+    },
+    {
+     "id": -2,
+     "kind": "knowledge",
+     "timestamp": "2026-11-16T09:35:41.69660984Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "/home/demo/projects/todo-api is not given to it: it is the hub's own directory, whose .cloop holds the control plane."
+    },
+    {
+     "id": -1,
+     "kind": "egress",
+     "timestamp": "2026-11-16T09:35:41.684614026Z",
+     "step": -1,
+     "exit_code": 0,
+     "message": "egress: this project holds the egress grant egress_c7447c54ac9f045d8c0fea6d, but this run on executor local gets no proxy session: executors.egress is not enabled on this hub, so it hosts no egress proxy. Set executors.egress.enabled on the hub and restart it."
+    }
+   ],
+   "top": [
+    1,
+    9
+   ],
+   "bottom": [
+    2461362.5986884837,
+    1,
+    1
+   ],
+   "more": false,
+   "offset": 0,
+   "limit": 50
+  }
+ }
+]

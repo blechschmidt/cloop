@@ -1,0 +1,72 @@
+[
+ {
+  "request": "GET /api/me?project_idx=2",
+  "body": {
+   "admin": true,
+   "authenticated": true,
+   "claim_age_seconds": 88,
+   "email": "dana@demo.example.com",
+   "global_permissions": [
+    "audit.read",
+    "config.write",
+    "executor.manage",
+    "executor.read",
+    "knowledge.admin",
+    "project.read",
+    "project.readers",
+    "project.share",
+    "project.write",
+    "run.start",
+    "run.stop",
+    "sandbox.attach",
+    "sandbox.attach.write",
+    "secret.grant",
+    "secret.own",
+    "secret.request",
+    "secret.revoke",
+    "session.admin",
+    "task.mutate",
+    "token.admin",
+    "user.manage",
+    "view.prefs"
+   ],
+   "identity": "dana@demo.example.com",
+   "max_claim_age_seconds": 300,
+   "name": "Dana Whitfield",
+   "oidc_enabled": true,
+   "permissions": [
+    "audit.read",
+    "config.write",
+    "executor.manage",
+    "executor.read",
+    "knowledge.admin",
+    "project.read",
+    "project.readers",
+    "project.share",
+    "project.write",
+    "run.start",
+    "run.stop",
+    "sandbox.attach",
+    "sandbox.attach.write",
+    "secret.grant",
+    "secret.own",
+    "secret.request",
+    "secret.revoke",
+    "session.admin",
+    "task.mutate",
+    "token.admin",
+    "user.manage",
+    "view.prefs"
+   ],
+   "rbac_enforced": true,
+   "recent_sign_in": {
+    "max_age_seconds": 7200,
+    "remaining_seconds": 7090
+   },
+   "role": "admin",
+   "session_expires_in_seconds": 86290,
+   "session_kind": "browser",
+   "sub": "demo-dana-demo-example-com"
+  }
+ }
+]

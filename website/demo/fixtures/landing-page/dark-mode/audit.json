@@ -1,0 +1,196 @@
+[
+ {
+  "request": "GET /api/audit/verify?project_idx=3",
+  "body": {
+   "ok": true,
+   "total": 14,
+   "break_at_id": 0,
+   "reason": "",
+   "expected_hash": "",
+   "actual_hash": "",
+   "checked_at": "2026-11-16T09:40:09Z",
+   "anchored": false,
+   "verified_from_id": 1,
+   "pruned_count": 0,
+   "archive_path": "",
+   "archive_sha256": "",
+   "status": "intact",
+   "gaps": 0,
+   "gap_events": 0
+  }
+ },
+ {
+  "request": "GET /api/audit?limit=100&offset=0&project_idx=3",
+  "body": {
+   "events": [
+    {
+     "id": 14,
+     "timestamp": "2026-11-16T09:35:35.414343113Z",
+     "actor": "system",
+     "event_type": "state.save",
+     "entity_type": "plan",
+     "entity_id": "",
+     "payload": "{\"auto_evolve\":false,\"current_step\":1,\"evolve_step\":0,\"goal\":\"A dark colour scheme that follows the reader's system setting.\",\"innovate_mode\":false,\"max_parallel\":0,\"parallel\":false,\"plan_version\":3,\"status\":\"complete\",\"task_count\":1,\"total_input_tokens\":1499,\"total_output_tokens\":746}",
+     "prev_hash": "7f8324810f68216a8804b439911e7681bf63e28a745a067cba11bc490efda5c6",
+     "row_hash": "5883d53db5e3a9eb13446b421bb8009bf6d3a9014921133f5e57519729f861d6"
+    },
+    {
+     "id": 13,
+     "timestamp": "2026-11-16T09:35:35.389826664Z",
+     "actor": "system",
+     "event_type": "task.upsert",
+     "entity_type": "task",
+     "entity_id": "1",
+     "payload": "{\"annotations\":[{\"author\":\"ai\",\"text\":\"Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)\",\"timestamp\":\"2026-11-16T09:35:15.260641809Z\"},{\"author\":\"ai\",\"text\":\"Task completed successfully in 20s.\",\"timestamp\":\"2026-11-16T09:35:35.333598271Z\"}],\"artifact_path\":\".cloop/tasks/1-add-a-dark-colour-scheme.md\",\"completed_at\":\"2026-11-16T09:35:35.331068786Z\",\"description\":\"\",\"executor_id\":\"local\",\"executor_kind\":\"localprocess\",\"id\":1,\"isolation\":\"none\",\"priority\":1,\"result\":\"dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\\n\\nCommitted d74dd26: Add a dark colour scheme (Task 1).\\n\\nTASK_DONE\",\"run_id\":\"run_adef774f77421e084e0b67fb78b7c75d\",\"started_at\":\"2026-11-16T09:35:15.260260463Z\",\"status\":\"done\",\"title\":\"Add a dark colour scheme\"}",
+     "prev_hash": "892c6b5254fa4af830c243d71192fcc6b6517542164c11e82e8121c920b3066f",
+     "row_hash": "7f8324810f68216a8804b439911e7681bf63e28a745a067cba11bc490efda5c6"
+    },
+    {
+     "id": 12,
+     "timestamp": "2026-11-16T09:35:35.389210023Z",
+     "actor": "system",
+     "event_type": "state.save",
+     "entity_type": "plan",
+     "entity_id": "",
+     "payload": "{\"auto_evolve\":false,\"current_step\":1,\"evolve_step\":0,\"goal\":\"A dark colour scheme that follows the reader's system setting.\",\"innovate_mode\":false,\"max_parallel\":0,\"parallel\":false,\"plan_version\":3,\"status\":\"running\",\"task_count\":1,\"total_input_tokens\":1499,\"total_output_tokens\":746}",
+     "prev_hash": "76a07274647cd4c2b179626990eb87594178ba14e161f1464aca1327b170d33c",
+     "row_hash": "892c6b5254fa4af830c243d71192fcc6b6517542164c11e82e8121c920b3066f"
+    },
+    {
+     "id": 11,
+     "timestamp": "2026-11-16T09:35:35.344087143Z",
+     "actor": "system",
+     "event_type": "task.finish",
+     "entity_type": "task",
+     "entity_id": "1",
+     "payload": "{\"completed_at\":\"2026-11-16T09:35:35.331068786Z\",\"duration_ms\":20070,\"executor_id\":\"local\",\"executor_kind\":\"localprocess\",\"isolation\":\"none\",\"outcome\":\"done\",\"project\":\"/home/demo/projects/landing-page/.cloop/features/dark-mode\",\"reason\":\"dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio. Committed d74dd26: Add a dark colour scheme (Task 1). TASK_DONE\",\"run_id\":\"run_adef774f77421e084e0b67fb78b7c75d\",\"started_at\":\"2026-11-16T09:35:15.260260463Z\",\"task_id\":1,\"title\":\"Add a dark colour scheme\"}",
+     "prev_hash": "8b4d1d649a9b85fb5615f7d4415db00990753a7aae062791f47f75612f38eafd",
+     "row_hash": "76a07274647cd4c2b179626990eb87594178ba14e161f1464aca1327b170d33c"
+    },
+    {
+     "id": 10,
+     "timestamp": "2026-11-16T09:35:35.343808772Z",
+     "actor": "system",
+     "event_type": "task.upsert",
+     "entity_type": "task",
+     "entity_id": "1",
+     "payload": "{\"id\":1,\"title\":\"Add a dark colour scheme\",\"description\":\"\",\"priority\":1,\"status\":\"done\",\"result\":\"dark.css follows prefers-color-scheme; the button keeps a 6.1:1 contrast ratio.\\n\\nCommitted d74dd26: Add a dark colour scheme (Task 1).\\n\\nTASK_DONE\",\"started_at\":\"2026-11-16T09:35:15.260260463Z\",\"completed_at\":\"2026-11-16T09:35:35.331068786Z\",\"annotations\":[{\"timestamp\":\"2026-11-16T09:35:15.260641809Z\",\"author\":\"ai\",\"text\":\"Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)\"},{\"timestamp\":\"2026-11-16T09:35:35.333598271Z\",\"author\":\"ai\",\"text\":\"Task completed successfully in 20s.\"}],\"executor_id\":\"local\",\"executor_kind\":\"localprocess\",\"isolation\":\"none\",\"run_id\":\"run_adef774f77421e084e0b67fb78b7c75d\"}",
+     "prev_hash": "219dde1dacb1b4386be1a7e23fd762cc3004a153b80cbc2e7605c3f352d05adb",
+     "row_hash": "8b4d1d649a9b85fb5615f7d4415db00990753a7aae062791f47f75612f38eafd"
+    },
+    {
+     "id": 9,
+     "timestamp": "2026-11-16T09:35:35.343524744Z",
+     "actor": "system",
+     "event_type": "state.save",
+     "entity_type": "plan",
+     "entity_id": "",
+     "payload": "{\"auto_evolve\":false,\"current_step\":1,\"evolve_step\":0,\"goal\":\"A dark colour scheme that follows the reader's system setting.\",\"innovate_mode\":false,\"max_parallel\":0,\"parallel\":false,\"plan_version\":2,\"status\":\"running\",\"task_count\":1,\"total_input_tokens\":1499,\"total_output_tokens\":746}",
+     "prev_hash": "c8b8b58841c6d9bd3401026e1a69c485fcc14bb2e07e7f739e841bba4f9a3fc2",
+     "row_hash": "219dde1dacb1b4386be1a7e23fd762cc3004a153b80cbc2e7605c3f352d05adb"
+    },
+    {
+     "id": 8,
+     "timestamp": "2026-11-16T09:35:15.270333748Z",
+     "actor": "system",
+     "event_type": "task.upsert",
+     "entity_type": "task",
+     "entity_id": "1",
+     "payload": "{\"id\":1,\"title\":\"Add a dark colour scheme\",\"description\":\"\",\"priority\":1,\"status\":\"in_progress\",\"started_at\":\"2026-11-16T09:35:15.260260463Z\",\"annotations\":[{\"timestamp\":\"2026-11-16T09:35:15.260641809Z\",\"author\":\"ai\",\"text\":\"Task started on executor local (kind: localprocess, isolation: none, provider: anthropic)\"}],\"executor_id\":\"local\",\"executor_kind\":\"localprocess\",\"isolation\":\"none\",\"run_id\":\"run_adef774f77421e084e0b67fb78b7c75d\"}",
+     "prev_hash": "0845d9dbeaf9c9b60e47e0000b2eb1d6d7867d76352c5653a26880585927c2de",
+     "row_hash": "c8b8b58841c6d9bd3401026e1a69c485fcc14bb2e07e7f739e841bba4f9a3fc2"
+    },
+    {
+     "id": 7,
+     "timestamp": "2026-11-16T09:35:15.270093485Z",
+     "actor": "system",
+     "event_type": "state.save",
+     "entity_type": "plan",
+     "entity_id": "",
+     "payload": "{\"auto_evolve\":false,\"current_step\":0,\"evolve_step\":0,\"goal\":\"A dark colour scheme that follows the reader's system setting.\",\"innovate_mode\":false,\"max_parallel\":0,\"parallel\":false,\"plan_version\":0,\"status\":\"running\",\"task_count\":1,\"total_input_tokens\":0,\"total_output_tokens\":0}",
+     "prev_hash": "ae5aa497d393160f7933ff06933f2cc35bc44d1f8f407f286c0e6639f323f8d8",
+     "row_hash": "0845d9dbeaf9c9b60e47e0000b2eb1d6d7867d76352c5653a26880585927c2de"
+    },
+    {
+     "id": 6,
+     "timestamp": "2026-11-16T09:35:15.26037731Z",
+     "actor": "dana@demo.example.com",
+     "event_type": "task.dispatch",
+     "entity_type": "task",
+     "entity_id": "1",
+     "payload": "{\"executor_id\":\"local\",\"executor_kind\":\"localprocess\",\"isolation\":\"none\",\"lease_ids\":[],\"project\":\"/home/demo/projects/landing-page/.cloop/features/dark-mode\",\"read_only_projects\":[],\"run_id\":\"run_adef774f77421e084e0b67fb78b7c75d\",\"task_id\":1,\"title\":\"Add a dark colour scheme\"}",
+     "prev_hash": "e34e338bb6a091fa3fac943ce86e709d51d7f895122d34e51890dafaa97a2b30",
+     "row_hash": "ae5aa497d393160f7933ff06933f2cc35bc44d1f8f407f286c0e6639f323f8d8"
+    },
+    {
+     "id": 5,
+     "timestamp": "2026-11-16T09:35:15.235726076Z",
+     "actor": "system",
+     "event_type": "state.save",
+     "entity_type": "plan",
+     "entity_id": "",
+     "payload": "{\"auto_evolve\":false,\"current_step\":0,\"evolve_step\":0,\"goal\":\"A dark colour scheme that follows the reader's system setting.\",\"innovate_mode\":false,\"max_parallel\":0,\"parallel\":false,\"plan_version\":0,\"status\":\"running\",\"task_count\":1,\"total_input_tokens\":0,\"total_output_tokens\":0}",
+     "prev_hash": "6a28f050fe65c9ee96f569d8d8fa7dd4d6454c519efcc304e991605859a8fca8",
+     "row_hash": "e34e338bb6a091fa3fac943ce86e709d51d7f895122d34e51890dafaa97a2b30"
+    },
+    {
+     "id": 4,
+     "timestamp": "2026-11-16T09:35:15.222090158Z",
+     "actor": "system",
+     "event_type": "state.save",
+     "entity_type": "plan",
+     "entity_id": "",
+     "payload": "{\"auto_evolve\":false,\"current_step\":0,\"evolve_step\":0,\"goal\":\"A dark colour scheme that follows the reader's system setting.\",\"innovate_mode\":false,\"max_parallel\":0,\"parallel\":false,\"plan_version\":0,\"status\":\"initialized\",\"task_count\":1,\"total_input_tokens\":0,\"total_output_tokens\":0}",
+     "prev_hash": "23e6cc6ff6a01cd595dd066bcd4c1dfce9b5a4fb65635c2d6475f8a983256338",
+     "row_hash": "6a28f050fe65c9ee96f569d8d8fa7dd4d6454c519efcc304e991605859a8fca8"
+    },
+    {
+     "id": 3,
+     "timestamp": "2026-11-16T09:35:15.213771198Z",
+     "actor": "system",
+     "event_type": "state.save",
+     "entity_type": "plan",
+     "entity_id": "",
+     "payload": "{\"auto_evolve\":false,\"current_step\":0,\"evolve_step\":0,\"goal\":\"A dark colour scheme that follows the reader's system setting.\",\"innovate_mode\":false,\"max_parallel\":0,\"parallel\":false,\"plan_version\":0,\"status\":\"initialized\",\"task_count\":1,\"total_input_tokens\":0,\"total_output_tokens\":0}",
+     "prev_hash": "c285072876cafaa6e5336025c6e63105f5b99cd236497e156e8f95b91c7f5cc3",
+     "row_hash": "23e6cc6ff6a01cd595dd066bcd4c1dfce9b5a4fb65635c2d6475f8a983256338"
+    },
+    {
+     "id": 2,
+     "timestamp": "2026-11-16T09:35:14.696906247Z",
+     "actor": "system",
+     "event_type": "task.upsert",
+     "entity_type": "task",
+     "entity_id": "1",
+     "payload": "{\"id\":1,\"title\":\"Add a dark colour scheme\",\"description\":\"\",\"priority\":1,\"status\":\"pending\"}",
+     "prev_hash": "29dcce716035203650a683ab9fa2a943f1484251fea04f2dfb23d46e26bcc30d",
+     "row_hash": "c285072876cafaa6e5336025c6e63105f5b99cd236497e156e8f95b91c7f5cc3"
+    },
+    {
+     "id": 1,
+     "timestamp": "2026-11-16T09:35:14.696734018Z",
+     "actor": "system",
+     "event_type": "state.save",
+     "entity_type": "plan",
+     "entity_id": "",
+     "payload": "{\"auto_evolve\":false,\"current_step\":0,\"evolve_step\":0,\"goal\":\"A dark colour scheme that follows the reader's system setting.\",\"innovate_mode\":false,\"max_parallel\":0,\"parallel\":false,\"plan_version\":0,\"status\":\"initialized\",\"task_count\":1,\"total_input_tokens\":0,\"total_output_tokens\":0}",
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "row_hash": "29dcce716035203650a683ab9fa2a943f1484251fea04f2dfb23d46e26bcc30d"
+    }
+   ],
+   "total": 14,
+   "all": 14,
+   "limit": 100,
+   "offset": 0,
+   "has_more": false,
+   "actors": [
+    "dana@demo.example.com",
+    "system"
+   ],
+   "entity_types": [
+    "plan",
+    "task"
+   ]
+  }
+ }
+]

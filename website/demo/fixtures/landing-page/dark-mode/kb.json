@@ -1,0 +1,8 @@
+[
+ {
+  "request": "GET /api/kb?project_idx=3",
+  "body": {
+   "entries": []
+  }
+ }
+]

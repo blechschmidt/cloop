@@ -1,0 +1,8 @@
+[
+ {
+  "request": "GET /api/goal?project_idx=2&*",
+  "body": {
+   "goal": "Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning."
+  }
+ }
+]

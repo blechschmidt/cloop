@@ -1,0 +1,14 @@
+[
+ {
+  "request": "GET /api/forwarders",
+  "body": {
+   "forwarders": []
+  }
+ },
+ {
+  "request": "GET /api/forwarders/bindings",
+  "body": {
+   "bindings": []
+  }
+ }
+]

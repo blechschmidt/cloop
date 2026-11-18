@@ -1,0 +1,47 @@
+[
+ {
+  "request": "GET /api/queue/stats?project_idx=2",
+  "body": {
+   "done": 1,
+   "failed": 1,
+   "queued": 0,
+   "running": 0,
+   "skipped": 0
+  }
+ },
+ {
+  "request": "GET /api/queue?limit=300&project_idx=2",
+  "body": {
+   "entries": [
+    {
+     "id": 2,
+     "kind": "task",
+     "task_id": 2,
+     "title": "Summarise sales by region",
+     "description": "Units and revenue per region and product for the week.",
+     "status": "failed",
+     "source": "orchestrator",
+     "created_at": "2026-11-16T09:36:02.217393658Z",
+     "started_at": "2026-11-16T09:36:02.220071207Z",
+     "completed_at": "2026-11-16T09:36:32.378812077Z",
+     "error_message": "aborted (usage_limit): five-hour session limit reached"
+    },
+    {
+     "id": 1,
+     "kind": "task",
+     "task_id": 1,
+     "title": "Parse the monthly sales export",
+     "description": "Read data/sales-*.csv into typed rows; report and skip bad rows.",
+     "status": "done",
+     "source": "orchestrator",
+     "created_at": "2026-11-16T09:35:41.950343105Z",
+     "started_at": "2026-11-16T09:35:41.956370987Z",
+     "completed_at": "2026-11-16T09:36:02.106045013Z",
+     "output_summary": "Committed be34630: Read the sales export into typed rows (Task 1)."
+    }
+   ],
+   "limit": 300,
+   "offset": 0
+  }
+ }
+]

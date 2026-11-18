@@ -1,0 +1,8 @@
+[
+ {
+  "request": "GET /api/instructions?project_idx=3&*",
+  "body": {
+   "instructions": "Plain HTML and CSS, no build step. Keep the page under 30 KB.\n\n## Feature branch\nThis project is the feature \"Dark mode\" of landing-page. It is developed in its own git worktree on branch `cloop/feature/dark-mode`, cut from `main`, while other features of the same project are developed in parallel in their own worktrees.\n- Commit your work to this branch. Do not switch branches, and never merge into or push to `main`.\n- A plain `git push` publishes this branch only. When the feature is complete, a pull request into `main` is opened from it.\n- Change only files inside this worktree."
+  }
+ }
+]

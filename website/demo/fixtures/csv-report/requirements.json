@@ -1,0 +1,364 @@
+[
+ {
+  "request": "GET /api/requirements/1/checks?project_idx=2&*",
+  "body": {
+   "checks": [
+    {
+     "id": 1,
+     "requirement_id": 1,
+     "run_id": "run_ca69aff311fc5177fdc551e1c0aefb6e",
+     "method": "tests",
+     "verdict": "fulfilled",
+     "summary": "1 test passed",
+     "tests": [
+      {
+       "name": "all ten rows read",
+       "command": "python3 report.py data/sales-2026-10.csv | grep -q '^10 sales read'",
+       "outcome": "pass",
+       "exit_code": 0,
+       "duration_ms": 32
+      }
+     ],
+     "fingerprint": "0c96b4918a17605a2544f32711cb365b",
+     "commit": "be346304cb22facc270cfbc53916e39e313031f4",
+     "executor_id": "local",
+     "checked_by": "dana@demo.example.com",
+     "checked_at": "2026-11-16T09:36:36.86583Z",
+     "duration_ms": 32
+    }
+   ],
+   "fingerprint": "0c96b4918a17605a2544f32711cb365b",
+   "ok": true,
+   "proofs": [],
+   "requirement": {
+    "id": 1,
+    "title": "Every row of the export is read or reported",
+    "description": "A malformed row is named with its line, never dropped in silence.",
+    "priority": "must",
+    "status": "approved",
+    "tests": [
+     {
+      "name": "all ten rows read",
+      "command": "python3 report.py data/sales-2026-10.csv | grep -q '^10 sales read'",
+      "timeout_seconds": 30
+     }
+    ],
+    "created_at": "2026-11-16T09:30:07.856515Z",
+    "updated_at": "2026-11-16T09:30:07.856515Z",
+    "created_by": "dana@demo.example.com",
+    "updated_by": "dana@demo.example.com",
+    "approved_by": "dana@demo.example.com",
+    "approved_at": "2026-11-16T09:30:07.856515Z"
+   },
+   "tasks": [
+    {
+     "id": 1,
+     "title": "Parse the monthly sales export",
+     "status": "done"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/requirements/2/checks?project_idx=2&*",
+  "body": {
+   "checks": [
+    {
+     "id": 2,
+     "requirement_id": 2,
+     "run_id": "run_ca69aff311fc5177fdc551e1c0aefb6e",
+     "method": "tests",
+     "verdict": "unfulfilled",
+     "summary": "test \"regions in the report\" failed (exit 1)",
+     "tests": [
+      {
+       "name": "regions in the report",
+       "command": "python3 report.py data/sales-2026-10.csv | grep -q '^North'",
+       "outcome": "fail",
+       "exit_code": 1,
+       "duration_ms": 49
+      }
+     ],
+     "fingerprint": "e109b7803d6f6a2faa0e6e5d7f672d64",
+     "commit": "be346304cb22facc270cfbc53916e39e313031f4",
+     "executor_id": "local",
+     "checked_by": "dana@demo.example.com",
+     "checked_at": "2026-11-16T09:36:36.898174Z",
+     "duration_ms": 49
+    }
+   ],
+   "fingerprint": "e109b7803d6f6a2faa0e6e5d7f672d64",
+   "ok": true,
+   "proofs": [],
+   "requirement": {
+    "id": 2,
+    "title": "The report shows revenue per region",
+    "description": "North, South, East and West, in euros.",
+    "priority": "must",
+    "status": "approved",
+    "tests": [
+     {
+      "name": "regions in the report",
+      "command": "python3 report.py data/sales-2026-10.csv | grep -q '^North'",
+      "timeout_seconds": 30
+     }
+    ],
+    "created_at": "2026-11-16T09:30:07.873118Z",
+    "updated_at": "2026-11-16T09:30:07.873118Z",
+    "created_by": "dana@demo.example.com",
+    "updated_by": "dana@demo.example.com",
+    "approved_by": "dana@demo.example.com",
+    "approved_at": "2026-11-16T09:30:07.873118Z"
+   },
+   "tasks": [
+    {
+     "id": 2,
+     "title": "Summarise sales by region",
+     "status": "pending"
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/requirements/export?project_idx=2&*",
+  "body": {
+   "content": "# What this project must keep doing, kept beside its code (cloop requirements).\n#\n# Review changes here like code. `cloop requirements import` brings them into the\n# hub, `cloop requirements export` writes the hub's back, and\n# `cloop requirements check --file .cloop/requirements.yaml` runs the approved\n# requirements' tests without a hub. An id is never given to a second\n# requirement. Format: docs/guides/requirements.md#requirements-as-code\n\nversion: 1\nrequirements:\n  - id: R-1\n    title: Every row of the export is read or reported\n    status: approved\n    priority: must\n    details: A malformed row is named with its line, never dropped in silence.\n    tests:\n      - name: all ten rows read\n        command: python3 report.py data/sales-2026-10.csv | grep -q '^10 sales read'\n        timeout: 30s\n  - id: R-2\n    title: The report shows revenue per region\n    status: approved\n    priority: must\n    details: North, South, East and West, in euros.\n    tests:\n      - name: regions in the report\n        command: python3 report.py data/sales-2026-10.csv | grep -q '^North'\n        timeout: 30s\n",
+   "ok": true,
+   "path": ".cloop/requirements.yaml",
+   "requirements": 2,
+   "sha256": "ff45d7e3089886d5989f4eab4c561f13b15614e84631fc7641233122600acfbc"
+  }
+ },
+ {
+  "request": "GET /api/requirements/lint?project_idx=2&*",
+  "body": {
+   "checked": 2,
+   "findings": [],
+   "notes": [],
+   "ok": true
+  }
+ },
+ {
+  "request": "GET /api/requirements/spec?project_idx=2&*",
+  "body": {
+   "ok": true,
+   "reading": false,
+   "spec": {
+    "path": ".cloop/requirements.yaml",
+    "state": "missing",
+    "read": {
+     "read_at": "2026-11-16T09:38:31.974598Z",
+     "read_by": "dana@demo.example.com",
+     "executor_id": "local",
+     "path": ".cloop/requirements.yaml",
+     "found": false
+    },
+    "fresh": true,
+    "imports": 0,
+    "exports": 0,
+    "conflicts": 0,
+    "refused": 0,
+    "in_sync": 0
+   }
+  }
+ },
+ {
+  "request": "GET /api/requirements/trace?limit=0&project_idx=2",
+  "body": {
+   "ok": true,
+   "rows": [],
+   "coverage": {
+    "approved": 2,
+    "musts": {
+     "total": 2,
+     "tested": 2,
+     "proven": 0,
+     "passing": 1,
+     "linked": 2,
+     "tested_pct": 100,
+     "proven_pct": 0,
+     "passing_pct": 50,
+     "linked_pct": 100
+    },
+    "all": {
+     "total": 2,
+     "tested": 2,
+     "proven": 0,
+     "passing": 1,
+     "linked": 2,
+     "tested_pct": 100,
+     "proven_pct": 0,
+     "passing_pct": 50,
+     "linked_pct": 100
+    },
+    "stale": 0,
+    "gaps": {
+     "unfulfilled": 1
+    },
+    "verification": {
+     "tested": 2
+    }
+   },
+   "matched": 2,
+   "digest": "e242623ee0539374860c35f9",
+   "filter": {},
+   "generated_at": "2026-11-16T09:38:30.758930998Z"
+  }
+ },
+ {
+  "request": "GET /api/requirements?project_idx=2",
+  "body": {
+   "ok": true,
+   "requirements": [
+    {
+     "id": 1,
+     "title": "Every row of the export is read or reported",
+     "description": "A malformed row is named with its line, never dropped in silence.",
+     "priority": "must",
+     "status": "approved",
+     "tests": [
+      {
+       "name": "all ten rows read",
+       "command": "python3 report.py data/sales-2026-10.csv | grep -q '^10 sales read'",
+       "timeout_seconds": 30
+      }
+     ],
+     "created_at": "2026-11-16T09:30:07.856515Z",
+     "updated_at": "2026-11-16T09:30:07.856515Z",
+     "created_by": "dana@demo.example.com",
+     "updated_by": "dana@demo.example.com",
+     "approved_by": "dana@demo.example.com",
+     "approved_at": "2026-11-16T09:30:07.856515Z",
+     "fingerprint": "0c96b4918a17605a2544f32711cb365b",
+     "last_check": {
+      "id": 1,
+      "requirement_id": 1,
+      "run_id": "run_ca69aff311fc5177fdc551e1c0aefb6e",
+      "method": "tests",
+      "verdict": "fulfilled",
+      "summary": "1 test passed",
+      "tests": [
+       {
+        "name": "all ten rows read",
+        "command": "python3 report.py data/sales-2026-10.csv | grep -q '^10 sales read'",
+        "outcome": "pass",
+        "exit_code": 0,
+        "duration_ms": 32
+       }
+      ],
+      "fingerprint": "0c96b4918a17605a2544f32711cb365b",
+      "commit": "be346304cb22facc270cfbc53916e39e313031f4",
+      "executor_id": "local",
+      "checked_by": "dana@demo.example.com",
+      "checked_at": "2026-11-16T09:36:36.86583Z",
+      "duration_ms": 32
+     },
+     "tasks": [
+      1
+     ]
+    },
+    {
+     "id": 2,
+     "title": "The report shows revenue per region",
+     "description": "North, South, East and West, in euros.",
+     "priority": "must",
+     "status": "approved",
+     "tests": [
+      {
+       "name": "regions in the report",
+       "command": "python3 report.py data/sales-2026-10.csv | grep -q '^North'",
+       "timeout_seconds": 30
+      }
+     ],
+     "created_at": "2026-11-16T09:30:07.873118Z",
+     "updated_at": "2026-11-16T09:30:07.873118Z",
+     "created_by": "dana@demo.example.com",
+     "updated_by": "dana@demo.example.com",
+     "approved_by": "dana@demo.example.com",
+     "approved_at": "2026-11-16T09:30:07.873118Z",
+     "fingerprint": "e109b7803d6f6a2faa0e6e5d7f672d64",
+     "last_check": {
+      "id": 2,
+      "requirement_id": 2,
+      "run_id": "run_ca69aff311fc5177fdc551e1c0aefb6e",
+      "method": "tests",
+      "verdict": "unfulfilled",
+      "summary": "test \"regions in the report\" failed (exit 1)",
+      "tests": [
+       {
+        "name": "regions in the report",
+        "command": "python3 report.py data/sales-2026-10.csv | grep -q '^North'",
+        "outcome": "fail",
+        "exit_code": 1,
+        "duration_ms": 49
+       }
+      ],
+      "fingerprint": "e109b7803d6f6a2faa0e6e5d7f672d64",
+      "commit": "be346304cb22facc270cfbc53916e39e313031f4",
+      "executor_id": "local",
+      "checked_by": "dana@demo.example.com",
+      "checked_at": "2026-11-16T09:36:36.898174Z",
+      "duration_ms": 49
+     },
+     "tasks": [
+      2
+     ],
+     "gaps": [
+      "unfulfilled"
+     ],
+     "action": "covered"
+    }
+   ],
+   "counts": {
+    "fulfilled": 1,
+    "unfulfilled": 1,
+    "unverified": 0,
+    "error": 0
+   },
+   "never": 0,
+   "stale": 0,
+   "runs": [
+    {
+     "run_id": "run_ca69aff311fc5177fdc551e1c0aefb6e",
+     "state": "done",
+     "source": "dashboard",
+     "started_by": "dana@demo.example.com",
+     "started_at": "2026-11-16T09:36:36.76788Z",
+     "deadline": "2026-11-16T09:40:36.767879Z",
+     "finished_at": "2026-11-16T09:36:36.969117Z",
+     "executor_id": "local",
+     "requirement_ids": [
+      1,
+      2
+     ],
+     "counts": {
+      "fulfilled": 1,
+      "unfulfilled": 1,
+      "unverified": 0,
+      "error": 0
+     },
+     "kind": "check"
+    }
+   ],
+   "spec": {
+    "path": ".cloop/requirements.yaml",
+    "state": "missing",
+    "read": {
+     "read_at": "2026-11-16T09:38:31.974598Z",
+     "read_by": "dana@demo.example.com",
+     "executor_id": "local",
+     "path": ".cloop/requirements.yaml",
+     "found": false
+    },
+    "fresh": true,
+    "imports": 0,
+    "exports": 0,
+    "conflicts": 0,
+    "refused": 0,
+    "in_sync": 0
+   },
+   "targets": 0,
+   "must_gaps": 0
+  }
+ }
+]

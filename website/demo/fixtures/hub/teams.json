@@ -1,0 +1,67 @@
+[
+ {
+  "request": "GET /api/teams",
+  "body": {
+   "teams": [
+    {
+     "slug": "everyone",
+     "name": "Everyone on this hub",
+     "description": "Every identity that can sign in to this hub.",
+     "created_at": "0001-01-01T00:00:00Z",
+     "updated_at": "0001-01-01T00:00:00Z",
+     "members": [],
+     "projects": [],
+     "builtin": true
+    },
+    {
+     "slug": "finance-analytics",
+     "name": "Finance analytics",
+     "description": "Reads the weekly sales report.",
+     "created_at": "2026-11-16T09:30:06.942742125Z",
+     "created_by": "dana@demo.example.com",
+     "updated_at": "2026-11-16T09:30:06.942742125Z",
+     "updated_by": "dana@demo.example.com",
+     "members": [
+      {
+       "identity": "sam@demo.example.com",
+       "added_at": "2026-11-16T09:30:06.956105558Z",
+       "added_by": "dana@demo.example.com"
+      }
+     ],
+     "projects": [
+      {
+       "name": "csv-report",
+       "path": "/home/demo/projects/csv-report",
+       "role": "viewer"
+      }
+     ]
+    },
+    {
+     "slug": "web",
+     "name": "Web team",
+     "description": "The Tidewater site and its launch.",
+     "idp_group": "engineers",
+     "created_at": "2026-11-16T09:30:06.938821356Z",
+     "created_by": "dana@demo.example.com",
+     "updated_at": "2026-11-16T09:30:06.938821356Z",
+     "updated_by": "dana@demo.example.com",
+     "members": [
+      {
+       "identity": "priya@demo.example.com",
+       "added_at": "2026-11-16T09:30:06.947776314Z",
+       "added_by": "dana@demo.example.com"
+      }
+     ],
+     "projects": [
+      {
+       "name": "landing-page",
+       "path": "/home/demo/projects/landing-page",
+       "role": "operator"
+      }
+     ]
+    }
+   ],
+   "directory": true
+  }
+ }
+]

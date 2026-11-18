@@ -1,0 +1,86 @@
+[
+ {
+  "request": "GET /api/queue/stats?project_idx=0",
+  "body": {
+   "done": 5,
+   "failed": 0,
+   "queued": 0,
+   "running": 0,
+   "skipped": 0
+  }
+ },
+ {
+  "request": "GET /api/queue?limit=300&project_idx=0",
+  "body": {
+   "entries": [
+    {
+     "id": 5,
+     "kind": "task",
+     "task_id": 5,
+     "title": "Document the API in the README",
+     "description": "A table of every endpoint, how to run the service and what an error looks like.",
+     "status": "done",
+     "source": "orchestrator",
+     "created_at": "2026-11-16T09:32:20.57061575Z",
+     "started_at": "2026-11-16T09:32:20.573978003Z",
+     "completed_at": "2026-11-16T09:32:35.71242101Z",
+     "output_summary": "Committed f604bb5: Document every endpoint in the README (Task 5)."
+    },
+    {
+     "id": 4,
+     "kind": "task",
+     "task_id": 4,
+     "title": "Cover the handlers with tests",
+     "description": "httptest-based tests for create, list, complete, the empty-title 400 and unknown-id 404; attach the coverage report.",
+     "status": "done",
+     "source": "orchestrator",
+     "created_at": "2026-11-16T09:31:44.029332033Z",
+     "started_at": "2026-11-16T09:31:44.032729931Z",
+     "completed_at": "2026-11-16T09:32:14.165034952Z",
+     "output_summary": "Committed 034e2f9: Test the handlers: create, complete, list, 400 and 404 (Task 4)."
+    },
+    {
+     "id": 3,
+     "kind": "task",
+     "task_id": 3,
+     "title": "Implement the /todos CRUD handlers",
+     "description": "GET/POST /todos and GET/PATCH/DELETE /todos/{id}, JSON in and out, 400 and 404 as JSON errors.",
+     "status": "done",
+     "source": "orchestrator",
+     "created_at": "2026-11-16T09:30:58.772843834Z",
+     "started_at": "2026-11-16T09:30:58.775110895Z",
+     "completed_at": "2026-11-16T09:31:43.935019337Z",
+     "output_summary": "Committed 9a1ae7f: Serve /todos: list, create, read, complete and delete (Task 3)."
+    },
+    {
+     "id": 2,
+     "kind": "task",
+     "task_id": 2,
+     "title": "Add an in-memory store for to-do items",
+     "description": "A Store with Add, Get, List, SetDone and Delete, safe for concurrent use.",
+     "status": "done",
+     "source": "orchestrator",
+     "created_at": "2026-11-16T09:30:28.517956382Z",
+     "started_at": "2026-11-16T09:30:28.51983022Z",
+     "completed_at": "2026-11-16T09:30:58.659079742Z",
+     "output_summary": "Committed e148e51: Add an in-memory, mutex-guarded to-do store (Task 2)."
+    },
+    {
+     "id": 1,
+     "kind": "task",
+     "task_id": 1,
+     "title": "Scaffold the HTTP server with a health check",
+     "description": "A main package that listens on $ADDR (default :8080) and answers GET /healthz with 200 ok.",
+     "status": "done",
+     "source": "orchestrator",
+     "created_at": "2026-11-16T09:30:08.303557239Z",
+     "started_at": "2026-11-16T09:30:08.308609876Z",
+     "completed_at": "2026-11-16T09:30:28.445265331Z",
+     "output_summary": "Committed 36e3b86: Scaffold the HTTP server with GET /healthz (Task 1)."
+    }
+   ],
+   "limit": 300,
+   "offset": 0
+  }
+ }
+]

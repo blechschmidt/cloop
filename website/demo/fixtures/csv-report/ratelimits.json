@@ -1,0 +1,9 @@
+[
+ {
+  "request": "GET /api/ratelimits?project_idx=2",
+  "body": {
+   "count": 0,
+   "models": []
+  }
+ }
+]

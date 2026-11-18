@@ -1,0 +1,217 @@
+[
+ {
+  "request": "GET /api/executor-pools",
+  "body": {
+   "chart": "https://demo.example.com/charts/cloop-executor-controller.tgz",
+   "hub_protocol": 4,
+   "image_tag": "edge",
+   "pools": [
+    {
+     "id": "pool-7w0u9ra1nd4cvpo7",
+     "name": "ci-runners-eu",
+     "labels": {
+      "region": "eu-central",
+      "tier": "ci"
+     },
+     "capabilities": {
+      "harnesses": [
+       "claude",
+       "git"
+      ],
+      "container_runtimes": [
+       "docker"
+      ],
+      "platform": "linux",
+      "arch": "amd64",
+      "memory_mb": 8192,
+      "cpus": 4
+     },
+     "max_runners": 12,
+     "created_at": "2026-11-16T09:30:02.217764631Z",
+     "created_by": "static-token",
+     "updated_at": "2026-11-16T09:30:02.217764631Z",
+     "updated_by": "static-token",
+     "revoked_at": "0001-01-01T00:00:00Z",
+     "binding": "pool:pool-7w0u9ra1nd4cvpo7",
+     "snapshot": {
+      "pool_id": "pool-7w0u9ra1nd4cvpo7",
+      "name": "ci-runners-eu",
+      "revoked": false,
+      "max_runners": 12,
+      "waiting": 0,
+      "demand": 0,
+      "busy": 0,
+      "idle": 0,
+      "pending": 0,
+      "runners": 0,
+      "spare": 12,
+      "wanted": 0,
+      "runner_states": [],
+      "queued_projects": [],
+      "revision": "f4c66a71b72acd39",
+      "at": "2026-11-16T09:40:06.929073152Z"
+     },
+     "cordoned": false,
+     "health": {
+      "problems": [],
+      "waiting": 0,
+      "last_contact": "2026-11-16T09:30:02.22262008Z",
+      "controller": {
+       "credential_id": "ATdydprn-WX1LOWf",
+       "version": "dev+g0a796d2.dirty",
+       "protocol": 4,
+       "behind": false,
+       "last_contact": "2026-11-16T09:30:02.22262008Z"
+      },
+      "storage": {
+       "claims": 4,
+       "bound": 4,
+       "pending": 0,
+       "in_use": 2,
+       "full": 0,
+       "retained": 0,
+       "bytes_used": 19327352832,
+       "bytes_capacity": 171798691840
+      },
+      "live_credentials": 1
+     },
+     "admitted": true
+    }
+   ]
+  }
+ },
+ {
+  "request": "GET /api/executor-pools/pool-7w0u9ra1nd4cvpo7/audience?*",
+  "body": {
+   "audience": [],
+   "pool_id": "pool-7w0u9ra1nd4cvpo7",
+   "restricted": false
+  }
+ },
+ {
+  "request": "GET /api/executor-pools/pool-7w0u9ra1nd4cvpo7?*",
+  "body": {
+   "id": "pool-7w0u9ra1nd4cvpo7",
+   "name": "ci-runners-eu",
+   "labels": {
+    "region": "eu-central",
+    "tier": "ci"
+   },
+   "capabilities": {
+    "harnesses": [
+     "claude",
+     "git"
+    ],
+    "container_runtimes": [
+     "docker"
+    ],
+    "platform": "linux",
+    "arch": "amd64",
+    "memory_mb": 8192,
+    "cpus": 4
+   },
+   "max_runners": 12,
+   "created_at": "2026-11-16T09:30:02.217764631Z",
+   "created_by": "static-token",
+   "updated_at": "2026-11-16T09:30:02.217764631Z",
+   "updated_by": "static-token",
+   "revoked_at": "0001-01-01T00:00:00Z",
+   "binding": "pool:pool-7w0u9ra1nd4cvpo7",
+   "snapshot": {
+    "pool_id": "pool-7w0u9ra1nd4cvpo7",
+    "name": "ci-runners-eu",
+    "revoked": false,
+    "max_runners": 12,
+    "waiting": 0,
+    "demand": 0,
+    "busy": 0,
+    "idle": 0,
+    "pending": 0,
+    "runners": 0,
+    "spare": 12,
+    "wanted": 0,
+    "runner_states": [],
+    "queued_projects": [],
+    "revision": "f4c66a71b72acd39",
+    "at": "2026-11-16T09:40:15.566538396Z"
+   },
+   "cordoned": false,
+   "health": {
+    "problems": [],
+    "waiting": 0,
+    "last_contact": "2026-11-16T09:30:02.22262008Z",
+    "controller": {
+     "credential_id": "ATdydprn-WX1LOWf",
+     "version": "dev+g0a796d2.dirty",
+     "protocol": 4,
+     "behind": false,
+     "last_contact": "2026-11-16T09:30:02.22262008Z"
+    },
+    "storage": {
+     "claims": 4,
+     "bound": 4,
+     "pending": 0,
+     "in_use": 2,
+     "full": 0,
+     "retained": 0,
+     "bytes_used": 19327352832,
+     "bytes_capacity": 171798691840
+    },
+    "live_credentials": 1
+   },
+   "credentials": [
+    {
+     "id": "ATdydprn-WX1LOWf",
+     "pool_id": "pool-7w0u9ra1nd4cvpo7",
+     "created_at": "2026-11-16T09:30:02.217764631Z",
+     "created_by": "static-token",
+     "last_used_at": "2026-11-16T09:30:02.22262008Z",
+     "revoked_at": "0001-01-01T00:00:00Z",
+     "controller_version": "dev+g0a796d2.dirty",
+     "controller_protocol": 4
+    }
+   ],
+   "audience": [],
+   "runners": [
+    {
+     "enrollment_id": "nffp08mNTUF3u81h",
+     "name": "ci-runners-eu-amo3dw",
+     "state": "pending",
+     "minted_at": "2026-11-16T09:30:02.225535111Z",
+     "expires_at": "2026-11-16T09:40:02.225535111Z",
+     "enrolled_at": "0001-01-01T00:00:00Z",
+     "retired_at": "0001-01-01T00:00:00Z",
+     "credential_id": "ATdydprn-WX1LOWf"
+    },
+    {
+     "enrollment_id": "voVzY4wcCdfWz8ut",
+     "name": "ci-runners-eu-izbiyw",
+     "state": "pending",
+     "minted_at": "2026-11-16T09:30:02.225535111Z",
+     "expires_at": "2026-11-16T09:40:02.225535111Z",
+     "enrolled_at": "0001-01-01T00:00:00Z",
+     "retired_at": "0001-01-01T00:00:00Z",
+     "credential_id": "ATdydprn-WX1LOWf"
+    }
+   ],
+   "queue": [],
+   "controller_reports": [
+    {
+     "credential_id": "ATdydprn-WX1LOWf",
+     "healthy": true,
+     "reported_at": "2026-11-16T09:30:02.222955918Z",
+     "storage": {
+      "claims": 4,
+      "bound": 4,
+      "pending": 0,
+      "in_use": 2,
+      "full": 0,
+      "retained": 0,
+      "bytes_used": 19327352832,
+      "bytes_capacity": 171798691840
+     }
+    }
+   ]
+  }
+ }
+]

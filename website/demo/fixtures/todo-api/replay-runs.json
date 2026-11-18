@@ -1,0 +1,48 @@
+[
+ {
+  "request": "GET /api/replay-runs/1?project_idx=0&*",
+  "body": {
+   "created_at": "2026-11-16T09:36:39Z",
+   "duration_ms": 0,
+   "equivalence_rationale": "",
+   "equivalence_score": 0,
+   "error": "",
+   "id": 1,
+   "input_tokens": 0,
+   "original_model": "claude-opus-5-5",
+   "original_output": "Added store.go with Add, Get, List (sorted by id), SetDone and Delete behind one mutex; an unknown id returns ErrNotFound.\n\nCommitted e148e51: Add an in-memory, mutex-guarded to-do store (Task 2).\n\nTASK_DONE\n",
+   "original_provider": "claudecode",
+   "output_tokens": 0,
+   "prompt": "You are a senior backend engineer. Focus on correctness, performance, and maintainability. Apply best practices for API design, error handling, database interaction, and security. Prefer explicit error handling and well-structured code over brevity.\n\nYou are an AI agent executing a task as part of a larger project goal.\nYou have full file system access and can run commands.\nIMPORTANT: Use your best judgment for all decisions. Do NOT ask for clarification or confirmation. Decide and execute autonomously.\n\n## PROJECT GOAL\nBuild a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.\n\n## CONSTRAINTS\nStandard library only. Every handler answers JSON, errors as {\"error\": \"...\"}.\n\n## CURRENT TASK\n**Task 2: Add an in-memory store for to-do items** [role: backend]\nA Store with Add, Get, List, SetDone and Delete, safe for concurrent use.\n*Depends on: #1 Scaffold the HTTP server with a health check*\n\n## COMPLETED TASKS (for context)\n- [x] Task 1: Scaffold the HTTP server with a health check\n  Summary: Added main.go: the server listens on $ADDR (default :8080) and GET /healthz answers 200 ok. `go vet ./...` is clean.  Committed 36e3b86: Scaffold the HTTP server with GET /healthz (Task 1).  TASK_DONE\n- [x] Task 2: Add an in-memory store for to-do items\n  Summary: Added store.go with Add, Get, List (sorted by id), SetDone and Delete behind one mutex; an unknown id returns ErrNotFound.  Committed e148e51: Add an in-memory, mutex-guarded to-do store (Task 2).  TA...\n- [x] Task 3: Implement the /todos CRUD handlers\n  Summary: handlers.go registers the five /todos routes on the 1.22 ServeMux patterns. Bad input is a 400 and an unknown id a 404, both as {\"error\": ...}.  Committed 9a1ae7f: Serve /todos: list, create, read, co...\n- [x] Task 4: Cover the handlers with tests\n  Summary: Three httptest tests pass; coverage is 86.7% (main is the only uncovered function). The coverage report and a chart of the load test are attached.  Committed 034e2f9: Test the handlers: create, comple...\n- [x] Task 5: Document the API in the README\n  Summary: The README now has a table of the six endpoints, how to run the service and the error shape.  Committed f604bb5: Document every endpoint in the README (Task 5).  TASK_DONE\n\n## INSTRUCTIONS\n1. Focus ONLY on the current task\n2. Implement it fully and verify it works\n3. If the task is already done or not applicable, explain why\n4. Summarize what you did\n\n## BACKGROUND WORK\nDo NOT signal completion while work you started is still running. If you start\nanything in the background — a build, a test run, a training job, a `&` or\n`nohup` command, a background shell — you must wait for it to finish and check\nits result before you finish. Later tasks may depend on its output, and a task\nthat reports success while its work is still running will hand them an\nincomplete artifact. If the work genuinely cannot finish within this task,\nend with TASK_FAILED and say what is still running rather than claiming success.\n\nWhen the task is successfully completed, end with: TASK_DONE\nIf the task is not applicable or already done, end with: TASK_SKIPPED\nIf you cannot complete the task, end with: TASK_FAILED\n",
+   "replayed_output": "TASK_DONE",
+   "similarity_score": 0.06666666666666667,
+   "target_model": "mock-model",
+   "target_provider": "mock",
+   "task_id": 2,
+   "task_title": "Add an in-memory store for to-do items"
+  }
+ },
+ {
+  "request": "GET /api/replay-runs?limit=50&project_idx=0",
+  "body": {
+   "count": 1,
+   "runs": [
+    {
+     "id": 1,
+     "created_at": "2026-11-16T09:36:39Z",
+     "task_id": 2,
+     "task_title": "Add an in-memory store for to-do items",
+     "original_provider": "claudecode",
+     "original_model": "claude-opus-5-5",
+     "target_provider": "mock",
+     "target_model": "mock-model",
+     "similarity_score": 0.06666666666666667,
+     "equivalence_score": 0,
+     "duration_ms": 0,
+     "input_tokens": 0,
+     "output_tokens": 0
+    }
+   ]
+  }
+ }
+]

@@ -1,0 +1,9 @@
+[
+ {
+  "request": "GET /api/risk-matrix?project_idx=0",
+  "body": {
+   "entries": null,
+   "goal": "Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint."
+  }
+ }
+]

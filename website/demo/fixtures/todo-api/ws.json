@@ -1,0 +1,603 @@
+[
+ {
+  "request": "WS /api/ws?project_idx=0",
+  "frames": [
+   {
+    "type": "task_update",
+    "data": {
+     "goal": "Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.",
+     "workdir": "/home/demo/projects/todo-api",
+     "max_steps": 0,
+     "current_step": 5,
+     "status": "complete",
+     "steps": null,
+     "created_at": "2026-11-16T09:29:59.62452826Z",
+     "updated_at": "2026-11-16T09:32:35.781454073Z",
+     "model": "claude-opus-5-5",
+     "instructions": "Standard library only. Every handler answers JSON, errors as {\"error\": \"...\"}.",
+     "auto_evolve": false,
+     "evolve_step": 0,
+     "provider": "claudecode",
+     "pm_mode": true,
+     "plan": {
+      "goal": "Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.",
+      "tasks": [
+       {
+        "id": 1,
+        "title": "Scaffold the HTTP server with a health check",
+        "description": "A main package that listens on $ADDR (default :8080) and answers GET /healthz with 200 ok.",
+        "priority": 1,
+        "status": "done",
+        "role": "backend",
+        "result": "Added main.go: the server listens on $ADDR (default :8080) and GET /healthz answers 200 ok. `go vet ./...` is clean.\n\nCommitted 36e3b86: Scaffold the HTTP server with GET /healthz (Task 1).\n\nTASK_DONE",
+        "started_at": "2026-11-16T09:30:08.286836378Z",
+        "completed_at": "2026-11-16T09:30:28.418016152Z",
+        "estimated_minutes": 20,
+        "artifact_path": ".cloop/tasks/1-scaffold-the-http-server-with-a-health-c.md",
+        "tags": [
+         "server",
+         "epic:api"
+        ],
+        "annotations": [
+         {
+          "timestamp": "2026-11-16T09:30:08.287185345Z",
+          "author": "ai",
+          "text": "Task started on executor local (kind: localprocess, isolation: none, provider: claudecode)"
+         },
+         {
+          "timestamp": "2026-11-16T09:30:28.421743578Z",
+          "author": "ai",
+          "text": "Task completed successfully in 20s."
+         }
+        ],
+        "risk_score": 6,
+        "impact_score": 8,
+        "executor_id": "local",
+        "executor_kind": "localprocess",
+        "isolation": "none",
+        "run_id": "run_7e90556ea15008190be0c8147a6b65cb",
+        "citations": [
+         {
+          "kind": "injected",
+          "title": "Release checklist",
+          "url": "https://wiki.demo.example.com/confluence/display/ENG/Release+checklist",
+          "source": "Engineering wiki",
+          "source_kind": "confluence",
+          "document_id": 2,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         },
+         {
+          "kind": "injected",
+          "title": "HTTP API style guide",
+          "url": "https://wiki.demo.example.com/confluence/display/ENG/HTTP+API+style+guide",
+          "source": "Engineering wiki",
+          "source_kind": "confluence",
+          "document_id": 4,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         }
+        ]
+       },
+       {
+        "id": 2,
+        "title": "Add an in-memory store for to-do items",
+        "description": "A Store with Add, Get, List, SetDone and Delete, safe for concurrent use.",
+        "priority": 1,
+        "status": "done",
+        "role": "backend",
+        "depends_on": [
+         1
+        ],
+        "result": "Added store.go with Add, Get, List (sorted by id), SetDone and Delete behind one mutex; an unknown id returns ErrNotFound.\n\nCommitted e148e51: Add an in-memory, mutex-guarded to-do store (Task 2).\n\nTASK_DONE",
+        "started_at": "2026-11-16T09:30:28.484010042Z",
+        "completed_at": "2026-11-16T09:30:58.626785531Z",
+        "estimated_minutes": 30,
+        "artifact_path": ".cloop/tasks/2-add-an-in-memory-store-for-to-do-items.md",
+        "tags": [
+         "store",
+         "epic:api"
+        ],
+        "annotations": [
+         {
+          "timestamp": "2026-11-16T09:30:28.484740044Z",
+          "author": "ai",
+          "text": "Task started on executor local (kind: localprocess, isolation: none, provider: claudecode)"
+         },
+         {
+          "timestamp": "2026-11-16T09:30:58.630175298Z",
+          "author": "ai",
+          "text": "Task completed successfully in 30s."
+         }
+        ],
+        "risk_score": 8,
+        "impact_score": 7,
+        "executor_id": "local",
+        "executor_kind": "localprocess",
+        "isolation": "none",
+        "run_id": "run_7e90556ea15008190be0c8147a6b65cb",
+        "citations": [
+         {
+          "kind": "injected",
+          "title": "Release checklist",
+          "url": "https://wiki.demo.example.com/confluence/display/ENG/Release+checklist",
+          "source": "Engineering wiki",
+          "source_kind": "confluence",
+          "document_id": 2,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         }
+        ]
+       },
+       {
+        "id": 3,
+        "title": "Implement the /todos CRUD handlers",
+        "description": "GET/POST /todos and GET/PATCH/DELETE /todos/{id}, JSON in and out, 400 and 404 as JSON errors.",
+        "priority": 2,
+        "status": "done",
+        "role": "backend",
+        "depends_on": [
+         2
+        ],
+        "result": "handlers.go registers the five /todos routes on the 1.22 ServeMux patterns. Bad input is a 400 and an unknown id a 404, both as {\"error\": ...}.\n\nCommitted 9a1ae7f: Serve /todos: list, create, read, complete and delete (Task 3).\n\nTASK_DONE",
+        "started_at": "2026-11-16T09:30:58.738126025Z",
+        "completed_at": "2026-11-16T09:31:43.903020027Z",
+        "estimated_minutes": 45,
+        "artifact_path": ".cloop/tasks/3-implement-the-todos-crud-handlers.md",
+        "tags": [
+         "server",
+         "api",
+         "epic:api"
+        ],
+        "annotations": [
+         {
+          "timestamp": "2026-11-16T09:30:58.739220568Z",
+          "author": "ai",
+          "text": "Task started on executor local (kind: localprocess, isolation: none, provider: claudecode)"
+         },
+         {
+          "timestamp": "2026-11-16T09:31:43.906472418Z",
+          "author": "ai",
+          "text": "Task completed successfully in 45s."
+         }
+        ],
+        "risk_score": 1,
+        "impact_score": 6,
+        "requirements": [
+         1
+        ],
+        "executor_id": "local",
+        "executor_kind": "localprocess",
+        "isolation": "none",
+        "run_id": "run_7e90556ea15008190be0c8147a6b65cb",
+        "citations": [
+         {
+          "kind": "injected",
+          "title": "TODO-15 Document the PATCH payload",
+          "url": "https://jira.demo.example.com/jira/browse/TODO-15",
+          "source": "Product tracker",
+          "source_kind": "jira",
+          "document_id": 8,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         },
+         {
+          "kind": "injected",
+          "title": "Release checklist",
+          "url": "https://wiki.demo.example.com/confluence/display/ENG/Release+checklist",
+          "source": "Engineering wiki",
+          "source_kind": "confluence",
+          "document_id": 2,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         },
+         {
+          "kind": "injected",
+          "title": "TODO-12 Unknown todo ids answer with an HTML 404 page",
+          "url": "https://jira.demo.example.com/jira/browse/TODO-12",
+          "source": "Product tracker",
+          "source_kind": "jira",
+          "document_id": 7,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         }
+        ]
+       },
+       {
+        "id": 4,
+        "title": "Cover the handlers with tests",
+        "description": "httptest-based tests for create, list, complete, the empty-title 400 and unknown-id 404; attach the coverage report.",
+        "priority": 2,
+        "status": "done",
+        "role": "testing",
+        "depends_on": [
+         3
+        ],
+        "result": "Three httptest tests pass; coverage is 86.7% (main is the only uncovered function). The coverage report and a chart of the load test are attached.\n\nCommitted 034e2f9: Test the handlers: create, complete, list, 400 and 404 (Task 4).\n\nTASK_DONE",
+        "started_at": "2026-11-16T09:31:44.007922955Z",
+        "completed_at": "2026-11-16T09:32:14.128206028Z",
+        "estimated_minutes": 30,
+        "artifact_path": ".cloop/tasks/4-cover-the-handlers-with-tests.md",
+        "tags": [
+         "tests",
+         "epic:api"
+        ],
+        "annotations": [
+         {
+          "timestamp": "2026-11-16T09:31:44.008238441Z",
+          "author": "ai",
+          "text": "Task started on executor local (kind: localprocess, isolation: none, provider: claudecode)"
+         },
+         {
+          "timestamp": "2026-11-16T09:32:14.131173286Z",
+          "author": "ai",
+          "text": "Task completed successfully in 30s."
+         }
+        ],
+        "risk_score": 3,
+        "impact_score": 5,
+        "executor_id": "local",
+        "executor_kind": "localprocess",
+        "isolation": "none",
+        "run_id": "run_7e90556ea15008190be0c8147a6b65cb",
+        "citations": [
+         {
+          "kind": "injected",
+          "title": "HTTP API style guide",
+          "url": "https://wiki.demo.example.com/confluence/display/ENG/HTTP+API+style+guide",
+          "source": "Engineering wiki",
+          "source_kind": "confluence",
+          "document_id": 4,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         },
+         {
+          "kind": "injected",
+          "title": "Release checklist",
+          "url": "https://wiki.demo.example.com/confluence/display/ENG/Release+checklist",
+          "source": "Engineering wiki",
+          "source_kind": "confluence",
+          "document_id": 2,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         },
+         {
+          "kind": "injected",
+          "title": "TODO-12 Unknown todo ids answer with an HTML 404 page",
+          "url": "https://jira.demo.example.com/jira/browse/TODO-12",
+          "source": "Product tracker",
+          "source_kind": "jira",
+          "document_id": 7,
+          "run_id": "run_7e90556ea15008190be0c8147a6b65cb"
+         }
+        ],
+        "attachment_count": 2
+       },
+       {
+        "id": 5,
+        "title": "Document the API in the README",
+        "description": "A table of every endpoint, how to run the service and what an error looks like.",
+        "priority": 3,
+        "status": "done",
+        "role": "docs",
+        "depends_on": [
+         4
+        ],
+        "result": "The README now has a table of the six endpoints, how to run the service and the error shape.\n\nCommitted f604bb5: Document every endpoint in the README (Task 5).\n\nTASK_DONE",
+        "started_at": "2026-11-16T09:32:20.55205993Z",
+        "completed_at": "2026-11-16T09:32:35.676610405Z",
+        "estimated_minutes": 15,
+        "artifact_path": ".cloop/tasks/5-document-the-api-in-the-readme.md",
+        "tags": [
+         "docs",
+         "epic:api"
+        ],
+        "annotations": [
+         {
+          "timestamp": "2026-11-16T09:32:20.552471651Z",
+          "author": "ai",
+          "text": "Task started on executor local (kind: localprocess, isolation: none, provider: claudecode)"
+         },
+         {
+          "timestamp": "2026-11-16T09:32:35.680067181Z",
+          "author": "ai",
+          "text": "Task completed successfully in 15s."
+         }
+        ],
+        "risk_score": 5,
+        "impact_score": 4,
+        "requirements": [
+         2
+        ],
+        "executor_id": "local",
+        "executor_kind": "localprocess",
+        "isolation": "none",
+        "run_id": "run_296945b3ce38ec821b15e5a960b1cd81",
+        "citations": [
+         {
+          "kind": "injected",
+          "title": "Release checklist",
+          "url": "https://wiki.demo.example.com/confluence/display/ENG/Release+checklist",
+          "source": "Engineering wiki",
+          "source_kind": "confluence",
+          "document_id": 2,
+          "run_id": "run_296945b3ce38ec821b15e5a960b1cd81"
+         },
+         {
+          "kind": "injected",
+          "title": "TODO-15 Document the PATCH payload",
+          "url": "https://jira.demo.example.com/jira/browse/TODO-15",
+          "source": "Product tracker",
+          "source_kind": "jira",
+          "document_id": 8,
+          "run_id": "run_296945b3ce38ec821b15e5a960b1cd81"
+         },
+         {
+          "kind": "injected",
+          "title": "HTTP API style guide",
+          "url": "https://wiki.demo.example.com/confluence/display/ENG/HTTP+API+style+guide",
+          "source": "Engineering wiki",
+          "source_kind": "confluence",
+          "document_id": 4,
+          "run_id": "run_296945b3ce38ec821b15e5a960b1cd81"
+         },
+         {
+          "kind": "injected",
+          "title": "TODO-12 Unknown todo ids answer with an HTML 404 page",
+          "url": "https://jira.demo.example.com/jira/browse/TODO-12",
+          "source": "Product tracker",
+          "source_kind": "jira",
+          "document_id": 7,
+          "run_id": "run_296945b3ce38ec821b15e5a960b1cd81"
+         }
+        ]
+       },
+       {
+        "id": 6,
+        "title": "Review the API before the first release",
+        "description": "A second person reads the handlers and the tests before the README is written.",
+        "priority": 2,
+        "status": "done",
+        "kind": "human_gate",
+        "completed_at": "2026-11-16T09:32:20.111216081Z",
+        "annotations": [
+         {
+          "timestamp": "2026-11-16T09:32:20.111216822Z",
+          "author": "dana@demo.example.com",
+          "text": "Approved: the run may continue past this review gate."
+         }
+        ],
+        "approved": true
+       }
+      ],
+      "version": 14
+     },
+     "skip_clarify": true,
+     "run_owner": {
+      "pid": 89,
+      "start_ticks": 551319134,
+      "boot_id": "bbcf604a-1603-4bdb-a64e-5c620bd32b6e",
+      "host": "demo.example.com",
+      "exe": "/usr/local/bin/cloop",
+      "executor": "localprocess",
+      "adoptable": true,
+      "run_id": "run_296945b3ce38ec821b15e5a960b1cd81",
+      "started_at": "2026-11-16T09:32:20.466339382Z",
+      "build": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "build_since": "2026-11-16T09:32:20.523391321Z"
+     },
+     "run_build": {
+      "build": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "reference": {
+       "version": "dev+g0a796d2.dirty",
+       "commit": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+       "schema": 103
+      },
+      "behind": 0,
+      "comparable": true,
+      "live": false,
+      "live_known": true,
+      "pid": 89,
+      "since": "2026-11-16T09:32:20.523391321Z",
+      "started_at": "2026-11-16T09:32:20.466339382Z",
+      "executor": "localprocess",
+      "adoptable": true
+     },
+     "steps_count": 5,
+     "step_timeout": "0"
+    }
+   },
+   {
+    "type": "history_append",
+    "data": {
+     "entries": [],
+     "from": [
+      4,
+      21
+     ],
+     "to": [
+      4,
+      21
+     ]
+    }
+   },
+   {
+    "type": "step_output",
+    "data": {
+     "chunk": "warning: executor: 1 in-flight session(s) reattached to a still-running workload\n\n🏭 cloop Software Factory\n   Provider: claudecode\n   Goal: Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.\n\ntime=2026-11-16T09:32:20.536Z level=INFO msg=\"session started\" project=/home/demo/projects/todo-api provider=claudecode event=session_start goal=\"Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.\" mode=pm trace_id=\"\"\nResuming plan: 5/6 tasks complete\n\n━━━ Task 5/6: Document the API in the README ━━━\n       A table of every endpoint, how to run the service and what an error looks like.\n\ntime=2026-11-16T09:32:20.552Z level=INFO msg=\"Document the API in the README\" project=/home/demo/projects/todo-api provider=claudecode event=task_start task_id=5 priority=3 description=\"A table of every endpoint, how to run the service and what an error looks like.\" role=docs trace_id=\"\" request_id=37e6d3dda5e670ec678ae75a\n  knowledge: 5 reference passage(s) from 4 document(s)\n→ Running claudecode on task 5...\n  The README now has a table of the six endpoints, how to run the service and the error shape.\n  \n  Committed f604bb5: Document every endpoint in the README (Task 5).\n  \n  TASK_DONE\n  [15s, provider: claudecode]\n\n✓ Task 5 complete: Document the API in the README\n\ntime=2026-11-16T09:32:35.712Z level=INFO msg=\"Document the API in the README\" project=/home/demo/projects/todo-api provider=claudecode event=task_done task_id=5 duration_ms=15124 request_id=37e6d3dda5e670ec678ae75a\n🎉 All tasks complete! Goal achieved.\n   6/6 tasks complete\n\ntime=2026-11-16T09:32:35.794Z level=INFO msg=\"all tasks complete\" project=/home/demo/projects/todo-api provider=claudecode event=session_done summary=\"6/6 tasks complete\"\nSession: 1 step(s) in 15s\n"
+    }
+   },
+   {
+    "type": "run_state",
+    "data": {
+     "running": false
+    }
+   },
+   {
+    "type": "presence",
+    "data": {
+     "users": [
+      {
+       "id": "18e9026b941f50c9",
+       "name": "Dana Whitfield",
+       "color": "#3fb950"
+      }
+     ],
+     "you": "18e9026b941f50c9"
+    }
+   },
+   {
+    "type": "presence",
+    "data": {
+     "users": [
+      {
+       "id": "18e9026b941f50c9",
+       "name": "Dana Whitfield",
+       "color": "#3fb950"
+      }
+     ]
+    }
+   },
+   {
+    "type": "requirements_coverage",
+    "data": {
+     "coverage": {
+      "approved": 2,
+      "musts": {
+       "total": 1,
+       "tested": 1,
+       "proven": 0,
+       "passing": 1,
+       "linked": 1,
+       "tested_pct": 100,
+       "proven_pct": 0,
+       "passing_pct": 100,
+       "linked_pct": 100
+      },
+      "all": {
+       "total": 2,
+       "tested": 2,
+       "proven": 0,
+       "passing": 2,
+       "linked": 2,
+       "tested_pct": 100,
+       "proven_pct": 0,
+       "passing_pct": 100,
+       "linked_pct": 100
+      },
+      "stale": 0,
+      "gaps": {},
+      "verification": {
+       "tested": 2
+      }
+     },
+     "digest": "a17a04f97fb2eeb63b4a794f"
+    }
+   },
+   {
+    "type": "projects",
+    "data": {
+     "projects": [
+      {
+       "name": "todo-api",
+       "path": "/home/demo/projects/todo-api",
+       "status": "complete",
+       "health": "complete",
+       "goal": "Build a small Go REST service for to-do lists: create, list, complete and delete items, with tests and a README that documents every endpoint.",
+       "total_tasks": 6,
+       "done_tasks": 6,
+       "failed_tasks": 0,
+       "active_tasks": 0,
+       "total_steps": 5,
+       "last_activity": "2026-11-16T09:32:35.781454073Z",
+       "provider": "claudecode",
+       "model": "claude-opus-5-5",
+       "pm_mode": true,
+       "has_project": true,
+       "running": false,
+       "has_git": true
+      },
+      {
+       "name": "landing-page",
+       "path": "/home/demo/projects/landing-page",
+       "status": "complete",
+       "health": "complete",
+       "goal": "Ship the Tidewater landing page: a hero with a sign-up button, features, pricing and an FAQ, with no third-party scripts and every in-page link working.",
+       "total_tasks": 5,
+       "done_tasks": 4,
+       "failed_tasks": 0,
+       "active_tasks": 0,
+       "total_steps": 5,
+       "last_activity": "2026-11-16T09:36:39.443040228Z",
+       "provider": "anthropic",
+       "model": "claude-sonnet-4-6",
+       "pm_mode": true,
+       "has_project": true,
+       "running": false,
+       "has_git": true
+      },
+      {
+       "name": "csv-report",
+       "path": "/home/demo/projects/csv-report",
+       "status": "paused",
+       "pause_reason": {
+        "code": "usage_cap",
+        "detail": "five-hour session limit reached",
+        "resumes_at": "2026-11-16T15:13:35Z"
+       },
+       "health": "idle",
+       "goal": "Turn the monthly sales CSV export into a weekly Markdown summary by region, generated every Monday morning.",
+       "total_tasks": 4,
+       "done_tasks": 1,
+       "failed_tasks": 0,
+       "active_tasks": 0,
+       "total_steps": 2,
+       "last_activity": "2026-11-16T09:36:32.381147761Z",
+       "provider": "claudecode",
+       "model": "claude-opus-5-5",
+       "pm_mode": true,
+       "has_project": true,
+       "running": false,
+       "has_git": true
+      },
+      {
+       "name": "landing-page/dark-mode",
+       "path": "/home/demo/projects/landing-page/.cloop/features/dark-mode",
+       "status": "complete",
+       "health": "complete",
+       "goal": "A dark colour scheme that follows the reader's system setting.",
+       "total_tasks": 1,
+       "done_tasks": 1,
+       "failed_tasks": 0,
+       "active_tasks": 0,
+       "total_steps": 1,
+       "last_activity": "2026-11-16T09:35:35.398491623Z",
+       "provider": "anthropic",
+       "model": "claude-sonnet-4-6",
+       "pm_mode": true,
+       "has_project": true,
+       "running": false,
+       "parent": "/home/demo/projects/landing-page",
+       "feature": {
+        "slug": "dark-mode",
+        "title": "Dark mode",
+        "branch": "cloop/feature/dark-mode",
+        "base": "main",
+        "created_at": "2026-11-16T09:35:14.446686255Z",
+        "created_by": "dana@demo.example.com"
+       }
+      }
+     ],
+     "stats": {
+      "total_projects": 3,
+      "active_runs": 0,
+      "total_tasks": 16,
+      "done_tasks": 12,
+      "failed_tasks": 0,
+      "total_steps": 13
+     }
+    }
+   }
+  ]
+ }
+]

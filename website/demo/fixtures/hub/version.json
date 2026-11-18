@@ -1,0 +1,22 @@
+[
+ {
+  "request": "GET /api/version",
+  "body": {
+   "version": "dev+g0a796d2.dirty",
+   "identified": true,
+   "revision": "0a796d2b5c0a03ae3dacc1777bb99b6624725ba2",
+   "modified": true,
+   "built_at": "2026-11-16T06:33:58Z",
+   "built_at_source": "commit",
+   "build_age_seconds": 11174,
+   "started_at": "2026-11-16T09:30:00.881156349Z",
+   "uptime_seconds": 612,
+   "go": "go1.26.11",
+   "os": "linux",
+   "arch": "amd64",
+   "protocol": 31,
+   "min_protocol": 1,
+   "build_id": "18bc95354ef4f212"
+  }
+ }
+]
