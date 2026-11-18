@@ -44,6 +44,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/internal/layoutsweep"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/movegit"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -66,59 +67,30 @@ import (
 	"github.com/blechschmidt/cloop/pkg/trace"
 )
 
-// layoutViewport is one emulated screen. Mobile turns on Chrome's mobile
-// emulation, which is what brings meta[viewport] into play — and with it the
-// shrink-to-fit zoom an overflowing phone page gets.
-type layoutViewport struct {
-	Name   string `json:"name"`
-	Width  int    `json:"width"`
-	Height int    `json:"height"`
-	Scale  int    `json:"scale"`
-	Mobile bool   `json:"mobile"`
-}
+// The viewports, the scroll allowlist, what the probe reports and how it is
+// judged are internal/layoutsweep's, shared with the documentation site
+// demo's sweep (tests/demo, Task 20507): one definition of overflow for the
+// dashboard and its published copy.
+type (
+	layoutViewport    = layoutsweep.Viewport
+	layoutMeasurement = layoutsweep.Measurement
+	layoutScenario    = layoutsweep.Scenario
+	layoutFinding     = layoutsweep.Finding
+)
 
-// layoutViewports: the narrowest phone still sold, the one this hub's own
-// users carry (telemetry: 360x780 at dpr 3, Task 20473) and the commonest
-// one, a tablet in portrait, a small laptop and a common desktop.
-var layoutViewports = []layoutViewport{
-	{Name: "phone-320", Width: 320, Height: 568, Scale: 2, Mobile: true},
-	{Name: "phone-360", Width: 360, Height: 780, Scale: 3, Mobile: true},
-	{Name: "phone-390", Width: 390, Height: 844, Scale: 3, Mobile: true},
-	{Name: "tablet-768", Width: 768, Height: 1024, Scale: 2, Mobile: true},
-	{Name: "laptop-1024", Width: 1024, Height: 768, Scale: 1, Mobile: false},
-	{Name: "desktop-1280", Width: 1280, Height: 800, Scale: 1, Mobile: false},
-}
+// layoutViewports: every width the sweep lays the dashboard out at, from the
+// narrowest phone still sold to a common desktop (layoutsweep.Viewports).
+var layoutViewports = layoutsweep.Viewports
 
 // layoutDarkViewport is where the sweep repeats every tab and dialog in the
 // dark theme: the phone width this hub's own telemetry sees most.
 const layoutDarkViewport = "phone-390"
 
-// layoutScrollAllowed is an element meant to scroll sideways, and why. MaxWidth
-// is the widest viewport it may scroll at; above it, it has to fit like
-// anything else (0: it may scroll at every width).
-type layoutScrollAllowed struct {
-	Selector string `json:"selector"`
-	MaxWidth int    `json:"max_width"`
-	Reason   string `json:"-"`
-}
-
-// layoutScrollAllowlist is every box allowed to scroll sideways. Anything else
-// that does is reported: a phone user cannot see a scrollbar on a box that has
-// not been scrolled yet, so sideways scrolling is a decision, not a fallback.
-// An entry the sweep never finds on screen fails the gate as stale.
-var layoutScrollAllowlist = []layoutScrollAllowed{
-	{Selector: ".table-scroll", MaxWidth: 768, Reason: "a table has as many columns as it has facts, and a phone " +
-		"has room for three: it scrolls inside its own frame so the page does not, on a phone or a tablet " +
-		"in portrait. Wider than that it has to fit, which is what keeps a long name from widening a " +
-		"desktop table."},
-	{Selector: "#tabNav", MaxWidth: 768, Reason: "a tablet in portrait gets the tab strip rather than the " +
-		"phone's menu, and the strip scrolls with its scrollbar hidden: wrapped, twenty-one tabs take " +
-		"three header rows. Above 768px it wraps by group instead (Task 20351)."},
-	{Selector: "#timelineChart", MaxWidth: 768, Reason: "the Gantt chart draws its time axis at a minimum " +
-		"width so that a bar stays wide enough to read; on a narrow screen the chart scrolls."},
-	{Selector: "#ciSnippet", MaxWidth: 768, Reason: "a workflow file to copy verbatim: wrapping its lines " +
-		"would show YAML indentation that is not in the file."},
-}
+// layoutScrollAllowlist is every box allowed to scroll sideways, each with its
+// reason (layoutsweep.DashboardScrollAllowlist). Anything else that does is
+// reported, and an entry the sweep never finds on screen fails the gate as
+// stale.
+var layoutScrollAllowlist = layoutsweep.DashboardScrollAllowlist
 
 // layoutFixture holds the long strings the hub is seeded with; the driver
 // waits for them to be on screen before it measures anything.
@@ -733,40 +705,6 @@ var layoutTabs = []string{
 
 // ── What the driver reports ──────────────────────────────────────────────────
 
-type layoutOffender struct {
-	Kind        string `json:"kind"`
-	Where       string `json:"where"`
-	OverPx      int    `json:"over_px"`
-	Text        string `json:"text"`
-	Culprit     string `json:"culprit"`
-	CulpritText string `json:"culprit_text"`
-	Left        int    `json:"left"`
-	Right       int    `json:"right"`
-	Top         int    `json:"top"`
-	Bottom      int    `json:"bottom"`
-}
-
-type layoutMeasurement struct {
-	Viewport  string           `json:"viewport"`
-	Theme     string           `json:"theme"`
-	Page      overflowPage     `json:"page"`
-	Offenders []layoutOffender `json:"offenders"`
-	Allowed   []struct {
-		Selector string `json:"selector"`
-		Where    string `json:"where"`
-		OverPx   int    `json:"over_px"`
-	} `json:"allowed"`
-	Elements int `json:"elements"`
-	Controls int `json:"controls"`
-	Roots    int `json:"roots"`
-}
-
-type layoutScenario struct {
-	Name         string              `json:"name"`
-	Error        string              `json:"error"`
-	Measurements []layoutMeasurement `json:"measurements"`
-}
-
 type layoutResults struct {
 	Error        string             `json:"error"`
 	Scenarios    []layoutScenario   `json:"scenarios"`
@@ -828,73 +766,10 @@ func runLayoutSweep(t *testing.T, node, chrome, base string, fx layoutFixture, o
 	return got
 }
 
-// layoutFinding is one defect, gathered across every viewport it shows at.
-type layoutFinding struct {
-	scenario, kind, where string
-	detail                string
-	at                    []string
-}
-
-// layoutFindings turns a run into its defects, merged so that one fault seen at
-// five widths in two themes is one line naming them all.
+// layoutFindings turns a run into its defects (layoutsweep.Findings): one
+// fault seen at five widths in two themes is one line naming them all.
 func layoutFindings(scenarios []layoutScenario) []layoutFinding {
-	byKey := map[string]*layoutFinding{}
-	var order []string
-	add := func(scenario, kind, where, detail, at string) {
-		key := scenario + "|" + kind + "|" + where
-		f := byKey[key]
-		if f == nil {
-			f = &layoutFinding{scenario: scenario, kind: kind, where: where, detail: detail}
-			byKey[key] = f
-			order = append(order, key)
-		}
-		f.at = append(f.at, at)
-	}
-	for _, s := range scenarios {
-		for _, m := range s.Measurements {
-			at := m.Viewport
-			if m.Theme == "dark" {
-				at += " (dark)"
-			}
-			p := m.Page
-			if p.OverflowPx > 1 {
-				add(s.Name, "page", "the document", fmt.Sprintf("scrolls %dpx sideways", p.OverflowPx), at)
-			}
-			if p.InnerWidth > p.ExpectedWidth+1 {
-				add(s.Name, "zoom", "the document", fmt.Sprintf("the layout viewport is %dpx on a %dpx screen — "+
-					"the page overflowed and the browser zoomed all of it out to fit", p.InnerWidth, p.ExpectedWidth), at)
-			}
-			for _, o := range m.Offenders {
-				var d string
-				switch o.Kind {
-				case "control":
-					d = fmt.Sprintf("cannot be brought fully onto the screen (left %d, right %d, top %d, bottom %d)",
-						o.Left, o.Right, o.Top, o.Bottom)
-				case "scroll":
-					d = fmt.Sprintf("scrolls %dpx sideways and is not in layoutScrollAllowlist", o.OverPx)
-				case "clip":
-					d = fmt.Sprintf("hides %dpx of its content", o.OverPx)
-				default:
-					d = fmt.Sprintf("content runs %dpx out of its box", o.OverPx)
-				}
-				if o.Culprit != "" {
-					d += fmt.Sprintf("; furthest right: %s %q", o.Culprit, o.CulpritText)
-				} else if o.Text != "" {
-					d += fmt.Sprintf("; text %q", o.Text)
-				}
-				add(s.Name, o.Kind, o.Where, d, at)
-			}
-		}
-	}
-	out := make([]layoutFinding, 0, len(order))
-	for _, k := range order {
-		out = append(out, *byKey[k])
-	}
-	return out
-}
-
-func (f layoutFinding) String() string {
-	return fmt.Sprintf("%s: %s %s — %s [at %s]", f.scenario, f.kind, f.where, f.detail, strings.Join(f.at, ", "))
+	return layoutsweep.Findings(scenarios)
 }
 
 // TestLayoutSweep_EveryTabAndDialogFits is the sweep itself. Its subtests read
@@ -1059,7 +934,7 @@ func checkLayoutSelfTest(t *testing.T, plain, wide *layoutMeasurement) {
 	findings := layoutFindings([]layoutScenario{{Name: "self-test", Measurements: []layoutMeasurement{*plain}}})
 	found := func(kind, id string) bool {
 		for _, f := range findings {
-			if f.kind == kind && strings.Contains(f.where, "#"+id) {
+			if f.Kind == kind && strings.Contains(f.Where, "#"+id) {
 				return true
 			}
 		}
@@ -1077,7 +952,7 @@ func checkLayoutSelfTest(t *testing.T, plain, wide *layoutMeasurement) {
 		}
 	}
 	for _, f := range findings {
-		if strings.Contains(f.where, "#stEllipsis") || strings.Contains(f.where, "#stAllowed") {
+		if strings.Contains(f.Where, "#stEllipsis") || strings.Contains(f.Where, "#stAllowed") {
 			t.Errorf("the probe reported a deliberate truncation or an allowlisted scroller: %s", f)
 		}
 	}
@@ -1090,8 +965,8 @@ func checkLayoutSelfTest(t *testing.T, plain, wide *layoutMeasurement) {
 	wf := layoutFindings([]layoutScenario{{Name: "self-test", Measurements: []layoutMeasurement{*wide}}})
 	var page, zoom bool
 	for _, f := range wf {
-		page = page || f.kind == "page"
-		zoom = zoom || f.kind == "zoom"
+		page = page || f.Kind == "page"
+		zoom = zoom || f.Kind == "zoom"
 	}
 	if !page || !zoom {
 		t.Errorf("a box %dpx wider than the screen did not report the document scrolling sideways "+

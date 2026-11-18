@@ -2,14 +2,15 @@ package arch_test
 
 // Test-only packages stay out of the binary (Task 20372).
 //
-// internal/ holds nine packages written for tests: hometest sandboxes $HOME,
+// internal/ holds ten packages written for tests: hometest sandboxes $HOME,
 // taskfill builds fully populated tasks, dbtemplate and statedbtest hand
 // tests a migrated state.db by copying a file instead of migrating one,
 // cosigntest and edgetest stand in for cosign and an edge release (Task 20376),
 // rbactest holds the ui.oidc blocks the RBAC reporters are tested against
 // (Task 20395), drivertest stands in for container runtimes and a Kubernetes
-// API server, and ssohubtest runs a hub with single sign-on for the terminal
-// commands' tests (Task 20417). Go's
+// API server, ssohubtest runs a hub with single sign-on for the terminal
+// commands' tests (Task 20417), and layoutsweep judges what the browser
+// sweeps of the dashboard and its demo measured (Task 20507). Go's
 // internal/ rule only stops other modules from importing them; nothing stops a
 // production file in this one from doing so.
 //
@@ -48,6 +49,7 @@ var testOnly = map[string]string{
 	"internal/rbactest":    "the ui.oidc blocks every RBAC reporter is tested against, and a copy of :8888's",
 	"internal/drivertest":  "stands in for a container runtime CLI and a Kubernetes API server, to drive the real drivers",
 	"internal/ssohubtest":  "a hub with single sign-on and a fake identity provider in the test's process, for the terminal commands",
+	"internal/layoutsweep": "the layout sweep's probe and its judgement, shared by the dashboard's sweep and the demo's",
 }
 
 func TestTestOnlyPackagesAreImportedOnlyByTests(t *testing.T) {

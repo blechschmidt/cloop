@@ -92,7 +92,11 @@ and the device's enrollment use the hub's static token.
    computed from the day it was opened (Analytics asks for the last 30 days)
    also gets a wildcard twin, so it is answered on any later day.
 10. Builds the demo from them, serves it, walks it again (`walk.js check`),
-    runs `tests/demo`, and removes the scratch directory.
+    runs `tests/demo` on the recording, and removes the scratch directory.
+    `tests/demo` includes the browser sweep, which walks the demo once more
+    at a phone, a tablet and a desktop width, opens the admin dialogs and
+    presses three buttons that would write
+    ([website/demo/README.md](../../website/demo/README.md) has the details).
 
 To check a demo as a reader meets it weeks later, run the check walk with the
 page's clock moved ahead:
@@ -104,7 +108,11 @@ WALK_DAYS_LATER=60 node scripts/demo/walk.js check "$CHROME" http://127.0.0.1:80
 ```
 
 `projects.json` lists the three projects as the fixtures show them, for
-example `{"name": "todo-api", "path": "/home/demo/projects/todo-api"}`.
+example `{"name": "todo-api", "path": "/home/demo/projects/todo-api"}`. A sixth
+argument, a JSON file like `{"viewports": [...], "allow": [...]}`, also lays
+every tab and dialog out at each viewport and measures it with
+`internal/layoutsweep/probe.js`. `tests/demo` passes one; the measurements are
+judged there.
 
 ## The scrub
 

@@ -122,3 +122,43 @@ records and how, and how to record again.
 fixture, or a fixture holds a credential, a `/root` or `/tmp` path, or a host
 that is not made up or public. A dashboard change that adds a read therefore
 needs a new recording, or a fixture added by hand in the format above.
+
+## Checking it in a browser
+
+`tests/demo` also opens the demo in headless Chrome, the way a reader does
+(`browser_test.go`). It builds the demo with `scripts/build-demo.py`, serves
+it from a local server under `/cloop/`, as GitHub Pages does, and runs
+`scripts/demo/walk.js check` against it. The walk:
+
+- opens every tab of the hub and of each of the three projects, each task's
+  details, and the main admin dialogs: an executor's details and firewall, the
+  form that enrolls a machine, a new secret, a grant, a knowledge source, the
+  approvals inbox and an audit row's details;
+- lays each of them out at a phone (360 px), a tablet (768 px) and a desktop
+  (1280 px) width and measures them with the dashboard's own layout probe, so
+  the demo and the dashboard follow the same rules for what counts as
+  overflowing (`internal/layoutsweep`);
+- presses **Add task**, **Start run** and **Delete** on the last project's
+  Tasks tab.
+
+The test fails when the page throws or logs an error, when a request goes to
+any server other than the local one (in the browser or in the shim) or asks
+the local server for anything outside the demo's directory, when anything
+overflows, and when a write is not refused with the read-only notice or
+changes what the Tasks tab shows.
+
+```bash
+make test-demo     # the fixture checks and the browser sweep
+
+# Against a site you have already built with make docs-site:
+CLOOP_DEMO_SITE=dist/docs-site go test -run TestTheDemoInABrowser -v ./tests/demo/
+
+# Keep what the walk recorded (every tab, dialog, write and measurement):
+CLOOP_DEMO_REPORT=/tmp/report.json go test -run TestTheDemoInABrowser ./tests/demo/
+```
+
+The sweep needs Chrome or Chromium, node 22 or later and python3, and skips
+without them, like the dashboard's other browser tests. CI runs `tests/demo`
+in the **Dashboard demo in a browser** job, which fails if the sweep skipped.
+A dashboard change that breaks the demo therefore fails CI, even when the
+dashboard itself still passes.

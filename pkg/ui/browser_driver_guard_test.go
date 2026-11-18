@@ -44,6 +44,9 @@ func TestBrowserDriversReleaseNodeWhenDone(t *testing.T) {
 	if len(drivers) < 10 {
 		t.Fatalf("found %d drivers in testdata; the glob is wrong or the drivers moved", len(drivers))
 	}
+	// The documentation site demo's walker is a browser driver too: tests/demo
+	// waits on it in CI (Task 20507).
+	drivers = append(drivers, filepath.Join("..", "..", "scripts", "demo", "walk.js"))
 	for _, path := range drivers {
 		src, err := os.ReadFile(path)
 		if err != nil {

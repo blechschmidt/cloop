@@ -34,39 +34,14 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/blechschmidt/cloop/internal/layoutsweep"
 )
 
-// chromeCandidates are the install locations this project's boxes actually use,
-// in preference order, plus whatever is on PATH.
-var chromeCandidates = []string{
-	"/opt/cft/chrome-linux64/chrome",
-	"/root/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome",
-	"/root/.cache/ms-playwright/chromium-*/chrome-linux64/chrome",
-	"/root/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
-}
-
-func findChrome() string {
-	for _, pat := range chromeCandidates {
-		if !strings.Contains(pat, "*") {
-			if st, err := os.Stat(pat); err == nil && !st.IsDir() {
-				return pat
-			}
-			continue
-		}
-		matches, _ := filepath.Glob(pat)
-		for _, m := range matches {
-			if st, err := os.Stat(m); err == nil && !st.IsDir() {
-				return m
-			}
-		}
-	}
-	for _, name := range []string{"google-chrome", "chromium", "chromium-browser"} {
-		if p, err := exec.LookPath(name); err == nil {
-			return p
-		}
-	}
-	return ""
-}
+// findChrome is the Chrome or Chromium every browser test here drives, or ""
+// when there is none and they skip (layoutsweep.FindChrome, which the
+// documentation site demo's browser sweep shares).
+func findChrome() string { return layoutsweep.FindChrome() }
 
 // pttResult mirrors the JSON testdata/ptt_browser.js prints.
 type pttResult struct {
