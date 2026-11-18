@@ -9,6 +9,11 @@ New to cloop? Read [your first project](getting-started/first-project.md), then
 [how cloop works](getting-started/concepts.md). The rest of this page assumes
 you have run cloop at least once.
 
+To look around the web dashboard before you install anything, open the
+[dashboard demo](https://blechschmidt.github.io/cloop/demo/). It is a read-only
+copy of the dashboard with canned data from three demo projects, and nothing
+you click changes anything.
+
 This page is also the site's table of contents: the menu on the published site
 is generated from the sections and links below, so a new page appears in the
 menu as soon as it is listed here.

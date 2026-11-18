@@ -17,6 +17,11 @@ working, and look up afterwards what was done for each task.
 [Getting started](https://blechschmidt.github.io/cloop/docs/getting-started/installation/) ·
 [How it works](https://blechschmidt.github.io/cloop/docs/getting-started/concepts/)
 
+**[Try the demo](https://blechschmidt.github.io/cloop/demo/)** to see the web
+dashboard without installing anything. It is a read-only copy of the dashboard
+with canned data from three demo projects, and nothing you click changes
+anything.
+
 ## Quick start
 
 ```bash

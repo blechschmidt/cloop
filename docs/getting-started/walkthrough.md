@@ -24,6 +24,12 @@ install that is a child process of the dashboard itself.
 The screenshots come from a real, throwaway hub with three invented projects,
 which `scripts/screenshots/capture.sh` builds from scratch.
 
+To click through the dashboard yourself without installing anything, open the
+[dashboard demo](https://blechschmidt.github.io/cloop/demo/). It is a read-only
+copy of the dashboard with canned data from three demo projects. Every tab
+and dialog opens, and nothing you click changes anything: buttons that would
+start a run, add a task or delete one say that the demo is read-only.
+
 ---
 
 ## Before you start

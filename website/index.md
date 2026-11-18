@@ -22,7 +22,12 @@ shows what happens during those two commands, and what to do when a task fails.
 
 [Get started](docs/getting-started/installation.md){ .md-button .md-button--primary }
 [How it works](docs/getting-started/concepts.md){ .md-button }
+[Try the demo](https://blechschmidt.github.io/cloop/demo/){ .md-button }
 [GitHub](https://github.com/blechschmidt/cloop){ .md-button }
+
+The demo is a read-only copy of the web dashboard with canned data from three
+demo projects. You can open every tab and dialog, and nothing you click changes
+anything.
 
 ---
 
