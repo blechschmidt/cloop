@@ -827,8 +827,11 @@
       }
       const list = document.getElementById('notifyList');
       if (list) {
-        list.innerHTML = hooks.length ? '<table class="audit-table"><thead><tr><th>Name</th><th>Type</th><th>Posts to</th>' +
-          '<th>Events</th><th>Deliveries</th><th></th></tr></thead><tbody>' + hooks.map(_notifyRow).join('') + '</tbody></table>'
+        // In a frame of its own that scrolls on a phone, rather than the page.
+        list.innerHTML = hooks.length ? '<div class="table-scroll" style="overflow-x:auto">' +
+          '<table class="audit-table"><thead><tr><th>Name</th><th>Type</th><th>Posts to</th>' +
+          '<th>Events</th><th>Deliveries</th><th></th></tr></thead><tbody>' + hooks.map(_notifyRow).join('') +
+          '</tbody></table></div>'
           : '<div class="audit-empty">No webhooks. Approvers learn about requests only by opening the dashboard.</div>';
       }
       const refused = document.getElementById('notifyRefused');
@@ -1720,8 +1723,9 @@
           when(c.created_at) + '</td><td>' + when(c.last_used_at) + '</td><td>' + state + '</td><td>' + acts +
           '</td></tr>';
       }).join('');
-      html += rows ? '<table class="data-table" style="margin-top:8px;width:100%"><thead><tr><th>Credential</th>' +
-        '<th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+      html += rows ? '<div class="table-scroll" style="overflow-x:auto">' +
+        '<table class="data-table" style="margin-top:8px;width:100%"><thead><tr><th>Credential</th>' +
+        '<th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
         : '<p style="margin-top:8px">No credential yet. Mint one and give it to the identity provider as its ' +
           'secret token, with the endpoint above as its tenant URL.</p>';
       body.innerHTML = html;
@@ -2281,10 +2285,12 @@
               <select class="form-select" id="oidcDefaultRole"></select>
             </div>
           </div>
-          <table class="data-table">
-            <thead><tr><th>Claim</th><th>Value</th><th>Role</th><th>Project</th><th>Executor</th><th></th></tr></thead>
-            <tbody id="oidcMappingsBody"></tbody>
-          </table>
+          <div class="table-scroll" style="overflow-x:auto">
+            <table class="data-table">
+              <thead><tr><th>Claim</th><th>Value</th><th>Role</th><th>Project</th><th>Executor</th><th></th></tr></thead>
+              <tbody id="oidcMappingsBody"></tbody>
+            </table>
+          </div>
           <div id="oidcMappingsEmpty" class="muted" style="font-size:12px;margin:8px 0"></div>
           <button class="btn" data-act="oidcAddMapping">Add role mapping</button>
 
@@ -2543,10 +2549,12 @@
             pattern whose owner is literal, or with a condition that pins
             <code>assertion.repository</code>.
           </p>
-          <table class="data-table">
-            <thead><tr><th>Rule</th><th>State</th><th>Models</th><th>Budget</th><th>Last match</th><th></th></tr></thead>
-            <tbody id="ciRulesBody"></tbody>
-          </table>
+          <div class="table-scroll" style="overflow-x:auto">
+            <table class="data-table">
+              <thead><tr><th>Rule</th><th>State</th><th>Models</th><th>Budget</th><th>Last match</th><th></th></tr></thead>
+              <tbody id="ciRulesBody"></tbody>
+            </table>
+          </div>
           <div id="ciRulesEmpty" class="muted" style="font-size:12px;margin:8px 0"></div>
           <button class="btn" data-act="ciNewRule">Add pipeline rule</button>
 
@@ -2635,10 +2643,12 @@
           </div>
 
           <h4 style="margin-top:20px">Live sessions</h4>
-          <table class="data-table">
-            <thead><tr><th>Pipeline</th><th>Rule</th><th>Spend</th><th>Remaining</th><th></th></tr></thead>
-            <tbody id="ciSessionsBody"></tbody>
-          </table>
+          <div class="table-scroll" style="overflow-x:auto">
+            <table class="data-table">
+              <thead><tr><th>Pipeline</th><th>Rule</th><th>Spend</th><th>Remaining</th><th></th></tr></thead>
+              <tbody id="ciSessionsBody"></tbody>
+            </table>
+          </div>
           <div id="ciSessionsEmpty" class="muted" style="font-size:12px;margin:8px 0"></div>
 
           <h4 style="margin-top:20px">Recent exchanges</h4>
@@ -2646,10 +2656,12 @@
             Every federation attempt, accepted or refused. This is where a pipeline reporting
             <code>403</code> is diagnosed — the refusal it sees carries no detail on purpose.
           </p>
-          <table class="data-table">
-            <thead><tr><th>When</th><th>Pipeline</th><th>Verdict</th><th>Rule</th><th>Detail</th></tr></thead>
-            <tbody id="ciExchangesBody"></tbody>
-          </table>
+          <div class="table-scroll" style="overflow-x:auto">
+            <table class="data-table">
+              <thead><tr><th>When</th><th>Pipeline</th><th>Verdict</th><th>Rule</th><th>Detail</th></tr></thead>
+              <tbody id="ciExchangesBody"></tbody>
+            </table>
+          </div>
           <div id="ciExchangesEmpty" class="muted" style="font-size:12px;margin:8px 0"></div>
 
           <h4 style="margin-top:20px">Workflow snippet</h4>

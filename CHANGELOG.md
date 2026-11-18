@@ -1413,6 +1413,15 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Wide tables no longer make the dashboard scroll sideways on a phone.** The
+  Overview's repository access table and six tables in Settings (webhooks,
+  single sign-on role mappings, SCIM credentials, CI rules, live CI sessions
+  and recent CI exchanges) sat directly in the page. On a 360 px phone a
+  project with a repository grant made the page 19 px wider than the screen,
+  a hub with a notification webhook made Settings 225 px wider, and the
+  browser zoomed the whole dashboard out to fit. Each table now scrolls inside
+  its own frame, as the dashboard's other tables do. The browser sweep of the
+  documentation site's demo found them (Task 20507).
 - **An executor pool's runner retired just as it connects is now told so.**
   The hub sends a runner its welcome and only then attaches the connection to
   the runner's executor. A retirement in that moment found no connection to

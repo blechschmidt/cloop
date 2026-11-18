@@ -154,7 +154,7 @@ function ghAppRenderAssignments() {
         : 'Ask a maintainer to assign some.') +
       '</p></div>';
   } else {
-    html += '<table class="data-table" style="width:100%"><thead><tr>' +
+    html += '<div class="table-scroll" style="overflow-x:auto"><table class="data-table" style="width:100%"><thead><tr>' +
       '<th>Repositories</th><th>Access</th><th>Via</th><th>Expires</th><th></th>' +
       '</tr></thead><tbody>' +
       rows.map(a => {
@@ -177,7 +177,7 @@ function ghAppRenderAssignments() {
           '<td style="text-align:right;white-space:nowrap">' + edit + revoke + '</td></tr>' +
           (ghAppState.editing === a.grant_id ? ghAppEditRow(a) : '');
       }).join('') +
-      '</tbody></table>';
+      '</tbody></table></div>';
   }
 
   if (canGrant) {
