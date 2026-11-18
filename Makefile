@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-update test-isolation test-projectmove e2e-stack fuzz bench lint lint-tool lint-version clean \
+.PHONY: build test test-unit test-e2e test-e2e-update test-isolation test-demo test-projectmove e2e-stack fuzz bench lint lint-tool lint-version clean \
         docs-api docs-audit docs-credentials docs-check docs-stage docs-site docs-demo demo-fixtures docs-serve docs-freshness \
         release-dist changelog-check requirements-check \
         terraform-test terraform-validate
@@ -61,8 +61,8 @@ build:
 icons:
 	@./scripts/build-icons.sh
 
-## test: run all tests (unit + e2e + the hostile-run suite)
-test: test-unit test-e2e test-isolation
+## test: run all tests (unit + e2e + the hostile-run suite + the docs demo)
+test: test-unit test-e2e test-isolation test-demo
 
 ## test-unit: run unit tests with race detector and coverage, the packages
 ##            CI's race step tests in the order it tests them (longest first;
@@ -89,6 +89,15 @@ test-e2e-update: build
 ##                 unless CLOOP_ISOLATION_BIN names one.
 test-isolation:
 	CLOOP_ISOLATION_CONTAINER_E2E=1 $(GO) test ./tests/isolation/ -count=1 -v -timeout 20m
+
+## test-demo: the documentation site's dashboard demo (tests/demo). Its
+##            fixtures answer every read the dashboard makes and give nothing
+##            away, and in headless Chrome every tab and admin dialog draws,
+##            fits at phone, tablet and desktop widths, sends nothing off the
+##            local server and refuses every write. The browser half needs
+##            Chrome, node and python3, and skips without them.
+test-demo:
+	$(GO) test ./tests/demo/ -count=1 -v -timeout 20m
 
 ## test-projectmove: move a project with work in flight from the hub to a
 ##                   container executor, on to a device and back, and kill the

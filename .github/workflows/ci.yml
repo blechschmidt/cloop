@@ -1396,6 +1396,89 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/ci-step.sh --why
 
+  demo-sweep:
+    name: Dashboard demo in a browser
+    runs-on: ubuntu-latest
+    # The documentation site's demo (/demo/) is the real dashboard behind a
+    # stand-in for the hub, served to anyone who follows the README's "Try the
+    # demo" link. Nothing else here opens it: the docs job builds the site and
+    # its links, and pkg/ui's browser tests drive the dashboard against a real
+    # hub, not the demo's canned answers. tests/demo does both halves (Task
+    # 20507). Its fixture tests hold the recording to every read the dashboard
+    # can make and to what it may contain; its browser sweep builds the demo
+    # with scripts/build-demo.py, serves it under /cloop/ as GitHub Pages does,
+    # and walks it in headless Chrome (scripts/demo/walk.js): every tab of each
+    # demo project and of the hub, each task's details and the main admin
+    # dialogs, each laid out at a phone, a tablet and a desktop width and
+    # measured by the dashboard's own layout sweep (internal/layoutsweep). It
+    # fails on an uncaught error, a request to any other server, an overflow,
+    # and a write (Add task, Start run, Delete) that is not refused with the
+    # read-only notice or changes what the page shows.
+    #
+    # tests/demo runs here and not in Build and Test's race step
+    # (scripts/race-packages.sh leaves it out, as it does tests/e2e). The
+    # PASS-line check, because the sweep skips without Chrome or node and a
+    # skip exits 0.
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        # walk.js speaks to Chrome over node's global WebSocket (node 22 on).
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Warm the browser the sweep drives
+        # As in the pkg/ui shard jobs: Chrome's first start reads it in from a
+        # cold disk. Best effort; without Chrome the sweep skips, and the next
+        # step fails on that.
+        run: |
+          chrome=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
+          if [ -n "$chrome" ]; then
+            timeout 60 "$chrome" --headless=new --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null 2>&1 || true
+            echo "warmed $chrome"
+          else
+            echo "no Chrome on this runner; the sweep will skip"
+          fi
+
+      - name: The demo answers every read, gives nothing away, and works in a browser
+        env:
+          CLOOP_DEMO_REPORT: /tmp/demo-report.json
+        run: |
+          set -euo pipefail
+          go test ./tests/demo/ -count=1 -v -timeout 20m 2>&1 | tee /tmp/demo.log
+          grep -qE '^--- PASS: TestTheDemoInABrowser \(' /tmp/demo.log || {
+            echo "::error::go test succeeded but TestTheDemoInABrowser did not pass: it was skipped" \
+                 "(no Chrome, node or python3 on this runner?); see the log."
+            exit 1
+          }
+
+      - name: Keep the walk's report
+        # Every tab, dialog, write and measurement walk.js recorded, for
+        # whoever reads a failure: what the page showed is in it.
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: demo-sweep-report
+          path: /tmp/demo-report.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Say why the job failed
+        # Annotates each failed step with its cause; see `defaults` above.
+        if: failure() || cancelled()
+        timeout-minutes: 10
+        run: bash scripts/ci-step.sh --why
+
   terraform-modules:
     name: Terraform ${{ matrix.make }} (${{ matrix.terraform }})
     runs-on: ubuntu-latest
