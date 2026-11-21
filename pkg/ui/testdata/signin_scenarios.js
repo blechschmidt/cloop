@@ -93,7 +93,10 @@ async function tokenHub() {
 async function ssoSocketDrop() {
   const {h, assigns} = await boot(null);
   if (!h.sockets.length) return {error: 'no WebSocket was opened at boot'};
+  // A lapsed session is refused everywhere. With no project open the probe
+  // asks for the project list, with one open for its state (Task 20508).
   refuse(h, '/api/state', true);
+  refuse(h, '/api/projects', true);
   h.sockets[h.sockets.length - 1].finishClose();
   await globalThis.__settle(10);
   const first = view(assigns);
@@ -118,6 +121,7 @@ async function modeOutlivesTheSession() {
   window.clearProjectSelection();
   await globalThis.__settle(10);
   refuse(h, '/api/state', false);
+  refuse(h, '/api/projects', false);
   h.sockets[h.sockets.length - 1].finishClose();
   await globalThis.__settle(10);
   return view(assigns);

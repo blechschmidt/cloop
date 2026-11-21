@@ -31,7 +31,16 @@
 
     // ── Settings ─────────────────────────────────────────────────────────────────
 
+    // The provider cards (Default Provider to Ollama) show and save the open
+    // project's configuration, what `cloop config set` writes in its directory.
+    // They are proj-only (Task 20508): on a hub of several projects with none
+    // open they showed the hub's own project's and saved a key there, under a
+    // tab that calls itself global. So with none open nothing is read, and
+    // neither save nor the reset below sends anything.
+    const noProject = () => h.pidx() === null;
+
     function loadConfig() {
+      if (noProject()) return;
       api(pUrl('/api/config')).then(cfg => {
         if (cfg.error) return;
         // Provider
@@ -62,7 +71,7 @@
     }
 
     function saveConfigField(key, value) {
-      if (value === undefined || value === null) return;
+      if (value === undefined || value === null || noProject()) return;
       api(pUrl('/api/config/set'), {key, value}).then(d => {
         if (d.ok) { toast('Saved: '+key, 'ok'); loadConfig(); }
         else toast(d.error||'Save failed', 'err');
@@ -173,7 +182,12 @@
       }).catch(() => toast('Request failed', 'err'));
     }
 
+    // confirmReset resets the open project. Its Danger Zone section is
+    // proj-only (Task 20508): on a hub of several projects with none open the
+    // request would be answered for the hub's own project, which nobody chose,
+    // so the section is offered once a project is in view.
     function confirmReset() {
+      if (noProject()) return;
       if (!confirm('Reset project state? This clears step history and resets status. Goal and config are preserved.')) return;
       api(pUrl('/api/reset'), {}).then(d => {
         if (d.ok) { toast('Project reset', 'ok'); refreshState(); }
@@ -2105,6 +2119,7 @@
           <div id="ksBody"></div>
         </div>
 
+        <div class="proj-only">
         <div class="settings-section">
           <h3>Default Provider</h3>
           <div class="form-group">
@@ -2190,6 +2205,7 @@
             </div>
           </div>
           <button class="btn settings-save" data-act="saveOllamaCfg">Save</button>
+        </div>
         </div>
 
         <div class="settings-section">
@@ -2715,7 +2731,7 @@
           <button class="btn" id="hiddenProjectsBtn" data-action="openHiddenProjectsModal" disabled>No hidden projects</button>
         </div>
 
-        <div class="settings-section danger-zone">
+        <div class="settings-section danger-zone proj-only">
           <h3>Danger Zone</h3>
           <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Reset clears all step history and resets the project status. The goal and config are preserved.</p>
           <button class="btn danger" data-act="confirmReset">Reset Project State</button>

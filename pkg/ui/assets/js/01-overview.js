@@ -41,7 +41,7 @@ function panelHelpers() {
     execAt: _execAt, execKind: _execKindLabel, execErr: _execDetailErrText,
     fleet: d => d ? panelIf('executors', 'fleetBar', fleetAutoUpdate = d) : fleetAutoUpdate, oidc: () => myOIDC,
     known: () => !!myGlobalPerms, tab: () => activeTab, unauthorized: handleUnauthorized, filesChip: fmtFilesChip,
-    pidx: () => isMultiProject && selectedProjectIdx === null ? null : _overviewIdx(),
+    pidx: () => noneOpen() ? null : _overviewIdx(),
     fw: {sum: _fwSum, form: _fwForm, read: _fwRead, refusal: _fwRefusal, meta: _fwMeta},
     quota: {label: _quotaLabel, labels: _quotaLabels, fmt: _quotaFmt, saturation: _quotaSaturation},
     tl: {state: () => appState, active: _filterActive, apply: applyFilters, badge: updateFilterBadge},
@@ -284,19 +284,16 @@ function applyStateDiff(diff) {
 }
 
 function render(s) {
+  // With no project open on a hub of several, a state document is nobody's:
+  // one that arrives anyway — a late fetch — is the hub's own project's, and
+  // neither becomes the page's state nor is drawn.
+  if (noneOpen()) return;
   appState = s;
 
   // Sync Run/Stop button state from project status.
   if (typeof updateRunButtonState === 'function') {
     updateRunButtonState(isActiveRunStatus(s.status) || runWaits(s));
   }
-
-  // In multi-project mode with no project selected, don't overwrite the UI
-  // with single-project data from WebSocket events or stale fetches.
-  if (isMultiProject && selectedProjectIdx === null) return;
-
-  const multiPanel = document.getElementById('multiProjectOverview');
-  if (multiPanel) multiPanel.style.display = 'none';
 
   const hasProject = s && s.goal;
   document.getElementById('initPanel').style.display    = hasProject ? 'none' : '';
@@ -434,8 +431,6 @@ function updateBrowserTitle() {
   }
 }
 
-// renderMultiProjectOverview shows a card grid summary of all projects on the
-// Overview tab when no specific project is selected in multi-project mode.
 // renderAbortedLedgerBanner surfaces tasks the plan believes it finished whose
 // entire recorded summary is a provider or harness refusal (Task 20224).
 //
@@ -477,55 +472,6 @@ function renderAbortedLedgerBanner(s) {
       'for real, or record there that a later task already did it.' +
     '</div>' +
     '<div class="ledger-banner-ids">' + esc(ids) + '</div>';
-}
-
-function renderMultiProjectOverview() {
-  const panel    = document.getElementById('multiProjectOverview');
-  const initP    = document.getElementById('initPanel');
-  const projP    = document.getElementById('projectPanel');
-  if (!panel) return;
-  if (initP) initP.style.display = 'none';
-  if (projP) projP.style.display = 'none';
-  panel.style.display = '';
-
-  const data = window._lastProjectsData;
-  const grid = document.getElementById('multiProjectCards');
-  if (!grid) return;
-  if (!data || !data.projects || !data.projects.length) {
-    grid.innerHTML = '<div class="empty-state"><h3>No projects loaded</h3><p>Use <code>cloop ui --projects /path/a /path/b</code> to add projects.</p></div>';
-    return;
-  }
-  // This is the second place the project list is drawn, and hiding has to
-  // reach both — a project that disappears from the Projects tab but still
-  // fills a card here has not been hidden, it has been misplaced. Index
-  // before filtering: the card's openProject() call addresses the project by
-  // its position in the *unfiltered* payload.
-  // Features (Task 20341) are summarised by their project, as on the grid.
-  const listed = function(path) { return data.projects.some(function(q) { return q.path === path; }); };
-  const shown = data.projects.map(function(p, i) { return {p: p, i: i}; })
-                             .filter(function(e) { return !e.p.hidden && !(e.p.parent && listed(e.p.parent)); });
-  if (!shown.length) {
-    grid.innerHTML = '<div class="empty-state"><h3>All projects hidden</h3><p>Restore them under <strong>Settings &rarr; Hidden Projects</strong>.</p></div>';
-    return;
-  }
-  grid.innerHTML = shown.map(function(entry) {
-    const p = entry.p, i = entry.i;
-    const health   = p.health || 'unknown';
-    const hCol     = healthColor(health);
-    const total    = p.total_tasks || 0;
-    const done     = p.done_tasks  || 0;
-    const pct      = total > 0 ? Math.round(100 * done / total) : -1;
-    const valueStr = pct >= 0 ? pct + '% done' : (p.total_steps || 0) + ' steps';
-    const subStr   = pct >= 0 ? done + '/' + total + ' tasks' : (p.status || '');
-    const modelStr = [p.provider, p.model].filter(Boolean).join(' / ');
-    return '<div class="stat-card" style="cursor:pointer" data-action="openProject" data-arg="' + i + '" data-arg-name="' + esc(p.name) + '" title="Open project">' +
-      '<div class="stat-label" style="font-weight:600">' + esc(p.name) + '</div>' +
-      '<div style="font-size:11px;margin:3px 0"><span style="color:' + hCol + '">&#9679;</span> ' + esc(health) + '</div>' +
-      '<div class="stat-value" style="font-size:15px;margin-top:4px">' + esc(valueStr) + '</div>' +
-      '<div class="stat-sub">' + esc(subStr) + '</div>' +
-      (modelStr ? '<div style="font-size:10px;color:var(--muted);margin-top:4px" title="Provider / Model">' + esc(modelStr) + '</div>' : '') +
-    '</div>';
-  }).join('');
 }
 
 // ── Event history (Tasks 20118, 20384) ──────────────────────────────────────

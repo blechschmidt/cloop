@@ -1413,6 +1413,39 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **The dashboard offers a project's tabs only while a project is open.** On a
+  hub with several projects the Project tabs (Overview, Tasks, Requirements and
+  the rest) were on screen with no project selected. Opened like that, Tasks
+  said "No tasks yet". A request that names no project is answered for the
+  hub's own project, so a task typed into that empty tab was added there, where
+  the tab never showed it. Requirements, Knowledge Base, Chat and Analytics
+  showed that project's data, and the command palette's *Start run* and *Stop
+  run* started and stopped its run. Now the tab bar, the phone's menu, the
+  command palette, the shortcut help and the footer's key hints list only what
+  is hub-wide until you open a project. A link, a key or a view restored after
+  signing in that names a project's tab leaves you on the project list, and `r`
+  refreshes that list. The parts of Settings and Budget that belong to one
+  project follow the same rule: the provider cards, *Reset Project State* and
+  *Per-Project Caps* are shown only with a project open, and *Disk &
+  Retention* asks you to open one. With none open they used to show the hub's
+  own project and save to it, API keys included. The card grid the Overview
+  drew with no project selected is gone, since it repeated the Projects tab.
+  With no project open the page also no longer reads the hub's own project's
+  state when the hub says it dropped updates or when the live connection drops.
+  Requirement R-40 in `.cloop/requirements.yaml` holds the behaviour
+  (Task 20508).
+- **The dashboard waits for the project list before it shows a project.**
+  Whether a project is in view before you open one depends on how many
+  projects the hub lists, and the page assumed one whenever it did not know.
+  Before the list arrived, after it failed to load, and when it came back as an
+  error (a rate limit while `r` was held down, or a server error), the page
+  showed the hub's own project as if it were the only one, and an error
+  emptied the project grid. Now nothing that belongs to a project is shown
+  until the list has loaded, an error leaves the list as it was, and a first
+  load that fails is tried again. The project lists the hub pushes now say how
+  many projects there are as well: a second project added while the page was
+  open used to show the first project's tasks when you opened it. A hub with
+  one project still shows its tabs, once the list has loaded (Task 20508).
 - **Wide tables no longer make the dashboard scroll sideways on a phone.** The
   Overview's repository access table and six tables in Settings (webhooks,
   single sign-on role mappings, SCIM credentials, CI rules, live CI sessions

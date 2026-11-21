@@ -129,10 +129,6 @@ func TestDashboard_FeaturesNestUnderTheirProject(t *testing.T) {
 		t.Errorf("the project counter reads %q — features are not projects", g.Total)
 	}
 
-	if o := res["overview_cards"]; !reflect.DeepEqual(o.Cards, []int{0, 1}) {
-		t.Errorf("the all-projects Overview shows cards for %v, want the two projects only", o.Cards)
-	}
-
 	d := res["dropdown_nests_features"]
 	if !reflect.DeepEqual(d.Order, []int{0, 2, 3, 1}) || d.Sub != 2 {
 		t.Errorf("dropdown order = %v with %d indented, want [0 2 3 1] with the two features indented", d.Order, d.Sub)

@@ -154,7 +154,9 @@ const SHOTS = [
   {
     file: '05-settings.png',
     what: 'Settings — the provider configuration',
-    setup: `switchTab('settings')`,
+    // The provider cards are the open project's, and on a hub of several
+    // projects Settings shows them only while one is open.
+    setup: `openProject(0, 'checkout-api'); switchTab('settings')`,
     settle: `document.getElementById('tab-settings').classList.contains('active')`,
     clip: '#tab-settings',
     // The provider cards, stopping at the speech-to-text one. Everything

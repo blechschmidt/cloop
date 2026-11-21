@@ -302,7 +302,11 @@
       _budgetSave('/api/budget/global', payload, 'budgetGlobalSaveMsg');
     }
 
+    // saveBudgetProject saves the open project's caps. Their section, Per-Project
+    // Caps, is proj-only (Task 20508): on a hub of several projects with none
+    // open the form showed the hub's own project's caps, and saved to it.
     function saveBudgetProject() {
+      if (h.pidx() === null) return;
       const payload = {
         global_usd_pct:    parseFloat(document.getElementById('bpGlobalUSDPct').value)   || 0,
         global_token_pct:  parseFloat(document.getElementById('bpGlobalTokenPct').value) || 0,
@@ -552,10 +556,22 @@
         h.panel('diskfloor', {api, apiMethod, esc, toast, fmt: _duFmtBytes})
           .then(p => p.load()).catch(() => {});
       }
+      // The breakdown is the open project's .cloop directory. With none open on
+      // a hub of several there is none to show: asked without an index, the hub
+      // answers for its own project, which nobody picked (Task 20508).
+      const el = document.getElementById('diskUsageBody');
+      if (h.pidx() === null) {
+        if (el) el.innerHTML = '<div style="font-size:13px;color:var(--muted)">Open a project to see what its <code>.cloop</code> directory holds.</div>';
+        return Promise.resolve(null);
+      }
       return api(pUrl('/api/disk-usage'))
-        .then(d => { _renderDiskUsage(d || {}); return d; })
+        .then(d => {
+          // An error body is not a directory with nothing in it and retention off.
+          if (!d || d.error) throw new Error((d && d.error) || 'no answer');
+          _renderDiskUsage(d);
+          return d;
+        })
         .catch(err => {
-          const el = document.getElementById('diskUsageBody');
           if (el) {
             el.innerHTML = '<div class="empty-state"><p>Could not load disk usage: ' +
               esc(err && err.message ? err.message : String(err)) + '</p></div>';
@@ -701,7 +717,7 @@
         </div>
       </div>
 
-      <div class="section">
+      <div class="section proj-only">
         <div class="section-title">Per-Project Caps</div>
         <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
           Set percentage-based caps relative to the global limits, or absolute per-project limits.

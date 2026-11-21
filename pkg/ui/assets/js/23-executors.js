@@ -147,7 +147,9 @@ function _ccSetVal(id, v) {
 ACTIONS.refreshCCLimits = () => loadCCLimits({force: true});
 window.loadCCLimits = function(opts) {
   var section = document.getElementById('ccLimitsSection');
-  if (!section) return;
+  // The caps are a project's. Coming back to the tab re-reads them, and with
+  // the project closed since that asked for the hub's own (Task 20508).
+  if (!section || noneOpen()) return;
   var force = !!(opts && opts.force);
   var key   = (typeof selectedProjectIdx !== 'undefined') ? String(selectedProjectIdx) : 'single';
   // Switching projects invalidates the figures on screen regardless of age.

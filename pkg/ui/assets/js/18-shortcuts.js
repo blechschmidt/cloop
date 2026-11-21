@@ -7,8 +7,20 @@ const TAB_KEYS = ['overview','tasks','kanban','timeline','kb','deps','risk-matri
 // The help modal, the command palette hints, and the global keydown handler
 // all derive from this object. Adding a new shortcut here keeps everything in
 // sync — never hard-code shortcut strings elsewhere.
+//
+// The two Project groups hold the keys that act on an open project. With none
+// open they do nothing, and the help leaves them out (Task 20508), as the tab
+// bar leaves out the tabs they go to.
 const KEYBOARD_SHORTCUTS = {
-  Navigation: [
+  General: [
+    { keys: ['Ctrl', 'K'], description: 'Open command palette' },
+    { keys: ['?'], description: 'Show this keyboard shortcut help' },
+    { keys: ['Esc'], description: 'Close modal / palette / clear focus' },
+    { keys: ['/'], description: 'Focus search filter bar' },
+    { keys: ['r'], description: 'Refresh the open project, or the project list' },
+    { keys: ['t'], description: 'Toggle dark/light theme' },
+  ],
+  'Project tabs': [
     { keys: ['1'], description: 'Go to Overview tab' },
     { keys: ['2'], description: 'Go to Tasks tab' },
     { keys: ['3'], description: 'Go to Kanban tab' },
@@ -18,11 +30,8 @@ const KEYBOARD_SHORTCUTS = {
     { keys: ['7'], description: 'Go to Risk Matrix tab' },
     { keys: ['8'], description: 'Go to Analytics tab' },
     { keys: ['9'], description: 'Go to Chat tab' },
-    { keys: ['Ctrl', 'K'], description: 'Open command palette' },
-    { keys: ['?'], description: 'Show this keyboard shortcut help' },
-    { keys: ['Esc'], description: 'Close modal / palette / clear focus' },
   ],
-  'Task Actions': [
+  'Project tasks': [
     { keys: ['n'], description: 'New task (focus title field)' },
     { keys: ['Ctrl', 'Enter'], description: 'Add the task from its description box' },
     { keys: ['j'], description: 'Move focus down through tasks' },
@@ -30,13 +39,6 @@ const KEYBOARD_SHORTCUTS = {
     { keys: ['Enter'], description: 'Edit focused task' },
     { keys: ['h'], description: 'Move focused kanban card to previous column' },
     { keys: ['l'], description: 'Move focused kanban card to next column' },
-  ],
-  Project: [
-    { keys: ['r'], description: 'Refresh project state' },
-    { keys: ['t'], description: 'Toggle dark/light theme' },
-  ],
-  Search: [
-    { keys: ['/'], description: 'Focus search filter bar' },
   ],
 };
 
@@ -48,7 +50,11 @@ function _formatShortcutKeys(keys) {
   }).join('');
 }
 
-// All commands registered in the palette.
+// All commands registered in the palette. g marks one that is about the hub
+// and offered always. Every other is about the open project — its tabs, its
+// tasks, its run — and offered only while one is open (Task 20508): chosen
+// with none, Start run and Stop run acted on the hub's own project, which
+// nobody had picked.
 const CMD_REGISTRY = [
   { label:'Overview',        icon:'🏠', shortcut:'1', action:()=>switchTab('overview') },
   { label:'Tasks',           icon:'📋', shortcut:'2', action:()=>switchTab('tasks') },
@@ -62,14 +68,14 @@ const CMD_REGISTRY = [
   { label:'Assistant',       icon:'🤖', shortcut:'',  action:()=>switchTab('assistant') },
   { label:'Requirements',    icon:'☑️', shortcut:'',  action:()=>switchTab('requirements') },
   { label:'Knowledge',       icon:'📖', shortcut:'',  action:()=>switchTab('knowledge') },
-  { label:'Projects',        icon:'📁', shortcut:'',  action:()=>switchTab('projects') },
-  { label:'Executors',       icon:'🖥', shortcut:'',  action:()=>switchTab('executors') },
-  { label:'Settings',        icon:'⚙️', shortcut:'',  action:()=>switchTab('settings') },
-  { label:'Show keyboard shortcuts', icon:'⌨️', shortcut:'?',  action:()=>openHelpModal() },
-  { label:'Toggle dark/light theme', icon:'🌓', shortcut:'t',  action:()=>toggleTheme() },
-  { label:'Focus search filter',     icon:'🔍', shortcut:'/',  action:()=>focusSearchFilter() },
+  { g:1, label:'Projects',   icon:'📁', shortcut:'',  action:()=>switchTab('projects') },
+  { g:1, label:'Executors',  icon:'🖥', shortcut:'',  action:()=>switchTab('executors') },
+  { g:1, label:'Settings',   icon:'⚙️', shortcut:'',  action:()=>switchTab('settings') },
+  { g:1, label:'Show keyboard shortcuts', icon:'⌨️', shortcut:'?',  action:()=>openHelpModal() },
+  { g:1, label:'Toggle dark/light theme', icon:'🌓', shortcut:'t',  action:()=>toggleTheme() },
+  { g:1, label:'Focus search filter',     icon:'🔍', shortcut:'/',  action:()=>focusSearchFilter() },
   { label:'Brainstorm ideas',icon:'💡', shortcut:'',   action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('suggestPanel'); if(el && el.style.display==='none'){ toggleSuggestPanel(); } },100); } },
-  { label:'Refresh state',   icon:'🔄', shortcut:'r',  action:()=>{ api(pUrl('/api/state')).then(s=>render(s)).catch(()=>{}); toast('Refreshed','ok'); } },
+  { g:1, label:'Refresh',    icon:'🔄', shortcut:'r',  action:()=>refreshState() },
   { label:'New task',        icon:'➕', shortcut:'n',  action:()=>{ switchTab('tasks'); setTimeout(()=>{ const el=document.getElementById('newTaskTitle'); if(el){el.focus();} },100); } },
   { label:'Start run',       icon:'▶️', shortcut:'',   action:()=>apiRun() },
   { label:'Stop run',        icon:'⏹', shortcut:'',   action:()=>apiStop() },
@@ -77,6 +83,8 @@ const CMD_REGISTRY = [
   { label:'Run plan',        icon:'🚀', shortcut:'',   action:()=>apiRun() },
   { label:'Reset session',   icon:'🗑', shortcut:'',   action:()=>panelAct('settings','confirmReset') },
 ];
+// What the palette offers now.
+const cmdList = () => CMD_REGISTRY.filter(c => c.g || !noneOpen());
 
 // ── Help modal (keyboard shortcuts cheat sheet) ─────────────────────────────
 let helpOpen = false;
@@ -86,6 +94,7 @@ function _renderHelpModalBody() {
   if (!body) return;
   let html = '';
   for (const [category, rows] of Object.entries(KEYBOARD_SHORTCUTS)) {
+    if (noneOpen() && category.startsWith('Project')) continue;
     html += '<div class="help-category"><h4>' + esc(category) + '</h4>';
     for (const r of rows) {
       html += '<div class="help-row">' +
@@ -182,12 +191,11 @@ function kbMoveFocusedKanbanCard(direction) {
 // ── Command palette state ────────────────────────────────────────────────────
 let cmdOpen = false;
 let cmdSelectedIdx = 0;
-let cmdFiltered = [...CMD_REGISTRY];
+let cmdFiltered = [];
 
 function openCommandPalette() {
   cmdOpen = true;
   cmdSelectedIdx = 0;
-  cmdFiltered = [...CMD_REGISTRY];
   const inp = document.getElementById('cmd-input');
   inp.value = '';
   renderCmdResults('');
@@ -201,9 +209,7 @@ function closeCommandPalette() {
 
 function renderCmdResults(query) {
   const q = query.trim().toLowerCase();
-  cmdFiltered = q
-    ? CMD_REGISTRY.filter(c => c.label.toLowerCase().includes(q))
-    : [...CMD_REGISTRY];
+  cmdFiltered = cmdList().filter(c => c.label.toLowerCase().includes(q));
   if (cmdSelectedIdx >= cmdFiltered.length) cmdSelectedIdx = 0;
 
   const container = document.getElementById('cmd-results');
@@ -237,7 +243,9 @@ function scrollCmdItemIntoView() {
 
 act('cmdSelect', function(idx) {
   const cmd = cmdFiltered[idx];
-  if (!cmd) return;
+  // Still on offer: the project a command was listed for may have closed
+  // under the open palette (its access withdrawn, the project removed).
+  if (!cmd || !cmdList().includes(cmd)) return;
   closeCommandPalette();
   cmd.action();
 }, NUM);
@@ -367,10 +375,9 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  // r: refresh state.
+  // r: refresh the open project's state, or with none open the project list.
   if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-    api(pUrl('/api/state')).then(s => render(s)).catch(() => {});
-    toast('Refreshed', 'ok');
+    refreshState();
     return;
   }
 
@@ -384,7 +391,8 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey) {
     switchTab('tasks');
     kbClearFocus();
-    setTimeout(() => { const el = document.getElementById('newTaskTitle'); if (el) el.focus(); }, 100);
+    // Refused with no project open, and then there is no form to type into.
+    setTimeout(() => { const el = document.getElementById('newTaskTitle'); if (el && activeTab === 'tasks') el.focus(); }, 100);
     return;
   }
 
@@ -458,15 +466,28 @@ document.addEventListener('keydown', function(e) {
 // Both endpoints carry the same Perm: read, so /api/projects 401s under exactly
 // the conditions /api/state did and the probe is no weaker for the swap
 // (Task 20280).
+//
+// The list also decides what the page is: with one project the hub's own is
+// in view unasked, with several none is until one is opened. So nothing
+// per-project is shown before it answers, and an answer that is not a list is
+// asked for again rather than read as "one project" (Task 20508).
+// bootWait is how long to wait before asking again; it doubles, to 30 s.
+let bootWait = 1000;
 function checkAuthAndInit() {
+  let listed = false;
   fetch('/api/projects', {headers: authHeaders()}).then(pr => {
     if (pr.status === 401) {
       handleUnauthorized(pr);
       return;
     }
     return pr.json().then(pd => {
-      const projects = pd.projects || [];
+      // An error body (a 429, a 5xx) parses, and is not a list.
+      if (!pd || !Array.isArray(pd.projects)) throw new Error('not a project list');
+      listed = true;
+      bootWait = 1000;
+      const projects = pd.projects;
       isMultiProject = pd.multi_project === true || projects.length > 1;
+      rosterKnown = true;
       connectWS();
       if (isMultiProject) {
         // In multi-project mode, Projects list is the landing page. No
@@ -483,6 +504,9 @@ function checkAuthAndInit() {
         resumeView(projects);
         return;
       }
+      // The hub's one project is in view from here on: offer its tabs.
+      onlyProjectPath = projects[0] ? projects[0].path : '';
+      syncNav();
       // Single-project mode renders the Overview immediately, so this is the
       // one path that still needs the state document up front.
       return fetch('/api/state', {headers: authHeaders()})
@@ -502,9 +526,15 @@ function checkAuthAndInit() {
     // (see handleWS), and subsequent transitions are pushed by the watcher
     // and the run/stop handlers — no polling required.
   }).catch(() => {
-    // The roster could not be read. Connect anyway so a hub that recovers
-    // starts pushing without a reload.
-    connectWS();
+    // Something after the list threw: connect anyway, so pushes still arrive.
+    if (listed) return connectWS();
+    // The list could not be read: the hub is restarting, the network dropped,
+    // or it answered with an error. Ask again. The page used to connect its
+    // stream regardless, which with no list read is the hub's own project's:
+    // a hub of several then showed that one, tabs and all, until a reload.
+    if (bootWait === 1000) toast('Could not load the project list. Trying again…', 'err');
+    setTimeout(checkAuthAndInit, bootWait);
+    bootWait = Math.min(bootWait * 2, 30000);
   });
 }
 

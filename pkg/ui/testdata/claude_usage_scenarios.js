@@ -34,6 +34,9 @@ async function boot(routes) {
   for (const k of Object.keys(require.cache)) delete require.cache[k];
   require(shimPath);
   const h = globalThis.__harness;
+  // A hub with one project, which is in view: the Overview's caps card is a
+  // project's, and with no project open there is none to read (Task 20508).
+  h.projects = {multi_project: false, stats: {}, projects: [{name: 'alpha', path: '/p/alpha'}]};
   Object.assign(h.routes, routes);
   require(bundlePath);
   await globalThis.__settle(5);

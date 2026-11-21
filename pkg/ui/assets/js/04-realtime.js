@@ -251,20 +251,14 @@ function handleRealtimeMsg(type, data, scope) {
       try { _historyPush(data); } catch(_) {}
       break;
     case 'projects':
-      try {
-        const gone = reanchorSelection(data.projects || []);
-        renderProjects(data.projects || [], data.stats || {});
-        updateProjectSelector();
-        renderFeaturePanels();
-        if (gone) clearProjectSelection();
-        // Task 20134: no per-project /api/state refetch here. The selected
-        // project's state is kept fresh via the state_diff events delivered
-        // on the same WS subscription (see broadcastStateDiff in watchProjects).
-        // Refresh the overview cards if on the overview tab with no project selected.
-        if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
-          renderMultiProjectOverview();
-        }
-      } catch(_) {}
+      // The list, as GET /api/projects answers it: drawn the same way, and
+      // heard the same way on how many projects the hub has — a second
+      // project first learned of here used to leave the page showing the
+      // first one's tasks under the second one's name (Task 20508).
+      // Task 20134: no per-project /api/state refetch here. The selected
+      // project's state is kept fresh via the state_diff events delivered
+      // on the same WS subscription (see broadcastStateDiff in watchProjects).
+      try { applyProjects(data); } catch(_) {}
       break;
     case 'presence':
       try {
@@ -424,20 +418,18 @@ function handleRealtimeMsg(type, data, scope) {
       // Server signalled that this client fell behind and dropped events.
       // Re-fetch full state so the UI catches up. (See Task 20040.)
       try {
-        // Pushes may have been among the dropped frames.
-        _historyPush({gap: 1});
         refreshHubHealth();
         panelIf('readers', 'refresh');
-        const url = (typeof pUrl === 'function' && isMultiProject) ? pUrl('/api/state') : '/api/state';
-        api(url).then(s => { try { render(s); } catch(_) {} }).catch(() => {});
-        if (isMultiProject) {
-          api('/api/projects').then(d => {
-            try {
-              renderProjects(d.projects || [], d.stats || {});
-              updateProjectSelector();
-            } catch(_) {}
-          }).catch(() => {});
+        // The open project's history — pushes may have been among the dropped
+        // frames — and its state. With none open there is neither to catch up
+        // on, and both reads would be answered for the hub's own project: its
+        // whole state, and its rows spliced into the history the last project
+        // left behind (Task 20508).
+        if (!noneOpen()) {
+          _historyPush({gap: 1});
+          api(pUrl('/api/state')).then(s => { try { render(s); } catch(_) {} }).catch(() => {});
         }
+        if (isMultiProject) loadProjects();
       } catch(_) {}
       break;
     case 'members_update':
@@ -564,8 +556,9 @@ function connectWS() {
     // WebSocket() in the same call stack — don't probe or backoff.
     if (intentional) return;
     // If the close was a normal shutdown or we haven't tried SSE yet on the
-    // first connection, probe the state endpoint to detect auth failures.
-    fetch(pUrl('/api/state'), {headers: authHeaders()}).then(r => {
+    // first connection, probe the hub to detect auth failures (probeURL: the
+    // open project's state, or with none open the project list).
+    fetch(probeURL(), {headers: authHeaders()}).then(r => {
       if (r.status === 401) { handleUnauthorized(r); return; }
       // The project itself is gone from this user's reach — unshared or
       // removed while the socket was down — so reconnecting would only be
@@ -647,9 +640,10 @@ function connectSSE() {
     evtSource.close();
     evtSource = null;
     // SSE fallback reconnect probe — detect auth failures before reconnect.
-    // Intentionally global (no pUrl): selectedProjectIdx context is rebuilt
-    // by the projects payload that arrives after reconnect.
-    fetch('/api/state', {headers: authHeaders()}).then(r => {
+    // The same question the WebSocket path asks (probeURL). It used to be the
+    // state endpoint with no index whatever was open: the hub's own project's
+    // whole state, read to look at a status code.
+    fetch(probeURL(), {headers: authHeaders()}).then(r => {
       if (r.status === 401) {
         handleUnauthorized(r);
       } else {

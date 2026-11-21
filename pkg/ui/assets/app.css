@@ -255,6 +255,16 @@
   .tab-btn.global-tab.active { background: rgba(188,140,255,.10); border-color: rgba(188,140,255,.35); color: var(--purple); }
   .tab-btn.global-tab:hover  { color: var(--purple); border-color: rgba(188,140,255,.4); }
 
+  /* No project in view — a hub that lists several and none of them opened —
+     so nothing per-project is offered: not the Project tabs, not their copies
+     in the phone's menu, not the hints for the keys that act on tasks
+     (Task 20508). body.in-project is syncNav's (00-core.js) and absent until
+     the page knows which it is, so a hub's project list never opens under
+     tabs that are about to go. The phone menu's and the footer's wrappers are
+     not boxes of their own: their children stay laid out as they were. */
+  body:not(.in-project) .proj-only { display: none !important; }
+  .mobile-nav-panel .proj-only, #kb-footer .proj-only { display: contents; }
+
   /* Scope hint badge (shown in header near project selector) */
   .scope-hint {
     display: none;
@@ -286,7 +296,10 @@
     user-select: none;
     flex-shrink: 0;
   }
-  .mobile-nav-section-label:first-of-type { border-top: none; margin-top: 0; padding-top: 8px; }
+  /* The first label on screen sits under the menu's own header rule: Project,
+     first in its wrapper, or Global when no project is in view. */
+  .mobile-nav-section-label:first-of-type,
+  body:not(.in-project) .mobile-nav-section-label { border-top: none; margin-top: 0; padding-top: 8px; }
 
   /* ── Main ── */
   main { flex: 1; padding: 24px; max-width: 1100px; margin: 0 auto; width: 100%; }

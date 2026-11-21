@@ -81,18 +81,33 @@ function reanchorSelection(projects) {
   return i < 0;
 }
 
+// While the hub lists one project, its path: the project a page shows without
+// having been asked to. modeTurned picks it by name once the hub lists more.
+let onlyProjectPath = '';
+
+// applyProjects takes a project list — the answer to GET /api/projects, or a
+// `projects` push, which says the same things — and draws it. It returns false
+// for an answer that is not a list: api() resolves an error body (a 429, a
+// 5xx), and one taken for an empty list emptied the grid and told the page the
+// hub had a single project, its own (Task 20508).
 function applyProjects(d) {
-  const projects = d.projects || [];
-  isMultiProject = d.multi_project === true || projects.length > 1;
+  if (!d || !Array.isArray(d.projects)) return false;
+  const projects = d.projects;
+  // How many projects the hub lists decides whether one is in view without
+  // being picked. Every list says (multi_project); a push from a hub member
+  // older than that can only add to what is known, by its length.
+  const several = (typeof d.multi_project === 'boolean' ? d.multi_project : isMultiProject) || projects.length > 1;
+  const turned = rosterKnown && several !== isMultiProject && selectedProjectIdx === null;
+  isMultiProject = several;
+  rosterKnown = true;
   const gone = reanchorSelection(projects);
   renderProjects(projects, d.stats || {});
+  if (turned) modeTurned(projects);
+  if (!several) onlyProjectPath = projects[0] ? projects[0].path : '';
+  syncNav();
   updateProjectSelector();
   renderFeaturePanels();
   if (gone) clearProjectSelection();
-  // Refresh the overview cards if we're on the overview tab with no project selected.
-  if (isMultiProject && selectedProjectIdx === null && activeTab === 'overview') {
-    renderMultiProjectOverview();
-  }
   // The link `cloop remote init` prints, /?project=<path> (Task 20417): open
   // that project once the list that indexes it is here, then drop the query
   // so a reload lands on the list again. With &tab=<name> the project opens
@@ -100,6 +115,26 @@ function applyProjects(d) {
   const qs = new URLSearchParams(location.search), dl = qs.get('project'), di = projects.findIndex(p => p.path === dl);
   if (dl) history.replaceState(null, '', location.pathname);
   if (di >= 0) openProject(di, projects[di].name, qs.get('tab'));
+  return true;
+}
+
+// modeTurned: the hub went from one project to several, or back, under a page
+// that had picked none (Task 20508). With one, the page shows it unasked and
+// its stream is that project's; with several it shows none, on a stream that
+// carries no project. Left as it was, the page went on drawing the old side
+// while its requests were answered for the new one: a second project's card,
+// opened, showed the first project's tasks, and a deleted project's Overview
+// stayed up over a Start that ran the hub's own.
+function modeTurned(projects) {
+  // Several now, and a tab of the project that was the only one is on screen:
+  // the page stays there, the project now picked by name.
+  const i = isMultiProject && !GLOBAL_TABS.includes(activeTab) ? projects.findIndex(p => p.path === onlyProjectPath) : -1;
+  if (i >= 0) return openProject(i, projects[i].name, activeTab);
+  // Otherwise nothing drawn is the new side's: forget it, and open the stream
+  // that goes with the answer.
+  appState = null;
+  clearProjectScopedPanels();
+  connectWS();
 }
 
 function loadProjects() {
@@ -557,6 +592,11 @@ act('openProject', function(idx, name, tab) {
 
 // Returns to the Projects landing page from a scoped project view.
 act('clearProjectSelection', function() {
+  // The back arrow and the breadcrumb's "← Projects" go away with the project
+  // (they are per-project). Pressed from the keyboard, focus went with them to
+  // the top of the page; it moves to the project selector beside them instead.
+  const a = document.activeElement;
+  const pressed = a && a.dataset && a.dataset.action === 'clearProjectSelection';
   selectedProjectIdx  = null;
   selectedProjectName = '';
   selectedProjectPath = '';
@@ -576,6 +616,7 @@ act('clearProjectSelection', function() {
   connectWS();
   // No project selected → no per-project running task to advertise.
   updateBrowserTitle();
+  if (pressed) document.getElementById('projSelectorBtn').focus();
 });
 
 // ── Project selector dropdown ─────────────────────────────────────────────────
@@ -1311,10 +1352,7 @@ act('submitNewProject', function() {
     toast('Project created: ' + dir, 'ok');
     // Reload projects list and open the new project.
     api('/api/projects').then(pd => {
-      const projects = pd.projects || [];
-      isMultiProject = pd.multi_project === true || projects.length > 1;
-      renderProjects(projects, pd.stats || {});
-      updateProjectSelector();
+      applyProjects(pd);
       if (d.project_idx !== undefined && d.project_idx >= 0) {
         openProject(d.project_idx, dir.split('/').pop());
         // Its first run was refused for want of a Claude credential (Task 20379).

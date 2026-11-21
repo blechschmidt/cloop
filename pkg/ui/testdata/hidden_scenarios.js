@@ -218,34 +218,26 @@ const scenarios = {
     };
   },
 
-  // The Overview tab draws its own card grid from the same payload. It is a
-  // second render path, and per-project filtering has been fixed in one path
-  // while being forgotten in the other often enough in this codebase that it
-  // is worth pinning both.
-  async overview_grid_also_hides() {
+  // The header dropdown draws the list from the same payload. It is a second
+  // render path — per-project filtering has been fixed in one path while being
+  // forgotten in the other often enough in this codebase that it is worth
+  // pinning both — and the one that would quietly undo the feature by offering
+  // the hidden project for selection. (Until Task 20508 there was a third: the
+  // card grid the Overview drew with no project selected. That tab is now a
+  // project's only, so the grid is gone.)
+  async dropdown_also_hides() {
     await boot(projectsPayload(1));
     window.switchTab('projects');           // populates the cached payload
     await globalThis.__settle();
-    window.clearProjectSelection();         // overview, no project selected
-    window.switchTab('overview');
-    await globalThis.__settle();
 
-    const html = document.getElementById('multiProjectCards').innerHTML || '';
-    const indices = [];
-    const re = /data-action="openProject" data-arg="(\d+)"/g;
-    let m;
-    while ((m = re.exec(html)) !== null) indices.push(Number(m[1]));
-
-    // The header dropdown is the third render path, and the one that would
-    // quietly undo the feature by offering the hidden project for selection.
     const dropHtml = document.getElementById('projSelectorDropdown').innerHTML || '';
     const dropIndices = [];
     const reDrop = /data-action="selectProjectFromDropdown" data-arg="(\d+)"/g;
+    let m;
     while ((m = reDrop.exec(dropHtml)) !== null) dropIndices.push(Number(m[1]));
 
     return {
-      grid: indices,
-      names: /beta/.test(html) ? ['beta'] : [],
+      names: /beta/.test(dropHtml) ? ['beta'] : [],
       dropdown: dropIndices,
     };
   },

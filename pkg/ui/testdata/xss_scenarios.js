@@ -7,8 +7,9 @@
 // proof of concept — the literal text &quot; survives JSON.stringify, the HTML
 // parser decodes it inside the attribute, and the JavaScript it was spliced
 // into ends its string there. The sites: a Projects card (open, Hide, Delete),
-// the Overview's project cards, the header's project dropdown, and the hidden
-// projects dialog (Unhide).
+// the header's project dropdown, and the hidden projects dialog (Unhide). The
+// fifth, the project cards the Overview drew with no project selected, went
+// with that view in Task 20508.
 //
 // The rendered markup is read the way a browser reads it — tags split on
 // quoted attribute values, character references decoded — so a name that
@@ -123,10 +124,6 @@ const scenarios = {
     window.switchTab('projects');
     await globalThis.__settle(5);
     const grid = String(document.getElementById('projList').innerHTML);
-    window.clearProjectSelection();
-    window.switchTab('overview');
-    await globalThis.__settle(5);
-    const overview = String(document.getElementById('multiProjectCards').innerHTML);
     const dropdown = String(document.getElementById('projSelectorDropdown').innerHTML);
     window.openHiddenProjectsModal();
     await globalThis.__settle(5);
@@ -134,12 +131,13 @@ const scenarios = {
 
     const containers = {
       projList: tagsOf(grid),
-      multiProjectCards: tagsOf(overview),
       projSelectorDropdown: tagsOf(dropdown),
       hiddenProjectsList: tagsOf(hidden),
     };
 
-    // Click every control the five sites draw, and read back what it did.
+    // Click every control these sites draw, and read back what it did. (The
+    // all-projects card grid the Overview drew with no project selected was
+    // one of them until Task 20508 removed it.)
     const effects = [];
     for (const [where, tags] of Object.entries(containers)) {
       for (const {attrs} of tags) {

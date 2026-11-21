@@ -1578,25 +1578,39 @@ func TestDashboard_ExecutorsPanelWired(t *testing.T) {
 	// list makes every future tab addition fail this test for a reason that
 	// has nothing to do with executors.
 	if !globalTabsInclude(dashboardSource, "executors") {
-		t.Error("'executors' is missing from updateScopeHint's globalTabs — the header " +
-			"scope badge would claim the tab shows project data")
+		t.Error("'executors' is missing from GLOBAL_TABS — the header scope badge would " +
+			"claim the tab shows project data, and the tab would be refused with no project open")
 	}
 }
 
-// globalTabsInclude reports whether updateScopeHint's globalTabs array lists
-// tab. Returns false when the declaration cannot be found at all, so a
-// rename of the variable fails the callers rather than silently passing.
+// globalTabsInclude reports whether the bundle's GLOBAL_TABS array (00-core.js)
+// lists tab: the one list the scope badge, the breadcrumb and the no-project
+// guard read (Task 20508; it was updateScopeHint's own globalTabs before).
+// Returns false when the declaration cannot be found at all, so a rename of
+// the constant fails the callers rather than silently passing.
 func globalTabsInclude(html, tab string) bool {
-	m := regexp.MustCompile(`const globalTabs = \[([^\]]*)\];`).FindStringSubmatch(html)
-	if len(m) != 2 {
-		return false
-	}
-	for _, raw := range strings.Split(m[1], ",") {
-		if strings.Trim(strings.TrimSpace(raw), `'"`) == tab {
+	for _, t := range globalTabsOf(html) {
+		if t == tab {
 			return true
 		}
 	}
 	return false
+}
+
+// globalTabsOf returns GLOBAL_TABS as the bundle declares it, nil when the
+// declaration is not there.
+func globalTabsOf(html string) []string {
+	m := regexp.MustCompile(`const GLOBAL_TABS = \[([^\]]*)\];`).FindStringSubmatch(html)
+	if len(m) != 2 {
+		return nil
+	}
+	var out []string
+	for _, raw := range strings.Split(m[1], ",") {
+		if t := strings.Trim(strings.TrimSpace(raw), `'"`); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // TestDashboard_ExecutorSelectorWired asserts the per-project half: the

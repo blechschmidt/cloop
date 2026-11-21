@@ -115,11 +115,43 @@ const FILTER_TABS = new Set(['tasks','kanban','timeline','deps']);
 
 // ── Multi-project mode ───────────────────────────────────────────────────────
 let isMultiProject      = false;  // true when multiple projects are registered
+// Whether a project list has said so yet. Until one has, the page does not
+// know which of the two it is, and shows no project unasked (Task 20508).
+let rosterKnown         = false;
 let selectedProjectIdx  = null;   // null = no project selected (Projects landing page)
 let selectedProjectName = '';
 // The selection by path, which survives the list being renumbered — see
 // reanchorSelection in 05-projects.js.
 let selectedProjectPath = '';
+
+// The tabs that are about the hub, whichever project is open: the ones
+// index.html draws with class global-tab. Every other tab shows one project.
+const GLOBAL_TABS = ['projects', 'budget', 'executors', 'secrets', 'audit', 'quotas', 'telemetry', 'settings'];
+
+// noneOpen: no project is in view — a hub that lists several and has none of
+// them opened, or a page that has not read the list yet. Nothing per-project
+// is offered then (Task 20508). A request made without an index is answered
+// for the hub's own project, so with the Project tabs on screen and nothing
+// selected the Tasks tab read "No tasks yet", took a task typed into it for
+// that project, and Requirements read its spec file — a project the viewer
+// never chose, and under single sign-on possibly one they may not see. A hub
+// with one project has it in view once its list has said so.
+const noneOpen = () => selectedProjectIdx === null && (isMultiProject || !rosterKnown);
+
+// syncNav shows the per-project navigation (.proj-only in index.html) while a
+// project is in view and hides it while none is. Called wherever the answer
+// can change: by switchTab, which every open and close of a project runs, and
+// by applyProjects, where a project list says how many there are. A page left
+// on a project's tab with no project to show goes to the list.
+function syncNav() {
+  document.body.classList.toggle('in-project', !noneOpen());
+  if (isMultiProject && noneOpen() && !GLOBAL_TABS.includes(activeTab)) switchTab('projects');
+}
+
+// What to ask the hub before a dropped stream is reopened, to tell a sign-in
+// that lapsed (401) from an outage: the open project's state, or with none
+// open the project list — never, unasked, the hub's own project's state.
+const probeURL = () => noneOpen() ? '/api/projects' : pUrl('/api/state');
 
 // pUrl appends ?project_idx=N to a URL when a project is selected in multi-project mode.
 function pUrl(url) {
@@ -151,8 +183,9 @@ act('submitLogin', function() {
   const input = document.getElementById('loginTokenInput');
   const token = input.value.trim();
   if (!token) return;
-  // Test the token against the state endpoint.
-  fetch('/api/state', {headers: {'Authorization': 'Bearer ' + token}}).then(r => {
+  // Test the token against the project list, as first paint does: the state
+  // endpoint answers with the hub's own project's whole task list.
+  fetch('/api/projects', {headers: {'Authorization': 'Bearer ' + token}}).then(r => {
     if (r.status === 401) {
       document.getElementById('loginError').classList.add('visible');
       input.select();
@@ -306,7 +339,12 @@ window.ensureChartLib = ensureChartLib;
 // ── Tab switching ───────────────────────────────────────────────────────────
 
 act('switchTab', function(name) {
+  // A tab that shows one project has nothing to show while none is open: a
+  // link (/?tab=tasks), a key (2, n) or a resumed view that names one is left
+  // where it is (Task 20508).
+  if (noneOpen() && !GLOBAL_TABS.includes(name)) return;
   activeTab = name;
+  syncNav();
   // Name the screen for the diagnostic trail (Task 20251). Done here rather
   // than left to the reporter's DOM query, because this is the authoritative
   // moment the view changes — and a trail whose view column is one tab behind
@@ -340,64 +378,50 @@ act('switchTab', function(name) {
   if (DEFERRED_TABS.includes(name)) openDeferredTab(name);
   if (name === 'executors') deferredPanel('execadmin');
 
-  if (isMultiProject && selectedProjectIdx === null && name === 'overview') {
-    // No project selected: show the all-projects summary panel.
-    // Always reload so the cards reflect the latest project statuses.
-    loadProjects();
-  } else {
-    // Task 20134: no /api/state refetch — appState is hydrated by the WS
-    // task_update on initial subscribe (openProject -> connectWS) and kept
-    // fresh by state_diff events. Re-render the affected panel directly from
-    // the cached state.
-    if (name === 'tasks' && appState) renderTasks(appState);
-    // The Overview's Executor card needs the fleet payload; it is the only
-    // per-project field on that page the state diff does not carry, because
-    // bindings live in the control plane's database rather than in project
-    // state.
-    if (name === 'overview') loadExecutors();
-    if (name === 'overview') { loadProjectRepositories(); loadProjectMembers(); }
-    if (name === 'projects') loadProjects();
-  }
+  // Task 20134: no /api/state refetch — appState is hydrated by the WS
+  // task_update on initial subscribe (openProject -> connectWS) and kept
+  // fresh by state_diff events. Re-render the affected panel directly from
+  // the cached state.
+  if (name === 'tasks' && appState) renderTasks(appState);
+  // The Overview's Executor card needs the fleet payload; it is the only
+  // per-project field on that page the state diff does not carry, because
+  // bindings live in the control plane's database rather than in project
+  // state.
+  if (name === 'overview') loadExecutors();
+  if (name === 'overview') { loadProjectRepositories(); loadProjectMembers(); }
+  if (name === 'projects') loadProjects();
 
-  // In multi-project mode, show/hide breadcrumb and project selector.
+  // In multi-project mode, show/hide breadcrumb and project selector: the
+  // breadcrumb on the open project's own tabs, never on a global one. By the
+  // tab on screen now, not by name: a link that opens a project does so from
+  // inside the Projects tab's own load above, and this is still that tab's
+  // call when it returns — it put "Global" over the project it had just opened.
   if (isMultiProject) {
     const bc = document.getElementById('projectBreadcrumb');
     updateProjectSelector();
-    if (name === 'projects' || name === 'settings' || name === 'budget' || name === 'executors' || name === 'audit' || name === 'secrets' || name === 'quotas') {
-      // Global tabs: hide breadcrumb
-      if (bc) bc.style.display = 'none';
-    } else {
-      // Project-scoped tabs: show breadcrumb when a project is selected
-      if (bc) bc.style.display = selectedProjectIdx !== null ? 'flex' : 'none';
-    }
+    if (bc) bc.style.display = GLOBAL_TABS.includes(activeTab) ? 'none' : 'flex';
   }
 
   // Update scope hint badge in header to make project-vs-global clear.
-  updateScopeHint(name);
+  updateScopeHint(activeTab);
 }, ARG);
 
 // updateScopeHint reflects whether the active tab is per-project or global.
 // In single-project mode the hint still appears so the distinction is clear.
 function updateScopeHint(name) {
-  const globalTabs = ['projects','budget','settings','executors','audit','secrets','quotas'];
   const hint = document.getElementById('scopeHint');
   if (!hint) return;
   hint.classList.remove('visible','project','global');
-  if (globalTabs.includes(name)) {
+  if (GLOBAL_TABS.includes(name)) {
     hint.textContent = 'Global';
     hint.classList.add('visible','global');
     hint.title = 'This tab applies across all projects (global configuration).';
   } else {
-    if (isMultiProject && selectedProjectIdx === null) {
-      hint.textContent = 'All projects';
-      hint.classList.add('visible','global');
-      hint.title = 'No project selected — choose one from the project selector to see project data.';
-    } else {
-      hint.textContent = 'Project';
-      hint.classList.add('visible','project');
-      const projHint = (isMultiProject && selectedProjectName) ? selectedProjectName : 'this project';
-      hint.title = 'This tab shows data for ' + projHint + '.';
-    }
+    // A project's tab is only ever on screen with its project (Task 20508).
+    hint.textContent = 'Project';
+    hint.classList.add('visible','project');
+    const projHint = (isMultiProject && selectedProjectName) ? selectedProjectName : 'this project';
+    hint.title = 'This tab shows data for ' + projHint + '.';
   }
 }
 

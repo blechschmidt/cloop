@@ -148,22 +148,17 @@ func TestDashboard_HidingPreservesProjectIndices(t *testing.T) {
 		t.Errorf("project counter reads %q, want \"2\" — it must agree with the cards on screen", got.Total)
 	}
 
-	// The Overview tab renders the same list from its own code path. Filtering
-	// applied to one grid and forgotten in the other is the specific way this
-	// bug class keeps coming back.
-	overview := results["overview_grid_also_hides"]
-	if !sameInts(overview.Grid, []int{0, 2}) {
-		t.Errorf("overview grid dispatches on %v, want [0 2]", overview.Grid)
+	// The header dropdown renders the same list from its own code path, and
+	// would otherwise put the hidden project one click from being selected
+	// again. Filtering applied to one list and forgotten in the other is the
+	// specific way this bug class keeps coming back.
+	drop := results["dropdown_also_hides"]
+	if !sameInts(drop.Dropdown, []int{0, 2}) {
+		t.Errorf("project selector dropdown offers %v, want [0 2]", drop.Dropdown)
 	}
-	if len(overview.Names) != 0 {
-		t.Errorf("the hidden project is still on the Overview grid — hiding "+
-			"reached the Projects tab but not this one (%v)", overview.Names)
-	}
-
-	// And the header dropdown, which would otherwise put the hidden project
-	// one click from being selected again.
-	if !sameInts(overview.Dropdown, []int{0, 2}) {
-		t.Errorf("project selector dropdown offers %v, want [0 2]", overview.Dropdown)
+	if len(drop.Names) != 0 {
+		t.Errorf("the hidden project is still in the header dropdown — hiding "+
+			"reached the Projects tab but not this list (%v)", drop.Names)
 	}
 }
 

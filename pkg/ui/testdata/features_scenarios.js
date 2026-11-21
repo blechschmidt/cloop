@@ -111,15 +111,6 @@ const scenarios = {
     };
   },
 
-  // The multi-project Overview (no project selected) summarises projects, not
-  // features — the same nesting as the grid.
-  async overview_cards() {
-    await boot();
-    window.switchTab('overview');
-    await globalThis.__settle();
-    return {cards: all(/data-action="openProject" data-arg="(\d+)"/g, html('multiProjectCards')).map(Number)};
-  },
-
   // The header dropdown lists each project followed by its features.
   async dropdown_nests_features() {
     await boot();

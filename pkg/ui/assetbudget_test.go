@@ -446,6 +446,15 @@ import (
 // press (deferred/reproduce.js, fetched when the button is pressed). Opening a
 // task's details fetches nothing new. 114,380 B after. The ceiling stays: 420 B
 // of slack.
+//
+// Task 20508 offers a project's tabs only while a project is open: a class on
+// <body>, one stylesheet rule, three wrappers in the markup, a guard in
+// switchTab, a mark on the palette's hub-wide entries, and a boot that waits
+// for a real project list. It took out more than it put in: the card grid the
+// Overview drew with no project selected — markup and renderer, unreachable
+// once the Overview is a project's tab only — and the two inline lists of
+// global tabs, now one. The set measured 114,389 B at HEAD; 114,087 B after.
+// The ceiling stays: 713 B of slack.
 const eagerWireBudgetBytes = 114_800
 
 // eagerAsset is one member of the first-paint set.

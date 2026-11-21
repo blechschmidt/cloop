@@ -98,7 +98,7 @@
     <div class="live-dot" id="liveDot"></div>
     <!-- Project selector (shown in multi-project mode) -->
     <div class="proj-selector-wrap" id="projSelectorWrap">
-      <button class="tab-btn" data-action="clearProjectSelection" style="padding:4px 10px;font-size:12px" id="projBackBtn" title="Back to all projects">&#8592;</button>
+      <button class="tab-btn proj-only" data-action="clearProjectSelection" style="padding:4px 10px;font-size:12px" id="projBackBtn" title="Back to all projects">&#8592;</button>
       <div style="position:relative">
         <button class="proj-selector-btn" id="projSelectorBtn" data-action="toggleProjectSelector" title="Switch project">
           <span id="projSelectorLabel">All Projects</span>
@@ -144,7 +144,8 @@
     </button>
     <div class="updated-at" id="updatedAt"></div>
     <div class="tab-nav" id="tabNav">
-      <div class="tab-group">
+      <!-- proj-only: offered once a project is in view (Task 20508, syncNav). -->
+      <div class="tab-group proj-only">
         <span class="tab-section-label" title="These tabs show data for the currently selected project">Project</span>
         <button class="tab-btn active" data-action="switchTab" data-arg="overview"  id="tbtn-overview"   title="Project overview (per-project)">Overview</button>
         <button class="tab-btn"        data-action="switchTab" data-arg="tasks"     id="tbtn-tasks"      title="Tasks (per-project)">Tasks</button>
@@ -238,6 +239,7 @@
         <span class="mobile-nav-title">cloop</span>
         <button class="mobile-nav-close" data-action="closeMobileNav" aria-label="Close navigation">&#x2715;</button>
       </div>
+      <div class="proj-only">
       <div class="mobile-nav-section-label">Project</div>
       <button class="m-tab-btn" data-action="switchTab" data-arg="overview"  id="mtbtn-overview"><span class="m-tab-icon">&#128200;</span>Overview</button>
       <button class="m-tab-btn" data-action="switchTab" data-arg="tasks"     id="mtbtn-tasks"><span class="m-tab-icon">&#10003;</span>Tasks</button>
@@ -254,6 +256,7 @@
       <button class="m-tab-btn" data-action="switchTab" data-arg="assistant" id="mtbtn-assistant"><span class="m-tab-icon">&#129302;</span>Assistant</button>
       <button class="m-tab-btn" data-action="switchTab" data-arg="replay"    id="mtbtn-replay"><span class="m-tab-icon">&#9851;</span>Replay</button>
       <button class="m-tab-btn" data-action="switchTab" data-arg="provider-calls" id="mtbtn-provider-calls"><span class="m-tab-icon">&#128268;</span>Provider Calls</button>
+      </div>
       <div class="mobile-nav-section-label">Global</div>
       <button class="m-tab-btn" data-action="switchTab" data-arg="projects"  id="mtbtn-projects"><span class="m-tab-icon">&#127760;</span>Projects</button>
       <button class="m-tab-btn" data-action="switchTab" data-arg="budget"    id="mtbtn-budget"><span class="m-tab-icon">&#127760;</span>Budget</button>
@@ -270,14 +273,6 @@
     <div id="hubDiskBanner" class="exec-banner warn" role="alert" style="display:none"><span class="exec-banner-icon">&#9888;</span><span id="hubDiskText"></span></div>
     <!-- ═══════════════════════════════════════════════════════════ OVERVIEW -->
     <div id="tab-overview" class="tab-panel active">
-
-      <!-- Multi-project summary (shown in multi-project mode when no project is selected) -->
-      <div id="multiProjectOverview" style="display:none">
-        <div class="section">
-          <div class="section-title">All Projects — Overview</div>
-          <div id="multiProjectCards" class="stats-grid" style="margin-top:12px"></div>
-        </div>
-      </div>
 
       <!-- No-project init panel -->
       <div id="initPanel" style="display:none">
@@ -1277,17 +1272,19 @@
   <span class="kb-sep">|</span>
   <span><kbd>/</kbd> search</span>
   <span class="kb-sep">|</span>
-  <span><kbd>j</kbd><kbd>k</kbd> navigate</span>
-  <span class="kb-sep">|</span>
-  <span><kbd>n</kbd> new task</span>
-  <span class="kb-sep">|</span>
   <span><kbd>r</kbd> refresh</span>
   <span class="kb-sep">|</span>
   <span><kbd>t</kbd> theme</span>
   <span class="kb-sep">|</span>
-  <span><kbd>1</kbd>-<kbd>9</kbd> tabs</span>
-  <span class="kb-sep">|</span>
   <span><kbd>Esc</kbd> close</span>
+  <span class="proj-only">
+  <span class="kb-sep">|</span>
+  <span><kbd>j</kbd><kbd>k</kbd> navigate</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>n</kbd> new task</span>
+  <span class="kb-sep">|</span>
+  <span><kbd>1</kbd>-<kbd>9</kbd> tabs</span>
+  </span>
   <!-- Which build is serving this page (Task 20249). Lives in the footer so
        the answer is one glance away from every tab; the full provenance is in
        Settings → Build. Populated by 29-build.js, empty until it answers. -->

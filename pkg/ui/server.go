@@ -6795,6 +6795,8 @@ func (s *Server) broadcastProjectsUpdate() {
 		p, err := json.Marshal(map[string]interface{}{
 			"projects": visible,
 			"stats":    stats,
+			// As GET /api/projects says it, for this recipient (Task 20508).
+			"multi_project": s.multiProjectFor(visible),
 		})
 		if err != nil {
 			p = nil
@@ -7207,6 +7209,29 @@ func splitProviderModelToken(s string) (string, string, bool) {
 	return s[:i], s[i+1:], true
 }
 
+// multiProjectFor is the multi_project flag of a project list as one caller
+// sees it: whether the dashboard has to be told which project a request is for.
+//
+// True when there are multiple registered projects, so the frontend can enable
+// the scoped-tabs experience.
+//
+// Also whenever the caller's list lacks this hub's own project (Task 20366).
+// Single-project mode sends no index, and an index-less request resolves to
+// the hub's own directory — so a member whose one shared project is somebody
+// else's, or who has none left, would have their whole dashboard read a
+// project they cannot see. With the flag set they get the projects page, and
+// address theirs by index.
+//
+// Every project list the hub sends carries it — the GET and the pushes that
+// follow it (Task 20508) — because the dashboard offers a project's tabs
+// without one being picked only while the flag is false, and a list that left
+// the flag out could only be guessed at by its length: a member's one shared
+// project is a list of one on a hub of several.
+func (s *Server) multiProjectFor(statuses []multiui.ProjectStatus) bool {
+	return len(statuses) > 1 || len(s.projectsSnapshot()) > 0 ||
+		!statusesInclude(statuses, s.primaryProjectPath())
+}
+
 // handleProjects returns all project statuses and aggregate stats.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	if emptyList(r) {
@@ -7228,21 +7253,10 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	statuses, stats := s.filterStatusesForRecipient(s.recipientIdentity(r), tokenFromRequest(r), entries, statuses)
 	// Which of them a move holds (Task 20496).
 	statuses = s.withMoving(statuses)
-	// multi_project is true when there are multiple registered projects so the
-	// frontend can enable the scoped-tabs experience.
-	//
-	// Also whenever the caller's list lacks this hub's own project (Task
-	// 20366). Single-project mode sends no index, and an index-less request
-	// resolves to the hub's own directory — so a member whose one shared
-	// project is somebody else's, or who has none left, would have their
-	// whole dashboard read a project they cannot see. With the flag set they
-	// get the projects page, and address theirs by index.
-	multiProject := len(statuses) > 1 || len(s.projectsSnapshot()) > 0 ||
-		!statusesInclude(statuses, s.primaryProjectPath())
 	body := map[string]interface{}{
 		"projects":      statuses,
 		"stats":         stats,
-		"multi_project": multiProject,
+		"multi_project": s.multiProjectFor(statuses),
 	}
 	// The index each project answers to in ?project_idx and
 	// /api/projects/{idx}, keyed by path, for a client that names projects
@@ -7318,7 +7332,8 @@ func (s *Server) handleProjectsEvents(w http.ResponseWriter, r *http.Request) {
 	// OIDC is enabled and flagged with this viewer's hidden projects.
 	entries, statuses := s.cachedProjectView()
 	statuses, stats := s.filterStatusesForRecipient(c.user, c.token, entries, statuses)
-	if payload, err := json.Marshal(map[string]interface{}{"projects": statuses, "stats": stats}); err == nil {
+	if payload, err := json.Marshal(map[string]interface{}{"projects": statuses, "stats": stats,
+		"multi_project": s.multiProjectFor(statuses)}); err == nil {
 		if werr := writeSSE(w, flusher, "event: projects\ndata: %s\n\n", payload); werr != nil {
 			return
 		}

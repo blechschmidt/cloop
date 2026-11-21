@@ -6,8 +6,15 @@ function loadTimeline() { panelIf('timeline', 'open'); }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
+// refreshState reads the open project's state again — the r key, the palette's
+// Refresh and every edit that wants its result drawn. With no project open
+// there is no state to read, so it reads the project list instead (Task 20508).
+// An error body is not an answer: api() resolves one (a 429, with r held
+// down), and drawn it was an empty list, or a project with no goal.
 act('refreshState', function() {
-  api(pUrl('/api/state')).then(s => { render(s); toast('Refreshed', 'ok'); }).catch(() => toast('Load failed', 'err'));
+  const answer = d => { if (!d || d.error) throw d; return d; };
+  (noneOpen() ? api('/api/projects').then(answer).then(applyProjects) : api(pUrl('/api/state')).then(answer).then(render))
+    .then(() => toast('Refreshed', 'ok'), () => toast('Load failed', 'err'));
 });
 
 // updateRunButtonState shows the Run button when not running, Stop when running.

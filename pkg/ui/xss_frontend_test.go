@@ -10,7 +10,9 @@ package ui
 // name holding the literal text &quot; closed the string, and the rest ran as
 // code with the session of whoever clicked the card. A hub admin sees every
 // project. The fix carries the name in a data attribute the action reads as
-// data (testdata/xss_scenarios.js says how this test reads the markup).
+// data (testdata/xss_scenarios.js says how this test reads the markup). Four
+// of the five are still drawn: the Overview's all-projects cards went with
+// that view in Task 20508.
 //
 // What it asserts, per site and per hostile name:
 //   - the markup has no event-handler attribute and no element a name smuggled
@@ -125,7 +127,6 @@ func TestDashboard_HostileProjectNamesStayData(t *testing.T) {
 		{"projList", "openProject"},
 		{"projList", "projectHide"},
 		{"projList", "projectDelete"},
-		{"multiProjectCards", "openProject"},
 		{"projSelectorDropdown", "selectProjectFromDropdown"},
 		{"hiddenProjectsList", "projectUnhide"},
 	}

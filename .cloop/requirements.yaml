@@ -856,3 +856,40 @@ requirements:
       - name: two projects' sandboxes never share a network
         command: go test ./tests/security -run '^TestTwoProjectsSandboxesNeverShareANetwork$'
         timeout: 20m
+  - id: R-40
+    title: With no project open on a hub that lists more than one project, the dashboard shall offer nothing that acts on a project and ask the hub for nothing a project holds.
+    status: approved
+    priority: must
+    tags: [correctness, dashboard]
+    details: |-
+      The hub answers a request that names no project for its own project. On a
+      hub that lists more than one project the dashboard therefore offers a
+      project's tabs, keys and commands only while a project is open. Before one
+      is opened and after it is closed, the tab bar and the phone's menu list the
+      hub-wide tabs alone; a link, a key or a view restored after a sign-in that
+      names a project's tab leaves the page on the project list; the command
+      palette lists no command that adds a task or starts, stops or resets a
+      run, and runs none that was listed for a project that has closed since;
+      the parts of Settings and Budget that belong to one project are neither
+      shown, read nor saved; and the page asks for no project's state, tasks or
+      history: not on a key, not when the hub tells it to catch up, not when its
+      stream drops, and not from an answer that arrives after its project
+      closed. Whether the hub lists more than one project is read from its
+      project list alone, so until the list has loaded, and after an answer that
+      is not a list, the page shows no project. Opening a project brings all of
+      it back, for that project, and a hub with one project has it in view once
+      its list has loaded. The script's list of hub-wide tabs, the markup's
+      classes and the stylesheet's rule each say which tabs are a project's, and
+      a test holds the three to one another, so a tab added later cannot be left
+      offered without a project or hidden with one. Which requests are a
+      project's is read from the hub's own route table. A browser test in the
+      package's suite measures that what is hidden is off screen at desktop,
+      tablet and phone widths, and at desktop width before the project list has
+      loaded. Promised in docs/getting-started/web-ui.md, "The layout".
+    tests:
+      - name: the script, the markup and the stylesheet agree on what is a project's
+        command: go test ./pkg/ui -run '^(TestDashboard_PerProjectNavigationIsMarked|TestCommandPaletteMarksWhatNeedsAProject|TestAskedOfNoProjectReadsTheRouteTable)$'
+      - name: every project list the hub sends says whether it lists more than one project
+        command: go test ./pkg/ui -run '^TestEveryProjectListCarriesTheMultiProjectFlag$'
+      - name: every way into a project's tab, and what the page asks the hub for
+        command: go test ./pkg/ui -run '^(TestDashboard_NoProjectOpen_NothingPerProjectIsReachable|TestDashboard_NoProjectOpen_NavigationFollowsTheProject|TestDashboard_NoProjectOpen_TheProjectListDecides|TestDashboard_NoProjectOpen_PaletteAndHelp|TestDashboard_NoProjectOpen_ResyncReadsNoProject|TestDashboard_NoProjectOpen_NothingIsAskedOrSavedForTheHubsOwnProject)$'
