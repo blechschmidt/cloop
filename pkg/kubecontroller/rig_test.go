@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -154,8 +155,23 @@ func (rc *runningController) stop(t *testing.T) {
 	select {
 	case <-rc.done:
 	case <-time.After(15 * time.Second):
-		t.Fatal("the controller did not stop within 15s of its context ending")
+		t.Fatalf("the controller did not stop within 15s of its context ending; its goroutines:\n%s", stuckGoroutines())
 	}
+}
+
+// stuckGoroutines is every goroutine's stack that runs the package's code,
+// for a controller that did not stop: what it waits on is the bug, and a
+// failure that only happens on a loaded CI runner must say so itself.
+func stuckGoroutines() string {
+	buf := make([]byte, 4<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	var ours []string
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "pkg/kubecontroller.") && !strings.Contains(g, "stuckGoroutines") {
+			ours = append(ours, g)
+		}
+	}
+	return strings.Join(ours, "\n\n")
 }
 
 func (r *rig) stopAll() {
@@ -168,7 +184,7 @@ func (r *rig) stopAll() {
 		select {
 		case <-rc.done:
 		case <-time.After(15 * time.Second):
-			r.t.Error("a controller did not stop within 15s")
+			r.t.Errorf("a controller did not stop within 15s; its goroutines:\n%s", stuckGoroutines())
 		}
 	}
 }

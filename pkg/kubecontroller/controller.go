@@ -233,17 +233,9 @@ func (c *Controller) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = srv.Serve(ln)
-		}()
-		stop := context.AfterFunc(ctx, func() {
-			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = srv.Shutdown(sctx)
-		})
-		defer stop()
+		// Deferred after wg.Wait, so it runs before it: the wait includes
+		// the server's Serve, which only a Shutdown ends.
+		defer serveHealth(ctx, &wg, srv, ln)()
 	}
 
 	for _, run := range []func(context.Context){c.pools.run, c.pods.run, c.secrets.run, c.claims.run} {
@@ -385,6 +377,38 @@ func (c *Controller) recoverGoroutine(what string) {
 	if r := recover(); r != nil {
 		c.panics.Add(1)
 		c.logf("%s panicked: %v\n%s", what, r, debug.Stack())
+	}
+}
+
+// serveHealth serves srv on ln, counted in wg, and shuts it down as soon as
+// ctx ends. The caller calls the function it returns before it waits on wg:
+// that makes sure of the Shutdown, which the AfterFunc alone does not.
+//
+// ctx being done does not mean an AfterFunc on it has run. The context
+// package closes Done, then cancels the children an AfterFunc hangs from, and
+// Err answers without waiting for that. Run can see the end, stop its work,
+// release its lease and get here before the goroutine cancelling ctx has
+// reached the AfterFunc; stop then wins, the Shutdown never happens, Serve
+// never returns, and Run waits on it for ever. A loaded CI runner got there
+// first (TestTheControllerLeavesNoGoroutinesBehind; Task 20510), and so could
+// `cloop executor controller` on SIGTERM. So when stop reports that it
+// prevented the call, the call is made here.
+func serveHealth(ctx context.Context, wg *sync.WaitGroup, srv *http.Server, ln net.Listener) (done func()) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = srv.Serve(ln)
+	}()
+	shutdown := func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sctx)
+	}
+	stop := context.AfterFunc(ctx, shutdown)
+	return func() {
+		if stop() {
+			shutdown()
+		}
 	}
 }
 

@@ -1413,6 +1413,16 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **`cloop executor controller` exits when it is stopped.** The controller
+  closed its health endpoint from a function the stop signal was meant to
+  start, and before exiting waited for the endpoint to close. Go passes a
+  stop signal to such functions only after the controller itself can see it,
+  so a controller that finished its work and gave up its lease quickly enough
+  cancelled the function before it ran. It then waited for good on an
+  endpoint nothing would close. The Helm chart always serves that endpoint,
+  so a stopped controller Pod could hang until the kubelet killed it at the
+  end of its 30-second grace period. The controller now closes the endpoint
+  itself when the function did not run (Task 20510).
 - **The dashboard offers a project's tabs only while a project is open.** On a
   hub with several projects the Project tabs (Overview, Tasks, Requirements and
   the rest) were on screen with no project selected. Opened like that, Tasks
