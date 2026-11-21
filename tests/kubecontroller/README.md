@@ -81,6 +81,13 @@ CLOOP_KUBECONTROLLER_E2E_IMAGE_IMPORT='docker exec -i k3s ctr images import -' \
 | `CLOOP_KUBECONTROLLER_E2E_STORAGE_CLASS` | the runner volumes' StorageClass; unset, the cluster's default, which must provision `ReadWriteOnce` volumes |
 | `CLOOP_KUBECONTROLLER_E2E_KEEP` | leave the namespace and the hub's directory behind |
 
+Either way the image goes to the nodes as an archive of the Docker daemon's own
+platform alone (`docker save --platform`, so Docker 28 or later), never through
+`kind load docker-image`. Under Docker's containerd image store, the default of
+a fresh Docker 29, an image can name platforms whose content the daemon never
+fetched, and a node's `ctr images import --all-platforms` refuses such an
+archive. `scripts/kind-load-image.sh` does the same for CI's own steps.
+
 It takes about six minutes, most of it the hub noticing that a killed runner
 is gone, which it does by probing every 30 seconds. CI runs it in the
 `kube-controller` job, on a kind cluster of its own.

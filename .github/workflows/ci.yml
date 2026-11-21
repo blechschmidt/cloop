@@ -3146,7 +3146,8 @@ jobs:
         # readOnlyRootFilesystem, runAsNonRoot and capabilities dropped.
         run: |
           set -euo pipefail
-          kind load docker-image cloop-hub:ci --name cloop-ci
+          # Not `kind load docker-image`: see scripts/kind-load-image.sh.
+          ./scripts/kind-load-image.sh cloop-ci cloop-hub:ci
           helm install cloop deploy/helm/cloop-hub --namespace cloop \
             --set image.repository=cloop-hub --set image.tag=ci --set image.pullPolicy=Never \
             --set secrets.create=true --set secrets.secretKey=ci-key \
@@ -3554,7 +3555,9 @@ jobs:
           set -euo pipefail
           docker pull -q alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
           docker tag alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc "$CLOOP_K8S_ENV_E2E_IMAGE"
-          kind load docker-image "$CLOOP_K8S_ENV_E2E_IMAGE" --name cloop-ci
+          # The runner's Docker kept only its own platform of that multi-platform
+          # index; `kind load docker-image` would hand the node the whole index.
+          ./scripts/kind-load-image.sh cloop-ci "$CLOOP_K8S_ENV_E2E_IMAGE"
           go test ./pkg/executor/kubernetes/ -run RealCluster -count=1 -v -timeout 8m 2>&1 | tee /tmp/realcluster.log
           for t in TestOwnerReference_RealClusterGarbageCollection \
                    TestLeaseEnv_RealClusterResolvesTheEnvironmentFromTheSecret \

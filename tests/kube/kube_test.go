@@ -480,18 +480,8 @@ func buildImages(ctx context.Context, t *testing.T, x tool) {
 	dockerBuild(ctx, t, x, forgeCtx, forgeImage)
 	dockerBuild(ctx, t, x, harnessContext(ctx, t), harnessImage)
 
-	cluster, importCmd := os.Getenv(kindEnv), os.Getenv(importEnv)
 	for _, img := range []string{forgeImage, harnessImage} {
-		switch {
-		case cluster != "":
-			x.run(ctx, nil, false, "kind", "load", "docker-image", img, "--name", cluster)
-		case importCmd != "":
-			tarball, err := exec.CommandContext(ctx, "docker", "save", img).Output()
-			if err != nil {
-				t.Fatalf("docker save %s: %v", img, err)
-			}
-			x.run(ctx, tarball, false, "sh", "-c", importCmd)
-		default:
+		if !toNodes(ctx, t, x, img) {
 			continue // already on the nodes, the caller says
 		}
 		// The node has its own copy now; the daemon's is disk nobody needs.

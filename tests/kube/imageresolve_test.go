@@ -434,23 +434,15 @@ func buildMarked(ctx context.Context, t *testing.T, x tool, tag, marker string) 
 }
 
 // loadImage puts image on the cluster's nodes the way buildImages does,
-// pulling it first if the daemon does not hold it.
+// pulling it first if the daemon does not hold it. A pulled image is the case
+// toNodes exists for: under Docker's containerd image store the daemon keeps
+// the image's whole multi-platform index but only its own platform's content.
 func loadImage(ctx context.Context, t *testing.T, x tool, image string) {
 	t.Helper()
 	if _, err := x.run(ctx, nil, true, "docker", "image", "inspect", image); err != nil {
 		x.run(ctx, nil, false, "docker", "pull", "-q", image)
 	}
-	cluster, importCmd := os.Getenv(kindEnv), os.Getenv(importEnv)
-	switch {
-	case cluster != "":
-		x.run(ctx, nil, false, "kind", "load", "docker-image", image, "--name", cluster)
-	case importCmd != "":
-		tarball, err := exec.CommandContext(ctx, "docker", "save", image).Output()
-		if err != nil {
-			t.Fatalf("docker save %s: %v", image, err)
-		}
-		x.run(ctx, tarball, false, "sh", "-c", importCmd)
-	}
+	toNodes(ctx, t, x, image)
 }
 
 // deployRegistry serves the distribution API over TLS in ns and returns its

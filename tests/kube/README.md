@@ -126,6 +126,14 @@ CLOOP_KUBE_E2E_KUBECONFIG=/tmp/kubeconfig CLOOP_KUBE_E2E_KIND_CLUSTER=cloop-ci \
 | `CLOOP_KUBE_E2E_KEEP` | leave the forge, the target namespace and the helper Pod behind |
 | `CLOOP_KUBE_E2E_NODE_EXEC` | a command prefix that runs a command on the hub's node, for the restart test; `docker exec <node name>` by default |
 
+Images go to the nodes as an archive of the Docker daemon's own platform alone
+(`docker save --platform`, so Docker 28 or later), never through `kind load
+docker-image`. Under Docker's containerd image store, the default of a fresh
+Docker 29, an image pulled by its multi-platform index (the test's `registry:2`)
+keeps only the daemon's own platform's content, and a node's `ctr images import
+--all-platforms` refuses an archive of the whole index.
+`scripts/kind-load-image.sh` does the same for CI's own steps.
+
 A kind node image is about 1 GB on disk and the test images another few
 hundred MB, loaded twice; check free space before running it on a small host.
 

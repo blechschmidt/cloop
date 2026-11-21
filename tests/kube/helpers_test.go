@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -108,6 +109,42 @@ func (x tool) apply(ctx context.Context, objects ...any) {
 		x.t.Fatal(err)
 	}
 	x.kubectlIn(ctx, b, "apply", "-f", "-")
+}
+
+// toNodes puts image, which the local Docker daemon holds, on the cluster's
+// nodes: through kind when CLOOP_KUBE_E2E_KIND_CLUSTER names a cluster, or
+// through the CLOOP_KUBE_E2E_IMAGE_IMPORT command for any other. With neither
+// set it does nothing and reports false: the caller says the image is there.
+//
+// The archive holds the daemon's own platform alone. `kind load docker-image`
+// saves the whole image, and under Docker's containerd image store (a fresh
+// Docker 29's default, GitHub's Ubuntu 26 runners among them) an image pulled
+// by a multi-platform index keeps that index but only one platform's content,
+// so the node's `ctr images import --all-platforms` refuses the archive:
+// "content digest sha256:…: not found". scripts/kind-load-image.sh, which
+// CI's own steps use, says the same.
+func toNodes(ctx context.Context, t *testing.T, x tool, image string) bool {
+	t.Helper()
+	cluster, importCmd := os.Getenv(kindEnv), os.Getenv(importEnv)
+	if cluster == "" && importCmd == "" {
+		return false
+	}
+	platform := x.stdout(ctx, "docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
+	archive := filepath.Join(t.TempDir(), "image.tar")
+	x.run(ctx, nil, false, "docker", "save", "--platform", platform, "-o", archive, image)
+	// The test's images run to a few hundred MB; free the disk now, not at
+	// the end of a half-hour test.
+	defer os.Remove(archive)
+	if cluster != "" {
+		x.run(ctx, nil, false, "kind", "load", "image-archive", archive, "--name", cluster)
+		return true
+	}
+	tarball, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.run(ctx, tarball, false, "sh", "-c", importCmd)
+	return true
 }
 
 // toolEnv is the environment for go, docker, kind, helm and kubectl: this

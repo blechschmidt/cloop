@@ -15,10 +15,13 @@ package kubernetes
 // Opt-in, with the same switch as ownerref_cluster_test.go:
 //
 //	kind create cluster --name cloop-gc
-//	kind load docker-image alpine:3.21 --name cloop-gc
+//	docker pull alpine:3.21 && scripts/kind-load-image.sh cloop-gc alpine:3.21
 //	CLOOP_K8S_GC_E2E=1 go test ./pkg/executor/kubernetes/ -run RealCluster -v
 //
-// CLOOP_K8S_ENV_E2E_IMAGE overrides the image; it needs /bin/sh and sha256sum.
+// (scripts/kind-load-image.sh, not `kind load docker-image`: a pulled image
+// under Docker's containerd image store names platforms the daemon never
+// fetched, and kind's import refuses it.) CLOOP_K8S_ENV_E2E_IMAGE overrides
+// the image; it needs /bin/sh and sha256sum.
 
 import (
 	"context"

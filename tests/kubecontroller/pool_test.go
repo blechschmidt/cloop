@@ -265,16 +265,7 @@ func setUp(ctx context.Context, t *testing.T, kubeconfig string) *e2e {
 	copyFile(t, filepath.Join(root, "scripts", "e2e", "gitproxy", "claude"), filepath.Join(buildCtx, "claude"))
 	copyFile(t, filepath.Join(root, "tests", "kubecontroller", "runner.Dockerfile"), filepath.Join(buildCtx, "Dockerfile"))
 	w.x.run(ctx, nil, false, "docker", "build", "--build-arg", "BASE="+alpineDigest, "-t", w.image, buildCtx)
-	switch cluster, importCmd := os.Getenv(kindEnv), os.Getenv(importEnv); {
-	case cluster != "":
-		w.x.run(ctx, nil, false, "kind", "load", "docker-image", w.image, "--name", cluster)
-	case importCmd != "":
-		tarball, err := exec.CommandContext(ctx, "docker", "save", w.image).Output()
-		if err != nil {
-			t.Fatalf("docker save %s: %v", w.image, err)
-		}
-		w.x.run(ctx, tarball, false, "sh", "-c", importCmd)
-	default:
+	if !toNodes(ctx, t, w.x, w.image) {
 		t.Fatalf("set %s or %s: the image must reach the cluster's nodes", kindEnv, importEnv)
 	}
 	// The nodes have their own copy; the daemon's is disk nobody needs.

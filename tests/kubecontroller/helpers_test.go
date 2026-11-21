@@ -111,6 +111,42 @@ func (x tool) jsonpath(ctx context.Context, ns, kind, name, path string) string 
 	return out
 }
 
+// toNodes puts image, which the local Docker daemon holds, on the cluster's
+// nodes: through kind when CLOOP_KUBECONTROLLER_E2E_KIND_CLUSTER names a
+// cluster, or through the CLOOP_KUBECONTROLLER_E2E_IMAGE_IMPORT command for
+// any other. With neither set it does nothing and reports false.
+//
+// The archive holds the daemon's own platform alone, as
+// scripts/kind-load-image.sh explains: `kind load docker-image` saves the
+// whole image, and under Docker's containerd image store (a fresh Docker 29's
+// default, GitHub's Ubuntu 26 runners among them) an image can name platforms
+// whose content the daemon never fetched, which the node's
+// `ctr images import --all-platforms` refuses.
+func toNodes(ctx context.Context, t *testing.T, x tool, image string) bool {
+	t.Helper()
+	cluster, importCmd := os.Getenv(kindEnv), os.Getenv(importEnv)
+	if cluster == "" && importCmd == "" {
+		return false
+	}
+	platform, stderr, err := x.capture(ctx, nil, "docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
+	if err != nil {
+		t.Fatalf("docker version: %v\n%s", err, tail(stderr, 30))
+	}
+	archive := filepath.Join(t.TempDir(), "image.tar")
+	x.run(ctx, nil, false, "docker", "save", "--platform", strings.TrimSpace(platform), "-o", archive, image)
+	defer os.Remove(archive)
+	if cluster != "" {
+		x.run(ctx, nil, false, "kind", "load", "image-archive", archive, "--name", cluster)
+		return true
+	}
+	tarball, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.run(ctx, tarball, false, "sh", "-c", importCmd)
+	return true
+}
+
 // realHome is HOME as the test binary found it, before hometest isolated it:
 // docker, kind and helm keep their state under it.
 var realHome string
