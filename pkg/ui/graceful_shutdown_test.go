@@ -239,13 +239,24 @@ func TestServer_GracefulShutdown_FullIntegration(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- srv.Run(ctx) }()
 
-	waitForServerReady(t, port, 2*time.Second)
+	// Getting the hub up and a request through it is not what this test
+	// times: the shutdown is, with the budgets further down. So the waits up
+	// to the cancel are generous. Under -race, a hub that has just started
+	// answers its first requests behind its own startup, in which every
+	// watcher opens the database: the pure-Go SQLite parses the whole schema
+	// on each new connection, and every allocation it makes goes through one
+	// process-wide lock. Behind that and the shard's other parallel tests, the
+	// first GET /api/state took more than the three seconds it once had on a
+	// CI runner, and 103 times in 120 on this host with the CPUs
+	// oversubscribed twice over (Task 20510).
+	const startup = 30 * time.Second
+	waitForServerReady(t, port, startup)
 
 	// (c-prep) Open a WebSocket client and wait until the server has
 	// registered it in hubClients so the shutdown path actually has a
 	// peer to send the 1001 close frame to.
 	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/api/ws", port)
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), startup)
 	defer dialCancel()
 	conn, _, err := websocket.Dial(dialCtx, wsURL, nil)
 	if err != nil {
@@ -255,7 +266,7 @@ func TestServer_GracefulShutdown_FullIntegration(t *testing.T) {
 	// before the client finishes its read loop.
 	defer conn.CloseNow() //nolint:errcheck
 
-	if got := waitForHubClients(srv, 1, 2*time.Second); got != 1 {
+	if got := waitForHubClients(srv, 1, startup); got != 1 {
 		t.Fatalf("server never registered the WebSocket client (got %d)", got)
 	}
 
@@ -264,7 +275,7 @@ func TestServer_GracefulShutdown_FullIntegration(t *testing.T) {
 	// future regression that races Shutdown ahead of the response gets
 	// caught here.
 	statusURL := fmt.Sprintf("http://127.0.0.1:%d/api/state", port)
-	httpClient := &http.Client{Timeout: 3 * time.Second}
+	httpClient := &http.Client{Timeout: startup}
 	resp, err := httpClient.Get(statusURL)
 	if err != nil {
 		t.Fatalf("GET /api/state: %v", err)
