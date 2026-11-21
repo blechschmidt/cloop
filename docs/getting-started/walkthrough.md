@@ -58,10 +58,13 @@ at once. Counters run across the top. Below them is one row per registered
 project, with its goal, a status pill, a progress bar, `done/total` tasks, when
 it last did anything, and the provider and model it will use on its next run.
 
-Click a row to open that project in the **Project** tabs, to the left of the
-divider in the tab bar. The tabs to the right of the divider (Projects, Budget,
-Executors, Settings) are hub-wide. The two groups are labelled because a setting
-you change on a Global tab changes it for every project on the hub.
+Click a row to open that project. Its **Project** tabs (Overview, Tasks and the
+rest) then appear in the tab bar, to the left of the divider. Until you open a
+project, the bar shows only the hub-wide tabs to the right of the divider
+(Projects, Budget, Executors, Settings). The two groups are labelled because a
+setting you change on a Global tab changes it for every project on the hub. The
+few parts of a Global tab that belong to one project, such as the provider
+cards in Settings, are shown only while a project is open.
 
 ---
 
@@ -324,17 +327,19 @@ up again.
 
 ![The Settings tab's Configuration section: cards for Default Provider, ClaudeCode, Anthropic, OpenAI and Ollama, each with its own model, base URL and password-masked API key field and its own Save button, with "no key" badges on the backends that have none.](../screenshots/05-settings.png)
 
-**Settings** is global, not per-project. The **Configuration** section edits the
-same provider keys that `cloop config set` writes: the default provider, and for
-each backend a model, a base URL and an API key. Each card saves on its own. API
+**Settings** is mostly about the whole hub. Its **Configuration** section starts
+with the provider cards, which edit the same keys that `cloop config set` writes
+in a project's directory: the default provider, and for each backend a model, a
+base URL and an API key. On a hub with more than one project they show the open
+project's settings, so open a project first. Each card saves on its own. API
 keys are write-only: leave the field blank to keep the existing key. A *no key*
 badge marks a backend that has none. For help picking a backend, see
 [Choosing and configuring a provider](providers.md).
 
 Further down the same tab are **Display glasses** (a personal, expiring link for
 Meta Ray-Ban Display glasses), **Hidden Projects**, and a **Danger Zone**, whose
-*Reset Project State* clears the step history but keeps the goal and
-configuration.
+*Reset Project State* clears the open project's step history but keeps the goal
+and configuration. The Danger Zone is shown while a project is open.
 
 Hiding a project removes it from your dashboard only. It keeps running, and
 other users still see it. **Hidden Projects** shows only how many projects you

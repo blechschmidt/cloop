@@ -103,6 +103,22 @@ Audit, Quotas and Telemetry are hidden unless your role has the matching
 permission, so a single-user install usually shows Projects, Budget, Executors
 and Settings.
 
+On a hub with more than one project, the Project tabs appear when you open a
+project and go away when you return to the list. Until then the tab bar, the
+phone menu and the command palette (`Ctrl+K`) offer only what is hub-wide, and
+the keys that act on a project (`1` to `9`, `n`) do nothing. A link to
+`/?tab=tasks` with no project open lands on the project list; add
+`project=<path>` to open the project on that tab.
+
+A few parts of the Global tabs belong to one project, and follow the same rule.
+Settings' provider cards and *Reset Project State*, and the Budget tab's
+*Per-Project Caps*, are shown only while a project is open, and change that
+project. Budget's *Disk & Retention* shows the open project's `.cloop`
+directory, and asks you to open a project when none is open.
+
+When the hub has only one project and no features, that project is always the
+one in view, so both groups are shown as soon as the dashboard has loaded.
+
 This page has one section per screen. For a step-by-step setup (where work may
 run, then a project, then its tasks), see
 [the dashboard walkthrough](walkthrough.md), which uses the same screenshots.
@@ -276,11 +292,14 @@ them: a badge you turn on here is a flag `cloop run` uses too.
 
 ![The global Settings tab: a Configuration section with cards for Default Provider, ClaudeCode, Anthropic, OpenAI and Ollama. Each card has its own model, base URL and password-masked API key field and its own Save button, and the backends without a key show a "no key" badge.](../screenshots/05-settings.png)
 
-Settings applies to the whole hub. The **Configuration** section edits the
-provider keys that `cloop config set` writes: the default provider, and the
-model, base URL and API key of ClaudeCode, Anthropic, OpenAI and Ollama. Each
-card saves on its own. API keys are write-only (a blank field keeps the current
-key), and a *no key* badge marks a backend without one.
+Most of Settings applies to the whole hub. The provider cards in the
+**Configuration** section are the exception: they edit the keys that
+`cloop config set` writes in a project's directory, so on a hub with more than
+one project they show the open project's settings and are hidden until you open
+one. The cards cover the default provider, and the model, base URL and API key
+of ClaudeCode, Anthropic, OpenAI and Ollama. Each card saves on its own. API
+keys are write-only (a blank field keeps the current key), and a *no key* badge
+marks a backend without one.
 [Choosing and configuring a provider](providers.md) explains each key.
 
 Below it:
@@ -290,8 +309,9 @@ Below it:
 - **Hidden Projects** shows only how many projects you have hidden. Clicking it
   opens a dialog with an Unhide button for each, so their names don't appear on
   screen when you open this tab for something else.
-- **Danger Zone** has *Reset Project State*, which clears the step history and
-  resets the status but keeps the goal and configuration.
+- **Danger Zone** has *Reset Project State*, which clears the open project's
+  step history and resets its status but keeps the goal and configuration. On
+  a hub with more than one project it appears once you have opened a project.
 
 ### On the glasses
 
