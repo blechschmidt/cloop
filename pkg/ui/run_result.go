@@ -138,26 +138,44 @@ func (s *Server) overlaySeededRunStatus(workDir string, ps *state.ProjectState) 
 		}
 		return
 	}
-	if !s.liveLogRunningFor(workDir) {
-		return
-	}
-	run, ok := s.trackedRun(workDir)
-	if !ok || !isSeededDispatch(run.ex, run.handleID) {
+	// The tracked handle, not the live-log flag: see seededRunInFlight, which
+	// is where the difference is explained.
+	if !s.seededRunInFlight(workDir) {
 		return
 	}
 	ps.Status = "running"
 	ps.PauseReason = nil
 }
 
-// seededRunInFlight reports whether this member is streaming a run for workDir
+// seededRunInFlight reports whether this member is following a run for workDir
 // that was carried out as a seed — a run whose plan and outcomes live on
 // another machine until it reports them.
+//
+// The tracked handle is the test, not the live-log flag. Only the Overview's
+// Run button raises that flag; the project grid's Run button and
+// POST /api/projects/{idx}/run do not, and a run this hub adopted after a
+// restart never did — so a seeded run started any of those ways reported
+// neither its status (Task 20349) nor, once there was one, its plan. Every
+// dispatch path tracks its handle, and every settling path forgets it, which
+// is exactly the window in which a report describes something.
 func (s *Server) seededRunInFlight(workDir string) bool {
-	if workDir == "" || !s.liveLogRunningFor(workDir) {
-		return false
+	_, ok := s.seededRunHandle(workDir)
+	return ok
+}
+
+// seededRunHandle is seededRunInFlight with the run it found.
+func (s *Server) seededRunHandle(workDir string) (dispatchedRun, bool) {
+	if workDir == "" {
+		return dispatchedRun{}, false
 	}
 	run, ok := s.trackedRun(workDir)
-	return ok && isSeededDispatch(run.ex, run.handleID)
+	if !ok || run.lost || run.handedOver || run.ex == nil {
+		return dispatchedRun{}, false
+	}
+	if !isSeededDispatch(run.ex, run.handleID) {
+		return dispatchedRun{}, false
+	}
+	return run, true
 }
 
 // seededFeatureRun reports whether handleID on ex is a feature's run — one
@@ -434,14 +452,11 @@ func decodeInterim(key string, data []byte) (*projectseed.Result, error) {
 // when it settles, as before), or while another hub member streams the run
 // (the report is held by the member the device is connected to).
 func (s *Server) overlaySeededRunPlan(workDir string, ps *state.ProjectState) {
-	if ps == nil || workDir == "" {
+	if ps == nil {
 		return
 	}
-	if !s.liveLogRunningFor(workDir) {
-		return
-	}
-	run, ok := s.trackedRun(workDir)
-	if !ok || run.ex == nil {
+	run, ok := s.seededRunHandle(workDir)
+	if !ok {
 		return
 	}
 	d, ok := peekSeededDispatch(run.ex, run.handleID)

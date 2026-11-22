@@ -1413,6 +1413,17 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A seeded run's status and plan show whichever button started it.** Both
+  overlays that describe a run on an executor the hub cannot read were gated on
+  the live-log flag, which only the Overview's Run button raises: `POST
+  /api/projects/{idx}/run` — the project grid's Run button and the REST API —
+  records the run's handle and never touches that flag, and a run adopted after
+  a hub restart never raised it either. A seeded run started any way but one
+  therefore reported neither its status nor its plan, and the dashboard showed
+  a paused project with no tasks while a device worked through it. The test is
+  now the tracked handle, which every dispatch path records and every settling
+  path forgets (Task 50).
+
 - **A project's tasks appear on the hub while a run on a remote executor is
   making them.** A run on an executor that cannot read the hub's filesystem
   works on a copy of the project and reported its outcome only when it ended,

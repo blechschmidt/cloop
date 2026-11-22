@@ -2196,6 +2196,13 @@ rows, no attached files, and no project status: it is made every few seconds
 from a database the harness is still writing, and everything left out is
 reported in full by the run's own outcome. An unchanged plan is not sent twice.
 
+**Whichever button started the run.** What decides that a seeded run is in
+flight is the handle this member tracks — recorded by every dispatch path,
+forgotten by every settling path — and not the live-log flag, which only the
+Overview's Run button raises. A run started from the project grid, from
+`POST /api/projects/{idx}/run`, or adopted after a hub restart is described
+exactly like one started from the Overview.
+
 **It is a view, not a write.** The hub renders the newest report over its own
 copy of the project — the plan merged in memory, the record untouched — so the
 dashboard shows the tasks the device is working through with the hub's own

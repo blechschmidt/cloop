@@ -198,39 +198,73 @@ func TestStateIsUnchangedWhenTheDeviceHasNotReported(t *testing.T) {
 	}
 }
 
-// TestSeededRunInFlightIsWhatTurnsOnTheLivePush: a project whose run is on a
-// device changes without its state file changing, so the watchers diff it on
-// every tick somebody has it open. That extra work has to be confined to
-// exactly those projects.
-func TestSeededRunInFlightIsWhatTurnsOnTheLivePush(t *testing.T) {
+// TestSeededRunInFlightIsTheTrackedHandle pins what decides that a seeded run
+// is in flight — and what must not.
+//
+// It used to be the live-log flag, which only the Overview's Run button
+// raises. A run started from the project grid, from POST
+// /api/projects/{idx}/run, or adopted after a hub restart therefore showed
+// neither its status nor its plan: measured on the live hub, a project whose
+// device had just planned twelve tasks answered /api/state with "paused" and
+// no plan while the run was under way.
+func TestSeededRunInFlightIsTheTrackedHandle(t *testing.T) {
 	dir := setupProjectDir(t, "live push", nil)
 	srv := New(dir, 0, "")
 
 	if srv.seededRunInFlight(dir) {
-		t.Error("a project with no run at all is diffed on every tick")
+		t.Error("a project with no run at all reads as having a seeded run in flight")
 	}
 
-	// Tracked and live, but not seeded: a run on this filesystem writes the
-	// hub's own database, and its changes arrive as a state-file change.
+	// Tracked, but not seeded: a run on this filesystem writes the hub's own
+	// database, and its changes arrive as a state-file change.
 	local := stubExec{id: "local-host"}
 	srv.trackRun(dir, local, "h-local")
-	srv.liveLogStartRun(dir)
 	if srv.seededRunInFlight(dir) {
-		t.Error("a run on this filesystem is diffed on every tick")
+		t.Error("a run on this filesystem reads as a seeded run")
 	}
 	srv.untrackRun(dir)
 
+	// Seeded and tracked, and the live-log flag never raised — the project
+	// grid's Run button and the API both dispatch this way.
 	ex := stubExec{id: "sgx-1"}
 	rememberSeededDispatch(ex, "h-seeded", projectseed.Provenance{ExecutorID: ex.id})
 	t.Cleanup(func() { takeSeededDispatch(ex, "h-seeded") })
 	srv.trackRun(dir, ex, "h-seeded")
+	if srv.liveLogRunningFor(dir) {
+		t.Fatal("this test is only meaningful while the live-log flag is down")
+	}
 	if !srv.seededRunInFlight(dir) {
-		t.Error("a seeded run in flight is not diffed; its plan would only appear on a page load")
+		t.Error("a seeded run started without the live-log flag reads as no run at all — " +
+			"its plan and its status would never be shown")
 	}
 
-	// It ends: the extra work stops with it.
-	srv.liveLogSetRunning(dir, false)
+	// Settled: the dispatch is forgotten, and so is the run.
+	takeSeededDispatch(ex, "h-seeded")
 	if srv.seededRunInFlight(dir) {
-		t.Error("a project whose run has ended is still diffed on every tick")
+		t.Error("a settled dispatch still reads as a seeded run in flight")
+	}
+}
+
+// TestStateShowsAGridStartedRunsPlan is the same gap at the seam the operator
+// meets: the plan of a run nobody raised the live-log flag for.
+func TestStateShowsAGridStartedRunsPlan(t *testing.T) {
+	dir := setupProjectDir(t, "grid started", nil)
+	srv := New(dir, 0, "")
+	ts := newTestServerFor(t, srv)
+
+	ex := reportingExec{stubExec: stubExec{id: "sgx-1"}, doc: planReport(t)}
+	rememberSeededDispatch(ex, "h-grid", projectseed.Provenance{
+		ExecutorID: ex.id, ExecutorKind: "remote", Isolation: "remote"})
+	t.Cleanup(func() { takeSeededDispatch(ex, "h-grid") })
+	// Exactly what POST /api/projects/{idx}/run leaves behind: a tracked
+	// handle, and no live-log room.
+	srv.trackRun(dir, ex, "h-grid")
+
+	body := apiGET(t, ts, "/api/state")
+	if got := len(tasksFrom(t, body)); got != 3 {
+		t.Fatalf("/api/state shows %d tasks for a grid-started seeded run, want the 3 the run planned", got)
+	}
+	if body["status"] != "running" {
+		t.Errorf("status = %v, want running: the device is working through the project", body["status"])
 	}
 }
