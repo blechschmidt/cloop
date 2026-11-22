@@ -2826,6 +2826,23 @@ device is away.
   counts as executing for `failoverReplacementWindow` (5 minutes), so nobody
   starts a second run beside one that is about to begin. With no verdict, an
   unreachable driver still fails closed.
+- **A claim the agent contradicts is undone.** Before the hub gives up a run
+  whose claim nothing replaced, the member following it asks the executor. If
+  the executor is an edge agent (or a virtual executor on one), this member
+  holds its live session, the agent beat within its deadline, and the agent
+  says the workload is still running, the claim was made by a process that
+  could not see the agent. The member puts the session back to `running`
+  (`RestoreClaimedExecutorSession`, which matches nothing once a replacement is
+  recorded), records
+  [`executor.failover_refuted`](../reference/audit-events.md#executor), and
+  keeps following the run. Members of one cluster never probe an agent another
+  live member holds, so in practice the claimer is a hub outside the cluster
+  that serves the same database, such as an older build left running beside a
+  newer one. Such a hub holds no session to any edge agent and declares each
+  one unreachable whenever its probes run out. Without this check, every run on
+  a device longer than that process's probe cycle was killed and its project
+  paused, while the device was healthy. Any answer short of the agent's own
+  word leaves the claim standing.
 - **Restricted executors and the hub's own host.** An executor with an access
   list is checked against the claims of the person starting a run, and a
   failover starts the run on nobody's behalf. So placement skips every

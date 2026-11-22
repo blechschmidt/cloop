@@ -906,7 +906,111 @@ func (s *Server) runLossState(run dispatchedRun) lostRunState {
 	if !ok {
 		return runNotLost
 	}
-	return classifyLoss(loss, time.Now())
+	verdict := classifyLoss(loss, time.Now())
+	// A claim this member can disprove does not end the run (Task 20512):
+	// the liveness question must not settle a project whose agent says its
+	// workload is running, before the sweep gets to the same claim.
+	if verdict == runLostForGood && s.refuteLostRunClaim(run, loss) {
+		return runNotLost
+	}
+	return verdict
+}
+
+// ── a claim this member can disprove ────────────────────────────────────────
+
+// claimCheckTimeout bounds asking an agent about a run a claim took: one
+// health check and one status round trip.
+const claimCheckTimeout = 15 * time.Second
+
+// agentBacked reports whether ex is an executor whose liveness only the hub
+// member holding an edge agent's socket can see: the agent itself, or a
+// virtual executor on one. Every other kind is probed alike from any member,
+// so no member's own view can overturn a claim on it.
+func agentBacked(ex executor.Executor) bool {
+	if ex == nil {
+		return false
+	}
+	switch ex.Kind() {
+	case executor.KindRemoteAgent, executor.KindVirtual:
+		return true
+	}
+	v, ok := ex.(interface{ ParentID() string })
+	return ok && strings.TrimSpace(v.ParentID()) != ""
+}
+
+// refuteLostRunClaim answers a failover claim nothing replaced on a run this
+// member follows, by asking the executor itself (Task 20512). The claim says
+// the executor stopped answering. If this member holds the agent's live
+// session, the agent beat within its deadline, and asked just now it says the
+// workload is still running, the claim is wrong: it was made by a process
+// that could not see the agent. The session goes back to running, on the
+// record as executor.failover_refuted, and the run continues — instead of
+// being killed and its project paused under a healthy device.
+//
+// What makes such claims: a hub serving the same database outside this
+// cluster. Members never probe an agent another live member holds
+// (clusterProbeFilter); a process that is no member — an older build left
+// running beside a newer one, as on the host that found this — probes every
+// executor it knows, holds no session to any edge agent, and so declares each
+// of them unreachable whenever its probes run out, claiming the sessions of
+// the runs on them. On that host it stopped one long run on the same device
+// four times in three hours.
+//
+// It reports whether the claim was refuted. Anything short of the agent's own
+// word — no session here, a beat past its deadline, a status that cannot be
+// read or is not running, a replacement already recorded — leaves the claim
+// standing, and the caller gives the run up as before.
+func (s *Server) refuteLostRunClaim(run dispatchedRun, loss executorstore.HandleLoss) bool {
+	if loss.SessionID == "" || !loss.Claimed() || loss.Replaced() || run.handleID == "" || !agentBacked(run.ex) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), claimCheckTimeout)
+	defer cancel()
+	if err := run.ex.HealthCheck(ctx); err != nil {
+		return false
+	}
+	st, err := run.ex.Status(ctx, run.handleID)
+	if err != nil || st.State.Terminal() || st.State == executor.StateUnknown {
+		return false
+	}
+	sched, db, err := newScheduler(controlPlaneDir())
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	reason := fmt.Sprintf("agent %s is connected and beating, and says workload %s is %s",
+		run.ex.ID(), run.handleID, st.State)
+	refuter := sched.WithActor("ui")
+	// A restore that matches nothing is read back from the store: a
+	// replacement recorded first means the claim stands; a session running
+	// again means the sweep and the liveness question refuted the same claim
+	// at once and the other one restored it; claimed again means the process
+	// that claimed it did so once more in between, and the agent's answer
+	// still disproves it.
+	for attempt := 0; attempt < 3; attempt++ {
+		restored, err := refuter.RestoreClaimed(loss.SessionID, run.ex.ID(), reason, time.Now())
+		if err != nil {
+			s.log().Warn("executor", 0, "could not undo a failover claim on a run whose executor is answering",
+				map[string]interface{}{"executor": run.ex.ID(), "handle": run.handleID, "session": loss.SessionID,
+					"error": err.Error()})
+			return false
+		}
+		if restored {
+			s.log().Warn("executor", 0, "undid a failover claim on a run whose executor is answering: "+
+				"a process that cannot see the agent claimed it, most likely a hub outside this cluster sharing its database",
+				map[string]interface{}{"executor": run.ex.ID(), "handle": run.handleID, "session": loss.SessionID,
+					"claimed": loss.State, "claimed_at": loss.ClaimedAt.UTC().Format(time.RFC3339)})
+			return true
+		}
+		now, err := sched.LossOfHandle(run.ex.ID(), run.handleID)
+		switch {
+		case err != nil, now.SessionID != loss.SessionID, now.Replaced():
+			return false
+		case !now.Claimed():
+			return true
+		}
+	}
+	return false
 }
 
 // maybeSweepLostRuns runs sweepLostRuns at most every lostRunSweepInterval.
@@ -959,6 +1063,12 @@ func (s *Server) sweepLostRuns(now time.Time) {
 				Lost: true,
 			}, false)
 		case runLostForGood:
+			// Unless the executor answers for itself (Task 20512): a claim
+			// made by a process that could not see the agent is undone, and
+			// the run is followed on.
+			if s.refuteLostRunClaim(run, loss) {
+				continue
+			}
 			detail := fmt.Sprintf("executor %s stopped answering and nothing replaced the run", run.ex.ID())
 			if loss.Exhausted() {
 				detail = exhaustedDetail(run.ex.ID(), max(loss.Attempt-1, 0))

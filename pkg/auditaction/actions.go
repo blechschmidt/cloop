@@ -269,6 +269,11 @@ const (
 	// already been re-dispatched as often as executors.failover.max_attempts
 	// allows, so nothing re-dispatches it (Task 20391).
 	ActionExecutorFailoverExhausted Action = "executor.failover_exhausted"
+	// ActionExecutorFailoverRefuted records a failover claim undone by the hub
+	// member holding the executor's live session, whose agent says the
+	// workload is still running (Task 20512): the claim was made by a process
+	// that could not see the agent, and the run continues where it was.
+	ActionExecutorFailoverRefuted Action = "executor.failover_refuted"
 
 	// ── executor_pool ──────────────────────────────────────────────────────
 

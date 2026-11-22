@@ -459,6 +459,53 @@ func (d *DB) ClaimExecutorSessionRequeue(id, claimToken, newClaimToken string, m
 	return out, nil
 }
 
+// RestoreClaimedExecutorSession puts a session a failover claim took back to
+// running, for the one process that can prove the claim wrong: the hub member
+// holding the executor's live session, whose agent says the workload is still
+// running (Task 20512). It reports whether the session was restored.
+//
+// A claim is a supervisor's conclusion that it could not reach the executor,
+// and a process that never held the executor's connection reaches that
+// conclusion about a healthy device: an older hub build serving the same
+// database outside the cluster claimed every session of a live edge agent
+// whenever its own probes, which could not see the agent, ran out. Left
+// standing, such a claim makes the member following the run give it up — it
+// kills a healthy workload and pauses its project.
+//
+// Only a claimed session nothing replaced is restored, and that is decided in
+// this one statement: a successor recorded first wins, and then the restore
+// matches nothing — the run continues on the replacement. ended_at is cleared
+// because the session has not ended. The claim token stays as the claim
+// rotated it; a later claim reads it afresh, like any other.
+func (d *DB) RestoreClaimedExecutorSession(id string, at time.Time) (bool, error) {
+	if strings.TrimSpace(id) == "" {
+		return false, errors.New("statedb: executor session id is required")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	stamp := at.UTC().Format(time.RFC3339Nano)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.conn.Exec(
+		`UPDATE executor_sessions
+		 SET state = ?, updated_at = ?, ended_at = ''
+		 WHERE id = ? AND state IN (?, ?)
+		   AND NOT EXISTS (SELECT 1 FROM executor_sessions AS successor
+		                   WHERE successor.requeued_from = executor_sessions.id)`,
+		ExecutorSessionRunning, stamp,
+		id, ExecutorSessionRequeued, ExecutorSessionFailoverExhausted)
+	if err != nil {
+		return false, fmt.Errorf("statedb: restore executor session %q: %w", id, classifyDriverErr(err))
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("statedb: restore executor session %q: %w", id, classifyDriverErr(err))
+	}
+	return n == 1, nil
+}
+
 // getExecutorSessionLocked reads one session. The caller must hold d.mu; it
 // returns the raw sql.ErrNoRows so callers can decide which sentinel that
 // means in their context.

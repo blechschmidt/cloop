@@ -412,6 +412,91 @@ func TestClaimExecutorSessionRequeue(t *testing.T) {
 	}
 }
 
+// TestRestoreClaimedExecutorSession: a claim the member holding the agent can
+// disprove is undone — the session is running again, not ended — but only
+// while nothing replaced it, and a session no claim took is left alone
+// (Task 20512).
+func TestRestoreClaimedExecutorSession(t *testing.T) {
+	db := openTestDB(t)
+	open := func(t *testing.T, row ExecutorSessionRow) {
+		t.Helper()
+		if err := db.OpenExecutorSession(row); err != nil {
+			t.Fatalf("OpenExecutorSession(%s): %v", row.ID, err)
+		}
+	}
+	restore := func(t *testing.T, id string, at time.Time) bool {
+		t.Helper()
+		ok, err := db.RestoreClaimedExecutorSession(id, at)
+		if err != nil {
+			t.Fatalf("RestoreClaimedExecutorSession(%s): %v", id, err)
+		}
+		return ok
+	}
+	at := time.Now().Truncate(time.Millisecond)
+
+	open(t, ExecutorSessionRow{ID: "sess-1", ExecutorID: "edge-01", ClaimToken: "tok-1", Attempt: 1})
+	if restore(t, "sess-1", at) {
+		t.Fatal("a running session no claim took was restored")
+	}
+	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-1", "tok-2", 2, at); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	later := at.Add(time.Minute)
+	if !restore(t, "sess-1", later) {
+		t.Fatal("a requeued session nothing replaced was not restored")
+	}
+	got, err := db.GetExecutorSession("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != ExecutorSessionRunning || !got.EndedAt.IsZero() || !got.UpdatedAt.Equal(later) {
+		t.Fatalf("restored session = %+v, want running, not ended, updated at %v", got, later)
+	}
+	if got.ClaimToken != "tok-2" {
+		t.Errorf("ClaimToken = %q, want the claim's rotated tok-2", got.ClaimToken)
+	}
+	if n, err := db.CountRunningExecutorSessions("edge-01"); err != nil || n != 1 {
+		t.Fatalf("running sessions after the restore = (%d, %v), want (1, nil)", n, err)
+	}
+	// Running again means claimable again, by the token it carries now.
+	if _, err := db.ClaimExecutorSessionRequeue("sess-1", "tok-2", "tok-3", 2, later); err != nil {
+		t.Fatalf("claim of a restored session: %v", err)
+	}
+
+	// A replacement recorded first wins: the claim stands.
+	open(t, ExecutorSessionRow{ID: "sess-1b", ExecutorID: "edge-02", ClaimToken: "tok-b", Attempt: 2, RequeuedFrom: "sess-1"})
+	if restore(t, "sess-1", later) {
+		t.Fatal("a session a failover replaced was restored")
+	}
+	if got, _ := db.GetExecutorSession("sess-1"); got.State != ExecutorSessionRequeued {
+		t.Fatalf("replaced session is %q after a refused restore, want requeued", got.State)
+	}
+
+	// Exhausted, nothing replaced it: restored like a requeued one.
+	open(t, ExecutorSessionRow{ID: "sess-3", ExecutorID: "edge-01", ClaimToken: "tok-3", Attempt: 3})
+	if row, err := db.ClaimExecutorSessionRequeue("sess-3", "tok-3", "tok-4", 2, at); err != nil || row.State != ExecutorSessionFailoverExhausted {
+		t.Fatalf("claim past the cap = %+v, %v; want failover_exhausted", row, err)
+	}
+	if !restore(t, "sess-3", later) {
+		t.Fatal("an exhausted session nothing replaced was not restored")
+	}
+
+	// A session that ended is not brought back.
+	open(t, ExecutorSessionRow{ID: "sess-4", ExecutorID: "edge-01", ClaimToken: "tok-5", Attempt: 1})
+	if err := db.CloseExecutorSession("sess-4", ExecutorSessionFinished, at); err != nil {
+		t.Fatal(err)
+	}
+	if restore(t, "sess-4", later) {
+		t.Fatal("a finished session was restored")
+	}
+	if restore(t, "ghost", later) {
+		t.Fatal("an unknown session was restored")
+	}
+	if _, err := db.RestoreClaimedExecutorSession(" ", later); err == nil {
+		t.Error("a restore with a blank id succeeded, want an error")
+	}
+}
+
 // TestClaimExecutorSessionRequeueIsExactlyOnce is the safety-critical test.
 //
 // Eight supervisors notice the same executor is dead and race to fail over the

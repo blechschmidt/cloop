@@ -989,6 +989,22 @@ var registry = []Entry{
 		Note: "`nodes` names every executor the run was lost on, oldest first, each with when it went unreachable. " +
 			"A workload that takes down every node it lands on ends here instead of on the next node.",
 	},
+	{
+		Action: ActionExecutorFailoverRefuted,
+		Home:   HomeControlPlane,
+		Entity: "executor_session",
+		Trigger: "The hub member holding an edge agent's live session undoes a failover claim nothing replaced: the agent " +
+			"beat within its deadline and says the claimed workload is still running.",
+		Payload: []string{
+			"session_id", "executor_id", "handle_id", "claimed", "claimed_at", "attempt", "project_path", "reason",
+		},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`claimed` is the state the claim recorded (requeued or failover_exhausted) and `claimed_at` when. " +
+			"The session is running again and the run continues where it was. A claim like this comes from a process " +
+			"that could not see the agent: most often a hub serving the same database outside the cluster, such as an " +
+			"older build left running beside a newer one. Its executor.failover row precedes this one.",
+	},
 
 	// ── executor_pool ──────────────────────────────────────────────────────
 	// Task 20482. Pool management is an administrator's; the token mints come

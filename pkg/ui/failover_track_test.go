@@ -80,8 +80,21 @@ func newSeedNode(t *testing.T, id string) *seedNode {
 	return n
 }
 
-func (n *seedNode) ID() string   { return n.id }
-func (n *seedNode) Kind() string { return n.kind }
+func (n *seedNode) ID() string { return n.id }
+
+func (n *seedNode) Kind() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.kind
+}
+
+// setKind makes the node pose as another kind of executor — an edge agent,
+// whose liveness only the member holding its socket can see (Task 20512).
+func (n *seedNode) setKind(kind string) {
+	n.mu.Lock()
+	n.kind = kind
+	n.mu.Unlock()
+}
 func (n *seedNode) Capabilities() executor.Capabilities {
 	n.mu.Lock()
 	host := n.host

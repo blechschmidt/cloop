@@ -1436,6 +1436,24 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A run on an edge device is no longer stopped because a process that
+  cannot see the device says it is gone.** Before the hub gave up a run whose
+  session a failover had claimed, it read only the session store. Any process
+  sharing the hub's database can make that claim, including a hub outside the
+  cluster such as an older build left running beside a newer one. Such a hub
+  holds no session to any edge agent, so it declares every agent unreachable
+  whenever its probes run out and claims the sessions of the runs on them.
+  Five minutes later the member that held the agent's session killed the run
+  and paused its project, though the device was healthy: one long run on the
+  `sgx` executor was stopped four times in three hours this way, and each
+  restart started its builds again on a 2-CPU device. Now the member following
+  the run asks the agent first. If it holds the agent's live session, the agent
+  beat within its deadline and the agent says the workload is still running,
+  the session goes back to running, the refutation is audited as
+  `executor.failover_refuted`, and the run continues. A claim that a
+  replacement followed, or one the agent cannot answer for, stands as before
+  (Task 20512).
+
 - **A seeded run's status and plan show whichever button started it.** Both
   overlays that describe a run on an executor the hub cannot read were gated on
   the live-log flag, which only the Overview's Run button raises: `POST

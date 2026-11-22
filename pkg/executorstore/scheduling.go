@@ -442,6 +442,55 @@ func (s *Scheduler) LossOfHandle(executorID, handleID string) (HandleLoss, error
 	return out, nil
 }
 
+// RestoreClaimed puts a claimed session nothing replaced back to running and
+// records that the claim was refuted (Task 20512). It is the answer of the hub
+// member holding the executor's live session to a claim it can disprove: the
+// agent beat within its deadline and says the workload is still running.
+// reason says how it was disproved. It reports whether the session was
+// restored; false means the claim stands — a replacement was recorded first,
+// or the session is not claimed (any more).
+//
+// The audit row is written only for a restore that happened, and a failure to
+// write it does not undo the restore: the session is running either way, and
+// the run it records is better kept than a log line.
+func (s *Scheduler) RestoreClaimed(sessionID, executorID, reason string, at time.Time) (bool, error) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	before, err := s.db.GetExecutorSession(sessionID)
+	if err != nil {
+		return false, fmt.Errorf("executorstore: restore session %s: %w", sessionID, err)
+	}
+	ok, err := s.db.RestoreClaimedExecutorSession(sessionID, at)
+	if err != nil {
+		return false, fmt.Errorf("executorstore: restore session %s: %w", sessionID, err)
+	}
+	if !ok {
+		return false, nil
+	}
+	payload := map[string]any{
+		"session_id":   sessionID,
+		"executor_id":  executorID,
+		"handle_id":    before.HandleID,
+		"claimed":      before.State,
+		"attempt":      before.Attempt,
+		"project_path": FailoverProjectPath(sessionFromRow(before)),
+		"reason":       reason,
+	}
+	if !before.UpdatedAt.IsZero() {
+		payload["claimed_at"] = before.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	_ = s.db.AppendAuditEvent(&statedb.AuditEvent{
+		Timestamp:  at,
+		Actor:      s.actor,
+		EventType:  string(auditaction.ActionExecutorFailoverRefuted),
+		EntityType: auditSessionEntityType,
+		EntityID:   sessionID,
+		Payload:    statedb.MarshalAuditPayload(payload),
+	})
+	return true, nil
+}
+
 // CloseSession marks a session finished or failed.
 func (s *Scheduler) CloseSession(sessionID, state string, at time.Time) error {
 	switch state {
