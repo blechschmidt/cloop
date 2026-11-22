@@ -420,7 +420,9 @@ func (s *Server) letGoOfLostRun(run dispatchedRun, reason string) {
 	}
 	// A seeded run's result would be merged when it ends; this one is not
 	// going to be collected — its tasks were settled by the failover, and a
-	// copy of the project it took is out of reach.
+	// copy of the project it took is out of reach. A run nothing replaced is
+	// different: retireLostRun has already taken what the device managed to
+	// report of its plan (Task 50), and this is then a no-op.
 	_, _ = takeSeededDispatch(run.ex, run.handleID)
 	countRunSettled(run.ex, executor.Status{State: executor.StateFailed}, nil, false, run.tracked)
 	s.log().Info("executor", 0, "stopped following a run whose executor was lost",
@@ -524,9 +526,11 @@ func openReplacementSession(dir string, ex executor.Executor, handle executor.Ha
 // it did.
 //
 // The run is given up rather than settled: its tasks were settled by the
-// failover, and its output stream may never end. It is marked lost and handed
-// over in one critical section (its consumer, should the stream end after
-// all, leaves it alone), then let go of (letGoOfLostRun). With settle,
+// failover, and its output stream may never end. What the device reported of
+// its plan before it went quiet is kept, when nothing replaced the run: see
+// the call to collectRunResult below. The run is marked lost and handed over
+// in one critical section (its consumer, should the stream end after all,
+// leaves it alone), then let go of (letGoOfLostRun). With settle,
 // nothing replaced it: the project is settled here, with verdict, while the
 // run is still tracked, so the watcher's tick cannot settle it first with a
 // verdict that knows nothing. Without, the replacement is followed elsewhere
@@ -544,6 +548,23 @@ func (s *Server) retireLostRun(workDir, executorID, handleID string, verdict run
 	s.markHandedOverLocked(handleID)
 	s.runHandleMu.Unlock()
 
+	// Before the run is let go of: a seeded run reports its plan as it goes
+	// (Task 50), and the newest report is held on the handle that is about to
+	// be abandoned. Taken only when nothing replaced the run — a
+	// replacement was seeded from this hub's copy, and folding the stranded
+	// run's half-finished account in behind it would describe work the
+	// replacement is about to do again. Before reconcileDeadRun, for the
+	// reason runEnded merges first: a task the run left in progress is then
+	// recovered from the run's own account of it rather than from a plan that
+	// never heard it started.
+	//
+	// Not a feature's run: landing a feature's work asks its executor for the
+	// run's write-back, and this executor is lost — so a feature's stranded
+	// run is left exactly as it was before any of this, with its branch where
+	// the feature's own recovery expects it.
+	if settle && !seededFeatureRun(run.ex, run.handleID) {
+		s.collectRunResult(workDir, run.ex, run.handleID)
+	}
 	s.letGoOfLostRun(run, verdict.Detail)
 	if settle {
 		s.reconcileDeadRun(workDir, verdict)

@@ -156,6 +156,14 @@ type Result struct {
 	// sentence each, so the hub can say so instead of presenting a partial
 	// history as a whole one.
 	Omitted []string `json:"omitted,omitempty"`
+	// Interim marks a progress report — the plan as it stood while the run
+	// was still going (Task 50) — rather than the run's outcome. It carries
+	// Tasks and the token deltas and nothing else: no steps, no journal, no
+	// spend rows, no attachments, no status. The hub renders one
+	// live and merges one only if the run ends without an outcome, so a
+	// document that may be superseded a few seconds later stays cheap to
+	// produce and cheap to send.
+	Interim bool `json:"interim,omitempty"`
 }
 
 // TaskChange is one task the run touched.
@@ -234,6 +242,28 @@ type Cost struct {
 // agent may be able to read files the workload cannot, and a link is how a
 // workload would ask it to.
 func Harvest(dir string, seed []byte, scrub func(string) string) ([]byte, error) {
+	return harvest(dir, seed, scrub, false)
+}
+
+// HarvestProgress reads back the plan of a seeded run that is *still running*
+// (Task 50) and returns a document marked Interim.
+//
+// The hub renders it over its own copy of the project, so the operator sees
+// the work a run on another machine is going through — which for a project
+// whose tasks the run plans itself is the only way those tasks can be seen
+// before the run ends — and merges it if the run ends without ever sending
+// its outcome, which is how a lost run's plan survives the loss.
+//
+// It is deliberately much less than Harvest. Only the tasks and the token
+// deltas travel: a progress report is produced every few seconds while the
+// harness holds the database, so it reads the plan and nothing else — no
+// journal, no steps, no spend rows, no attachments, no verdict sidecars. And
+// it claims nothing about how the run ended, because it has not.
+func HarvestProgress(dir string, seed []byte, scrub func(string) string) ([]byte, error) {
+	return harvest(dir, seed, scrub, true)
+}
+
+func harvest(dir string, seed []byte, scrub func(string) string, interim bool) ([]byte, error) {
 	if len(seed) == 0 {
 		return nil, ErrNoSeed
 	}
@@ -244,7 +274,7 @@ func Harvest(dir string, seed []byte, scrub func(string) string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	r, err := collect(dir, base, scrub)
+	r, err := collect(dir, base, scrub, interim)
 	if err != nil {
 		return nil, err
 	}
@@ -267,8 +297,10 @@ func decodeSeed(seed []byte) (*state.ProjectState, error) {
 	return &st, nil
 }
 
-// collect builds the Result for the project the run left in dir.
-func collect(dir string, base *state.ProjectState, scrub func(string) string) (*Result, error) {
+// collect builds the Result for the project the run left in dir. With interim
+// set it builds a progress report instead: the plan, and nothing that costs a
+// second read of the database the run is still writing. See HarvestProgress.
+func collect(dir string, base *state.ProjectState, scrub func(string) string, interim bool) (*Result, error) {
 	cloopDir := filepath.Join(dir, seedDir)
 	info, err := os.Lstat(cloopDir)
 	switch {
@@ -290,7 +322,7 @@ func collect(dir string, base *state.ProjectState, scrub func(string) string) (*
 		}
 	}
 
-	r := &Result{Format: ResultFormat, BaseStep: base.CurrentStep}
+	r := &Result{Format: ResultFormat, BaseStep: base.CurrentStep, Interim: interim}
 
 	dbPath := filepath.Join(cloopDir, "state.db")
 	after, err := state.LoadDatabase(dbPath)
@@ -303,6 +335,24 @@ func collect(dir string, base *state.ProjectState, scrub func(string) string) (*
 	}
 	if err != nil {
 		return nil, fmt.Errorf("projectseed: read the project the run left in %s: %w", dbPath, err)
+	}
+
+	r.InputTokens = nonNegative(after.TotalInputTokens - base.TotalInputTokens)
+	r.OutputTokens = nonNegative(after.TotalOutputTokens - base.TotalOutputTokens)
+	r.EvolveSteps = nonNegative(after.EvolveStep - base.EvolveStep)
+
+	if interim {
+		// A progress report stops here (Task 50). Everything below is an
+		// account of a run that has ended — the verdict of a task the
+		// orchestrator decided but could not store, the status the run left
+		// the project in, its journal, its spend, its attached files — and a
+		// run still going will give all of it when it does end.
+		r.Tasks = diffTasks(base.Plan, after.Plan, scrub)
+		if len(r.Tasks) > maxResultTasks {
+			return nil, fmt.Errorf("projectseed: the run has %d changed tasks, more than the %d a result may carry",
+				len(r.Tasks), maxResultTasks)
+		}
+		return r, nil
 	}
 
 	// A run that died — or stopped because its own outcome write failed —
@@ -321,9 +371,6 @@ func collect(dir string, base *state.ProjectState, scrub func(string) string) (*
 		pr.Detail = scrub(pr.Detail)
 		r.PauseReason = &pr
 	}
-	r.InputTokens = nonNegative(after.TotalInputTokens - base.TotalInputTokens)
-	r.OutputTokens = nonNegative(after.TotalOutputTokens - base.TotalOutputTokens)
-	r.EvolveSteps = nonNegative(after.EvolveStep - base.EvolveStep)
 	r.Tasks = diffTasks(base.Plan, after.Plan, scrub)
 	if len(r.Tasks) > maxResultTasks {
 		return nil, fmt.Errorf("projectseed: the run left %d changed tasks, more than the %d a result may carry",

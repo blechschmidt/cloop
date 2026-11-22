@@ -132,7 +132,8 @@ accepts:
 - only the bundle its own dispatch asked for, up to that dispatch's cap. The
   cap is stored with the handle, so a restarted or adopting hub enforces it
   too;
-- a project document only from a seeded run;
+- a project document only from a seeded run; a progress report of one while it
+  runs replaces the report before it, and never the run's own outcome;
 - nothing after the handle's final status or its result frame.
 
 Everything an executor's handles hold counts against that executor's budget

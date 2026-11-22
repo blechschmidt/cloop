@@ -11,6 +11,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -331,6 +332,9 @@ type workload struct {
 	// would be lost and the control plane would eventually mis-resolve it as
 	// failed.
 	reported bool
+	// progressSum is the digest of the last plan this workload reported while
+	// it was running (Task 50), so an unchanged plan is not sent again.
+	progressSum [sha256.Size]byte
 	// plan is what this workload needs in order to write its work product back
 	// once the harness exits: the mode, the branch, the origin, and the commit
 	// the tree started at. Nil when the Spec asked for no write-back. See

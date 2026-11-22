@@ -31,6 +31,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"strings"
 	"time"
 
@@ -161,4 +162,163 @@ func (a *Agent) returnProjectState(ctx context.Context, wl *workload, sess *devi
 		return
 	}
 	wl.markProjectReturned()
+}
+
+// ── progress reports ────────────────────────────────────────────────────────
+//
+// Everything above carries a *finished* run's project state. A seeded run also
+// reports the plan while it is still running (Task 50), and that is what the
+// rest of this file is.
+//
+// The reason is the half of the return nothing covered. A run on a device
+// records its plan in its own copy of the project, and until the run settled
+// nothing carried the plan home — so a project whose tasks the run plans
+// itself (pm mode, auto-evolve) showed the operator an empty plan for the
+// whole run, however long it was, and a run whose executor was lost before it
+// settled took the plan with it: twelve tasks planned and one finished on the
+// device, nothing on the hub, and the next start planned them all again.
+//
+// What goes out is the plan and nothing else (projectseed.HarvestProgress):
+// no journal, no steps, no spend rows, no attachments. A report is produced
+// every interimProjectReportEvery for as long as the workload lives and is
+// superseded by the next one, so it has to be cheap to make and cheap to
+// hold, and everything left out is reported in full by the run's own outcome.
+//
+// It is read from a database the harness is still writing. That is the
+// concurrency model cloop is built on — WAL plus a busy timeout, the same way
+// two dashboards read one project — and a reading that loses a race sees the
+// plan a moment ago rather than a corrupt one.
+
+// interimProjectReportEvery is how often a running seeded workload reports its
+// plan. Tasks take minutes; a report every quarter-minute keeps the dashboard
+// close enough to the device without reading its database in a loop. A var so
+// tests do not have to wait for it.
+var interimProjectReportEvery = 15 * time.Second
+
+// projectProgress reports what reportProjectProgress needs, and whether there
+// is anything worth reading: a seeded workload that is still running and has
+// not already sent its outcome.
+func (w *workload) projectProgress() (seed []byte, dir string, ok bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.seed) == 0 || w.projectReturned || w.finished {
+		return nil, "", false
+	}
+	return w.seed, w.workDir, true
+}
+
+// sentProgress records the digest of the report just sent and reports whether
+// it differs from the last one. An unchanged plan is not sent again: a run
+// spends minutes per task, and re-sending the same document would make the hub
+// hold and decode it for nothing.
+func (w *workload) sentProgress(sum [sha256.Size]byte) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.progressSum == sum {
+		return false
+	}
+	w.progressSum = sum
+	return true
+}
+
+// forgetProgress clears the digest of the last report, so the same plan is
+// offered again: a report that could not be sent was not received.
+func (w *workload) forgetProgress() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.progressSum = [sha256.Size]byte{}
+}
+
+// followProjectProgress reports wl's plan to the control plane every
+// interimProjectReportEvery until the returned function is called.
+//
+// Started when the workload's output stream is opened and stopped before its
+// outcome is read back, so a progress report can never race the document that
+// supersedes it. A workload with no seed, or a hub too old for the frame,
+// starts nothing.
+func (a *Agent) followProjectProgress(wl *workload) func() {
+	if _, _, ok := wl.projectProgress(); !ok {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				a.cfg.logf("panic reporting the progress of %s: %v", wl.handleID, r)
+			}
+		}()
+		t := time.NewTicker(interimProjectReportEvery)
+		defer t.Stop()
+		// A device whose project cannot be read fails every tick for the
+		// length of the run — a newer cloop in the harness image wrote the
+		// database, the workload removed it — so the reason is logged once
+		// per run of failures rather than once per tick. The run's own
+		// outcome carries it to the hub's journal, which is where an operator
+		// looks for why the dashboard did not move.
+		failures := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := a.reportProjectProgress(ctx, wl); err != nil {
+					failures++
+					if failures == 1 {
+						a.cfg.logf("workload %s: could not read the run's plan while it runs: %v",
+							wl.handleID, err)
+					}
+					continue
+				}
+				failures = 0
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// reportProjectProgress sends one progress report, if there is one to send,
+// and returns why it could not be read.
+//
+// Nothing here is fatal to the run: a report is for the dashboard, the next
+// one is seconds away, and the run's outcome does not depend on any of them
+// arriving. A link that drops takes the reports with it until it is back, and
+// the hub's own view falls back to what it last received.
+func (a *Agent) reportProjectProgress(ctx context.Context, wl *workload) error {
+	seed, dir, ok := wl.projectProgress()
+	if !ok {
+		return nil
+	}
+	sess := a.currentSession()
+	if sess == nil || !remote.SupportsInterimProjectResult(sess.version) {
+		return nil
+	}
+	data, err := projectseed.HarvestProgress(dir, seed, wl.redactor().String)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 || !wl.sentProgress(sha256.Sum256(data)) {
+		return nil
+	}
+	frame, err := sess.frame(remote.TypeProjectResult, "", wl.handleID,
+		remote.ProjectResultPayload{Data: data, Interim: true})
+	if err != nil {
+		return err
+	}
+	// Serialised with the output flusher like every other frame for this
+	// handle, so a report cannot land between a chunk and its successor.
+	wl.sendMu.Lock()
+	err = sess.write(ctx, frame)
+	wl.sendMu.Unlock()
+	if err != nil && ctx.Err() == nil {
+		// The next report is the next tick's; this one is not re-sent, so the
+		// digest is cleared and the same plan is offered again.
+		wl.forgetProgress()
+		return err
+	}
+	return nil
 }

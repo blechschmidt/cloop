@@ -2388,7 +2388,20 @@ func (s *Server) watchState(ctx context.Context) {
 		func() {
 			defer recoverGoroutine("watchState iteration")
 			mod, ok := stateModTime(s.WorkDir)
-			if !ok || mod.Equal(s.lastMod) {
+			if !ok {
+				return
+			}
+			if mod.Equal(s.lastMod) {
+				// The file has not moved — but a seeded run's plan lives on
+				// the device, and the hub's view of it is the run's own
+				// reports (Task 50). So a project with such a run in flight
+				// is diffed anyway; a diff that finds nothing changed sends
+				// nothing, and nothing else here is republished.
+				if s.seededRunInFlight(s.WorkDir) {
+					if ps, err := state.LoadLite(s.WorkDir); err == nil {
+						s.broadcastStateDiff(s.WorkDir, ps)
+					}
+				}
 				return
 			}
 			s.lastMod = mod
@@ -2397,8 +2410,12 @@ func (s *Server) watchState(ctx context.Context) {
 			if err != nil {
 				return
 			}
-			s.overlaySeededRunStatus(s.WorkDir, ps)
-			data, err := marshalStateForWire(ps)
+			// The overlay goes on a copy, because broadcastStateDiff applies
+			// it to its own: a plan merged twice would add the run's tasks
+			// twice.
+			view := *ps
+			s.overlaySeededRun(s.WorkDir, &view)
+			data, err := marshalStateForWire(&view)
 			if err != nil {
 				return
 			}
@@ -2411,7 +2428,7 @@ func (s *Server) watchState(ctx context.Context) {
 			// (Task 20384).
 			s.pushHistory(s.WorkDir)
 			// And the spec coverage, when the change moved it (Task 20465).
-			s.pushCoverage(s.WorkDir, ps.Plan)
+			s.pushCoverage(s.WorkDir, view.Plan)
 		}()
 	}
 }
@@ -2459,11 +2476,12 @@ func (s *Server) broadcastStateDiff(workDir string, curr *state.ProjectState) {
 	if curr == nil {
 		return
 	}
-	// A seeded run in flight reads as running here, as on /api/state (Task
-	// 20349). On a copy: callers hand in state they may go on to save, and the
-	// overlay describes this hub's view of the run, not the project's record.
+	// A seeded run in flight reads as running here, and brings its plan with
+	// it, as on /api/state (Tasks 20349, 50). On a copy: callers hand in
+	// state they may go on to save, and the overlay describes this hub's view
+	// of the run, not the project's record.
 	view := *curr
-	s.overlaySeededRunStatus(workDir, &view)
+	s.overlaySeededRun(workDir, &view)
 	curr = &view
 	cache := s.ensureDiffCache()
 	prev := cache.swap(workDir, curr)
@@ -3015,7 +3033,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.overlaySeededRunStatus(workDir, ps)
+	s.overlaySeededRun(workDir, ps)
 
 	// Marshal without the multi-MiB Steps slice (Task 20125). The browser
 	// reads only steps_count here; the paginated /api/steps and
@@ -3228,7 +3246,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		// same mistake the replay below was fixed for in Task 20189, one line
 		// apart.
 		if ps, err := state.LoadLite(c.workDir); err == nil {
-			s.overlaySeededRunStatus(c.workDir, ps)
+			s.overlaySeededRun(c.workDir, ps)
 			if data, err := marshalStateForWire(ps); err == nil {
 				if werr := writeSSE(w, flusher, "data: %s\n\n", data); werr != nil {
 					return
@@ -3602,7 +3620,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		// marshalStateForWire'd, so Steps are dropped before going on the wire
 		// (Task 20125).
 		if ps, err := state.LoadLite(workDir); err == nil {
-			s.overlaySeededRunStatus(workDir, ps)
+			s.overlaySeededRun(workDir, ps)
 			if raw, err := marshalStateForWire(ps); err == nil {
 				if msg, err := json.Marshal(wsMessage{Type: "task_update", Data: raw}); err == nil {
 					_ = wsWrite(ctx, conn, msg)
@@ -6640,6 +6658,7 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 			changed[e.Path] = struct{}{}
 		}
 	}
+	primaryAbs, _ := filepath.Abs(s.WorkDir)
 	if len(changedPaths) > 0 || listChanged || livenessMoved {
 		s.refreshProjectStatusesUsing(entries, live, changed)
 		s.broadcastProjectsUpdate()
@@ -6651,7 +6670,6 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 		// here avoids a duplicate cache lookup. Only load state for
 		// projects with active WebSocket subscribers to keep the
 		// secondary-project case zero-cost when nobody is watching.
-		primaryAbs, _ := filepath.Abs(s.WorkDir)
 		for _, path := range changedPaths {
 			if path == primaryAbs {
 				continue
@@ -6670,6 +6688,28 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 			// The spec coverage, when the change moved it (Task 20465):
 			// likewise only for a project somebody has open.
 			s.pushCoverage(path, plan)
+		}
+	}
+
+	// A project whose run is on an executor that cannot read this filesystem
+	// changes without its state file changing: the run's plan lives on the
+	// device, and the hub's view of it is the reports the run sends while it
+	// works (Task 50). So such a project is diffed on every tick somebody has
+	// it open, whatever its files did. broadcastStateDiff sends nothing when
+	// the diff is empty, which is most ticks. The primary project is left to
+	// watchState, which does the same on a faster cadence.
+	for path := range subscribed {
+		if _, did := changed[path]; did {
+			continue
+		}
+		if path == primaryAbs {
+			continue
+		}
+		if !s.seededRunInFlight(path) {
+			continue
+		}
+		if ps, err := state.LoadLite(path); err == nil {
+			s.broadcastStateDiff(path, ps)
 		}
 	}
 

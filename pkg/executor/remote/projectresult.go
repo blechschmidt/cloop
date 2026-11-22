@@ -20,13 +20,23 @@ import (
 type projectResultState struct {
 	data []byte
 	err  string
+	// interim marks a report the device sent while the run was still going
+	// (Task 50). The newest one stands in for the outcome if the run never
+	// sends one, and the outcome replaces it for good.
+	interim bool
 }
 
 // applyProjectResult records a project_result frame on its handle.
 //
 // A second frame for the same handle replaces the first rather than being
 // refused: the agent re-reads and re-sends after a reconnect, and the later
-// reading of the same finished workload's directory is the better one.
+// reading of the same finished workload's directory is the better one. The
+// same rule carries the progress reports a running seeded run sends (Task
+// 50) — each replaces the last — with one exception in the other direction:
+// a progress report never replaces the run's outcome. The outcome
+// is read from a workspace whose harness has exited, a progress report from
+// one still being written, and after the outcome has arrived the only thing a
+// late progress report could do is stale what the hub is about to merge.
 //
 // The document is held until the hub collects it, so it is counted against the
 // executor's ResultBudget like a bundle (Task 20399). One the budget cannot
@@ -57,6 +67,12 @@ func (e *Executor) applyProjectResult(handleID string, p ProjectResultPayload) e
 		return fmt.Errorf("%w: handle %s was dispatched with no project seed, so it has no project "+
 			"state to return", ErrProtocol, handleID)
 	}
+	if p.Interim && hs.projectResult != nil && !hs.projectResult.interim {
+		// The run's outcome is already here; see the note above. Not an
+		// error: an agent whose progress ticker raced the final report did
+		// nothing wrong, and answering a protocol error would make it log one.
+		return nil
+	}
 	var held int64
 	if hs.projectResult != nil {
 		held = int64(len(hs.projectResult.data))
@@ -64,12 +80,16 @@ func (e *Executor) applyProjectResult(handleID string, p ProjectResultPayload) e
 	if refused := e.budget.swap(e.id, held, int64(len(p.Data))); refused != nil {
 		refuseFrame(refused.metricReason())
 		reason := refused.reason("the run's project state", e.id)
-		if hs.projectResult == nil {
+		if hs.projectResult == nil && !p.Interim {
 			hs.projectResult = &projectResultState{err: "the hub refused to hold it: " + reason}
 		}
 		return fmt.Errorf("%w: %s", ErrWriteBackBudget, reason)
 	}
-	hs.projectResult = &projectResultState{data: append([]byte(nil), p.Data...), err: p.Err}
+	hs.projectResult = &projectResultState{
+		data:    append([]byte(nil), p.Data...),
+		err:     p.Err,
+		interim: p.Interim,
+	}
 	return nil
 }
 
@@ -98,8 +118,40 @@ func (e *Executor) ProjectResult(handleID string) (executor.ProjectResult, error
 	// which is no worse than its log.
 	redactor := hs.bus.Redactor()
 	return executor.ProjectResult{
-		Data:   pr.data,
-		Err:    pr.err,
-		Redact: redactor.String,
+		Data:    pr.data,
+		Err:     pr.err,
+		Redact:  redactor.String,
+		Interim: pr.interim,
 	}, nil
 }
+
+// InterimProjectResult implements executor.InterimProjectResultFetcher.
+//
+// The document stays where it is: this is read on the dashboard's path, once
+// per render of the project, and the run it describes has not ended. Only
+// ProjectResult releases it, and only once.
+func (e *Executor) InterimProjectResult(handleID string) (executor.ProjectResult, error) {
+	hs, err := e.lookup(handleID)
+	if err != nil {
+		return executor.ProjectResult{}, err
+	}
+	hs.mu.Lock()
+	pr := hs.projectResult
+	hs.mu.Unlock()
+	if pr == nil || len(pr.data) == 0 {
+		return executor.ProjectResult{}, fmt.Errorf("%w: handle %s on agent %s",
+			executor.ErrProjectResultUnavailable, handleID, e.id)
+	}
+	redactor := hs.bus.Redactor()
+	return executor.ProjectResult{
+		// Not copied: every caller reads it and hands it to a decoder.
+		Data:    pr.data,
+		Redact:  redactor.String,
+		Interim: pr.interim,
+	}, nil
+}
+
+var (
+	_ executor.ProjectResultFetcher        = (*Executor)(nil)
+	_ executor.InterimProjectResultFetcher = (*Executor)(nil)
+)

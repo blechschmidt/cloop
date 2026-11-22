@@ -2171,6 +2171,58 @@ monitor session. Helper subcommands dispatched to a device (`cloop reset` from
 the dashboard) are not merged. They are not runs, and a reset expressed as a
 diff would not reset anything the diff can't name.
 
+### The plan comes back while the run is going (Task 50)
+
+The return above is an *outcome*: it travels when the harness exits. That left
+the plan a run **makes** out of reach for as long as the run lasted. A project
+started in pm mode is dispatched with a goal and no tasks — the run plans on
+the device — so the dashboard showed an empty project for the whole run,
+however long it was. And a run whose executor stopped answering never sent an
+outcome at all, so its plan was lost with it: twelve tasks planned and one
+finished on the device, nothing on the hub, and the next start planned them
+all again.
+
+So while a seeded workload runs, the device also reports the plan as it stands.
+
+| | |
+| --- | --- |
+| Built by | `projectseed.HarvestProgress`, on the device, every 15s while the workload lives |
+| Wire | the same `project_result` frame with `interim` set, protocol **v32** |
+| Rendered by | `Server.overlaySeededRunPlan`, over the state every reader of `/api/state` and of the state broadcasts receives |
+| Merged by | `projectseed.Apply`, only when a run ends without ever sending an outcome |
+
+**A report is the plan and nothing else.** No steps, no journal rows, no cost
+rows, no attached files, and no project status: it is made every few seconds
+from a database the harness is still writing, and everything left out is
+reported in full by the run's own outcome. An unchanged plan is not sent twice.
+
+**It is a view, not a write.** The hub renders the newest report over its own
+copy of the project — the plan merged in memory, the record untouched — so the
+dashboard shows the tasks the device is working through with the hub's own
+numbering and the hub's own attribution. The merge that writes a run's work
+down still happens once, when the run settles.
+
+**Except for a run nothing replaced.** A run whose executor stops answering is
+retired, and if no replacement took its place the hub merges the last report
+before letting the handle go: the plan survives the loss, dead-run recovery
+requeues the task the run was working on, and the journal row says the plan
+came from a report rather than an outcome. Its journal, steps and spend stayed
+on the device. A run the failover *did* replace keeps nothing — the
+replacement was seeded from the hub's copy, and merging the stranded run's
+half-finished account behind it would describe work the replacement is about to
+do again.
+
+**The status is never a report's to set.** A device that reports `complete`
+while it runs — out of order, out of date, or lying — does not finish the
+project on the hub. Only a run's outcome, or the hub's own verdict on a run it
+lost, settles a project.
+
+**Degraded, not refused, in the other direction from the outcome.** A hub below
+v32 refuses any `project_result` for a handle it has not seen finish, so the
+agent sends no report on such a session and the run's plan appears when it
+settles, as before. A device too old to report leaves the dashboard exactly as
+it was.
+
 ### Kubernetes: the seed in a Secret, the outcome in the log (Task 20402)
 
 A Pod shares nothing with the hub and talks to nobody: its ServiceAccount token

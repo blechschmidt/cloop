@@ -1413,6 +1413,33 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A project's tasks appear on the hub while a run on a remote executor is
+  making them.** A run on an executor that cannot read the hub's filesystem
+  works on a copy of the project and reported its outcome only when it ended,
+  so the plan the run *made* reached the hub only then — and a project started
+  in pm mode is dispatched with a goal and no tasks, because the run plans on
+  the device. The dashboard therefore showed an empty project for the whole
+  run, however long it was, and a run whose executor stopped answering took
+  its plan with it: twelve tasks planned and one finished on the device,
+  nothing on the hub, and the next start planned all twelve again. The agent
+  now reports the plan as it stands every 15 seconds for as long as the
+  workload lives — the same `project_result` frame, marked interim, protocol
+  v32 — and the hub renders the newest report over its own copy of the
+  project, so `/api/state` and every state broadcast show the tasks the device
+  is working through, with the hub's own numbering and its own attribution,
+  while leaving the record itself untouched. A report carries the plan and
+  nothing else: no steps, no journal rows, no spend, no attached files, and no
+  project status, because a run that has not ended has no outcome to claim —
+  a device that reports `complete` while it runs does not finish the project.
+  A run that ends without ever reporting an outcome is no longer a total loss:
+  the hub merges the last report it received, dead-run recovery requeues the
+  task the run was working on, and the journal row says the plan came from a
+  report rather than an outcome. A run the failover replaced keeps nothing, as
+  before, because its replacement was seeded from the hub's copy. Degraded,
+  not refused, in both directions: an agent sends no report to a hub below
+  v32, and a device too old to report leaves the dashboard exactly as it was
+  (Task 50).
+
 - **Projects can be started on a remote executor again.** The hardened systemd
   unit `cloop executor agent install` renders allows `@system-service`, which
   does not cover `landlock_create_ruleset`, `landlock_add_rule` and

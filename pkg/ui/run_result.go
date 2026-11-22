@@ -25,16 +25,19 @@ package ui
 // stale task and the bug this file fixes.
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
 	"github.com/blechschmidt/cloop/pkg/logger"
+	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
 )
 
@@ -101,6 +104,15 @@ func isSeededDispatch(ex executor.Executor, handleID string) bool {
 	return ok
 }
 
+// overlaySeededRun is this hub's view of a seeded run in flight, over the
+// project state about to be served: the run's status (Task 20349) and the plan
+// it is working through (Task 50). Every reader of /api/state and of the state
+// broadcasts goes through it, so the dashboard shows one answer.
+func (s *Server) overlaySeededRun(workDir string, ps *state.ProjectState) {
+	s.overlaySeededRunStatus(workDir, ps)
+	s.overlaySeededRunPlan(workDir, ps)
+}
+
 // overlaySeededRunStatus reports a seeded run that is in flight as running
 // (Task 20349).
 //
@@ -137,8 +149,29 @@ func (s *Server) overlaySeededRunStatus(workDir string, ps *state.ProjectState) 
 	ps.PauseReason = nil
 }
 
+// seededRunInFlight reports whether this member is streaming a run for workDir
+// that was carried out as a seed — a run whose plan and outcomes live on
+// another machine until it reports them.
+func (s *Server) seededRunInFlight(workDir string) bool {
+	if workDir == "" || !s.liveLogRunningFor(workDir) {
+		return false
+	}
+	run, ok := s.trackedRun(workDir)
+	return ok && isSeededDispatch(run.ex, run.handleID)
+}
+
+// seededFeatureRun reports whether handleID on ex is a feature's run — one
+// whose returned work is landed against a feature branch when it settles.
+func seededFeatureRun(ex executor.Executor, handleID string) bool {
+	d, ok := peekSeededDispatch(ex, handleID)
+	return ok && d.feature != nil
+}
+
 // takeSeededDispatch returns and forgets the record for handleID on ex.
 func takeSeededDispatch(ex executor.Executor, handleID string) (seededDispatch, bool) {
+	// Whatever the run reported while it ran has been superseded by this
+	// settlement, one way or another (Task 50).
+	forgetInterimPlan(ex.ID(), handleID)
 	key := seededKey(ex.ID(), handleID)
 	seededMu.Lock()
 	defer seededMu.Unlock()
@@ -231,6 +264,18 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 		details["renumbered"] = rep.Renumbered
 	}
 	msg := rep.Summary()
+	if result.Interim {
+		// All that came home is what the run reported while it was running
+		// (Task 50): it ended without an outcome — typically its executor
+		// stopped answering — so the plan is the plan as of its last report,
+		// and its journal, steps and spend stayed on the device. Said here
+		// rather than in Summary, which describes a merge without knowing why
+		// this one had only a progress report to work from.
+		details["interim"] = true
+		msg += fmt.Sprintf(" The run on executor %q ended without reporting its outcome, so this is "+
+			"its last report instead: its journal, steps and spend stayed on the executor, and a task "+
+			"it was working on is as that report left it.", ex.ID())
+	}
 	switch {
 	case err != nil && !rep.Changed():
 		msg = fmt.Sprintf("The run's results came back from executor %q but could not be merged: %v. "+
@@ -301,4 +346,153 @@ func missingProjectResultMessage(ex executor.Executor, err error) string {
 		msg += " What the executor saw: " + why + "."
 	}
 	return msg + " Check the run's log for how far it got."
+}
+
+// ── a seeded run's plan while it runs ───────────────────────────────────────
+
+// interimPlans caches the decoded progress report behind each live seeded run,
+// so rendering the project does not inflate and parse the same document on
+// every request. Keyed by executor and handle, with the digest of the bytes it
+// was decoded from: a newer report has different bytes and is decoded once.
+var interimPlans = struct {
+	sync.Mutex
+	docs  map[string]*interimPlan
+	order []string
+}{docs: map[string]*interimPlan{}}
+
+// maxInterimPlans bounds the cache: one entry per seeded run whose project
+// somebody has open, and each is dropped when its run settles. Kept small
+// because a decoded document is held in full and the ceiling on one is
+// generous (projectseed.MaxResultInflatedBytes); evicting one costs a decode,
+// never a wrong answer.
+const maxInterimPlans = 32
+
+type interimPlan struct {
+	sum [sha256.Size]byte
+	doc *projectseed.Result
+}
+
+// forgetInterimPlan drops the cached report for a run that has settled.
+func forgetInterimPlan(executorID, handleID string) {
+	key := seededKey(executorID, handleID)
+	interimPlans.Lock()
+	defer interimPlans.Unlock()
+	if _, ok := interimPlans.docs[key]; !ok {
+		return
+	}
+	delete(interimPlans.docs, key)
+	for i, k := range interimPlans.order {
+		if k == key {
+			interimPlans.order = append(interimPlans.order[:i], interimPlans.order[i+1:]...)
+			break
+		}
+	}
+}
+
+// decodeInterim decodes data, reusing the last decoding of the same bytes.
+func decodeInterim(key string, data []byte) (*projectseed.Result, error) {
+	sum := sha256.Sum256(data)
+	interimPlans.Lock()
+	defer interimPlans.Unlock()
+	if c, ok := interimPlans.docs[key]; ok && c.sum == sum {
+		return c.doc, nil
+	}
+	doc, err := projectseed.DecodeResult(data)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := interimPlans.docs[key]; !ok {
+		interimPlans.order = append(interimPlans.order, key)
+	}
+	interimPlans.docs[key] = &interimPlan{sum: sum, doc: doc}
+	for len(interimPlans.order) > maxInterimPlans {
+		delete(interimPlans.docs, interimPlans.order[0])
+		interimPlans.order = interimPlans.order[1:]
+	}
+	return doc, nil
+}
+
+// overlaySeededRunPlan shows the plan a seeded run in flight is working
+// through (Task 50).
+//
+// A run on an executor that cannot read this filesystem plans in its own copy
+// of the project and reports its outcome only when it ends, so the plan it
+// *made* reached the hub only then — and the dashboard, which renders this
+// hub's copy, showed an empty project for the whole run. For a project whose
+// tasks the run plans itself (pm mode, auto-evolve) that is every task it has:
+// the operator pressed Run, watched a transcript describe twelve tasks, and
+// saw none of them.
+//
+// The device now reports the plan as it goes (pkg/executor/agent's progress
+// reports), and this folds the newest report into the state about to be
+// served. On the hub's copy of the plan, never the project's own record: the
+// run's account of a plan it is still changing is a view, and the merge that
+// writes it down happens once, when the run ends.
+//
+// Nothing is overlaid for a run on this filesystem (it writes the hub's own
+// database), for a run whose device is too old to report (its plan appears
+// when it settles, as before), or while another hub member streams the run
+// (the report is held by the member the device is connected to).
+func (s *Server) overlaySeededRunPlan(workDir string, ps *state.ProjectState) {
+	if ps == nil || workDir == "" {
+		return
+	}
+	if !s.liveLogRunningFor(workDir) {
+		return
+	}
+	run, ok := s.trackedRun(workDir)
+	if !ok || run.ex == nil {
+		return
+	}
+	d, ok := peekSeededDispatch(run.ex, run.handleID)
+	if !ok {
+		return
+	}
+	fetcher, canFetch := run.ex.(executor.InterimProjectResultFetcher)
+	if !canFetch {
+		return
+	}
+	res, err := fetcher.InterimProjectResult(run.handleID)
+	if err != nil || len(res.Data) == 0 {
+		return
+	}
+	doc, err := decodeInterim(seededKey(run.ex.ID(), run.handleID), res.Data)
+	if err != nil {
+		// Said once per document, not once per render: the digest cache keeps
+		// a document that cannot be decoded from being decoded again.
+		s.log().Warn(logger.EventCheckpoint, 0, "a device's report of its run could not be read",
+			map[string]interface{}{"project": workDir, "executor": run.ex.ID(), "error": err.Error()})
+		return
+	}
+	// The hub's own plan is left exactly as it was: the merge writes to tasks
+	// and appends to the plan, and callers hand in state they may go on to
+	// save — or, on the broadcast path, state they share with the caller
+	// above them.
+	ps.Plan = clonePlanForOverlay(ps.Plan)
+	redact := res.Redact
+	if redact == nil {
+		redact = func(s string) string { return s }
+	}
+	projectseed.Merge(ps, doc, d.prov, redact, time.Now().UTC())
+}
+
+// clonePlanForOverlay copies a plan deeply enough that merging a run's report
+// into the copy cannot be seen through the original: every task is a copy, and
+// so is every slice the merge appends to.
+func clonePlanForOverlay(p *pm.Plan) *pm.Plan {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	c.Tasks = make([]*pm.Task, 0, len(p.Tasks))
+	for _, t := range p.Tasks {
+		if t == nil {
+			c.Tasks = append(c.Tasks, nil)
+			continue
+		}
+		ct := *t
+		ct.Annotations = append([]pm.Annotation(nil), t.Annotations...)
+		c.Tasks = append(c.Tasks, &ct)
+	}
+	return &c
 }

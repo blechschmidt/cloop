@@ -291,3 +291,124 @@ func TestRunEndedRecoversWhatAKilledRemoteRunLeftInProgress(t *testing.T) {
 		t.Errorf("project status = %q (%+v), want paused with the executor's account", st.Status, st.PauseReason)
 	}
 }
+
+// TestLostRunsPlanIsKept is the second half of Task 50, and the loss the
+// operator actually hit: a project started in pm mode on a device, the run
+// planning twelve tasks of its own and finishing one, and then the executor
+// stopped answering. The run never reported an outcome, so nothing reached the
+// hub — the dashboard showed an empty project, and the next start planned the
+// same twelve tasks again.
+//
+// What the device did report while it ran is held on the handle, and a run
+// nothing replaced takes it on the way out.
+func TestLostRunsPlanIsKept(t *testing.T) {
+	dir := statedbtest.Dir(t)
+	st := &state.ProjectState{
+		Goal: "Build an attested enclave and a client for it", WorkDir: dir, Status: "running",
+		Plan: &pm.Plan{Goal: "Build an attested enclave and a client for it"},
+	}
+	if err := st.SaveDirect(); err != nil {
+		t.Fatalf("save the hub's copy: %v", err)
+	}
+
+	done := time.Now().Add(-time.Minute).UTC()
+	ex := &resultExecutor{
+		stubExecutor: stubExecutor{status: executor.Status{State: executor.StateRunning}},
+		id:           "FL6HRGvUlqxf96aO", returns: true,
+		// What the device last reported while it was running: a plan of its
+		// own making, with no outcome for the run itself.
+		result: executor.ProjectResult{Interim: true, Data: gzResult(t, projectseed.Result{
+			Format: 1, Interim: true, Tasks: []projectseed.TaskChange{
+				{After: &pm.Task{ID: 1, Title: "Pin down the enclave protocol", Priority: 1,
+					Status: pm.TaskDone, Result: "documented", CompletedAt: &done}},
+				{After: &pm.Task{ID: 2, Title: "Set up the Cargo workspace", Priority: 2,
+					Status: pm.TaskInProgress, StartedAt: &done}},
+			},
+		})},
+	}
+	rememberSeededDispatch(ex, "h-lost", projectseed.Provenance{
+		ExecutorID: ex.id, ExecutorKind: executor.KindRemoteAgent, Isolation: "remote", RunID: "run_lost",
+	})
+
+	srv := &Server{WorkDir: dir}
+	srv.trackRun(dir, ex, "h-lost")
+	if !srv.retireLostRun(dir, ex.id, "h-lost", runVerdict{
+		Detail: "executor " + ex.id + " stopped answering and nothing replaced the run",
+	}, true) {
+		t.Fatal("retireLostRun did not take the run this test tracked")
+	}
+
+	got, err := state.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Plan == nil || len(got.Plan.Tasks) != 2 {
+		t.Fatalf("the hub's plan holds %d tasks after the run was lost, want the 2 it had reported",
+			len(got.Plan.Tasks))
+	}
+	one := got.Plan.TaskByID(1)
+	if one == nil || one.Status != pm.TaskDone {
+		t.Fatalf("task #1 = %+v, want the done the run reported", one)
+	}
+	if one.ExecutorID != ex.id || one.RunID != "run_lost" {
+		t.Errorf("task #1 attributed to %q run %q, want the hub's own dispatch record",
+			one.ExecutorID, one.RunID)
+	}
+	// Dead-run recovery runs after the merge, so the task the run was working
+	// on is recovered rather than left in progress for ever.
+	if two := got.Plan.TaskByID(2); two == nil || two.Status != pm.TaskPending {
+		t.Errorf("task #2 = %+v, want it reset to pending by the dead-run recovery", two)
+	}
+	// The run's end is the hub's verdict, never the report's.
+	if got.Status == "running" {
+		t.Errorf("the project is still %q after its run was lost", got.Status)
+	}
+	events := projectResultEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("journal = %+v, want one project_result row", events)
+	}
+	if !strings.Contains(events[0].Message, "without reporting its outcome") {
+		t.Errorf("the journal row does not say the plan came from a report rather than an outcome: %q",
+			events[0].Message)
+	}
+	// And the dispatch is settled: a second retirement finds nothing to take.
+	if n := ex.fetched.Load(); n != 1 {
+		t.Errorf("ProjectResult fetched %d times, want once", n)
+	}
+}
+
+// TestReplacedLostRunKeepsNothing is the control: when the failover put the
+// run on another executor, the replacement was seeded from the hub's copy, and
+// folding the stranded run's half-finished account in behind it would describe
+// work the replacement is about to do again.
+func TestReplacedLostRunKeepsNothing(t *testing.T) {
+	dir := remoteProject(t)
+	ex := &resultExecutor{
+		stubExecutor: stubExecutor{status: executor.Status{State: executor.StateRunning}},
+		id:           "FL6HRGvUlqxf96aO", returns: true,
+		result: executor.ProjectResult{Interim: true, Data: gzResult(t, projectseed.Result{
+			Format: 1, Interim: true, Tasks: []projectseed.TaskChange{
+				{After: &pm.Task{ID: 9, Title: "A task the stranded run made", Priority: 9}},
+			},
+		})},
+	}
+	rememberSeededDispatch(ex, "h-replaced", projectseed.Provenance{ExecutorID: ex.id})
+
+	srv := &Server{WorkDir: dir}
+	srv.trackRun(dir, ex, "h-replaced")
+	srv.retireLostRun(dir, ex.id, "h-replaced", runVerdict{Detail: "failed over"}, false)
+
+	got, err := state.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Plan.Tasks) != 1 {
+		t.Fatalf("the hub's plan holds %d tasks, want only its own", len(got.Plan.Tasks))
+	}
+	if n := ex.fetched.Load(); n != 0 {
+		t.Errorf("the stranded run's report was collected %d times; its replacement owns the project", n)
+	}
+	if isSeededDispatch(ex, "h-replaced") {
+		t.Error("the stranded dispatch is still tracked")
+	}
+}

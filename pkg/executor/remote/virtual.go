@@ -224,6 +224,14 @@ func (v *Virtual) ProjectResult(handleID string) (executor.ProjectResult, error)
 	return v.parent.ProjectResult(handleID)
 }
 
+// InterimProjectResult implements executor.InterimProjectResultFetcher, so a
+// project on a virtual executor shows the plan its run is making exactly as
+// one on the device itself does (Task 50). The report is held on the handle,
+// and the handle is the device's.
+func (v *Virtual) InterimProjectResult(handleID string) (executor.ProjectResult, error) {
+	return v.parent.InterimProjectResult(handleID)
+}
+
 // AgentVersion implements executor.BuildReporter, so a fleet build floor
 // applies to a virtual executor exactly as it applies to its device.
 func (v *Virtual) AgentVersion() string { return v.parent.AgentVersion() }
@@ -367,14 +375,15 @@ func (e *Executor) handleStatusesFor(ctx context.Context, virtualID string) ([]e
 // feature: no stop button for attach, no work product for write-back, a build
 // floor that never applies.
 var (
-	_ executor.Executor                  = (*Virtual)(nil)
-	_ executor.Lister                    = (*Virtual)(nil)
-	_ executor.Attacher                  = (*Virtual)(nil)
-	_ executor.WriteBackFetcher          = (*Virtual)(nil)
-	_ executor.WorkspaceCredentialHolder = (*Virtual)(nil)
-	_ executor.ProjectResultFetcher      = (*Virtual)(nil)
-	_ executor.BuildReporter             = (*Virtual)(nil)
-	_ executor.Revoker                   = (*Virtual)(nil)
-	_ executor.EgressScopeExplainer      = (*Virtual)(nil)
-	_ executor.Abandoner                 = (*Virtual)(nil)
+	_ executor.Executor                    = (*Virtual)(nil)
+	_ executor.Lister                      = (*Virtual)(nil)
+	_ executor.Attacher                    = (*Virtual)(nil)
+	_ executor.WriteBackFetcher            = (*Virtual)(nil)
+	_ executor.WorkspaceCredentialHolder   = (*Virtual)(nil)
+	_ executor.ProjectResultFetcher        = (*Virtual)(nil)
+	_ executor.InterimProjectResultFetcher = (*Virtual)(nil)
+	_ executor.BuildReporter               = (*Virtual)(nil)
+	_ executor.Revoker                     = (*Virtual)(nil)
+	_ executor.EgressScopeExplainer        = (*Virtual)(nil)
+	_ executor.Abandoner                   = (*Virtual)(nil)
 )

@@ -1209,7 +1209,12 @@ func (a *Agent) pumpOutput(wl *workload) {
 	if err != nil {
 		a.cfg.logf("stream %s: %v", wl.handleID, err)
 	} else {
+		// While the workload runs, a seeded one reports its plan to the
+		// control plane (Task 50) — stopped below before its outcome is
+		// read back, so no report can race the document that supersedes it.
+		stopProgress := a.followProjectProgress(wl)
 		a.drainOutput(ctx, wl, localID, lines)
+		stopProgress()
 	}
 
 	// The stream is closed, so the workload has terminated and its exit code

@@ -114,6 +114,14 @@ type ProjectResult struct {
 	// trusting the device to have scrubbed: a result is written by the party a
 	// redaction exists to protect against. Never nil.
 	Redact func(string) string
+	// Interim reports that Data is a progress report sent while the run was
+	// still going (Task 50) rather than its outcome. The hub renders one over
+	// its own copy of the project while the run is live, and merges the
+	// newest one if the run ends without ever sending its outcome — so the
+	// plan a lost run made is kept rather than lost with it. A merge says so
+	// on the project's journal: a progress report carries the plan, not the
+	// run's steps, journal or spend.
+	Interim bool
 }
 
 // ProjectResultFetcher is implemented by drivers whose Capabilities report
@@ -128,6 +136,24 @@ type ProjectResultFetcher interface {
 	// result before the terminal status, and the terminal status is what
 	// closes the stream, so by then everything that is coming has come.
 	ProjectResult(handleID string) (ProjectResult, error)
+}
+
+// InterimProjectResultFetcher is implemented by drivers that can hand back a
+// seeded run's newest progress report while the run is still going (Task 50).
+//
+// Separate from ProjectResultFetcher because the two have opposite lifetimes:
+// ProjectResult releases the document once, at the end, because merging a run
+// twice would count its spend twice; this one is read over and over — every
+// time the dashboard renders the project — and must leave the document where
+// it is. A driver that implements only ProjectResultFetcher is not a driver
+// that is doing anything wrong; its seeded runs simply show their plan when
+// they settle, as every seeded run did before this existed.
+type InterimProjectResultFetcher interface {
+	// InterimProjectResult returns the newest report the device has sent for
+	// handleID without consuming it, and ErrProjectResultUnavailable when
+	// none has arrived. Its Interim field says whether the run has since sent
+	// its outcome.
+	InterimProjectResult(handleID string) (ProjectResult, error)
 }
 
 // ErrProjectResultUnavailable reports that no result arrived for a handle.

@@ -3,6 +3,12 @@ package projectseed
 // merge.go is the hub's half of the return (Task 20339): folding what a run on
 // another machine changed into the copy of the project the dashboard renders.
 //
+// The same merge serves a run's progress reports (Task 50), which carry the
+// plan and nothing else and are marked Interim: rendered over the hub's copy
+// while the run is live, merged for real only when a run ends without ever
+// reporting its outcome. Such a document says nothing about how the run ended,
+// and mergeStatus ignores the status in it for that reason.
+//
 // The hub's copy is the authority. A Result is a report, from the least trusted
 // party in the system, about work done out of the hub's sight — and the hub's
 // copy may have moved on while the run was out: an operator can reset a task,
@@ -138,6 +144,10 @@ type MergeReport struct {
 	Steps, Events, Costs int
 	// Omitted is what the device said it left out.
 	Omitted []string
+	// Interim records that what was merged was a progress report rather than
+	// the run's outcome (Task 50): the plan as the run last reported it,
+	// merged because the run ended without ever reporting an outcome.
+	Interim bool
 	// Unreviewed are tasks that came back done without a review although the
 	// project's review gate is on (Task 20357): the device's cloop predates
 	// the gate, so it ran them — and published their work — unreviewed.
@@ -235,10 +245,18 @@ func (m MergeReport) Summary() string {
 		parts = append(parts, fmt.Sprintf("project status %s → %s", from, m.StatusTo))
 	}
 	msg := "The run's results came back from the executor"
-	if len(parts) == 0 {
-		msg = "The run came back from the executor without changing the project"
-	} else {
+	if m.Interim {
+		// A progress report, merged because the run ended without ever
+		// reporting an outcome (Task 50).
+		msg = "The run's plan came back as it last reported it while running"
+	}
+	switch {
+	case len(parts) > 0:
 		msg += ": " + strings.Join(parts, "; ")
+	case m.Interim:
+		msg = "The run's last report of its plan while running changed nothing here"
+	default:
+		msg = "The run came back from the executor without changing the project"
 	}
 	msg += "."
 	if len(m.Kept) > 0 {
@@ -283,7 +301,11 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 	if scrub == nil {
 		scrub = func(s string) string { return s }
 	}
-	rep := MergeReport{Outcomes: map[int]pm.TaskStatus{}, Omitted: append([]string(nil), r.Omitted...)}
+	rep := MergeReport{
+		Outcomes: map[int]pm.TaskStatus{},
+		Omitted:  append([]string(nil), r.Omitted...),
+		Interim:  r.Interim,
+	}
 	var rec Records
 	if st.Plan == nil {
 		st.Plan = &pm.Plan{Goal: st.Goal}
@@ -770,6 +792,13 @@ func sameDir(stored, dir string) bool {
 // with the executor's account of how the run ended. Adopting them hands that
 // machinery the case it was built for.
 func mergeStatus(st *state.ProjectState, r *Result, scrub func(string) string, rep *MergeReport) {
+	if r.Interim {
+		// A progress report is not an account of how the run ended, because
+		// it has not ended (Task 50). Whoever settles the run says what
+		// became of it — and when one is merged at all, it is because the run
+		// was lost, which is a verdict only the hub can reach.
+		return
+	}
 	from := st.Status
 	switch r.Status {
 	case "complete":

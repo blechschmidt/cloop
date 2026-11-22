@@ -351,7 +351,22 @@ const (
 	// read-only delivery, so the hub gives their runs no other project and
 	// says so in the journal; a spec carrying some is refused. See
 	// MinReadOnlyProjectsVersion.
-	ProtocolVersion = 31
+	//
+	// v32 lets a seeded run report its plan while it is still running (Task
+	// 50): the agent sends project_result frames — the same frame, marked
+	// interim — for as long as the workload lives, each carrying the plan as it
+	// stands and nothing else. Until this version the plan a run *made*
+	// existed only on the device until the run settled, so a project whose
+	// tasks the run plans itself (pm mode, auto-evolve) showed the operator an
+	// empty plan for the whole run, and a run whose executor was lost took its
+	// plan with it. No new frame: the hub holds the newest report per handle as
+	// it already held the final one, renders it over its own copy while the run
+	// is live, and merges it if the run ends without a final report. Gated on
+	// the agent side and degraded, not refused: an older hub has no handler for
+	// an interim frame and would answer it with a protocol error, so an agent
+	// only sends them on a session that negotiated v32. See
+	// MinInterimProjectResultVersion.
+	ProtocolVersion = 32
 	// MinProtocolVersion is the oldest version this build still accepts.
 	MinProtocolVersion = 1
 	// MinRevocationVersion is the first version whose agents understand the
@@ -479,6 +494,16 @@ const (
 	// the other way: an agent must not send the frame to a hub below this
 	// version, which has no handler for it.
 	MinProjectResultVersion = 13
+	// MinInterimProjectResultVersion is the first version whose hubs accept a
+	// project_result frame marked interim — a seeded run's plan sent back while
+	// the run is still going (Task 50).
+	//
+	// The rule runs the same way as MinProjectResultVersion's: an agent must
+	// not send the frame to a hub below this version. Such a hub refuses any
+	// project_result for a handle it has not seen finish, and answers with a
+	// protocol error; an agent speaking to one sends none, and the run's plan
+	// appears when the run settles, as before.
+	MinInterimProjectResultVersion = 32
 	// MinVirtualExecutorVersion is the first version whose agents honour
 	// StartPayload.Virtual — a sub-executor's firewall and device list — and
 	// report the inventory those are chosen from (Task 20345).
@@ -672,6 +697,13 @@ func SupportsProjectSeed(version int) bool { return version >= MinProjectSeedVer
 // SupportsProjectResult reports whether a session at this protocol version can
 // carry a seeded run's changes back in a project_result frame.
 func SupportsProjectResult(version int) bool { return version >= MinProjectResultVersion }
+
+// SupportsInterimProjectResult reports whether a session at this protocol
+// version accepts a seeded run's plan while the run is still running. See
+// MinInterimProjectResultVersion.
+func SupportsInterimProjectResult(version int) bool {
+	return version >= MinInterimProjectResultVersion
+}
 
 // SupportsVirtualExecutor reports whether an agent speaking this protocol
 // version applies StartPayload.Virtual and reports its hardware inventory.
@@ -1878,6 +1910,12 @@ type ProjectResultPayload struct {
 	// agent's. Carried rather than dropped so the hub's journal can say why a
 	// run came back without results instead of only that it did.
 	Err string `json:"error,omitempty"`
+	// Interim marks a report sent while the workload is still running (Task
+	// 50, protocol v32): the plan as it stands, so the dashboard can show the
+	// work a run on another machine is going through instead of an empty
+	// project. It is not the run's outcome — the final report, sent once the
+	// harness has exited, is — and the hub keeps only the newest one.
+	Interim bool `json:"interim,omitempty"`
 }
 
 // maxProjectResultErrBytes bounds ProjectResultPayload.Err. It is the bound
@@ -1903,6 +1941,11 @@ func DecodeProjectResult(f Frame) (ProjectResultPayload, error) {
 	case len(p.Err) > maxProjectResultErrBytes:
 		return p, fmt.Errorf("%w: project result error is %d bytes, over %d",
 			ErrProtocol, len(p.Err), maxProjectResultErrBytes)
+	case p.Interim && len(p.Data) == 0:
+		// An interim report exists to carry the plan. A device that cannot
+		// read its own project mid-run says so once, in the final report,
+		// where the project's journal has somewhere to put the reason.
+		return p, fmt.Errorf("%w: an interim project result carries no document", ErrProtocol)
 	}
 	return p, nil
 }
