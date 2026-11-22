@@ -179,14 +179,28 @@ func detectVirtualization(device string) bool {
 	return true
 }
 
+// procMeminfo is where detectMemoryMB reads memory first. A variable so a test
+// can take it away, as the installed unit's ProcSubset=pid does.
+var procMeminfo = "/proc/meminfo"
+
 // detectMemoryMB reads total system memory, returning 0 when it cannot.
 //
-// Only Linux is implemented, via /proc/meminfo. That is not an oversight: the
-// edge devices this feature targets are overwhelmingly Linux, and the field is
-// advisory scheduling metadata. A macOS agent reports 0 and is scheduled on
-// its other attributes rather than being excluded.
+// Only Linux is implemented: /proc/meminfo, and sysinfo(2) where /proc/meminfo
+// cannot be read — which is every agent the installer set up, because its unit
+// sets ProcSubset=pid (Task 20512). That is not an oversight: the edge devices
+// this feature targets are overwhelmingly Linux, and the field is advisory
+// scheduling metadata. A macOS agent reports 0 and is scheduled on its other
+// attributes rather than being excluded.
 func detectMemoryMB() int {
-	f, err := os.Open("/proc/meminfo")
+	if mb := meminfoMemoryMB(); mb > 0 {
+		return mb
+	}
+	return sysinfoMemoryMB()
+}
+
+// meminfoMemoryMB reads MemTotal from procMeminfo, 0 when it cannot.
+func meminfoMemoryMB() int {
+	f, err := os.Open(procMeminfo)
 	if err != nil {
 		return 0
 	}

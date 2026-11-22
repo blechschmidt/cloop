@@ -1454,6 +1454,12 @@ schema and the hub's HTTP API may change in any release.
   replacement followed, or one the agent cannot answer for, stands as before
   (Task 20512).
 
+- **An installed agent reports how much memory its device has.** The unit the
+  installer renders sets `ProcSubset=pid`, which hides `/proc/meminfo`, so
+  every installed agent reported its memory as unknown and the Executors panel
+  could not show how small a device was. The agent now falls back to
+  `sysinfo(2)`, which no mount option hides (Task 20512).
+
 - **A seeded run's status and plan show whichever button started it.** Both
   overlays that describe a run on an executor the hub cannot read were gated on
   the live-log flag, which only the Overview's Run button raises: `POST
