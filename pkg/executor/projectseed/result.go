@@ -415,6 +415,17 @@ func carryAttachments(dir, dbPath string, base, after *pm.Plan, scrub func(strin
 	if err != nil {
 		return nil, nil, fmt.Errorf("projectseed: read the run's attachments: %w", err)
 	}
+	// Only what the run attached as results. A task's input files are the
+	// hub's to begin with (Task 20511): the run fetched its copies from there,
+	// and a row of one in the sandbox's database — none is written there, but
+	// the workload can write that database — is not something to send back.
+	kept := rows[:0]
+	for _, row := range rows {
+		if row.Role == statedb.AttachmentRoleResult {
+			kept = append(kept, row)
+		}
+	}
+	rows = kept
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].CreatedAt.Before(rows[j].CreatedAt) })
 	var notes []string
 	if n := len(rows) - maxResultAttachments; n > 0 {

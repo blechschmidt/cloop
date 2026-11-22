@@ -54,7 +54,27 @@ const (
 	// AttachmentSourceCLI is a file attached by hand with
 	// `cloop task attachments add`.
 	AttachmentSourceCLI = "cli"
+	// AttachmentSourceUpload is a file a person uploaded in the dashboard
+	// (Task 20511).
+	AttachmentSourceUpload = "upload"
 )
+
+// Attachment roles: what a file is to its task (Task 20511).
+const (
+	// AttachmentRoleResult is a file attached as a task's result: what a run
+	// made for a person to look at, or what a person attached to the record.
+	// It is the empty string, which is what every row written before roles
+	// existed holds.
+	AttachmentRoleResult = ""
+	// AttachmentRoleInput is a file a person attached for the task's agent to
+	// work with. Every attempt at the task is given a copy of each.
+	AttachmentRoleInput = "input"
+)
+
+// ValidAttachmentRole reports whether role is one cloop gives a file.
+func ValidAttachmentRole(role string) bool {
+	return role == AttachmentRoleResult || role == AttachmentRoleInput
+}
 
 // Bounds on what a row carries. Names come from a run's outbox, notes from a
 // command line and reasons from the hub; all of them are loaded with every
@@ -74,6 +94,10 @@ const (
 
 // AttachmentOutboxDir is the store's subdirectory holding the tasks' outboxes.
 const AttachmentOutboxDir = "outbox"
+
+// AttachmentInboxDir is the store's subdirectory holding the copies of the
+// tasks' input files an attempt is given (Task 20511).
+const AttachmentInboxDir = "inbox"
 
 // attachmentGitignore is the store's .gitignore: everything in it, itself
 // included, so a project that does not ignore .cloop/ cannot commit a run's
@@ -183,6 +207,9 @@ type AttachmentRow struct {
 	// says why they are not: a remote run whose result had no room for the
 	// file left it on the device.
 	Unavailable string `json:"unavailable,omitempty"`
+	// Role is AttachmentRoleInput for a file given to the task's agent, and
+	// empty for a result (Task 20511).
+	Role string `json:"role,omitempty"`
 }
 
 // AttachmentUsage is how much a task's and its project's attachments hold, for
@@ -194,7 +221,7 @@ type AttachmentUsage struct {
 	ProjectBytes int64
 }
 
-const attachmentColumns = `id, task_id, name, media_type, size, sha256, source, run_id, note, added_by, created_at, unavailable`
+const attachmentColumns = `id, task_id, name, media_type, size, sha256, source, run_id, note, added_by, created_at, unavailable, role`
 
 // attachmentCountSelect is the correlated subquery taskSelect reads a task's
 // attachment count through. task_attachments_task makes it an index probe.
@@ -226,6 +253,10 @@ func boundAttachment(row AttachmentRow) (AttachmentRow, error) {
 	row.Note = clipText(strings.TrimSpace(row.Note), maxAttachmentNote)
 	row.AddedBy = clipText(strings.TrimSpace(row.AddedBy), maxAttachmentText)
 	row.Unavailable = clipText(strings.TrimSpace(row.Unavailable), maxAttachmentReason)
+	if !ValidAttachmentRole(row.Role) {
+		return row, fmt.Errorf("statedb: attachment %s: role %q is neither %q nor a result's %q",
+			row.ID, clipText(row.Role, 64), AttachmentRoleInput, AttachmentRoleResult)
+	}
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now()
 	}
@@ -256,9 +287,9 @@ func (d *DB) AddTaskAttachment(row AttachmentRow) error {
 		return fmt.Errorf("statedb: attach %q to task %d: %w", row.Name, row.TaskID, classifyDriverErr(err))
 	}
 	res, err := tx.Exec(`INSERT INTO task_attachments(`+attachmentColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
 		row.ID, row.TaskID, row.Name, row.MediaType, row.Size, row.SHA256, row.Source,
-		row.RunID, row.Note, row.AddedBy, row.CreatedAt.UTC().Format(time.RFC3339Nano), row.Unavailable)
+		row.RunID, row.Note, row.AddedBy, row.CreatedAt.UTC().Format(time.RFC3339Nano), row.Unavailable, row.Role)
 	if err != nil {
 		return fmt.Errorf("statedb: attach %q to task %d: %w", row.Name, row.TaskID, classifyDriverErr(err))
 	}
@@ -278,6 +309,31 @@ func (d *DB) TaskAttachments(taskID int) ([]AttachmentRow, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return queryAttachments(d.conn, `WHERE task_id = ? AND `+validAttachmentIDSQL+` ORDER BY created_at, id`, taskID)
+}
+
+// TaskInputs returns the files attached to a task for its agent — the rows of
+// role AttachmentRoleInput — oldest first (Task 20511).
+func (d *DB) TaskInputs(taskID int) ([]AttachmentRow, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return queryAttachments(d.conn, `WHERE task_id = ? AND role = ? AND `+validAttachmentIDSQL+` ORDER BY created_at, id`,
+		taskID, AttachmentRoleInput)
+}
+
+// HasTaskInputs reports whether any task in the database has an input file.
+func (d *DB) HasTaskInputs() (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var one int
+	err := d.conn.QueryRow(`SELECT 1 FROM task_attachments WHERE role = ? AND `+validAttachmentIDSQL+` LIMIT 1`,
+		AttachmentRoleInput).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("statedb: look for input files: %w", classifyDriverErr(err))
+	}
+	return true, nil
 }
 
 // AllTaskAttachments returns every attachment in the database, by task and
@@ -429,6 +485,30 @@ func AuditTaskAttachmentDelete(d *DB, row AttachmentRow, actor string) {
 	})
 }
 
+// AuditTaskAttachmentAdd records a file a person attached to a task (Task
+// 20511), and via where: the dashboard, or the command that did it. Best
+// effort, like every emit helper; d must be the project's handle.
+func AuditTaskAttachmentAdd(d *DB, row AttachmentRow, actor, via string) {
+	if actor == "" {
+		actor = "system"
+	}
+	emit(d, &AuditEvent{
+		Actor:      actor,
+		EventType:  string(auditaction.ActionTaskAttachmentAdd),
+		EntityType: "task",
+		EntityID:   fmt.Sprintf("%d", row.TaskID),
+		Payload: MarshalAuditPayload(map[string]any{
+			"id":            row.TaskID,
+			"attachment_id": row.ID,
+			"name":          row.Name,
+			"size":          row.Size,
+			"sha256":        row.SHA256,
+			"role":          row.Role,
+			"via":           via,
+		}),
+	})
+}
+
 // attachmentQuerier is what queryAttachments reads through: the connection,
 // or a transaction already holding the write lock.
 type attachmentQuerier interface {
@@ -448,7 +528,7 @@ func queryAttachments(q attachmentQuerier, where string, args ...any) ([]Attachm
 			created string
 		)
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.Name, &r.MediaType, &r.Size, &r.SHA256, &r.Source,
-			&r.RunID, &r.Note, &r.AddedBy, &created, &r.Unavailable); err != nil {
+			&r.RunID, &r.Note, &r.AddedBy, &created, &r.Unavailable, &r.Role); err != nil {
 			return nil, fmt.Errorf("statedb: read attachments: %w", classifyDriverErr(err))
 		}
 		r.CreatedAt = parseOptionalTime(created)
@@ -547,9 +627,9 @@ func distinctInts(tx *sql.Tx, query string) (map[int]bool, error) {
 }
 
 // removeAttachmentFiles deletes the stored bytes of attachments whose rows are
-// gone, and the outboxes of tasks that are gone. Best effort: a file left
-// behind costs disk, not correctness — no row names it any more — and the
-// store's sweep collects it later.
+// gone, and the outboxes and inboxes of tasks that are gone. Best effort: a
+// file left behind costs disk, not correctness — no row names it any more —
+// and the store's sweep collects it later.
 //
 // Only an id of attachment shape is removed, through OpenAttachmentStore's
 // root: the store is in reach of a workload on a shared-filesystem executor.
@@ -570,12 +650,16 @@ func (d *DB) removeAttachmentFiles(ids []string, outboxes []int) {
 	if len(outboxes) == 0 {
 		return
 	}
-	if info, err := root.Lstat(AttachmentOutboxDir); err != nil || !info.IsDir() {
-		return
-	}
-	for _, taskID := range outboxes {
-		if taskID > 0 {
-			_ = root.RemoveAll(AttachmentOutboxDir + "/" + strconv.Itoa(taskID))
+	// A gone task's inbox goes with its outbox: the copies of its input files
+	// an attempt was given, which no later task with the id may inherit.
+	for _, sub := range []string{AttachmentOutboxDir, AttachmentInboxDir} {
+		if info, err := root.Lstat(sub); err != nil || !info.IsDir() {
+			continue
+		}
+		for _, taskID := range outboxes {
+			if taskID > 0 {
+				_ = root.RemoveAll(sub + "/" + strconv.Itoa(taskID))
+			}
 		}
 	}
 }

@@ -602,6 +602,8 @@
                     data-action-keydown="addTaskDescKey"></textarea>
           <input class="form-input" id="newTaskPriority" placeholder="Priority (1=high)" type="number" min="1">
           <input class="form-input" id="newTaskDeps" placeholder="Depends on (IDs, e.g. 1,2)" style="flex:1;min-width:160px">
+          <button class="btn" id="newTaskFilesBtn" data-perm="task.mutate" data-action="pickTaskFiles" title="Files for the agent to work with">Files</button>
+          <input type="file" id="newTaskFiles" multiple hidden data-action-change="taskFilesPicked">
           <!-- Dictate a task (Task 20238). Hidden until GET /api/dictate says a
                speech backend is configured: a microphone that fails after
                someone has already spoken a sentence into it is worse than no

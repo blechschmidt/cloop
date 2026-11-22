@@ -135,7 +135,19 @@ var registry = []Entry{
 		Payload:   []string{"id", "attachment_id", "name", "size", "sha256"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,
-		Note:      "Attaching is not audited: a run's files are recorded in the project's event journal, which names the run. A file deleted with its task is covered by that task's `task.delete`.",
+		Note:      "A run attaching its files is not audited: they are recorded in the project's event journal, which names the run. A person attaching one is (`task.attachment_add`). A file deleted with its task is covered by that task's `task.delete`.",
+	},
+	{
+		Action:    ActionTaskAttachmentAdd,
+		Home:      HomeProject,
+		Entity:    "task",
+		Trigger:   "A person attaches a file to a task: uploads an input file for its agent in the dashboard (POST /api/tasks/{id}/attachments), or attaches one with `cloop task attachments add` or `cloop task add --input-file` (Task 20511).",
+		Payload:   []string{"id", "attachment_id", "name", "size", "sha256", "role", "via"},
+		Stability: StabilityStable,
+		Read:      authz.PermAuditRead,
+		Note: "`role` is `input` for a file every attempt at the task is given, and empty for one attached for the record. " +
+			"`via` names where it was attached: the dashboard, `cloop task attachments add` or `cloop task add`. " +
+			"A run's own files are recorded in the project's event journal, not here.",
 	},
 
 	// ── run ────────────────────────────────────────────────────────────────
@@ -213,6 +225,25 @@ var registry = []Entry{
 			"a minute for live sessions and 120 for every other value; `suppressed` counts that credential's " +
 			"refusals since its previous row that were not written, `untracked` the refusals of credentials the " +
 			"limiter kept no count for.",
+	},
+	{
+		Action: ActionRunInputFetch,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_session",
+		Trigger: "A run whose project was seeded into its sandbox — on an edge device, in a Kubernetes Pod — fetches one of " +
+			"its tasks' input files from the hub with its session, at the start of an attempt at the task — " +
+			"POST /api/run/knowledge/inputs/file (Task 20511).",
+		Payload: []string{
+			"session_id", "run_id", "project", "executor_id", "workdir", "task_id", "attachment_id", "name", "size",
+			"sha256", "outcome", "reason",
+		},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`outcome` is `ok` for a file served, `refused` — with the `reason` — for one the session may not have: " +
+			"a session minted without its tasks' input files, a task the hub numbers differently from the run, a " +
+			"file that is not an input of the task, or a request over the session's rate, its two transfers at " +
+			"once or its byte budget. Listing a task's input files is not recorded; every file whose bytes left " +
+			"the hub is.",
 	},
 	{
 		Action:  ActionRunFirewallDenied,

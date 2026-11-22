@@ -172,10 +172,11 @@ Seven pages, best read in order. They are also listed on the
   read-only account, connecting Confluence or Jira (Cloud or Data Center),
   choosing which spaces or projects to index, binding sources to projects, and
   what an agent sees during a run.
-- **[Task attachments](guides/attachments.md)**: files a run produces for
-  people to look at (reports, charts, screenshots, exports, logs), attached to
-  the task. Where an agent puts them, `cloop task attachments`, and how they
-  appear in the dashboard.
+- **[Task attachments](guides/attachments.md)**: files you give a task's
+  agent to work with (a spec, data, a screenshot), and files a run produces for
+  people to look at (reports, charts, exports, logs). Uploading input files,
+  where an agent finds them and puts its own, `cloop task attachments`, and how
+  they appear in the dashboard.
 - **[Stopping a run for review](guides/human-review-gates.md)**: human review
   gates in the task list. A run stops at one until someone approves it, so you
   can check the work above it and add or change tasks before the run goes on.

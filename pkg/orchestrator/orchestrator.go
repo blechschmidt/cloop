@@ -2381,8 +2381,9 @@ func (o *Orchestrator) runPMSequential(ctx context.Context) error {
 		prompt = withGateSection(prompt, requirementsRetrySection(task.RequirementsCheck))
 		prompt = withGateSection(prompt, activeGate.promptSection())
 		// Attachments (Task 20428): the outbox the agent copies files into for
-		// this attempt, named in its prompt and in its environment.
-		outbox := o.openOutbox(task, o.router.For(task.Role))
+		// this attempt, named in its prompt and in its environment; and the
+		// task's input files (Task 20511), copied where it can read them.
+		outbox := o.openOutbox(ctx, task, o.router.For(task.Role))
 		prompt = withGateSection(prompt, outbox.promptSection())
 
 		// Prompt A/B testing: track the currently recommended variant for this
@@ -4687,7 +4688,7 @@ func (o *Orchestrator) runPMParallel(ctx context.Context) error {
 			prompt = withGateSection(prompt, o.readOnlySection())
 			prompt = withGateSection(prompt, o.requirementContract(t))
 			prompt = withGateSection(prompt, requirementsRetrySection(t.RequirementsCheck))
-			roundOutboxes[i] = o.openOutbox(t, o.router.For(t.Role))
+			roundOutboxes[i] = o.openOutbox(ctx, t, o.router.For(t.Role))
 			prompt = withGateSection(prompt, roundOutboxes[i].promptSection())
 			prebuiltPrompts[i] = prompt
 		}

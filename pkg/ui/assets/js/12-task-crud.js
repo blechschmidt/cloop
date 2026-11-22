@@ -18,12 +18,24 @@ function clearAddTask() {
   ADD_TASK_FIELDS.forEach(id => { document.getElementById(id).value = ''; });
 }
 
+// Input files for a new task (Task 20511): picked with it, uploaded once it
+// exists, by deferred/attachments.js.
+ACTIONS.pickTaskFiles = () => document.getElementById('newTaskFiles').click();
+ACTIONS.taskFilesPicked = function() {
+  const n = this.files.length;
+  document.getElementById('newTaskFilesBtn').textContent = n ? 'Files ('+n+')' : 'Files';
+};
+
 act('submitAddTask', function() {
   const f = addTaskForm(), title = f.title;
   if (!title) { toast('Title is required', 'err'); return; }
   api(pUrl('/api/task/add'), f).then(d => {
     if (d.ok) {
       clearAddTask();
+      const fi = document.getElementById('newTaskFiles'), files = Array.from(fi.files);
+      fi.value = '';
+      ACTIONS.taskFilesPicked.call(fi);
+      if (files.length && d.task) panelAct('attachments', 'upload', d.task.id, files);
       toast('Task added: '+title, 'ok');
       // Optimistically merge the returned task into appState so the row
       // appears immediately, without waiting for the WS state_diff round-trip
@@ -515,9 +527,11 @@ function _renderTaskDetails(d) {
       '<div class="td-text">'+esc(t.failure_diagnosis)+'</div></div>';
   }
 
-  // Attachments (Task 20428): drawn by a deferred panel, fetched only for a
-  // task that has some.
-  if (t.attachment_count) html += '<div class="td-section" id="td-files"><h3>Attachments ('+t.attachment_count+')</h3><div class="td-empty">Loading…</div></div>';
+  // Attachments (Task 20428) and input files (Task 20511): drawn by a
+  // deferred panel, fetched for a task that has some or for someone who may
+  // add them.
+  const files = t.attachment_count || can('task.mutate');
+  if (files) html += '<div class="td-section" id="td-files"><h3>Attachments ('+(t.attachment_count||0)+')</h3><div class="td-empty">Loading…</div></div>';
   // What its runs' firewalls refused (Task 20437): deferred/network.js.
   if (d.network) html += '<div class="td-section" id="td-net"></div>';
   // The requirements gate's last check (Task 20461): deferred/reqgate.js.
@@ -569,7 +583,7 @@ function _renderTaskDetails(d) {
 
   body.innerHTML = html;
   _tdLoadReproductions(t.id);
-  if (t.attachment_count) panelAct('attachments', 'show', t.id);
+  if (files) panelAct('attachments', 'show', t.id);
   if (d.network) panelAct('network', 'task', t.id);
   if (t.requirements_check) panelAct('reqgate', 'show', t.requirements_check);
   if (t.review && t.review.verdict) panelAct('tdreview', 'show', t.review);

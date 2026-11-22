@@ -93,11 +93,11 @@ The dashboard and everything an integrator can drive: projects, tasks, runs,
 the executor fleet, secrets and grants, audit, and the display-glasses surface.
 Generated from `routeTable()` in `pkg/ui/routes.go`.
 
-382 endpoints, by the permission each one requires:
+385 endpoints, by the permission each one requires:
 
 | Permission | Endpoints |
 |------------|-----------|
-| `public` (no permission) | 73 |
+| `public` (no permission) | 75 |
 | `audit.read` | 5 |
 | `config.write` | 19 |
 | `executor.manage` | 50 |
@@ -114,7 +114,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | `secret.request` | 5 |
 | `secret.revoke` | 3 |
 | `session.admin` | 2 |
-| `task.mutate` | 42 |
+| `task.mutate` | 43 |
 | `token.admin` | 6 |
 | `user.manage` | 30 |
 | `view.prefs` | 2 |
@@ -385,6 +385,8 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | POST | `/api/run/adopt-build` | `run.start` | project |
 | POST | `/api/run/knowledge/citations` | `public` | global |
 | POST | `/api/run/knowledge/get` | `public` | global |
+| POST | `/api/run/knowledge/inputs` | `public` | global |
+| POST | `/api/run/knowledge/inputs/file` | `public` | global |
 | POST | `/api/run/knowledge/readonly` | `public` | global |
 | POST | `/api/run/knowledge/readonly/snapshot` | `public` | global |
 | POST | `/api/run/knowledge/search` | `public` | global |
@@ -425,6 +427,7 @@ Generated from `routeTable()` in `pkg/ui/routes.go`.
 | GET | `/api/tasks/{id}/attach` | `sandbox.attach` | project |
 | GET | `/api/tasks/{id}/attach/info` | `sandbox.attach` | project |
 | GET | `/api/tasks/{id}/attachments` | `project.read` | project |
+| POST | `/api/tasks/{id}/attachments` | `task.mutate` | project |
 | GET | `/api/tasks/{id}/attachments/{aid}` | `project.read` | project |
 | DELETE | `/api/tasks/{id}/attachments/{aid}` | `task.mutate` | project |
 | GET | `/api/tasks/{id}/blocker` | `project.read` | project |

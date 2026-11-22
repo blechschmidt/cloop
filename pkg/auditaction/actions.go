@@ -33,6 +33,9 @@ const (
 	// ActionTaskAttachmentDelete records a person deleting a file attached to
 	// a task (Task 20428).
 	ActionTaskAttachmentDelete Action = "task.attachment_delete"
+	// ActionTaskAttachmentAdd records a person attaching a file to a task: an
+	// input file for its agent, or a file for the record (Task 20511).
+	ActionTaskAttachmentAdd Action = "task.attachment_add"
 	// ActionTaskGateApprove records a person approving a human review gate in
 	// a task list, or pre-approving a task that requires approval (Task
 	// 20477).
@@ -56,6 +59,9 @@ const (
 	// run or a pool presented to a route of the dashboard's API, which takes
 	// none of them (Task 20499).
 	ActionRunCredentialRefused Action = "run.credential_refused"
+	// ActionRunInputFetch records a run seeded into its sandbox fetching one
+	// of its tasks' input files from the hub with its session (Task 20511).
+	ActionRunInputFetch Action = "run.input_fetch"
 	// ActionRunFirewallDenied records, when a run ends, what one deny path of
 	// its sandbox's firewall refused in all (Task 20437): one row per run and
 	// rule, never one per packet.

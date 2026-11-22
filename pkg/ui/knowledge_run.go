@@ -321,6 +321,10 @@ type knowledgeScope struct {
 	// Knowledge says the session was minted for the project's knowledge, not
 	// only for the projects it reads.
 	Knowledge bool `json:"knowledge,omitempty"`
+	// Inputs says the session opens the input files of the tasks of the
+	// project WorkDir names (Task 20511): minted for a run seeded into its
+	// sandbox, whose database holds none of them.
+	Inputs bool `json:"inputs,omitempty"`
 }
 
 // applyKnowledgeSession gives a run of a project with knowledge sources bound
@@ -355,7 +359,20 @@ func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, i
 			"not read their bindings ("+err.Error()+").")
 		has = false
 	}
-	if !has && len(readOnly) == 0 {
+	// A run seeded into its sandbox works on a copy of the project whose
+	// database holds none of its tasks' input files (Task 20511): it fetches
+	// them from the hub with this session at every attempt. Every such run
+	// gets it, with input files or without, so a file a person attaches while
+	// the run is going reaches the task's next attempt.
+	inputs := len(spec.ProjectSeed) > 0
+	if inputs && specHasNoNetwork(spec) {
+		inputs = false
+		if projectHasInputFiles(workDir) {
+			noteKnowledge(workDir, "Input files are attached to tasks of this project, but this run has no network "+
+				"to fetch them from the hub with: its agents get none of them.")
+		}
+	}
+	if !has && len(readOnly) == 0 && !inputs {
 		return spec, nil
 	}
 	base, why := knowledgeRouteFor(ex)
@@ -365,6 +382,10 @@ func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, i
 				"cannot reach this hub's knowledge search: %s. The run's tasks get no reference material and its "+
 				"agent no knowledge search.", ex.ID(), why))
 		}
+		if inputs && projectHasInputFiles(workDir) {
+			noteKnowledge(workDir, fmt.Sprintf("Input files are attached to tasks of this project, but its runs on %s "+
+				"cannot reach this hub to fetch them: %s. The run's agents get none of them.", ex.ID(), why))
+		}
 		return spec, nil
 	}
 	id, token, err := newKnowledgeToken()
@@ -373,7 +394,7 @@ func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, i
 			"could be minted ("+err.Error()+").")
 		return spec, nil
 	}
-	scope, _ := json.Marshal(knowledgeScope{WorkDir: workDir, ReadOnly: readOnly, Knowledge: has})
+	scope, _ := json.Marshal(knowledgeScope{WorkDir: workDir, ReadOnly: readOnly, Knowledge: has, Inputs: inputs})
 	now := time.Now().UTC()
 	if err := db.PutProxySession(statedb.ProxySessionRow{
 		Kind: statedb.ProxySessionKnowledge, SessionID: id, TokenSHA256: tokenSHA256(token),
@@ -393,6 +414,10 @@ func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, i
 	if len(readOnly) > 0 {
 		vars[knowledgerun.EnvReadersURL], vars[knowledgerun.EnvReadersToken] = base, token
 		sensitive = append(sensitive, knowledgerun.EnvReadersToken)
+	}
+	if inputs {
+		vars[knowledgerun.EnvInputsURL], vars[knowledgerun.EnvInputsToken] = base, token
+		sensitive = append(sensitive, knowledgerun.EnvInputsToken)
 	}
 	spec = withSensitiveEnv(spec, ex, vars, sensitive)
 	return spec, &runKnowledge{id: id, workDir: workDir, base: base}

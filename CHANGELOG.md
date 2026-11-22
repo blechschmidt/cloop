@@ -340,6 +340,29 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **You can give a task's agent files to work with.** Attach input files to a
+  task in the dashboard (**Add input files…** or a drop on the task's
+  Attachments section, or **Files** in the Add Task form), with
+  `cloop task attachments add <task> <file> --input`, or with
+  `cloop task add … --input-file <file>`. At the start of every attempt the run
+  copies them into `.cloop/attachments/inbox/<task>/`, names that directory in
+  the agent's prompt and in `$CLOOP_TASK_INPUTS`, and lists each file with its
+  size, type and note; the copies are read-only, fresh for each attempt and
+  removed when it ends. A provider that only returns text gets the text of the
+  text files in its prompt instead, up to 64 KiB. A run seeded into its sandbox
+  (an edge device, a Kubernetes Pod) fetches them from the hub with a run
+  session minted for every such run (`POST /api/run/knowledge/inputs` and
+  `/inputs/file`), which opens only the input files of its own project's tasks,
+  two at a time from a byte budget, and checks each against its SHA-256. A
+  file that cannot be given is named in the prompt with the reason. Uploads are
+  the request body itself (`POST /api/tasks/{id}/attachments`,
+  `application/octet-stream`, the one route that takes it), need
+  `task.mutate`, take their room before their first byte, are held to the
+  attachment limits and a read deadline, and are audited
+  (`task.attachment_add`); every file a seeded run fetches is audited too
+  (`run.input_fetch`). The listing says which files are inputs and
+  which are results. Migration 0104 adds `task_attachments.role`; older builds
+  read it as an ordinary attachment (Task 20511).
 - **The documentation site hosts the dashboard at `/demo/`, with canned data,
   so you can look around it before installing cloop.** It is the dashboard's
   own HTML, script bundle, stylesheet and panels, copied out of

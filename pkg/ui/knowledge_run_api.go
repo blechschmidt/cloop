@@ -61,6 +61,10 @@ func (s *Server) knowledgeRunRoutes() []routeSpec {
 		// session: readonly_run_api.go.
 		{Pattern: "POST " + mount + knowledgerun.PathReadOnly, Handler: s.handleRunReadOnly, Perm: authz.PermPublic, Scope: scopeGlobal},
 		{Pattern: "POST " + mount + knowledgerun.PathReadOnlySnapshot, Handler: s.handleRunReadOnlySnapshot, Perm: authz.PermPublic, Scope: scopeGlobal},
+		// A seeded run's tasks' input files (Task 20511), with the same
+		// session: inputs_run_api.go.
+		{Pattern: "POST " + mount + knowledgerun.PathInputs, Handler: s.handleRunInputs, Perm: authz.PermPublic, Scope: scopeGlobal},
+		{Pattern: "POST " + mount + knowledgerun.PathInputFile, Handler: s.handleRunInputFile, Perm: authz.PermPublic, Scope: scopeGlobal},
 	}
 }
 
@@ -95,6 +99,13 @@ var runKnowledgeLimiter = struct {
 
 // allowRunKnowledge takes a request from session id's bucket.
 func allowRunKnowledge(id string, now time.Time) bool {
+	return allowRunBucket(id, runKnowledgeRate, runKnowledgeBurst, now)
+}
+
+// allowRunBucket takes a request from the bucket under key, which refills at
+// rate a second up to burst.
+func allowRunBucket(key string, rate, burst float64, now time.Time) bool {
+	id := key
 	runKnowledgeLimiter.mu.Lock()
 	defer runKnowledgeLimiter.mu.Unlock()
 	if len(runKnowledgeLimiter.buckets) > 4096 {
@@ -108,10 +119,10 @@ func allowRunKnowledge(id string, now time.Time) bool {
 	}
 	b := runKnowledgeLimiter.buckets[id]
 	if b == nil {
-		b = &runKnowledgeBucket{tokens: runKnowledgeBurst, last: now}
+		b = &runKnowledgeBucket{tokens: burst, last: now}
 		runKnowledgeLimiter.buckets[id] = b
 	}
-	b.tokens = min(runKnowledgeBurst, b.tokens+now.Sub(b.last).Seconds()*runKnowledgeRate)
+	b.tokens = min(burst, b.tokens+now.Sub(b.last).Seconds()*rate)
 	b.last = now
 	if b.tokens < 1 {
 		return false
@@ -243,8 +254,14 @@ func withField(fields map[string]any, k string, v any) map[string]any {
 	return out
 }
 
-// close releases the call's database.
-func (c *runKnowledgeCall) close() { _ = c.db.Close() }
+// close releases the call's database. Idempotent: a handler may give it back
+// before a long answer and still defer the close.
+func (c *runKnowledgeCall) close() {
+	if c.db != nil {
+		_ = c.db.Close()
+		c.db = nil
+	}
+}
 
 // runBearer is the bearer token r presents, or "".
 func runBearer(r *http.Request) string {

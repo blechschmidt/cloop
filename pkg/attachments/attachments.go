@@ -202,6 +202,9 @@ type Meta struct {
 	Note      string
 	AddedBy   string
 	CreatedAt time.Time
+	// Role is statedb.AttachmentRoleInput for a file given to the task's
+	// agent, and empty for a result.
+	Role string
 }
 
 // Put stores the bytes src yields as a new attachment of the task, records it
@@ -224,7 +227,7 @@ func Put(db *statedb.DB, dbPath string, taskID int, meta Meta, src io.Reader, li
 func put(root *os.Root, db *statedb.DB, taskID int, meta Meta, src io.Reader, limit int64, scrub *redact.Set) (statedb.AttachmentRow, error) {
 	row := statedb.AttachmentRow{
 		TaskID: taskID, Name: CleanName(meta.Name), Source: meta.Source, RunID: meta.RunID,
-		Note: meta.Note, AddedBy: meta.AddedBy, CreatedAt: meta.CreatedAt,
+		Note: meta.Note, AddedBy: meta.AddedBy, CreatedAt: meta.CreatedAt, Role: meta.Role,
 	}
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now()

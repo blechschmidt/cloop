@@ -26,7 +26,8 @@ package ui
 //     is refused with 421.
 //   - forgeryGuard: a state-changing request must come from one of the hub's
 //     own pages (sameorigin.CheckUnsafe) unless it carries a bearer token, and
-//     its body must be JSON — multipart only on the three upload routes.
+//     its body must be JSON — multipart only on the three recording routes,
+//     application/octet-stream only on a task's file upload.
 //   - wsOriginAllowed: a WebSocket's Origin must be one of the hub's own,
 //     scheme, host and port.
 //
@@ -280,6 +281,11 @@ func (s *Server) bodyTypeAccepted(r *http.Request, ct string) bool {
 		return jsonbody.IsMediaType(ct, cspReportMediaTypes...)
 	case sameorigin.IsMultipartForm(ct):
 		return multipartRoutes[p]
+	case jsonbody.IsMediaType(ct, uploadMediaType):
+		// A task's input file, uploaded as itself (Task 20511): a type no
+		// form can send and no page can send cross-origin without a
+		// preflight, which the hub never answers.
+		return r.Method == http.MethodPost && uploadRoutePath(p)
 	}
 	return false
 }

@@ -1,0 +1,22 @@
+-- 0104_task_attachment_role: files a person gives a task's agent (Task 20511).
+--
+-- task_attachments.role — '' for a file attached as a task's result, which is
+-- every row written before this migration (a run's outbox, a remote run's
+-- result, `cloop task attachments add`), or 'input' for a file a person
+-- attached for the agent to work with: uploaded in the dashboard
+-- (POST /api/tasks/{id}/attachments), added with
+-- `cloop task attachments add --input` or `cloop task add --input-file`. At
+-- the start of every attempt at the task the run copies its input files into
+-- .cloop/attachments/inbox/<task id>/ and names that directory in the agent's
+-- prompt and in $CLOOP_TASK_INPUTS. Set when the file is attached and never
+-- changed after.
+--
+-- IF NOT EXISTS is the migration runner's (addcolumn.go), as in 0054 and 0087.
+--
+-- Additive in schema_compat.go's sense: task_attachments is not one of the
+-- tables builds before Task 20388 rewrite, and every build that knows the table
+-- names its columns when it reads and writes it. An older build sees an input
+-- file as an ordinary attachment: listed, served and deleted like one, and
+-- never given to an agent.
+
+ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT '';

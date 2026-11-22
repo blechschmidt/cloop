@@ -106,6 +106,14 @@ var publicRoutes = map[string]runRoute{
 		handlers: []string{"handleRunReadOnly"}, authenticates: "openRunKnowledgeCall", gate: "readOnlyTarget"},
 	"/api/run/knowledge/readonly/snapshot": {class: readersGatedRead, scope: "project",
 		handlers: []string{"handleRunReadOnlySnapshot"}, authenticates: "openRunKnowledgeCall", gate: "readOnlyTarget"},
+	// A seeded run's tasks' input files (Task 20511): the session records the
+	// directory its run was dispatched to, and only that directory's tasks'
+	// input files are listed or served — never another project's, whatever
+	// a readers list says.
+	"/api/run/knowledge/inputs": {class: ownProject, scope: "project",
+		handlers: []string{"handleRunInputs"}, authenticates: "openRunKnowledgeCall"},
+	"/api/run/knowledge/inputs/file": {class: ownProject, scope: "project",
+		handlers: []string{"handleRunInputFile"}, authenticates: "openRunKnowledgeCall"},
 	// Citations are taken from the session — a write — so they are the
 	// run's own whatever a list says.
 	"/api/run/knowledge/citations": {class: ownProject, scope: "project",

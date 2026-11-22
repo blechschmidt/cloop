@@ -8,6 +8,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/attachments"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -57,6 +59,16 @@ type attachmentsBrowserResults struct {
 		ModalFits   bool    `json:"modal_fits"`
 		ButtonsShow bool    `json:"buttons_show"`
 	} `json:"phone"`
+	InputFiles *struct {
+		Before   []string `json:"before"`
+		Headings []string `json:"headings"`
+		Names    []string `json:"names"`
+	} `json:"input_files"`
+	AddTask *struct {
+		Picked string `json:"picked"`
+		After  string `json:"after"`
+		Badge  string `json:"badge"`
+	} `json:"add_task"`
 }
 
 func TestTaskAttachments_InBrowser(t *testing.T) {
@@ -103,7 +115,7 @@ func TestTaskAttachments_InBrowser(t *testing.T) {
 		t.Fatalf("the driver reported an error: %s\nraw:\n%s", got.Error.Message, out)
 	}
 	if got.Badge == nil || got.Listed == nil || got.ImagePreview == nil || got.TextPreview == nil ||
-		got.Download == nil || got.Deleted == nil || got.Phone == nil {
+		got.Download == nil || got.Deleted == nil || got.Phone == nil || got.InputFiles == nil || got.AddTask == nil {
 		t.Fatalf("a scenario did not run:\n%s", out)
 	}
 
@@ -152,6 +164,51 @@ func TestTaskAttachments_InBrowser(t *testing.T) {
 		rows, _ := db.TaskAttachments(1)
 		if len(rows) != 2 {
 			t.Errorf("the hub holds %d attachments for task 1 after the delete, want 2", len(rows))
+		}
+	})
+	// Task 20511: input files, chosen with the details' button, dropped on
+	// the section, and picked with a new task in the Add Task form.
+	inputsOf := func(task int) map[string]string {
+		db, err := statedb.Open(state.DBPath(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		rows, err := db.TaskInputs(task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, r := range rows {
+			f, _, err := attachments.Open(state.DBPath(dir), r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := io.ReadAll(f)
+			f.Close()
+			out[r.Name] = string(data)
+		}
+		return out
+	}
+	t.Run("a task's details take input files from the file chooser and from a drop", func(t *testing.T) {
+		if strings.Join(got.InputFiles.Before, ",") != "Input files (0)" {
+			t.Errorf("a task without files shows %v, want an empty Input files section to add to", got.InputFiles.Before)
+		}
+		if strings.Join(got.InputFiles.Headings, ",") != "Input files (2)" ||
+			strings.Join(got.InputFiles.Names, ",") != "brief.txt,dropped.txt" {
+			t.Errorf("after adding: headings %v, files %v", got.InputFiles.Headings, got.InputFiles.Names)
+		}
+		in := inputsOf(2)
+		if in["brief.txt"] != "the brief for task 2\n" || in["dropped.txt"] != "dropped on the task" || len(in) != 2 {
+			t.Errorf("the hub holds %q as task 2's input files", in)
+		}
+	})
+	t.Run("the Add Task form uploads the files picked with the task", func(t *testing.T) {
+		if got.AddTask.Picked != "Files (1)" || got.AddTask.After != "Files" || !strings.Contains(got.AddTask.Badge, "📎 1") {
+			t.Errorf("add task = %+v", got.AddTask)
+		}
+		if in := inputsOf(3); in["spec.txt"] != "the spec for the new task\n" || len(in) != 1 {
+			t.Errorf("the hub holds %q as the new task's input files", in)
 		}
 	})
 	t.Run("a phone shows the section without widening the page", func(t *testing.T) {

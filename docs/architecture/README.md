@@ -978,7 +978,7 @@ each one is for.
 | `pkg/configvalidate` | schema and semantic validation of config and state |
 | `pkg/atomicfile` | crash-safe writes |
 | `pkg/artifact` | per-task output artifacts |
-| `pkg/attachments` | files attached to a task, accessed only through the attachment store's directory |
+| `pkg/attachments` | files attached to a task, accessed only through the attachment store's directory: a run's results from its outbox, and the input files a person gave its agent, copied into each attempt's inbox |
 | `pkg/eventlog` | tailing, replaying and verifying the audit log |
 | `pkg/dbbackup` | hot backups and restores |
 | `pkg/dbmaintain` | VACUUM and ANALYZE |

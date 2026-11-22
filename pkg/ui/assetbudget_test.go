@@ -455,6 +455,14 @@ import (
 // once the Overview is a project's tab only — and the two inline lists of
 // global tabs, now one. The set measured 114,389 B at HEAD; 114,087 B after.
 // The ceiling stays: 713 B of slack.
+//
+// Task 20511 lets a person attach input files for a task's agent. The upload
+// itself, the drop zone and the input-file list are in the attachments panel's
+// deferred script; first paint carries the Add Task bar's Files button and its
+// hidden picker, the two actions that count and hand over what was picked, and
+// a task's details asking for the panel for someone who may add files as well
+// as for a task that has some: 236 B on a set that measured 114,089 B, so
+// 114,325 B after. The ceiling stays: 475 B of slack.
 const eagerWireBudgetBytes = 114_800
 
 // eagerAsset is one member of the first-paint set.

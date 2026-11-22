@@ -744,6 +744,9 @@ func (s *Server) routeTable() []routeSpec {
 		{Pattern: "GET /api/tasks/{id}/attachments", Handler: s.handleTaskAttachments, Perm: read, Scope: scopeProject},
 		{Pattern: "GET /api/tasks/{id}/attachments/{aid}", Handler: s.handleTaskAttachmentGet, Perm: read, Scope: scopeProject},
 		{Pattern: "DELETE /api/tasks/{id}/attachments/{aid}", Handler: s.handleTaskAttachmentDelete, Perm: task, Scope: scopeProject},
+		// A person uploading an input file for the task's agent (Task 20511):
+		// the body is the file, the one octet-stream route (originguard.go).
+		{Pattern: "POST /api/tasks/{id}/attachments", Handler: s.handleTaskAttachmentUpload, Perm: task, Scope: scopeProject},
 		// Aborted-outcome verdicts (Task 20224). Both change what the plan
 		// believes about itself — clearing one is what allows the plan to be
 		// counted complete — so they are `task`, not `read`. Neither spends a

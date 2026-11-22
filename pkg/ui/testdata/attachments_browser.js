@@ -1,5 +1,5 @@
 // attachments_browser.js — opens a task's attachments in a real browser
-// (Task 20428).
+// (Task 20428), and adds input files to tasks there (Task 20511).
 //
 // What a person does with a task's files is a question about a browser, not a
 // bundle: whether the paperclip shows on the row, whether the details list
@@ -368,6 +368,74 @@ async function scenarioDelete(cdp) {
   };
 }
 
+// ── input files (Task 20511) ────────────────────────────────────────────────
+//
+// A file reaches the page the way a person gives it one: through the file
+// chooser a button opens, answered here over CDP with a file on disk, or by a
+// drop on the details' section.
+
+const choosers = [];
+
+async function interceptFileChoosers(cdp) {
+  await cdp.send('Page.setInterceptFileChooserDialog', {enabled: true});
+  cdp.ws.addEventListener('message', ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.method !== 'Page.fileChooserOpened') return;
+    const next = choosers.shift();
+    if (next) next(msg.params);
+  });
+}
+
+// choose presses sel, waits for the file chooser it opens and answers it.
+async function choose(cdp, sel, files) {
+  const opened = new Promise((res, rej) => {
+    const timer = setTimeout(() => rej(new Error('pressing ' + sel + ' opened no file chooser')), WAIT_MS);
+    choosers.push(p => { clearTimeout(timer); res(p); });
+  });
+  await click(cdp, sel);
+  const p = await opened;
+  await cdp.send('DOM.setFileInputFiles', {files, backendNodeId: p.backendNodeId});
+}
+
+const headingsExpr = `Array.from(document.querySelectorAll('#td-files h3')).map(h => h.textContent)`;
+const namesExpr = `${filesExpr}.map(f => f.querySelector('.td-file-name').textContent)`;
+
+async function scenarioInputFiles(cdp, inputs) {
+  await cdp.eval(`window.closeTaskDetails && window.closeTaskDetails()`);
+  await click(cdp, rowSel(2) + ' .task-title');
+  await waitFor(cdp, `document.getElementById('td-overlay').classList.contains('open')`, "task 2's details");
+  // A task with no files still offers to add some.
+  await waitFor(cdp, `!!document.querySelector('#td-files button[data-act="pick"]')`, 'the Add input files button');
+  const before = await cdp.eval(headingsExpr);
+  await choose(cdp, '#td-files button[data-act="pick"]', [inputs.brief]);
+  await waitFor(cdp, `${filesExpr}.length === 1`, 'the chosen input file to be listed');
+  // And a drop on the section.
+  await cdp.eval(`(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(['dropped on the task'], 'dropped.txt', {type: 'text/plain'}));
+    document.getElementById('td-files').dispatchEvent(new DragEvent('drop', {dataTransfer: dt, bubbles: true, cancelable: true}));
+  })()`);
+  await waitFor(cdp, `${filesExpr}.length === 2`, 'the dropped input file to be listed');
+  results.input_files = {before, headings: await cdp.eval(headingsExpr), names: await cdp.eval(namesExpr)};
+  await cdp.eval(`window.closeTaskDetails && window.closeTaskDetails()`);
+  await waitFor(cdp, `${badgeOf(2)}.indexOf('📎 2') === 0`, "task 2's badge to count its input files");
+}
+
+async function scenarioAddTaskWithFiles(cdp, inputs) {
+  await cdp.eval(`document.getElementById('newTaskTitle').value = 'Implement the spec'`);
+  await choose(cdp, '#newTaskFilesBtn', [inputs.spec]);
+  await waitFor(cdp, `document.getElementById('newTaskFilesBtn').textContent === 'Files (1)'`, 'the Files button to count the file');
+  const picked = await cdp.eval(`document.getElementById('newTaskFilesBtn').textContent`);
+  await click(cdp, '[data-action="submitAddTask"]');
+  await waitFor(cdp, `!!document.querySelector(${JSON.stringify(rowSel(3))})`, 'the new task');
+  await waitFor(cdp, `${badgeOf(3)}.indexOf('📎 1') === 0`, "the new task's input file");
+  results.add_task = {
+    picked,
+    after: await cdp.eval(`document.getElementById('newTaskFilesBtn').textContent`),
+    badge: await cdp.eval(badgeOf(3)),
+  };
+}
+
 async function scenarioPhone(cdp) {
   await cdp.send('Emulation.setDeviceMetricsOverride', {width: 360, height: 780, deviceScaleFactor: 3, mobile: true});
   await waitFor(cdp, `window.innerWidth === 360`, 'the phone viewport');
@@ -387,14 +455,21 @@ async function scenarioPhone(cdp) {
 
 async function main() {
   const {cdp, proc, dir} = await launchChrome();
+  // The files a person picks, on disk where the file chooser takes them from.
+  const inputs = {brief: path.join(dir, 'brief.txt'), spec: path.join(dir, 'spec.txt')};
+  fs.writeFileSync(inputs.brief, 'the brief for task 2\n');
+  fs.writeFileSync(inputs.spec, 'the spec for the new task\n');
   try {
     await boot(cdp);
+    await interceptFileChoosers(cdp);
     await scenarioBadge(cdp);
     await scenarioListed(cdp);
     await scenarioImagePreview(cdp);
     await scenarioTextPreview(cdp);
     await scenarioDownload(cdp);
     await scenarioDelete(cdp);
+    await scenarioInputFiles(cdp, inputs);
+    await scenarioAddTaskWithFiles(cdp, inputs);
     await scenarioPhone(cdp);
     process.stdout.write(JSON.stringify(results, null, 2));
   } finally {

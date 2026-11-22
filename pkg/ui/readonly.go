@@ -201,8 +201,7 @@ func deliverableReadOnly(grants []readOnlyGrant, spec executor.Spec, ex executor
 	case delivery == executor.ReadOnlyNone:
 		return nil, append(notes, fmt.Sprintf("Its readers lists name %d project(s) this run may read, but executor "+
 			"%s cannot give a run another project's tree, so it was given none.", len(grants), ex.ID()))
-	case spec.DisableNetwork || spec.EgressScope.RemovesNetwork() ||
-		(spec.EgressRules != nil && !spec.EgressRules.HasDestination()):
+	case specHasNoNetwork(spec):
 		return nil, append(notes, fmt.Sprintf("Its readers lists name %d project(s) this run may read, but it was "+
 			"given none: it has no network to ask the hub with, at each task boundary, whether they still list it.",
 			len(grants)))
@@ -228,6 +227,14 @@ func deliverableReadOnly(grants []readOnlyGrant, spec executor.Spec, ex executor
 		kept = append(kept, g)
 	}
 	return kept, notes
+}
+
+// specHasNoNetwork reports whether the workload spec describes has no network
+// at all, so none to reach the hub with: switched off, scoped away, or held to
+// firewall rules that allow no destination.
+func specHasNoNetwork(spec executor.Spec) bool {
+	return spec.DisableNetwork || spec.EgressScope.RemovesNetwork() ||
+		(spec.EgressRules != nil && !spec.EgressRules.HasDestination())
 }
 
 // readOnlyHow says, for the journal, how ex delivers the projects.

@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/attachments"
 	"github.com/blechschmidt/cloop/pkg/config"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/provider"
 	"github.com/blechschmidt/cloop/pkg/state"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/taskadd"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -31,6 +33,7 @@ var (
 	addModel      string
 	addTimeout    string
 	addReqs       []string
+	addInputFiles []string
 )
 
 var taskAddCmd = &cobra.Command{
@@ -49,7 +52,11 @@ Examples:
   cloop task add "set up CI pipeline with GitHub Actions" --auto
   cloop task add "add unit tests for the payment service" --provider anthropic
   cloop task add "write release notes" --no-ai --priority 5
-  cloop task add "make config errors exit non-zero" --no-ai --requirement R-3`,
+  cloop task add "make config errors exit non-zero" --no-ai --requirement R-3
+  cloop task add "implement the API in the spec" --no-ai --input-file spec.pdf --input-file examples.json
+
+--input-file attaches a file to the new task as an input file: every attempt at
+the task is given a copy, named in the agent's prompt and in $CLOOP_TASK_INPUTS.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		description := strings.Join(args, " ")
@@ -69,6 +76,11 @@ Examples:
 		// model call.
 		reqLinks, err := taskRequirementLinks(workdir, addReqs, nil)
 		if err != nil {
+			return err
+		}
+		// So is every input file, so a task is not added only for its file
+		// to be refused.
+		if err := checkInputFiles(workdir, addInputFiles); err != nil {
 			return err
 		}
 
@@ -233,7 +245,7 @@ Examples:
 			fmt.Printf("  Implements: %s\n", requirementKeys(reqLinks))
 		}
 
-		return nil
+		return attachInputFiles(workdir, task.ID, addInputFiles)
 	},
 }
 
@@ -300,6 +312,69 @@ func addTaskDirect(s *state.ProjectState, description string, reqLinks []int) er
 	if len(reqLinks) > 0 {
 		fmt.Printf("  Implements: %s\n", requirementKeys(reqLinks))
 	}
+	return attachInputFiles(s.WorkDir, task.ID, addInputFiles)
+}
+
+// checkInputFiles refuses input files that could never be attached to a new
+// task of the project in workDir: missing, not a regular file, or over a
+// limit — the project's included, counting what it already holds.
+func checkInputFiles(workDir string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	var held statedb.AttachmentUsage
+	if dbPath := state.DBPath(workDir); fileExists(dbPath) {
+		db, err := statedb.Open(dbPath)
+		if err != nil {
+			return err
+		}
+		// Task 0 is no task: its counts are zero and the project's are all.
+		held, err = db.TaskAttachmentUsage(0)
+		db.Close()
+		if err != nil {
+			return err
+		}
+	}
+	u := statedb.AttachmentUsage{ProjectFiles: held.ProjectFiles, ProjectBytes: held.ProjectBytes}
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return fmt.Errorf("--input-file: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("--input-file: %s is not a regular file", p)
+		}
+		if why := attachments.Room(u, info.Size()); why != "" {
+			return fmt.Errorf("--input-file: %s cannot be attached: %s", p, why)
+		}
+		u.TaskFiles++
+		u.TaskBytes += info.Size()
+		u.ProjectBytes += info.Size()
+	}
+	return nil
+}
+
+// attachInputFiles attaches the files at paths to the task just added, as
+// input files for its agent.
+func attachInputFiles(workDir string, taskID int, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	dbPath := state.DBPath(workDir)
+	db, err := statedb.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("task %d was added, but its input files were not attached: %w", taskID, err)
+	}
+	defer db.Close()
+	p := &attachmentProject{workDir: workDir, dbPath: dbPath, taskID: taskID, db: db}
+	added, err := attachFiles(p, paths, statedb.AttachmentRoleInput, "", "", "cloop task add")
+	for _, row := range added {
+		printAttached(row, taskID)
+	}
+	if err != nil {
+		return fmt.Errorf("task %d was added, but not all its input files were attached (attach the rest with "+
+			"`cloop task attachments add %d <file> --input`): %w", taskID, taskID, err)
+	}
 	return nil
 }
 
@@ -313,6 +388,7 @@ func init() {
 	taskAddCmd.Flags().IntVar(&addMaxMinutes, "max-minutes", 0, "Per-task execution time budget in minutes (0 = no limit); triggers auto-interrupt and timed_out status on expiry")
 	taskAddCmd.Flags().BoolVar(&addNoAI, "no-ai", false, "Skip AI structuring; use description as task title directly")
 	taskAddCmd.Flags().BoolVar(&addAuto, "auto", false, "Skip confirmation prompt and add immediately")
+	taskAddCmd.Flags().StringArrayVar(&addInputFiles, "input-file", nil, "Attach a file to the task for its agent to work with (repeatable)")
 	taskAddCmd.Flags().StringVar(&addProvider, "provider", "", "AI provider to use (anthropic, openai, ollama, claudecode)")
 	taskAddCmd.Flags().StringVar(&addModel, "model", "", "Model override for the AI provider")
 	taskAddCmd.Flags().StringVar(&addTimeout, "timeout", "3m", "Timeout for the AI call (e.g. 2m, 300s)")

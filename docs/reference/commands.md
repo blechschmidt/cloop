@@ -286,6 +286,7 @@ cloop task show <id>               # show full task details (untruncated)
 cloop task show <id> --json        # output task as JSON
 cloop task next                    # show the next pending task (preview before running)
 cloop task add "Title" --desc "Description" --priority 1
+cloop task add "Implement the spec" --no-ai --input-file spec.pdf   # with an input file for its agent
 cloop task edit <id> --title "New title" --priority 2
 cloop task skip <id>               # mark as skipped
 cloop task done <id>               # mark as done
@@ -323,14 +324,17 @@ environment names the task.
 
 #### `cloop task attachments`
 
-The files attached to a task: what its runs left in their outbox
+The files attached to a task: input files given to its agent (copied into
+`.cloop/attachments/inbox/<task-id>/` for every attempt, which the agent finds
+in `$CLOOP_TASK_INPUTS`), what its runs left in their outbox
 (`.cloop/attachments/outbox/<task-id>/`, which the agent finds in
 `$CLOOP_TASK_ATTACHMENTS`) and files attached by hand. See
 [Task attachments](../guides/attachments.md).
 
 ```bash
 cloop task attachments <id>                      # list (alias: list, ls)
-cloop task attachments add <id> <file>...        # attach by hand
+cloop task attachments add <id> <file>... --input  # input files for the agent (audited)
+cloop task attachments add <id> <file>...        # attach by hand, as results (audited)
 cloop task attachments get <id> <attachment>     # save under its own name
 cloop task attachments remove <id> <attachment>  # delete (audited)
 ```
@@ -338,8 +342,9 @@ cloop task attachments remove <id> <attachment>  # delete (audited)
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--json` | `false` | Print machine-readable JSON (every subcommand) |
+| `--input` | `false` | `add`: attach them as input files, given to every attempt at the task |
 | `--name` | | `add`: attach the file under this name (one file only) |
-| `--note` | | `add`: a note shown with the attachment |
+| `--note` | | `add`: a note shown with the attachment, and to the agent for an input file |
 | `-o, --output` | the attachment's name | `get`: where to save it; `-` prints it to stdout |
 | `--force` | `false` | `get`: overwrite an existing file |
 

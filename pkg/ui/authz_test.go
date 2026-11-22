@@ -207,6 +207,9 @@ var publicRouteAllowlist = map[string]string{
 	"POST /api/run/knowledge/citations":         knowledgeRunPublicReason,
 	"POST /api/run/knowledge/readonly":          knowledgeRunPublicReason,
 	"POST /api/run/knowledge/readonly/snapshot": knowledgeRunPublicReason,
+	// A seeded run's tasks' input files (Task 20511), with the same session.
+	"POST /api/run/knowledge/inputs":      knowledgeRunPublicReason,
+	"POST /api/run/knowledge/inputs/file": knowledgeRunPublicReason,
 
 	// Executor pool controllers (Task 20482): one justification for both.
 	"GET /api/pool-controller/feed":            poolControllerPublicReason,
