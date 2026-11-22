@@ -14,20 +14,41 @@ import (
 )
 
 // abi asks the kernel which Landlock ABI it speaks: 0 with the reason when it
-// speaks none (not built in, or not enabled at boot).
+// speaks none (not built in, not enabled at boot, or not reachable).
 func abi() (int, error) {
 	v, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
 	if errno != 0 {
-		switch errno {
-		case syscall.ENOSYS:
-			return 0, fmt.Errorf("%w: this kernel has no Landlock (Linux 5.13 or later, built with CONFIG_SECURITY_LANDLOCK)", ErrUnsupported)
-		case syscall.EOPNOTSUPP:
-			return 0, fmt.Errorf("%w: Landlock is not enabled on this kernel (add landlock to the lsm= boot parameter)", ErrUnsupported)
-		default:
-			return 0, fmt.Errorf("%w: query the Landlock ABI: %v", ErrUnsupported, errno)
-		}
+		return 0, abiError(errno)
 	}
 	return int(v), nil
+}
+
+// abiError says what an errno from the version query means. Separate from the
+// call so the wording of each case is a test rather than a guess about a
+// kernel the test machine does not have.
+func abiError(errno syscall.Errno) error {
+	switch errno {
+	case syscall.ENOSYS:
+		return fmt.Errorf("%w: this kernel has no Landlock (Linux 5.13 or later, built with CONFIG_SECURITY_LANDLOCK)", ErrUnsupported)
+	case syscall.EOPNOTSUPP:
+		return fmt.Errorf("%w: Landlock is not enabled on this kernel (add landlock to the lsm= boot parameter)", ErrUnsupported)
+	case syscall.EPERM:
+		// Not an error the version query itself returns: asking which ABI the
+		// kernel speaks takes no privilege. EPERM means something between
+		// this process and the kernel refused the call — a seccomp filter, as
+		// systemd installs from SystemCallFilter= with
+		// SystemCallErrorNumber=EPERM. @system-service does not cover the
+		// Landlock calls (they are systemd's @sandbox set), so a hardened
+		// unit that does not name them leaves the process unable to confine
+		// anything (Task 49). Saying so beats reporting a bare errno: the
+		// kernel is usually perfectly capable, and the fix is one directive.
+		return fmt.Errorf("%w: landlock_create_ruleset is blocked before it reaches the kernel (EPERM). "+
+			"A seccomp filter is the usual reason: under systemd, SystemCallFilter=@system-service "+
+			"does not include the Landlock calls, so the unit must also allow %q", ErrUnsupported,
+			"landlock_create_ruleset landlock_add_rule landlock_restrict_self")
+	default:
+		return fmt.Errorf("%w: query the Landlock ABI: %v", ErrUnsupported, errno)
+	}
 }
 
 // The filesystem rights of each ABI.

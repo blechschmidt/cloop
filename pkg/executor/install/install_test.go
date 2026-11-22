@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +158,12 @@ func TestGeneratedUnitParses(t *testing.T) {
 
 	// Every hardening directive the package claims to emit must be in the
 	// [Service] section with the value it declared.
+	//
+	// Among the values rather than the last of them: a key systemd merges
+	// across assignments is emitted more than once on purpose —
+	// SystemCallFilter names @system-service and then the Landlock calls it
+	// leaves out — and checking only the last would make one of the two
+	// invisible to this test.
 	for _, h := range hardening {
 		key, value, _ := strings.Cut(h.directive, "=")
 		got, ok := sections["Service"][key]
@@ -164,8 +171,8 @@ func TestGeneratedUnitParses(t *testing.T) {
 			t.Errorf("hardening directive %s is missing from [Service]", key)
 			continue
 		}
-		if got[len(got)-1] != value {
-			t.Errorf("%s = %q, want %q", key, got[len(got)-1], value)
+		if !slices.Contains(got, value) {
+			t.Errorf("%s = %v, want %q among them", key, got, value)
 		}
 	}
 

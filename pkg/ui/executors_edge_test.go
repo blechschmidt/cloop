@@ -369,3 +369,40 @@ func TestExecutorUpgrade_RefusesARollback(t *testing.T) {
 		t.Error("the device was asked anyway")
 	}
 }
+
+// TestConfinementNoteWarnsBeforeAnyRunIsStarted: a device that cannot keep a
+// run to its own project has every run of every project that shares it
+// refused, so the panel says so on the card. Without it the first symptom was
+// a Start button that failed once per click with a Landlock errno from the far
+// side of the link (Task 49).
+func TestConfinementNoteWarnsBeforeAnyRunIsStarted(t *testing.T) {
+	cannot, _ := edgeDevice(t, "edge-confine-1", remote.ProtocolVersion, remote.AgentCapabilities{})
+	view := executorView{}
+	annotateConfinement(&view, cannot)
+	if view.ConfinementNote == "" {
+		t.Fatal("a device that cannot confine a run carries no note")
+	}
+	for _, want := range []string{"install --upgrade", "Landlock", "containers"} {
+		if !strings.Contains(view.ConfinementNote, want) {
+			t.Errorf("the note should mention %q: %s", want, view.ConfinementNote)
+		}
+	}
+
+	// A device that can, and one too old to have been asked, carry none: the
+	// first is working, and for the second the protocol note already says the
+	// agent is behind.
+	can, _ := edgeDevice(t, "edge-confine-2", remote.ProtocolVersion,
+		remote.AgentCapabilities{HostSandbox: true})
+	view = executorView{}
+	annotateConfinement(&view, can)
+	if view.ConfinementNote != "" {
+		t.Errorf("a device that can confine carries a note: %s", view.ConfinementNote)
+	}
+
+	old, _ := edgeDevice(t, "edge-confine-3", remote.MinHostSandboxReportVersion-1, remote.AgentCapabilities{})
+	view = executorView{}
+	annotateConfinement(&view, old)
+	if view.ConfinementNote != "" {
+		t.Errorf("an agent that never reports the capability carries a note: %s", view.ConfinementNote)
+	}
+}

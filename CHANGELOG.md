@@ -1413,6 +1413,27 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Projects can be started on a remote executor again.** The hardened systemd
+  unit `cloop executor agent install` renders allows `@system-service`, which
+  does not cover `landlock_create_ruleset`, `landlock_add_rule` and
+  `landlock_restrict_self` — they are systemd's `@sandbox` set — and sets
+  `SystemCallErrorNumber=EPERM` beside it. Since the hub began asking a device
+  that serves more than one project to keep a host payload to its own project,
+  the agent has built that confinement with Landlock, so on every device the
+  installer has ever produced it could not build one and refused the payload:
+  starting any such project failed, once per click, with "query the Landlock
+  ABI: operation not permitted" three error wrappings down, on kernels that
+  speak Landlock perfectly well. The unit now allows those three calls, which
+  can only take rights away from what the agent starts; `cloop executor agent
+  install --upgrade` writes them as a drop-in on a device whose unit predates
+  the grant, unasked and whether or not the binary changes, and rolls it back
+  with the binary if the agent does not come back. The hub no longer dispatches
+  to a device that reports it cannot build the sandbox: it refuses the run
+  naming the device, the upgrade and the opt-out, the Executors panel shows the
+  same on the device's card before a run is started, the agent says on the
+  device when a payload did not start, and an EPERM from the Landlock query
+  now names the seccomp filter instead of the kernel (Task 49).
+
 - **`cloop executor controller` exits when it is stopped.** The controller
   closed its health endpoint from a function the stop signal was meant to
   start, and before exiting waited for the endpoint to close. Go passes a

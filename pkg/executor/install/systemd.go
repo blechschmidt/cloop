@@ -17,6 +17,12 @@ package install
 // remove it without the enrollment bundle a full re-render needs, and an
 // operator can see and delete the whole grant as one file.
 //
+// The syscall filter allows the three Landlock calls, which @system-service
+// does not: the agent builds a payload's confinement with them, and a unit
+// that denies them makes it refuse every payload the hub asks it to confine.
+// A device whose unit predates that line gets it from hostsandbox.go's
+// drop-in, written by an upgrade.
+//
 // Everything is emitted in a fixed order so two installs of the same spec
 // produce byte-identical units — a config-management system that re-renders
 // the unit on every run must not restart the fleet because a map iterated
@@ -73,6 +79,10 @@ var hardening = []struct{ directive, why string }{
 	{"SystemCallArchitectures=native", ""},
 	{"SystemCallFilter=@system-service",
 		"the standard service syscall set; @privileged and @obsolete are not in it"},
+	{"SystemCallFilter=" + landlockSyscalls,
+		"and the three calls that build a Landlock ruleset, which @system-service leaves out (they are\n" +
+			"# systemd's @sandbox set). The agent needs them to keep a host payload to its own project; without\n" +
+			"# them it refuses every such payload. They can only take rights away from what the agent starts"},
 	{"SystemCallErrorNumber=EPERM",
 		"a blocked call fails the operation rather than killing the process, so the failure is legible in the logs"},
 	{"UMask=0077",

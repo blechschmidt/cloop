@@ -878,14 +878,38 @@ func (e *Executor) start(ctx context.Context, spec executor.Spec, virtual *Virtu
 			e.subject(), sess.Version(), MinReadOnlyProjectsVersion,
 			"to place the other projects this run may read", ""))
 	}
-	if spec.ConfineToProject && virtual == nil && sandbox.Mode != executor.SandboxModeContainer &&
-		!SupportsProjectConfinement(sess.Version()) {
-		return executor.Handle{}, fmt.Errorf("%w: %s", ErrProjectConfinementUnsupported, executor.NeedsProtocol(
-			e.subject(), sess.Version(), MinProjectConfinementVersion,
-			"to keep this project's run, which runs as a process on the device's host, out of the other "+
-				"projects the device serves",
-			"Or run the device's payloads in containers (its sandbox mode), or opt the project out with "+
-				"executors.host_sandbox.opt_out if it may read the other projects on the device."))
+	if spec.ConfineToProject && virtual == nil && sandbox.Mode != executor.SandboxModeContainer {
+		if !SupportsProjectConfinement(sess.Version()) {
+			return executor.Handle{}, fmt.Errorf("%w: %s", ErrProjectConfinementUnsupported, executor.NeedsProtocol(
+				e.subject(), sess.Version(), MinProjectConfinementVersion,
+				"to keep this project's run, which runs as a process on the device's host, out of the other "+
+					"projects the device serves",
+				"Or run the device's payloads in containers (its sandbox mode), or opt the project out with "+
+					"executors.host_sandbox.opt_out if it may read the other projects on the device."))
+		}
+		// The device speaks a protocol new enough to honour the field and
+		// says it cannot build the sandbox the confinement is made of (Task
+		// 49). Dispatching anyway reaches the device, allocates its
+		// directory, logs that the payload was kept to its project — and
+		// then refuses with a Landlock errno three wrappings down, naming
+		// neither the device nor anything to do about it. So it is refused
+		// here, with both remedies, and the leases and the workspace this
+		// dispatch would have taken are never issued.
+		//
+		// Below MinHostSandboxReportVersion the flag is silence rather than a
+		// denial, and such an agent is dispatched to as before.
+		if ReportsHostSandbox(sess.Version()) && !e.AgentCapabilities().HostSandbox {
+			return executor.Handle{}, fmt.Errorf("%w: %s cannot build the host sandbox that keeps this "+
+				"project's run out of the other projects the device serves, so the run is refused rather "+
+				"than given them. Run `cloop executor agent install --upgrade` on the device: a unit cloop "+
+				"generated before this release denies the agent the three Landlock calls the sandbox is "+
+				"built from, and the upgrade grants them (it needs no enrollment bundle, and replaces "+
+				"nothing else). If the device's kernel has no Landlock (Linux 6.2 or later, "+
+				"CONFIG_SECURITY_LANDLOCK, landlock in the lsm= list), run its payloads in containers (its "+
+				"sandbox mode) instead, or opt the project out with executors.host_sandbox.opt_out if it "+
+				"may read the other projects on the device.",
+				ErrProjectConfinementUnsupported, e.subject())
+		}
 	}
 
 	// The disk limit (Task 20405): a stated one the device cannot hold is

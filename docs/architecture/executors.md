@@ -3542,6 +3542,7 @@ It writes three files and nothing else:
 | --- | --- | --- |
 | `/etc/systemd/system/cloop-executor.service` | `0644` | the unit, with **no credential** in it |
 | `/etc/systemd/system/cloop-executor.service.d/10-packet-filter.conf` | `0644` | the one relaxation: `CAP_NET_ADMIN` and `AF_NETLINK`, so the agent can install a sandbox's firewall (not written with `--packet-filter=false`) |
+| `/etc/systemd/system/cloop-executor.service.d/11-host-sandbox.conf` | `0644` | only on a device whose unit predates the Landlock grant: written by `--upgrade`, and removed by a full install, whose unit carries the grant itself |
 | `/var/lib/cloop-executor/enrollment` | `0600` | the enrollment bundle, owned by the service user |
 
 A unit file is world-readable, and `systemctl show` prints `ExecStart` to any
@@ -3558,6 +3559,21 @@ The generated unit runs the agent as a dedicated non-login system user with
 `ExecStart`. `StateDirectory=` gives it one writable directory. A device that
 runs container workloads through the agent must drop `PrivateDevices=` and
 `RestrictNamespaces=`, and a comment in the unit says so.
+
+A second `SystemCallFilter=` line allows `landlock_create_ruleset`,
+`landlock_add_rule` and `landlock_restrict_self`, which `@system-service` does
+not (they are systemd's `@sandbox` set). The agent builds a payload's
+[confinement](../security/model.md#on-a-device) out of those three calls, and
+`SystemCallErrorNumber=EPERM` beside the filter means a unit that omits them
+does not merely weaken the confinement — the agent cannot build one at all, and
+refuses every payload the hub asks it to confine, on a kernel that speaks
+Landlock perfectly well. They are not a relaxation: a Landlock ruleset can only
+take rights away from what the agent starts. Every device installed before this
+grant existed has the symptom, so `--upgrade` writes
+`11-host-sandbox.conf` with the same allow-list whenever the unit lacks it,
+without being asked and whether or not the binary changes; the hub refuses
+such a device's runs with the same remedy in the message, and the Executors
+panel says so on the device's card.
 
 The packet-filter drop-in is the installer's only relaxation. It is a separate
 file so that the unit is byte-identical with or without it, an upgrade can add
@@ -3833,6 +3849,22 @@ that an upgrade keeps and only an explicit flag changes:
 - `--remote-upgrade` (or `=false`) installs or removes the root helper that
   carries out upgrades the hub asks for (see below). `--channel edge` installs
   it too unless told otherwise, and a fresh install has it by default.
+
+The Landlock grant is the one exception to "only an explicit flag changes it".
+An upgrade writes `11-host-sandbox.conf` whenever the device's unit does not
+already allow the three Landlock calls, whether or not the binary changes, and
+restarts the agent — and rolls both back together if it does not come back.
+There is no flag to withhold it, because withholding it makes the device refuse
+every payload the hub asks it to confine rather than making it safer: a
+ruleset's three syscalls can only take rights away from what the agent starts.
+A device whose unit was rendered by a release that already grants them sees no
+change.
+
+The helper that carries out an upgrade the hub asked for runs the *installed*
+binary, so a device installed before the grant picks it up on the upgrade after
+the one that lands a binary with this code. An operator who wants it in one
+step runs the new binary's own installer on the device:
+`/tmp/cloop-new executor agent install --upgrade --from /tmp/cloop-new`.
 
 #### Upgrades the hub asks for: the remote-upgrade helper
 

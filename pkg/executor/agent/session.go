@@ -1079,6 +1079,12 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 
 	handle, err := runner.Start(context.WithoutCancel(ctx), spec)
 	if err != nil {
+		// Said on the device as well as answered to the hub (Task 49). The
+		// lines above announce what this workload was given — its directory,
+		// its confinement, its devices — so a journal that stops there reads
+		// exactly like a workload that started, and the one person looking at
+		// the device is the one who can act on the reason.
+		a.cfg.logf("workload %s: did not start: %v", handleID, err)
 		// Release the reservation: nothing is running, and holding the slot
 		// would leak capacity on every failed start.
 		a.closeDevicesFor(handleID, "the workload did not start")

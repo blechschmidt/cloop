@@ -532,6 +532,9 @@ func BuildPlan(spec Spec, out Output) (Plan, error) {
 		} else {
 			p.Remove = append(p.Remove, s.PacketFilterDropInPath())
 		}
+		// The unit above allows the Landlock calls itself, so the drop-in an
+		// upgrade wrote onto an older unit has nothing left to add (Task 49).
+		p.Remove = append(p.Remove, s.HostSandboxDropInPath())
 		// The channel and the upgrade helper, the same way: present when
 		// asked for, removed when not, so the flags describe the device
 		// afterwards rather than adding to whatever an earlier install left.

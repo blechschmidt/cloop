@@ -2,10 +2,13 @@ package install
 
 // unitchanges.go is everything an upgrade may change beside the binary: the
 // packet-filter grant (Task 20352), the update channel and the remote-upgrade
-// helper (Task 20376). Each is a file next to the unit — never the unit
-// itself, which an upgrade cannot honestly re-render (see upgrade.go) — and
-// each is changed only when the operator on the device asks for it, so a plain
-// --upgrade keeps all three as they are.
+// helper (Task 20376), and the Landlock grant (Task 49). Each is a file next
+// to the unit — never the unit itself, which an upgrade cannot honestly
+// re-render (see upgrade.go) — and the first three are changed only when the
+// operator on the device asks for it, so a plain --upgrade keeps them as they
+// are. The Landlock grant is the exception, and hostsandbox.go says why: it
+// takes rights away rather than granting any, and without it the agent
+// refuses every payload the hub asks it to confine.
 //
 // They are planned, applied and rolled back as one set: if the agent does not
 // come back after the upgrade, every file goes back to what it was, along with
@@ -35,6 +38,7 @@ const (
 // Kinds of file change, for the descriptions.
 const (
 	changePacketFilter  = "packet-filter"
+	changeHostSandbox   = "host-sandbox"
 	changeChannel       = "channel"
 	changeHelperService = "helper-service"
 	changeHelperPath    = "helper-path"
@@ -71,6 +75,18 @@ func (in *Installer) planUnitChanges(s Spec, out Output, opts UpgradeOptions) (*
 		pf.kind = changePacketFilter
 		u.packetFilter = pf
 		u.files = append(u.files, pf)
+	}
+
+	// The Landlock grant, asked for by nobody: a device whose unit forbids
+	// those three calls refuses every confined payload, and the upgrade is
+	// the only route that reaches an installed device without the enrollment
+	// bundle (hostsandbox.go).
+	hs, err := in.planHostSandbox(s, out)
+	if err != nil {
+		return nil, err
+	}
+	if hs != nil {
+		u.files = append(u.files, hs)
 	}
 
 	ch, before, after, err := in.planChannel(s, out, opts.Channel)
@@ -280,6 +296,8 @@ func (u *unitChanges) describe(dryRun bool) []string {
 		switch c.kind {
 		case changePacketFilter:
 			out = append(out, c.describe(dryRun))
+		case changeHostSandbox:
+			out = append(out, c.describeHostSandbox(dryRun))
 		case changeChannel:
 			out = append(out, c.describeChannel(dryRun))
 		case changeHelperService, changeHelperPath:

@@ -385,6 +385,12 @@
         if (ex.revocation_note) {
           h += '<div class="exec-blocked-note">&#9888; ' + esc(ex.revocation_note) + '</div>';
         }
+        // And a device that cannot keep a run to its own project, for the same
+        // reason: the hub refuses every run of a project that shares it, so the
+        // first symptom is a Start button that fails once per click.
+        if (ex.confinement_note) {
+          h += '<div class="exec-blocked-note">&#9888; ' + esc(ex.confinement_note) + '</div>';
+        }
         // Build skew, shown only when it is material. A device trailing by a patch
         // release is normal across a fleet and a warning on every card would cost
         // the operator the one that matters. The note names the upgrade procedure

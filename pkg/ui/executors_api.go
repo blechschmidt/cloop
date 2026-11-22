@@ -203,6 +203,15 @@ type executorView struct {
 	SupportsRevocation bool   `json:"supports_revocation"`
 	RevocationNote     string `json:"revocation_note,omitempty"`
 
+	// ConfinementNote says that this device cannot keep a host payload to its
+	// own project, which is the same class of fact as RevocationNote and is
+	// surfaced for the same reason (Task 49): the hub refuses every run of a
+	// project that shares such a device, so without this the first symptom is
+	// a Start button that fails — once per click — with a Landlock errno from
+	// the far side of the link. Empty when the device can confine, when it
+	// runs its payloads in containers, or when it is not a device at all.
+	ConfinementNote string `json:"confinement_note,omitempty"`
+
 	// ---- scheduling state (Task 20162) -------------------------------------
 	//
 	// Status above is about the *device* ("is it connected"); the fields below
@@ -697,7 +706,32 @@ func (s *Server) buildExecutorView(
 
 	view.Blocked, view.BlockedReason = blockedFor(ex)
 	s.annotateRevocation(&view, ex)
+	annotateConfinement(&view, ex)
 	return view
+}
+
+// annotateConfinement records that this device cannot keep a host payload to
+// its own project, so the panel says so before anyone starts a run (Task 49).
+//
+// Only for a device that runs payloads on its own host: a container or virtual
+// executor's sandbox sees nothing but its bind mount, and the hub asks nothing
+// of the agent for it. Only where the agent reports the fact at all — below
+// remote.MinHostSandboxReportVersion a false flag is silence, and the protocol
+// note beside it already says the agent is behind.
+func annotateConfinement(view *executorView, ex executor.Executor) {
+	remoteEx, ok := ex.(*remote.Executor)
+	if !ok || !deviceRunsHostProcesses(ex) {
+		return
+	}
+	v := remoteEx.ProtocolVersion()
+	if !remote.ReportsHostSandbox(v) || remoteEx.AgentCapabilities().HostSandbox {
+		return
+	}
+	view.ConfinementNote = "This device cannot confine a run to its own project, so cloop refuses every " +
+		"run of a project that shares it. Run `cloop executor agent install --upgrade` on the device: a " +
+		"unit cloop generated before this release denies the agent the Landlock calls the confinement is " +
+		"built from, and the upgrade grants them. A device whose kernel has no Landlock needs its payloads " +
+		"in containers instead."
 }
 
 // annotateRevocation records whether secret leases placed on this executor can

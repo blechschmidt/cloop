@@ -631,6 +631,19 @@ const MinReadOnlyProjectsVersion = 31
 // version honours Spec.ReadOnly.
 func SupportsReadOnlyProjects(version int) bool { return version >= MinReadOnlyProjectsVersion }
 
+// MinHostSandboxReportVersion is the first protocol whose agents report
+// whether they can build the host sandbox a confinement is made of
+// (AgentCapabilities.HostSandbox). It is MinReadOnlyProjectsVersion because
+// the field arrived with Spec.ReadOnly, in the same release.
+//
+// Below it, a false flag means "this agent never said", not "this device
+// cannot" — so a dispatch is not refused on it (Task 49).
+const MinHostSandboxReportVersion = MinReadOnlyProjectsVersion
+
+// ReportsHostSandbox reports whether an agent speaking this protocol version
+// says whether it can build the host sandbox.
+func ReportsHostSandbox(version int) bool { return version >= MinHostSandboxReportVersion }
+
 // SupportsRevocation reports whether an agent speaking this protocol version
 // honours the revoke frame.
 func SupportsRevocation(version int) bool { return version >= MinRevocationVersion }

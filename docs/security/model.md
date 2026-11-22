@@ -986,7 +986,14 @@ runs host-mode payloads as its own user. The agent keeps the projects apart:
   directory alone, and an attach terminal opened beside a confined payload is
   confined the same way. An agent that cannot give the sandbox refuses the
   payload, and the hub refuses to ask an agent below protocol 30, which would
-  ignore the request. A container or virtual executor's payload already sees
+  ignore the request. An agent that reports it cannot build the sandbox
+  (protocol 31 and later) is not asked either: the hub refuses the run itself,
+  naming the device and the remedy, and the Executors panel says so on the
+  device's card before anyone starts one. Until Task 49 the unit cloop's own
+  installer rendered denied the agent the three Landlock calls the sandbox is
+  built from — `@system-service` does not cover them — so on every such device
+  the sandbox was unbuildable and no project that shared the device could run.
+  `cloop executor agent install --upgrade` grants them. A container or virtual executor's payload already sees
   only its bind mount, and a pool's runner takes one run of one project.
 - The agent's own git, which provisions the next run and returns this one's
   work outside the sandbox, obeys nothing a run left in its checkout's `.git`

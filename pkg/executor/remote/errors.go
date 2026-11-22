@@ -112,10 +112,15 @@ var (
 
 	// ErrProjectConfinementUnsupported: the hub asked the device to keep a
 	// host-process workload to its own project (Spec.ConfineToProject, Task
-	// 20500), because the device serves other projects too, and the agent
-	// speaks a protocol older than MinProjectConfinementVersion, so it would
-	// ignore the field and run the workload with every other project's tree
-	// beneath its root in reach. Refused rather than dispatched.
+	// 20500), because the device serves other projects too, and the device
+	// cannot. Either the agent speaks a protocol older than
+	// MinProjectConfinementVersion, so it would ignore the field and run the
+	// workload with every other project's tree beneath its root in reach; or
+	// it speaks a new enough one and reports that it cannot build the sandbox
+	// the confinement is made of (AgentCapabilities.HostSandbox false, Task
+	// 49). Refused rather than dispatched, and in the second case refused
+	// here rather than at the device, where the reason arrives as a Landlock
+	// errno three wrappings down and names no remedy.
 	ErrProjectConfinementUnsupported = errors.New("remote: agent cannot keep a host workload to its project")
 
 	// ErrReadOnlyProjectsUnsupported: the spec gives the run other projects
