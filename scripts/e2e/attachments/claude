@@ -1,0 +1,28 @@
+#!/bin/sh
+# The stand-in harness for the attachments rig: every task attaches a 2 MiB
+# file of pseudo-random bytes (deterministic, so the rig can compute its
+# SHA-256 without seeing it), a report naming the credential the run was
+# leased, a small file, and a copy of the task's input file spec.txt — what a
+# real agent given input files and asked for a report would leave. It ends
+# the turn with TASK_DONE.
+prompt=$(cat)
+current=$(printf '%s\n' "$prompt" | sed -n '/^\*\*Task [0-9]/{p;q;}')
+id=$(printf '%s\n' "$current" | sed -n 's/^\*\*Task \([0-9][0-9]*\):.*/\1/p')
+[ -n "$id" ] || id=unknown
+if [ -z "$CLOOP_TASK_ATTACHMENTS" ]; then
+  echo "No outbox was named."
+  echo TASK_FAILED
+  exit 0
+fi
+mkdir -p "$CLOOP_TASK_ATTACHMENTS/plots"
+python3 -c 'import random, sys; sys.stdout.buffer.write(random.Random(20513).randbytes(2 << 20))' \
+  >"$CLOOP_TASK_ATTACHMENTS/plots/big.bin"
+printf '# Report of task %s\n\nThe run was leased: %s\n' "$id" "$CLAUDE_CODE_OAUTH_TOKEN" >"$CLOOP_TASK_ATTACHMENTS/report.md"
+printf 'small result of task %s\n' "$id" >"$CLOOP_TASK_ATTACHMENTS/small.txt"
+if [ -n "$CLOOP_TASK_INPUTS" ] && [ -f "$CLOOP_TASK_INPUTS/spec.txt" ]; then
+  cp "$CLOOP_TASK_INPUTS/spec.txt" "$CLOOP_TASK_ATTACHMENTS/echo.txt"
+else
+  printf 'no input file: CLOOP_TASK_INPUTS=%s\n' "$CLOOP_TASK_INPUTS" >"$CLOOP_TASK_ATTACHMENTS/echo.txt"
+fi
+echo "Attached the reports of task $id."
+echo TASK_DONE

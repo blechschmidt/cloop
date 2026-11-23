@@ -307,3 +307,17 @@ func (e *Executor) AddHandleTokens(handleID string, tokens ...redact.TokenHash) 
 	hs.bus.AddTokens(tokens...)
 	return true
 }
+
+// Compile-time proof that the hub can scrub what a device's run sends with
+// the set that scrubs its log.
+var _ executor.HandleRedaction = (*Executor)(nil)
+
+// HandleRedaction implements executor.HandleRedaction: the set installed on
+// the handle's log bus (Task 20513).
+func (e *Executor) HandleRedaction(handleID string) (*redact.Set, bool) {
+	hs, err := e.lookup(handleID)
+	if err != nil || hs.bus == nil {
+		return nil, false
+	}
+	return hs.bus.Redactor(), true
+}

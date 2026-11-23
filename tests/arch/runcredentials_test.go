@@ -114,6 +114,11 @@ var publicRoutes = map[string]runRoute{
 		handlers: []string{"handleRunInputs"}, authenticates: "openRunKnowledgeCall"},
 	"/api/run/knowledge/inputs/file": {class: ownProject, scope: "project",
 		handlers: []string{"handleRunInputFile"}, authenticates: "openRunKnowledgeCall"},
+	// The files a seeded run's tasks attach (Task 20513): kept in the store of
+	// the directory the session records, attached only to that directory's
+	// tasks — a write, so the run's own whatever a readers list says.
+	"/api/run/knowledge/results": {class: ownProject, scope: "project",
+		handlers: []string{"handleRunResult"}, authenticates: "openRunKnowledgeCall"},
 	// Citations are taken from the session — a write — so they are the
 	// run's own whatever a list says.
 	"/api/run/knowledge/citations": {class: ownProject, scope: "project",

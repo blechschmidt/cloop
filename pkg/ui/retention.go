@@ -158,6 +158,9 @@ func (s *Server) maybeRunRetention(workDir string, running multiui.RunningDirs) 
 	if _, err := os.Stat(filepath.Join(workDir, ".cloop")); err != nil {
 		return
 	}
+	// What the hub holds for remote runs it lost track of (Task 20513),
+	// whatever the project's retention policy: it is the hub's own.
+	s.sweepHeldResultsOf(workDir)
 
 	// The hub's own directory is governed by the hub's effective
 	// configuration, overlay included; every other project by its own

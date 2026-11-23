@@ -305,6 +305,8 @@ func (s *Server) handleTaskAttachmentUpload(w http.ResponseWriter, r *http.Reque
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
+	// What the hub holds for remote runs takes room too (Task 20513).
+	stored.ProjectBytes += attachments.HeldBytes(dbPath)
 	// The room this upload may take, counting what uploads still in flight
 	// have taken, and taken before a byte is read: uploads at once cannot
 	// together hold more of the disk than one could alone.

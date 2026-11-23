@@ -46,6 +46,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"path/filepath"
 	"regexp"
@@ -56,8 +57,10 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/attachments"
 	"github.com/blechschmidt/cloop/pkg/cost"
+	"github.com/blechschmidt/cloop/pkg/knowledgerun"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
 	"github.com/blechschmidt/cloop/pkg/pm"
+	"github.com/blechschmidt/cloop/pkg/redact"
 	"github.com/blechschmidt/cloop/pkg/requirements"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -159,6 +162,10 @@ type MergeReport struct {
 	Attached    int
 	LeftBehind  []string
 	NotRecorded []string
+	// Delivered counts the run's files the hub had already attached while
+	// the run went on (Task 20513): sent over the run's session as each
+	// attempt ended, and found here under the id the run gave them.
+	Delivered int
 
 	// Dispatched are the tasks the run started, by the hub's numbering: the
 	// ones it took out of the state the seed sent them in, and those it
@@ -230,6 +237,9 @@ func (m MergeReport) Summary() string {
 	}
 	if m.Attached > 0 {
 		recorded = append(recorded, plural(m.Attached, "attached file", "attached files"))
+	}
+	if m.Delivered > 0 {
+		recorded = append(recorded, plural(m.Delivered, "file", "files")+" it had already sent while it ran")
 	}
 	if m.RequirementChecks > 0 {
 		recorded = append(recorded, plural(m.RequirementChecks, "requirement check", "requirement checks"))
@@ -545,7 +555,11 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 // When the plan could not be saved the report is empty, because nothing was
 // merged. An error after the plan was saved — recording the journal or the cost
 // rows — comes with the report of what did land, so the caller can say both.
-func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string) (MergeReport, error) {
+func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string, opts ...ApplyOption) (MergeReport, error) {
+	var o applyOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	st, err := state.LoadLite(workDir)
 	if err != nil {
 		return MergeReport{}, fmt.Errorf("projectseed: load the hub's copy of %s: %w", workDir, err)
@@ -562,7 +576,10 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 	// Before the plan is saved, so the trail reads dispatch, then outcome:
 	// the tasks were dispatched whatever becomes of the save.
 	auditDispatches(workDir, st, rep.Dispatched, prov)
-	if !rep.Changed() && len(r.Attachments) == 0 {
+	// What the run sent while it ran and the hub holds for it (Task 20513):
+	// files of tasks the hub could not tell apart until now.
+	held := heldFiles(workDir, prov.RunID)
+	if !rep.Changed() && len(r.Attachments) == 0 && len(held) == 0 {
 		return rep, nil
 	}
 	if rep.Changed() {
@@ -578,8 +595,8 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 	// result is taken from the executor once, so whatever is not recorded now
 	// is gone. The attachments come first, after the plan they attach to.
 	var errs []error
-	if len(r.Attachments) > 0 {
-		if err := applyAttachments(workDir, r.Attachments, rep.Renumbered, prov, scrub, &rep); err != nil {
+	if len(r.Attachments) > 0 || len(held) > 0 {
+		if err := applyAttachments(workDir, r.Attachments, held, rep.Renumbered, prov, scrub, o, &rep); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -607,8 +624,60 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 	return rep, errors.Join(errs...)
 }
 
+// ApplyOption adjusts how Apply merges a result.
+type ApplyOption func(*applyOptions)
+
+type applyOptions struct {
+	// redaction is the set the hub scrubs the run's output with. Files the
+	// hub holds for the run are scrubbed with it as they are copied into the
+	// store, rather than read whole into memory to be scrubbed as a string.
+	// hasRedaction says it was given: a nil set scrubs nothing.
+	redaction    *redact.Set
+	hasRedaction bool
+}
+
+// WithRedaction gives Apply the redaction set the scrub function it is passed
+// applies (Task 20513), so the files the hub holds for the run — up to
+// attachments.MaxFileBytes each — are scrubbed as they are copied. Without it
+// such a file is read into memory and scrubbed with the function.
+func WithRedaction(set *redact.Set) ApplyOption {
+	return func(o *applyOptions) { o.redaction, o.hasRedaction = set, true }
+}
+
+// heldFiles are the files the hub holds for run runID of the project at
+// workDir: none for a dispatch with no run id, or when they cannot be read.
+func heldFiles(workDir, runID string) []attachments.HeldFile {
+	if strings.TrimSpace(runID) == "" {
+		return nil
+	}
+	held, _ := attachments.Held(state.DBPath(workDir), runID)
+	return held
+}
+
+// ClaimHeld attaches what the hub holds for a run whose result could not be
+// merged — lost, refused or unreadable — to the hub's tasks the run sent them
+// for, and lets go of the rest (Task 20513). With no result there is no plan to
+// renumber by, so a file goes only to the hub's task of the id the run named
+// whose title is the one the run had; a task the run created and the hub never
+// heard of takes nothing, and the report names what was dropped.
+func ClaimHeld(workDir string, prov Provenance, scrub func(string) string, opts ...ApplyOption) (MergeReport, error) {
+	var o applyOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	var rep MergeReport
+	held := heldFiles(workDir, prov.RunID)
+	if len(held) == 0 {
+		attachments.RemoveHeldRun(state.DBPath(workDir), prov.RunID)
+		return rep, nil
+	}
+	err := applyAttachments(workDir, nil, held, nil, prov, scrub, o, &rep)
+	return rep, err
+}
+
 // applyAttachments stores the files a run brought back and records the ones
-// it did not (Task 20428).
+// it did not (Task 20428), and takes in what the run sent while it ran
+// (Task 20513).
 //
 // Everything here came from the device and is checked as such: the task is
 // the hub's numbering of it, the name is cleaned and scrubbed, the bytes must
@@ -616,23 +685,57 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 // knowledge of what it leased, and the hub's limits apply as they would to a
 // run on the hub. A file refused here is recorded without its bytes, saying
 // why, so the task still shows it was made.
-func applyAttachments(workDir string, in []Attachment, renumbered map[int]int, prov Provenance,
-	scrub func(string) string, rep *MergeReport) error {
+//
+// A file the run sent while it ran is found by the id the run gave it: on the
+// hub's task already, which is counted and left as it is, or among the files
+// the hub holds for the run, which are attached now. Each is recorded once
+// however many ways it arrived. What the hub holds for the run and the result
+// does not describe — every file, when the result is a progress report from a
+// run that was lost — is attached by its own description, to the task it
+// names, under the same rule. Whatever is left is let go of at the end.
+func applyAttachments(workDir string, in []Attachment, held []attachments.HeldFile, renumbered map[int]int,
+	prov Provenance, scrub func(string) string, o applyOptions, rep *MergeReport) error {
 	if scrub == nil {
 		scrub = func(s string) string { return s }
 	}
 	dbPath := state.DBPath(workDir)
 	db, err := statedb.Open(dbPath)
 	if err != nil {
+		// What the hub holds for the run stays, for a later claim or the
+		// sweep: nothing of it was recorded.
 		return fmt.Errorf("projectseed: open %s to store the run's attachments: %w", workDir, err)
 	}
 	defer db.Close()
-	for _, a := range in {
-		taskID := a.TaskID
-		if to, ok := renumbered[taskID]; ok {
-			taskID = to
+	defer attachments.RemoveHeldRun(dbPath, prov.RunID)
+	heldByID := make(map[string]attachments.HeldFile, len(held))
+	for _, h := range held {
+		heldByID[h.ID] = h
+	}
+	hubID := func(id int) int {
+		if to, ok := renumbered[id]; ok {
+			return to
 		}
+		return id
+	}
+	for _, a := range in {
+		taskID := hubID(a.TaskID)
 		name := attachments.CleanName(scrub(a.Name))
+		validID := statedb.ValidAttachmentID(a.ID)
+		// Attached while the run went on, by the hub itself, after its own
+		// check of the task (Task 20513): counted, and left as it is.
+		var collides bool
+		if validID {
+			if row, err := db.TaskAttachment(taskID, a.ID); err == nil {
+				if delivered(row, prov) {
+					rep.Delivered++
+					delete(heldByID, a.ID)
+					continue
+				}
+				// The id is the hub's for something else: the run's file
+				// is recorded under a fresh one.
+				collides = true
+			}
+		}
 		// The task the run worked on, or none: an id the hub deleted and gave
 		// to another task while the run was out must not inherit its files.
 		if !rep.runTasks[taskID] {
@@ -641,6 +744,9 @@ func applyAttachments(workDir string, in []Attachment, renumbered map[int]int, p
 				rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf(
 					"%s: the hub's task #%d is not the task the run attached it to; the file stayed in the executor's workspace",
 					name, taskID))
+				if validID {
+					delete(heldByID, a.ID)
+				}
 				continue
 			}
 		}
@@ -650,6 +756,22 @@ func applyAttachments(workDir string, in []Attachment, renumbered map[int]int, p
 		}
 		if meta.CreatedAt.IsZero() || meta.CreatedAt.After(time.Now()) {
 			meta.CreatedAt = time.Now()
+		}
+		if validID && !collides {
+			meta.ID = a.ID
+		}
+		if h, ok := heldByID[a.ID]; ok && validID {
+			delete(heldByID, a.ID)
+			attachHeldFile(db, dbPath, h, taskID, name, meta, scrub, o, prov, rep)
+			continue
+		}
+		if a.Sent {
+			// The run says the hub has it, and the hub has no copy: a
+			// person deleted it while the run went on, most likely, and it
+			// is not put back.
+			rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf(
+				"%s (task #%d): the run sent it to the hub while it ran, and the hub no longer has it", name, taskID))
+			continue
 		}
 		left := truncate(scrub(a.Left), 512)
 		if len(a.Data) > 0 {
@@ -664,7 +786,10 @@ func applyAttachments(workDir string, in []Attachment, renumbered map[int]int, p
 				left = "not stored on the hub: " + attachments.Room(u, int64(len(a.Data)))
 			default:
 				data := []byte(scrub(string(a.Data)))
-				if _, err := attachments.Put(db, dbPath, taskID, meta, bytes.NewReader(data), attachments.MaxFileBytes, nil); err != nil {
+				_, err := putFresh(meta, func(m attachments.Meta) (statedb.AttachmentRow, error) {
+					return attachments.Put(db, dbPath, taskID, m, bytes.NewReader(data), attachments.MaxFileBytes, nil)
+				})
+				if err != nil {
 					if errors.Is(err, statedb.ErrTaskNotFound) {
 						rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: task #%d is not in the hub's plan", name, taskID))
 						continue
@@ -679,19 +804,158 @@ func applyAttachments(workDir string, in []Attachment, renumbered map[int]int, p
 		if left == "" {
 			left = "left in the executor's workspace"
 		}
-		// A row without its file takes no room, but it is a row: the task's
-		// file count still bounds how many a run may leave.
-		if u, err := db.TaskAttachmentUsage(taskID); err != nil || u.TaskFiles+1 > attachments.MaxTaskFiles {
-			rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: task #%d has no room for another attachment", name, taskID))
-			continue
+		recordLeft(db, taskID, name, meta, a.Size, a.SHA256, left, rep)
+	}
+	// What the run sent that its result does not describe.
+	rest := make([]attachments.HeldFile, 0, len(heldByID))
+	for _, h := range held {
+		if _, ok := heldByID[h.ID]; ok {
+			rest = append(rest, h)
 		}
-		if _, err := attachments.Record(db, taskID, meta, a.Size, a.SHA256, left); err != nil {
-			rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: %v", name, err))
-			continue
+	}
+	for _, h := range rest {
+		// The renumbering is of the tasks the run created: a file sent for a
+		// task the run was given keeps that task's id, even when the run went
+		// on to create another task that took the same number.
+		taskID := h.Task
+		if h.Created {
+			taskID = hubID(h.Task)
 		}
-		rep.LeftBehind = append(rep.LeftBehind, fmt.Sprintf("%s (task #%d) — %s", name, taskID, left))
+		name := attachments.CleanName(scrub(h.Name))
+		if !rep.runTasks[taskID] {
+			// By the hub's task of that id under the run's title — never for
+			// a task the run said it created or retitled, which only its
+			// result can place.
+			t, err := db.LoadTask(taskID)
+			if err != nil || h.Created || knowledgerun.TitleDigest(t.Title) != h.TitleSHA256 {
+				rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf(
+					"%s: the run sent it for its task #%d, which is not a task the hub has under the title the run gave it; "+
+						"the hub let it go", name, h.Task))
+				continue
+			}
+		}
+		meta := attachments.Meta{
+			ID: h.ID, Name: scrub(h.Name), Source: statedb.AttachmentSourceRun, RunID: prov.RunID,
+			AddedBy: "agent", CreatedAt: h.CreatedAt,
+		}
+		if meta.CreatedAt.IsZero() || meta.CreatedAt.After(time.Now()) {
+			meta.CreatedAt = time.Now()
+		}
+		if row, err := db.TaskAttachment(taskID, h.ID); err == nil {
+			if delivered(row, prov) {
+				rep.Delivered++
+				continue
+			}
+			meta.ID = ""
+		}
+		attachHeldFile(db, dbPath, h, taskID, name, meta, scrub, o, prov, rep)
 	}
 	return nil
+}
+
+// delivered reports whether row is the run's own file, attached while it ran:
+// a result of the run, under the id the run gave it.
+func delivered(row statedb.AttachmentRow, prov Provenance) bool {
+	return prov.RunID != "" && row.RunID == prov.RunID && row.Role == statedb.AttachmentRoleResult &&
+		row.Source == statedb.AttachmentSourceRun
+}
+
+// putFresh runs put with meta, and once more under a fresh id when the one
+// meta names turns out to be another attachment's: a run's id for a file is
+// its own to choose, and a collision costs the file its id, not its place.
+func putFresh(meta attachments.Meta, put func(attachments.Meta) (statedb.AttachmentRow, error)) (statedb.AttachmentRow, error) {
+	row, err := put(meta)
+	if errors.Is(err, attachments.ErrExists) && meta.ID != "" {
+		meta.ID = ""
+		row, err = put(meta)
+	}
+	return row, err
+}
+
+// attachHeldFile attaches a file the hub holds for the run to the hub's task
+// taskID, scrubbed with what the hub leased the run, or records it without its
+// bytes when the task has no room for it.
+func attachHeldFile(db *statedb.DB, dbPath string, h attachments.HeldFile, taskID int, name string,
+	meta attachments.Meta, scrub func(string) string, o applyOptions, prov Provenance, rep *MergeReport) {
+	u, err := db.TaskAttachmentUsage(taskID)
+	if err != nil {
+		recordLeft(db, taskID, name, meta, h.Size, h.SHA256, "not stored on the hub: "+err.Error(), rep)
+		return
+	}
+	if why := attachments.Room(u, h.Size); why != "" {
+		recordLeft(db, taskID, name, meta, h.Size, h.SHA256, "not stored on the hub: "+why, rep)
+		return
+	}
+	switch {
+	case o.hasRedaction:
+		_, err = putFresh(meta, func(m attachments.Meta) (statedb.AttachmentRow, error) {
+			return attachHeldAs(db, dbPath, prov.RunID, h, taskID, m, o.redaction)
+		})
+	default:
+		// No set to stream with: read whole, scrubbed with the function as a
+		// carried file's bytes are.
+		_, err = putFresh(meta, func(m attachments.Meta) (statedb.AttachmentRow, error) {
+			f, err := attachments.OpenHeld(dbPath, prov.RunID, h)
+			if err != nil {
+				return statedb.AttachmentRow{}, err
+			}
+			data, err := io.ReadAll(io.LimitReader(f, h.Size+1))
+			f.Close()
+			if err != nil {
+				return statedb.AttachmentRow{}, err
+			}
+			data = []byte(scrub(string(data)))
+			return attachments.Put(db, dbPath, taskID, m, bytes.NewReader(data), attachments.MaxFileBytes, nil)
+		})
+	}
+	switch {
+	case err == nil:
+		attachments.RemoveHeld(dbPath, prov.RunID, h.ID)
+		rep.Attached++
+	case errors.Is(err, statedb.ErrTaskNotFound):
+		rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: task #%d is not in the hub's plan", name, taskID))
+	default:
+		recordLeft(db, taskID, name, meta, h.Size, h.SHA256, "not stored on the hub: "+err.Error(), rep)
+	}
+}
+
+// attachHeldAs is attachments.AttachHeld under meta's id, which may be a
+// fresh one rather than the held file's own.
+func attachHeldAs(db *statedb.DB, dbPath, runID string, h attachments.HeldFile, taskID int, meta attachments.Meta,
+	set *redact.Set) (statedb.AttachmentRow, error) {
+	if meta.ID == h.ID {
+		return attachments.AttachHeld(db, dbPath, runID, h, taskID, meta, set)
+	}
+	f, err := attachments.OpenHeld(dbPath, runID, h)
+	if err != nil {
+		return statedb.AttachmentRow{}, err
+	}
+	defer f.Close()
+	return attachments.Put(db, dbPath, taskID, meta, io.NewSectionReader(f, 0, h.Size), attachments.MaxFileBytes, set)
+}
+
+// recordLeft records one of the run's files without its bytes, saying why, or
+// names it as not recorded when even that is refused.
+func recordLeft(db *statedb.DB, taskID int, name string, meta attachments.Meta, size int64, sum, left string,
+	rep *MergeReport) {
+	// A row without its file takes no room, but it is a row: the task's
+	// file count still bounds how many a run may leave.
+	if u, err := db.TaskAttachmentUsage(taskID); err != nil || u.TaskFiles+1 > attachments.MaxTaskFiles {
+		rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: task #%d has no room for another attachment", name, taskID))
+		return
+	}
+	_, err := putFresh(meta, func(m attachments.Meta) (statedb.AttachmentRow, error) {
+		row, err := attachments.Record(db, taskID, m, size, sum, left)
+		if errors.Is(err, statedb.ErrAttachmentExists) {
+			return row, fmt.Errorf("%w: %v", attachments.ErrExists, err)
+		}
+		return row, err
+	})
+	if err != nil {
+		rep.NotRecorded = append(rep.NotRecorded, fmt.Sprintf("%s: %v", name, err))
+		return
+	}
+	rep.LeftBehind = append(rep.LeftBehind, fmt.Sprintf("%s (task #%d) — %s", name, taskID, left))
 }
 
 // auditDispatches records a task.dispatch row in the hub's copy of the project

@@ -274,10 +274,26 @@ func (f failedInputs) Open(context.Context, attachments.TaskRef, attachments.Inp
 
 // agentEnv is the environment an agent's process gets for an attempt beyond
 // the run's own: the review gate's push hold and the task's outbox.
+//
+// It also takes back the variables a seeded run exchanges its tasks' files
+// with the hub by (Tasks 20511, 20513), which are the orchestrator's to use:
+// the agent finds its input files in its inbox and puts its own in its outbox,
+// and a cloop the agent starts — a test of its own project — must neither
+// fetch this run's tasks' input files nor send its files to this run's hub.
+// (The agent can still learn the session's token where it is given the same
+// session for a knowledge search, and the hub holds every request it makes to
+// the same bounds as the run's own.)
 func agentEnv(g *gateRun, b *taskOutbox) []string {
-	env := g.env()
-	if extra := b.env(); len(extra) > 0 {
-		env = append(append([]string(nil), env...), extra...)
+	env := append([]string(nil), g.env()...)
+	env = append(env, b.env()...)
+	if os.Getenv(knowledgerun.EnvResultsToken) != "" {
+		env = append(env, knowledgerun.EnvResultsURL+"=", knowledgerun.EnvResultsToken+"=")
+	}
+	if os.Getenv(knowledgerun.EnvInputsToken) != "" {
+		env = append(env, knowledgerun.EnvInputsURL+"=", knowledgerun.EnvInputsToken+"=")
+	}
+	if len(env) == 0 {
+		return nil
 	}
 	return env
 }
@@ -324,6 +340,8 @@ func (o *Orchestrator) collectAttachments(task *pm.Task, final bool) {
 		return
 	}
 	task.AttachmentCount += len(rep.Added)
+	// On to the hub, for a run seeded into its sandbox (Task 20513).
+	o.results.enqueue(task, rep.Added)
 	summary := attachments.Summary(task.ID, rep)
 	color.New(color.FgCyan).Printf("  📎 %s\n", summary)
 

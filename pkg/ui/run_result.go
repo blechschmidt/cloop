@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blechschmidt/cloop/pkg/attachments"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
@@ -243,6 +244,28 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 		}, details)
 	}
 
+	// The set the run's output is scrubbed with, for the files the run sent
+	// while it ran that the hub holds for it (Task 20513): read before the
+	// result is taken, while the handle is certainly still here.
+	var redaction []projectseed.ApplyOption
+	heldScrub := func(v string) string { return v }
+	if hr, ok := ex.(executor.HandleRedaction); ok {
+		if set, known := hr.HandleRedaction(handleID); known {
+			redaction = append(redaction, projectseed.WithRedaction(set))
+			heldScrub = set.String
+		}
+	}
+	// Whatever becomes of the result below, the files the run sent while it
+	// ran are not lost with it: a run whose result never comes, is refused,
+	// or could not be merged still has them attached to the tasks they were
+	// sent for. A merge that ran took them all, so anything still held means
+	// none did.
+	defer func() {
+		if held, _ := attachments.Held(state.DBPath(workDir), d.prov.RunID); len(held) > 0 {
+			s.claimHeldResults(workDir, d.prov, journal, heldScrub, redaction)
+		}
+	}()
+
 	fetcher, canFetch := ex.(executor.ProjectResultFetcher)
 	if !canFetch || !ex.Capabilities().ReturnsProjectState {
 		journal(fmt.Sprintf("Executor %q ran this project from a copy of its plan and cannot send the "+
@@ -273,7 +296,7 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 		return
 	}
 
-	rep, err := projectseed.Apply(workDir, result, d.prov, res.Redact)
+	rep, err := projectseed.Apply(workDir, result, d.prov, res.Redact, redaction...)
 	details := map[string]any{
 		"updated": rep.Updated, "added": rep.Added, "kept": len(rep.Kept),
 		"steps": rep.Steps, "events": rep.Events, "costs": rep.Costs,
@@ -317,6 +340,44 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 		s.refreshProjectStatuses()
 		s.broadcastProjectsUpdate()
 	}
+}
+
+// claimHeldResults attaches the files a seeded run sent while it ran to the
+// tasks they were sent for when its result could not be merged (Task 20513),
+// journals what became of them, and lets go of the rest.
+func (s *Server) claimHeldResults(workDir string, prov projectseed.Provenance,
+	journal func(string, map[string]any), scrub func(string) string, opts []projectseed.ApplyOption) {
+	defer recoverGoroutine("claim held results: " + workDir)
+	rep, err := projectseed.ClaimHeld(workDir, prov, scrub, opts...)
+	if err != nil {
+		journal(fmt.Sprintf("The files the run sent while it ran could not be attached: %v", err), nil)
+		return
+	}
+	if rep.Attached == 0 && rep.Delivered == 0 && len(rep.LeftBehind) == 0 && len(rep.NotRecorded) == 0 {
+		return
+	}
+	msg := fmt.Sprintf("Of the files the run sent while it ran, %s attached to the tasks they were sent for",
+		pluralCount(rep.Attached, "file was", "files were"))
+	if len(rep.LeftBehind) > 0 {
+		msg += "; recorded without their file: " + strings.Join(rep.LeftBehind, "; ")
+	}
+	if len(rep.NotRecorded) > 0 {
+		msg += "; not recorded: " + strings.Join(rep.NotRecorded, "; ")
+	}
+	journal(msg+".", map[string]any{"attached": rep.Attached})
+	if rep.Attached > 0 {
+		if st, err := state.LoadLite(workDir); err == nil {
+			s.broadcastStateDiff(workDir, st)
+		}
+	}
+}
+
+// pluralCount is "1 file was" or "3 files were".
+func pluralCount(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // projectResultRemedy says how ex comes to send a seeded run's outcome back, in

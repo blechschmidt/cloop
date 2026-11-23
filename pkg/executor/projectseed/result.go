@@ -200,7 +200,13 @@ type Event struct {
 // are the device's account of the file when it does not; the hub checks the
 // one and only reports the other.
 type Attachment struct {
-	TaskID int `json:"task_id"`
+	// ID is the id the run gave the attachment in its own copy of the
+	// project (Task 20513), and the id the hub records it under: a file the
+	// run also sent the hub while it ran is then one attachment, however
+	// many ways it arrived. Empty from a device whose cloop predates it,
+	// which the hub gives a fresh id.
+	ID     string `json:"id,omitempty"`
+	TaskID int    `json:"task_id"`
 	// TaskTitle is the title the task had in the seed — or, for a task the
 	// run created, as it left it. The hub attaches the file only to the task
 	// the run worked on: one the hub deleted or retitled while the run was
@@ -212,6 +218,11 @@ type Attachment struct {
 	CreatedAt time.Time `json:"created_at"`
 	Data      []byte    `json:"data,omitempty"`
 	Left      string    `json:"left,omitempty"`
+	// Sent says the run sent the file to the hub while it ran (Task 20513),
+	// so its bytes do not travel here: the hub attached it, or holds it for
+	// this merge. It is the run's word, and the hub believes it only as far
+	// as finding the file under ID.
+	Sent bool `json:"sent,omitempty"`
 }
 
 // Cost is one cost-ledger row. It carries no identity: who pays for a run is
@@ -447,9 +458,13 @@ func carryAttachments(dir, dbPath string, base, after *pm.Plan, scrub func(strin
 	budget := int64(attachmentCarryBytes)
 	out := make([]Attachment, 0, len(rows))
 	for _, row := range rows {
-		a := Attachment{TaskID: row.TaskID, TaskTitle: scrub(title(row.TaskID)), Name: scrub(row.Name),
+		a := Attachment{ID: row.ID, TaskID: row.TaskID, TaskTitle: scrub(title(row.TaskID)), Name: scrub(row.Name),
 			Size: min(max(row.Size, 0), attachments.MaxFileBytes), SHA256: row.SHA256, CreatedAt: row.CreatedAt}
 		switch {
+		case attachments.WasSent(dbPath, row.ID):
+			// On the hub already (Task 20513): described, so the hub can
+			// tell it from a file it never got, and not carried.
+			a.Sent = true
 		case row.Unavailable != "":
 			a.Left = scrub(row.Unavailable)
 		case row.Size > budget:
@@ -916,6 +931,10 @@ func DecodeResult(data []byte) (*Result, error) {
 				i, a.Size, attachments.MaxFileBytes)
 		case len(a.Data) > 0 && int64(len(a.Data)) != a.Size:
 			return nil, fmt.Errorf("projectseed: attachment %d carries %d bytes but claims %d", i, len(a.Data), a.Size)
+		case a.ID != "" && !statedb.ValidAttachmentID(a.ID):
+			return nil, fmt.Errorf("projectseed: attachment %d has an id that is not an attachment's", i)
+		case a.Sent && len(a.Data) > 0:
+			return nil, fmt.Errorf("projectseed: attachment %d is marked sent and carries its bytes too", i)
 		case len(a.Name) > maxAttachmentTextBytes || len(a.TaskTitle) > maxAttachmentTextBytes ||
 			len(a.Left) > maxAttachmentTextBytes || len(a.SHA256) > 64:
 			return nil, fmt.Errorf("projectseed: attachment %d carries an oversized field", i)

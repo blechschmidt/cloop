@@ -65,6 +65,9 @@ func (s *Server) knowledgeRunRoutes() []routeSpec {
 		// session: inputs_run_api.go.
 		{Pattern: "POST " + mount + knowledgerun.PathInputs, Handler: s.handleRunInputs, Perm: authz.PermPublic, Scope: scopeGlobal},
 		{Pattern: "POST " + mount + knowledgerun.PathInputFile, Handler: s.handleRunInputFile, Perm: authz.PermPublic, Scope: scopeGlobal},
+		// The files a seeded run's tasks attach, sent as each attempt ends
+		// (Task 20513), with the same session: results_run_api.go.
+		{Pattern: "POST " + mount + knowledgerun.PathResults, Handler: s.handleRunResult, Perm: authz.PermPublic, Scope: scopeGlobal},
 	}
 }
 

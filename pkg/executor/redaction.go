@@ -113,6 +113,19 @@ type HandleRedactor interface {
 	AddHandleRedactions(handleID string, values ...string) bool
 }
 
+// HandleRedaction is implemented by a driver that can say what it scrubs a
+// workload's output with on the hub (Task 20513): the set in force on the
+// handle now, refreshed and adopted credentials included.
+//
+// A seeded run sends the hub the files it attaches while it runs, and the hub
+// scrubs each with the very set that scrubs the run's live log before it
+// attaches the file, as it scrubs everything else the run sends back. The
+// boolean reports whether the handle is known; a known handle may have a nil
+// set, which scrubs nothing because the workload holds nothing to scrub.
+type HandleRedaction interface {
+	HandleRedaction(handleID string) (*redact.Set, bool)
+}
+
 // HandleTokenRedactor is implemented by a driver that can also be handed, for
 // a handle it scrubs on the hub, the recorded hashes of tokens its workload
 // holds that the hub process asking never had (Task 20454).

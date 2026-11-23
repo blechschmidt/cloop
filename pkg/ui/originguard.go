@@ -27,7 +27,8 @@ package ui
 //   - forgeryGuard: a state-changing request must come from one of the hub's
 //     own pages (sameorigin.CheckUnsafe) unless it carries a bearer token, and
 //     its body must be JSON — multipart only on the three recording routes,
-//     application/octet-stream only on a task's file upload.
+//     application/octet-stream only on a task's file upload and on the route
+//     a seeded run sends the files it attaches to.
 //   - wsOriginAllowed: a WebSocket's Origin must be one of the hub's own,
 //     scheme, host and port.
 //
@@ -284,8 +285,10 @@ func (s *Server) bodyTypeAccepted(r *http.Request, ct string) bool {
 	case jsonbody.IsMediaType(ct, uploadMediaType):
 		// A task's input file, uploaded as itself (Task 20511): a type no
 		// form can send and no page can send cross-origin without a
-		// preflight, which the hub never answers.
-		return r.Method == http.MethodPost && uploadRoutePath(p)
+		// preflight, which the hub never answers. And a file a seeded run
+		// sends as it attaches it (Task 20513), which carries the run's
+		// session token as a bearer besides.
+		return r.Method == http.MethodPost && (uploadRoutePath(p) || p == runResultsPath)
 	}
 	return false
 }

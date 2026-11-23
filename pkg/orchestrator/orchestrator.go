@@ -460,6 +460,10 @@ type Orchestrator struct {
 	// readOnly is what the run was told about the other projects it may read
 	// (Task 20501): nil for a run given none. See readonly.go.
 	readOnly *readOnlyAccess
+	// results sends the files the run's tasks attach to the hub as each
+	// attempt ends (Task 20513): nil for a run whose files land in the
+	// project's own store. See resultsend.go.
+	results *resultSender
 
 	// testAbortWaitCeiling and testAbortBackoff narrow maxAbortWait and
 	// abortBackoff so tests can exercise the abort paths without sleeping out
@@ -661,7 +665,10 @@ func New(cfg Config, prov provider.Provider) (*Orchestrator, error) {
 		// The run's knowledge session, when the hub gave it one (Task 20472).
 		knowledge: newKnowledgeAccess(os.Getenv),
 		// The other projects it may read, when it was given any (Task 20501).
-		readOnly: newReadOnlyAccess(os.Getenv)}
+		readOnly: newReadOnlyAccess(os.Getenv),
+		// Where the files its tasks attach are sent, for a run seeded into
+		// its sandbox (Task 20513).
+		results: newResultSender(resultsEnv, state.DBPath(s.WorkDir), s.Plan)}
 	o.adopt = defaultAdoptHooks()
 	o.selfBuild = state.SelfBuild()
 	o.refusedFiles = map[runbuild.FileID]bool{}
@@ -1370,6 +1377,11 @@ func (o *Orchestrator) runPM(ctx context.Context) error {
 	ctx = spanCtx
 
 	o.sweepAttachments()
+	// A seeded run sends what its tasks attach to the hub as it goes (Task
+	// 20513); what is still waiting when the loop ends is sent before the
+	// run exits — after the outboxes are drained, so their files go too.
+	o.results.start()
+	defer o.finishResults(ctx)
 	// An attempt the run left early — stopped, paused, requeued — has not
 	// collected its outbox. On an executor whose workspace is thrown away
 	// with the run, this is the last chance before the result is read.

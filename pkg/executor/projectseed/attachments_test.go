@@ -192,7 +192,7 @@ func TestApplyChecksWhatADeviceSends(t *testing.T) {
 	if err := st.SaveDirect(); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyAttachments(hub, r.Attachments, rep.Renumbered, Provenance{RunID: "r"}, func(s string) string { return s }, &rep); err != nil {
+	if err := applyAttachments(hub, r.Attachments, nil, rep.Renumbered, Provenance{RunID: "r"}, func(s string) string { return s }, applyOptions{}, &rep); err != nil {
 		t.Fatal(err)
 	}
 	if rep.Attached != 1 {
@@ -237,7 +237,7 @@ func TestALeftBehindRowStillCountsAgainstTheTask(t *testing.T) {
 		in = append(in, Attachment{TaskID: 1, TaskTitle: "one", Name: "kept.bin", Size: 10, Left: "left on the device"})
 	}
 	rep := MergeReport{}
-	if err := applyAttachments(hub, in, nil, Provenance{}, nil, &rep); err != nil {
+	if err := applyAttachments(hub, in, nil, nil, Provenance{}, nil, applyOptions{}, &rep); err != nil {
 		t.Fatal(err)
 	}
 	db, err := statedb.Open(state.DBPath(hub))

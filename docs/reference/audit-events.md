@@ -50,7 +50,7 @@ the other.
 
 ## Who may read these
 
-Reading all 272 of the actions below requires the `audit.read` permission, held by `admin`.
+Reading all 273 of the actions below requires the `audit.read` permission, held by `admin`.
 
 The trail is one table behind one pair of admin-only endpoints, so the
 permission does not vary by action today. It is recorded per action anyway,
@@ -76,7 +76,7 @@ whichever one happened to be opened.
 
 | Home | Meaning | Actions |
 | --- | --- | --- |
-| `control-plane` | the hub's own state.db | 238 |
+| `control-plane` | the hub's own state.db | 239 |
 | `project` | the project's .cloop/state.db | 30 |
 | `either` | whichever chain the decision was scoped to | 4 |
 
@@ -88,10 +88,10 @@ Everything else is recorded in the hub's own state.db.
 
 ## Actions by family
 
-272 actions in 55 families. Every action is listed: this section is the whole
+273 actions in 55 families. Every action is listed: this section is the whole
 vocabulary of the `event_type` column.
 
-[`task.*`](#task) (10) · [`run.*`](#run) (7) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (5) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (20) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (13) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.move.*`](#projectmove) (6) · [`project.member.*`](#projectmember) (4) · [`project.reader.*`](#projectreader) (2) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
+[`task.*`](#task) (10) · [`run.*`](#run) (8) · [`feature.*`](#feature) (3) · [`requirement.*`](#requirement) (9) · [`knowledge.source.*`](#knowledgesource) (7) · [`knowledge.*`](#knowledge) (5) · [`step.*`](#step) (1) · [`state.*`](#state) (1) · [`config.*`](#config) (1) · [`executor.*`](#executor) (20) · [`forwarder.*`](#forwarder) (12) · [`executor_pool.*`](#executor_pool) (13) · [`workspace.*`](#workspace) (2) · [`sandbox.*`](#sandbox) (1) · [`sandbox.attach.*`](#sandboxattach) (3) · [`secret.*`](#secret) (15) · [`secret.lease.*`](#secretlease) (1) · [`lease.*`](#lease) (4) · [`github_app.*`](#github_app) (1) · [`egress.*`](#egress) (8) · [`gitproxy.*`](#gitproxy) (9) · [`kubeguard.*`](#kubeguard) (6) · [`ci.*`](#ci) (1) · [`ci.session.*`](#cisession) (5) · [`ci.exchange.*`](#ciexchange) (2) · [`ci.relay.*`](#cirelay) (2) · [`ci.rule.*`](#cirule) (3) · [`ci.config.*`](#ciconfig) (1) · [`model_relay.session.*`](#model_relaysession) (4) · [`model_relay.*`](#model_relay) (5) · [`authz.*`](#authz) (2) · [`api_token.*`](#api_token) (6) · [`static_token.*`](#static_token) (1) · [`session.*`](#session) (10) · [`device.*`](#device) (3) · [`request.*`](#request) (2) · [`role_binding.*`](#role_binding) (3) · [`quota.*`](#quota) (4) · [`resource_ceiling.*`](#resource_ceiling) (2) · [`sealing_key.*`](#sealing_key) (5) · [`hub_ca.*`](#hub_ca) (8) · [`oidc.*`](#oidc) (2) · [`telemetry.*`](#telemetry) (1) · [`notifications.*`](#notifications) (1) · [`disk.*`](#disk) (1) · [`stt.credential.*`](#sttcredential) (2) · [`user.*`](#user) (17) · [`scim.*`](#scim) (16) · [`project.*`](#project) (3) · [`project.move.*`](#projectmove) (6) · [`project.member.*`](#projectmember) (4) · [`project.reader.*`](#projectreader) (2) · [`team.*`](#team) (5) · [`audit.*`](#audit) (2) · [`audit.forward.*`](#auditforward) (2)
 
 ### task.*
 
@@ -141,6 +141,7 @@ Payload keys:
 | `run.firewall_denied` | `plan` | project | stable | A run ends whose sandbox firewall refused connections: one row per deny path that refused any, with the totals. |
 | `run.input_fetch` | `knowledge_session` | control-plane | beta | A run whose project was seeded into its sandbox — on an edge device, in a Kubernetes Pod — fetches one of its tasks' input files from the hub with its session, at the start of an attempt at the task — POST /api/run/knowledge/inputs/file (Task 20511). |
 | `run.reexecuted` | `plan` | project | stable | A run replaces its own image with a newer build at a task boundary, keeping its process. |
+| `run.result_upload` | `knowledge_session` | control-plane | beta | A run whose project was seeded into its sandbox — on an edge device, in a Kubernetes Pod — sends the hub a file it attached to a task, with its session, when the attempt that made it ends — POST /api/run/knowledge/results (Task 20513). |
 
 Payload keys:
 
@@ -151,6 +152,7 @@ Payload keys:
 - `run.firewall_denied` — `project`, `run_id`, `executor_id`, `rule`, `why`, `count`, `destinations`, `top`, `first_seen`, `last_seen`, `fingerprint`
 - `run.input_fetch` — `session_id`, `run_id`, `project`, `executor_id`, `workdir`, `task_id`, `attachment_id`, `name`, `size`, `sha256`, `outcome`, `reason`
 - `run.reexecuted` — `project`, `run_id`, `pid`, `from`, `to`, `reason`, `reexecs`
+- `run.result_upload` — `session_id`, `run_id`, `project`, `executor_id`, `workdir`, `task_id`, `attachment_id`, `name`, `size`, `sha256`, `hub_task_id`, `outcome`, `reason`
 
 - `run.adopt_requested` — Gated like starting a run. The request names the run's process, so it is acted on by that run or by none; what the run then did is its run.reexecuted row, or a refusal in the project's journal.
 - `run.cap_paused` — Distinct from state.save's bare "paused" status because a cap is the one pause that ends by itself: `resumes_at` is the window's reset from the OAuth usage API, and it is what run.cap_resumed is later matched against.
@@ -159,6 +161,7 @@ Payload keys:
 - `run.firewall_denied` — Aggregated per run and rule (Task 20437), never per packet: `count` is the refusals the sandbox's packet log reported — rate-limited to ten a second per deny path, so a flood is at least this many — `destinations` how many distinct destinations, `top` up to eight of them as `dst:port/proto`. `rule` is the deny path's tag (`default`, `deny:<prefix>`, `meta:<prefix>`, `block:<prefix>`, `xlat:<prefix>`), or `unitemised` for what the run's capped aggregate counted without itemising; `why` is the hub's sentence for it. Each destination is also a `network_blocked` row in the run's history. Absent for a run on Kubernetes, whose NetworkPolicy has no portable log, and for one on a device whose agent predates protocol v24.
 - `run.input_fetch` — `outcome` is `ok` for a file served, `refused` — with the `reason` — for one the session may not have: a session minted without its tasks' input files, a task the hub numbers differently from the run, a file that is not an input of the task, or a request over the session's rate, its two transfers at once or its byte budget. Listing a task's input files is not recorded; every file whose bytes left the hub is.
 - `run.reexecuted` — Written by the new image. Together with task.dispatch it answers "which build ran this task": a run's tasks before this row ran on `from`, after it on `to`.
+- `run.result_upload` — `outcome` is `attached` for a file attached to the hub's task `hub_task_id` straight away, `held` for one the hub keeps until the run's result says which task it belongs to — a task the run created, one the hub has under another title, or a hub process that cannot scrub it with the run's credentials — `refused` with the `reason` for one the session may not send: a session minted without it, an id that is another attachment's, bytes that do not match the size or SHA-256 sent with them, a file over a limit, or a request over the session's rate, its transfers at once or its byte budget — and `error` for one the hub failed to keep. `task_id` is the run's number for the task.
 
 ### feature.*
 

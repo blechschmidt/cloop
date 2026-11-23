@@ -31,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/redact"
 )
 
 // ErrVirtualExecutorUnsupported reports a virtual executor whose firewall or
@@ -224,6 +225,12 @@ func (v *Virtual) ProjectResult(handleID string) (executor.ProjectResult, error)
 	return v.parent.ProjectResult(handleID)
 }
 
+// HandleRedaction implements executor.HandleRedaction: the handle is the
+// device's (Task 20513).
+func (v *Virtual) HandleRedaction(handleID string) (*redact.Set, bool) {
+	return v.parent.HandleRedaction(handleID)
+}
+
 // InterimProjectResult implements executor.InterimProjectResultFetcher, so a
 // project on a virtual executor shows the plan its run is making exactly as
 // one on the device itself does (Task 50). The report is held on the handle,
@@ -382,6 +389,7 @@ var (
 	_ executor.WorkspaceCredentialHolder   = (*Virtual)(nil)
 	_ executor.ProjectResultFetcher        = (*Virtual)(nil)
 	_ executor.InterimProjectResultFetcher = (*Virtual)(nil)
+	_ executor.HandleRedaction             = (*Virtual)(nil)
 	_ executor.BuildReporter               = (*Virtual)(nil)
 	_ executor.Revoker                     = (*Virtual)(nil)
 	_ executor.EgressScopeExplainer        = (*Virtual)(nil)

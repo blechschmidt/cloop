@@ -199,6 +199,11 @@ var (
 	// belongs to another task, or it never existed.
 	ErrAttachmentNotFound = errors.New("statedb: attachment not found")
 
+	// ErrAttachmentExists indicates a task_attachments row already holds the
+	// id an attach was to record (Task 20513): a seeded run's file arriving a
+	// second time under the id the run gave it.
+	ErrAttachmentExists = errors.New("statedb: attachment already recorded")
+
 	// ErrRequirementNotFound indicates no requirements row has the id asked
 	// about, or no requirement_runs row the run id (Task 20458).
 	ErrRequirementNotFound = errors.New("statedb: requirement not found")
@@ -291,7 +296,7 @@ func HTTPStatus(err error) int {
 		errors.Is(err, ErrAttachmentNotFound), errors.Is(err, ErrRequirementNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrStaleVersion), errors.Is(err, ErrRequirementCheckRunning),
-		errors.Is(err, ErrRequirementSpecChanged):
+		errors.Is(err, ErrRequirementSpecChanged), errors.Is(err, ErrAttachmentExists):
 		return http.StatusConflict
 	case errors.Is(err, ErrDBLocked):
 		return http.StatusServiceUnavailable

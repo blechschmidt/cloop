@@ -143,34 +143,65 @@ reason.
 
 ## Runs on remote executors
 
-How files reach the hub depends on where the agent runs:
+How files reach the hub depends on where the agent runs.
 
-- **On the hub's host, or in a container there**, the project directory is the
-  hub's own (bind-mounted into the container), so attachments go straight into
-  the project's store.
-- **On an edge device, in a Kubernetes Pod, or as a containerised feature**,
-  files come back in the run's result, the same document that brings back the
-  run's tasks, steps and journal. A result is a single transport frame of
-  limited size, so it carries at most **384 KiB** of attachments in total, in
-  the order they were attached. Images and PDFs barely compress. A file that
-  doesn't fit is still recorded on the hub, without its bytes and with the
-  reason ("left in the executor's workspace"), so the task shows that it exists
-  and where it is.
+**On the hub's host, or in a container there**, the project directory is the
+hub's own (bind-mounted into the container), so attachments go straight into
+the project's store.
 
-The hub checks what comes back:
+**On an edge device, in a Kubernetes Pod, on an executor pool's runner, or as
+a containerised feature**, the run works on its own copy of the project. When
+an attempt ends, the run sends each file it attached to the hub over its run
+session (`POST /api/run/knowledge/results`, with `$CLOOP_TASK_RESULTS_URL` and
+`$CLOOP_TASK_RESULTS_TOKEN`). It sends them one at a time in the background,
+so the next task starts without waiting, and the run's log has a line for each
+file. Files arrive whole, up to the usual [limits](#limits). When the run loop
+ends, the run waits up to five minutes for files still being sent (30 seconds
+when it was stopped).
 
-- The task is identified by the hub's number for it (the hub may have
-  renumbered a task the device created).
-- It must still be the task the run worked on. If it was deleted or renamed on
-  the hub during the run and its id now belongs to another task, nothing is
-  attached.
-- The bytes must match the digest sent with them. The hub scrubs them again
-  with the credentials it leased and applies its own limits. A file it refuses
-  is still recorded, with the reason.
+What the hub does with a file a run sends:
+
+- If the file's task is one the run was given, and the hub still has it under
+  the same title, the file is attached to the task straight away. You see it in
+  the dashboard while the run goes on.
+- Otherwise the hub holds the file until the run ends. A task the run created
+  itself can get a different number on the hub, and only the run's result says
+  which task it became. Files of a task renamed on the hub during the run, and
+  files that reach a hub cluster member other than the one streaming the run,
+  are held too.
+- When the run's result comes back, the held files are attached to the tasks
+  it names. If the result never comes (for example, the executor stopped
+  answering), each held file is attached to the task it was sent for, as long
+  as the hub has that task under the title the run gave it. A file that can't
+  be placed is dropped, and the project's **Event History** names it.
+
+A file the run could not send, because the hub was unreachable or refused it,
+comes back in the run's result instead. A result is a single transport frame,
+so it carries at most **384 KiB** of attachments in total. A file that doesn't
+fit is still recorded on the hub, without its bytes and with the reason ("left
+in the executor's workspace"), so the task shows that it exists.
+
+The hub checks every file a run sends or brings back:
+
+- The bytes must match the size and SHA-256 sent with them. If they don't,
+  nothing of the file is kept.
+- The task must be the one the run worked on. A file whose task was deleted or
+  renamed on the hub during the run, so that its number now belongs to another
+  task, is not attached.
+- The hub scrubs the file's name and bytes again with the credentials it
+  leased to the run, as it does the run's log, and applies the task's and the
+  project's limits. Files the hub holds for runs count toward the project's
+  limit, for every upload and every attach.
+- Each file is recorded under the id the run gave it, so a file that arrives
+  both ways, sent during the run and carried in the result, is attached once.
+- A run's session sends files to its own project and nowhere else. Every file
+  it sends, kept or refused, is on the hub's audit trail (`run.result_upload`).
 
 A file kept on the device takes no space on the hub but counts toward the
-task's 100 files. A device whose `cloop` was built before this feature returns
-no attachments.
+task's 100 files. Sending needs what input files need: the run's sandbox must
+have a network, and the hub must know its public address (`ui.external_url`).
+A run without either, or one whose `cloop` on the executor was built before
+this feature, brings its files back only in its result.
 
 Input files go the other way. A run on the hub's host, or in a container that
 mounts the project, copies them from the project's own store. A run whose
@@ -203,6 +234,8 @@ named by a random id:
 .cloop/attachments/.gitignore               # "*" — never committed, even where .cloop/ is not ignored
 .cloop/attachments/outbox/<task-id>/        # files waiting for the attempt to end
 .cloop/attachments/inbox/<task-id>/         # the running attempt's copies of the input files
+.cloop/attachments/held/<run>/              # on the hub: files a remote run sent, until its result places them
+.cloop/attachments/sent/<id>                # in a remote run's copy: marks a file it sent to the hub
 ```
 
 The metadata (name, type, size, SHA-256, role and the run) is in the
@@ -216,6 +249,9 @@ own store inside its worktree's `.cloop/`.
   show as missing.
 - When a run starts, it removes files that no row refers to any more, after an
   hour's grace.
+- The hub removes what it holds for a remote run once the run's result is
+  merged. Files held for a run the hub lost track of are removed a day after
+  the last one arrived, once no live run session names that run.
 - **`cloop audit`** scans attachments for credentials as well as transcripts.
 
 ## Limits
@@ -225,8 +261,10 @@ own store inside its worktree's `.cloop/`.
 | One file | 32 MiB |
 | One task | 100 files, 128 MiB |
 | One project | 1 GiB |
-| Carried back from a remote run | 384 KiB in total |
+| Carried back in a remote run's result | 384 KiB in total |
+| Held on the hub for one remote run | 200 files |
 | Uploads in progress at once | 4 to a project, 16 to a hub process |
+| Files one remote run sends at once | 2, from 256 MiB that refills at 2 MiB a second |
 
 An upload takes its room before the first byte arrives, so uploads made at the
 same time cannot together pass a limit. One that arrives slower than about

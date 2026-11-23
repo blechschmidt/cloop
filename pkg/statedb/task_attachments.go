@@ -296,7 +296,7 @@ func (d *DB) AddTaskAttachment(row AttachmentRow) error {
 	if n, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("statedb: attach %q to task %d: %w", row.Name, row.TaskID, classifyDriverErr(err))
 	} else if n == 0 {
-		return fmt.Errorf("statedb: attachment %s is already recorded", row.ID)
+		return fmt.Errorf("%w: %s", ErrAttachmentExists, row.ID)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("statedb: attach %q to task %d: %w", row.Name, row.TaskID, classifyDriverErr(err))

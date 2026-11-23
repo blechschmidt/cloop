@@ -308,9 +308,10 @@ func TestASeededRunIsGivenASessionForItsInputFiles(t *testing.T) {
 		name, value, _ := strings.Cut(kv, "=")
 		env[name] = value
 	}
-	if env[knowledgerun.EnvInputsURL] != f.ts.URL+knowledgerun.MountPath || env[redact.EnvKey] != knowledgerun.EnvInputsToken ||
+	if env[knowledgerun.EnvInputsURL] != f.ts.URL+knowledgerun.MountPath ||
+		env[redact.EnvKey] != knowledgerun.EnvInputsToken+","+knowledgerun.EnvResultsToken ||
 		env[knowledgerun.EnvURL] != "" || env[knowledgerun.EnvToken] != "" {
-		t.Fatalf("the run's environment = %v: want the input files' URL and token, the token declared sensitive, "+
+		t.Fatalf("the run's environment = %v: want the input files' URL and token, the tokens declared sensitive, "+
 			"and no knowledge search for a project without knowledge", env)
 	}
 	db, err := statedb.Open(state.DBPath(f.dir))

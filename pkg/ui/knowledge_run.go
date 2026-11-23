@@ -325,6 +325,10 @@ type knowledgeScope struct {
 	// project WorkDir names (Task 20511): minted for a run seeded into its
 	// sandbox, whose database holds none of them.
 	Inputs bool `json:"inputs,omitempty"`
+	// Results says the session sends the hub the files the run's tasks
+	// attach (Task 20513): minted, like Inputs, for every run seeded into its
+	// sandbox with a network, whose attachments land in its own copy.
+	Results bool `json:"results,omitempty"`
 }
 
 // applyKnowledgeSession gives a run of a project with knowledge sources bound
@@ -372,7 +376,11 @@ func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, i
 				"to fetch them from the hub with: its agents get none of them.")
 		}
 	}
-	if !has && len(readOnly) == 0 && !inputs {
+	// The same runs send the hub the files their tasks attach, as each
+	// attempt ends (Task 20513): without the session those come back only in
+	// the run's result, which has room for 384 KiB of them.
+	results := inputs
+	if !has && len(readOnly) == 0 && !inputs && !results {
 		return spec, nil
 	}
 	base, why := knowledgeRouteFor(ex)
@@ -394,7 +402,8 @@ func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, i
 			"could be minted ("+err.Error()+").")
 		return spec, nil
 	}
-	scope, _ := json.Marshal(knowledgeScope{WorkDir: workDir, ReadOnly: readOnly, Knowledge: has, Inputs: inputs})
+	scope, _ := json.Marshal(knowledgeScope{WorkDir: workDir, ReadOnly: readOnly, Knowledge: has, Inputs: inputs,
+		Results: results})
 	now := time.Now().UTC()
 	if err := db.PutProxySession(statedb.ProxySessionRow{
 		Kind: statedb.ProxySessionKnowledge, SessionID: id, TokenSHA256: tokenSHA256(token),
@@ -418,6 +427,10 @@ func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, i
 	if inputs {
 		vars[knowledgerun.EnvInputsURL], vars[knowledgerun.EnvInputsToken] = base, token
 		sensitive = append(sensitive, knowledgerun.EnvInputsToken)
+	}
+	if results {
+		vars[knowledgerun.EnvResultsURL], vars[knowledgerun.EnvResultsToken] = base, token
+		sensitive = append(sensitive, knowledgerun.EnvResultsToken)
 	}
 	spec = withSensitiveEnv(spec, ex, vars, sensitive)
 	return spec, &runKnowledge{id: id, workDir: workDir, base: base}

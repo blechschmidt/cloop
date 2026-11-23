@@ -246,6 +246,27 @@ var registry = []Entry{
 			"the hub is.",
 	},
 	{
+		Action: ActionRunResultUpload,
+		Home:   HomeControlPlane,
+		Entity: "knowledge_session",
+		Trigger: "A run whose project was seeded into its sandbox — on an edge device, in a Kubernetes Pod — sends the hub " +
+			"a file it attached to a task, with its session, when the attempt that made it ends — " +
+			"POST /api/run/knowledge/results (Task 20513).",
+		Payload: []string{
+			"session_id", "run_id", "project", "executor_id", "workdir", "task_id", "attachment_id", "name", "size",
+			"sha256", "hub_task_id", "outcome", "reason",
+		},
+		Stability: StabilityBeta,
+		Read:      authz.PermAuditRead,
+		Note: "`outcome` is `attached` for a file attached to the hub's task `hub_task_id` straight away, `held` for one " +
+			"the hub keeps until the run's result says which task it belongs to — a task the run created, one the hub " +
+			"has under another title, or a hub process that cannot scrub it with the run's credentials — `refused` " +
+			"with the `reason` for one the session may not send: a session minted without it, an id that is another " +
+			"attachment's, bytes that do not match the size or SHA-256 sent with them, a file over a limit, or a " +
+			"request over the session's rate, its transfers at once or its byte budget — and `error` for one the hub " +
+			"failed to keep. `task_id` is the run's number for the task.",
+	},
+	{
 		Action:  ActionRunFirewallDenied,
 		Home:    HomeProject,
 		Entity:  "plan",

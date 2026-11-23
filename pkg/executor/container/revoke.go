@@ -342,6 +342,20 @@ func (e *Executor) AddHandleTokens(handleID string, tokens ...redact.TokenHash) 
 	return true
 }
 
+// Compile-time proof that the hub can scrub what a containerised feature's run sends with the
+// set that scrubs its log.
+var _ executor.HandleRedaction = (*Executor)(nil)
+
+// HandleRedaction implements executor.HandleRedaction: the set installed on
+// the handle's log bus (Task 20513).
+func (e *Executor) HandleRedaction(handleID string) (*redact.Set, bool) {
+	rec, err := e.lookup(handleID)
+	if err != nil || rec.bus == nil {
+		return nil, false
+	}
+	return rec.bus.Redactor(), true
+}
+
 // bindingFiles lists the files bindings name, by the path the workload reads
 // them at.
 func bindingFiles(bindings []executor.SecretBinding) []string {

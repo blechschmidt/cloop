@@ -340,6 +340,26 @@ schema and the hub's HTTP API may change in any release.
 
 ### Added
 
+- **Files a run attaches on a remote executor now reach the hub whole.** A run
+  on an edge device, in a Kubernetes Pod, on a pool runner or as a
+  containerised feature used to bring its attachments back only inside its
+  result, which has room for 384 KiB of them; a larger report, screenshot or
+  export was recorded on the hub without its bytes, and on a Pod or a pool
+  runner it was gone with the workspace. Now the run sends each file to the
+  hub as soon as the attempt that made it ends, in the background, over its
+  run session (`POST /api/run/knowledge/results`, `$CLOOP_TASK_RESULTS_URL`
+  and `$CLOOP_TASK_RESULTS_TOKEN`), up to the usual 32 MiB a file. The hub
+  checks the bytes against the size and SHA-256 sent with them, attaches the
+  file to its task straight away when the task is one the run was given under
+  the same title, scrubbed with what the run was leased, and otherwise holds
+  it until the run's result says which task it belongs to. A run whose result
+  never arrives still has its files attached to the tasks they were sent for.
+  Each file is recorded under the id the run gave it, so one that also comes
+  back in the result is attached once. Sends take their room first, are held
+  to the attachment limits, two streams and a byte budget per run, and are
+  audited (`run.result_upload`). The run waits up to five minutes at its end
+  for files still being sent; anything it could not send comes back in its
+  result as before (Task 20513).
 - **You can give a task's agent files to work with.** Attach input files to a
   task in the dashboard (**Add input files…** or a drop on the task's
   Attachments section, or **Files** in the Add Task form), with

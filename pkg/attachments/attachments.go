@@ -94,6 +94,9 @@ var (
 	// ErrNotRegular reports something in the store or the outbox that is not
 	// a plain file: a link, a directory, a FIFO.
 	ErrNotRegular = errors.New("attachments: not a regular file")
+	// ErrExists reports an attach under an id (Meta.ID) the store already
+	// holds a file or a row of (Task 20513).
+	ErrExists = errors.New("attachments: an attachment with that id already exists")
 )
 
 // StoreDir is where the attachments recorded in the database at dbPath live.
@@ -196,6 +199,13 @@ func newID() (string, error) {
 
 // Meta is what an attach records besides the bytes.
 type Meta struct {
+	// ID, when set, is the id the attachment is recorded under instead of a
+	// fresh one: the id a seeded run gave the file in its own copy of the
+	// project, so the hub records it once however many ways it arrives
+	// (Task 20513). It must have statedb.ValidAttachmentID's shape, and an
+	// attach under an id the store already holds fails with ErrExists
+	// without touching what holds it.
+	ID        string
 	Name      string
 	Source    string
 	RunID     string
@@ -231,6 +241,9 @@ func put(root *os.Root, db *statedb.DB, taskID int, meta Meta, src io.Reader, li
 	}
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now()
+	}
+	if meta.ID != "" {
+		return putAs(root, db, row, meta.ID, src, limit, scrub)
 	}
 	id, err := newID()
 	if err != nil {
@@ -278,6 +291,90 @@ func put(root *os.Root, db *statedb.DB, taskID int, meta Meta, src io.Reader, li
 	return row, nil
 }
 
+// putAs is put under an id the caller chose (Meta.ID).
+//
+// The id is not this process's to have drawn, so nothing may be assumed about
+// it: another row may hold it, and so may a file in the store. The file is
+// created under its final name, exclusively, rather than written beside it and
+// renamed over it — a rename replaces whatever the name held, which for an id
+// that is already an attachment's would replace that attachment's bytes, and
+// the cleanup after the row then failed to record would delete them. Created
+// exclusively, a file of that name already there is ErrExists before a byte is
+// written, and what is removed on a failure is only ever this call's own file.
+//
+// The row is the commit point either way: a file without one is invisible to
+// every reader, and the store's sweep removes it once it is old enough.
+func putAs(root *os.Root, db *statedb.DB, row statedb.AttachmentRow, id string, src io.Reader, limit int64,
+	scrub *redact.Set) (statedb.AttachmentRow, error) {
+	if !statedb.ValidAttachmentID(id) {
+		return row, fmt.Errorf("attachments: store %q: id %q is not 32 lower-case hex characters", row.Name, clipID(id))
+	}
+	row.ID = id
+	if _, err := db.TaskAttachment(row.TaskID, id); err == nil {
+		return row, fmt.Errorf("%w: %s on task %d", ErrExists, id, row.TaskID)
+	}
+	f, err := root.OpenFile(id, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return row, fmt.Errorf("%w: the store already holds a file named %s", ErrExists, id)
+	}
+	if err != nil {
+		return row, fmt.Errorf("attachments: store %q: %w", row.Name, err)
+	}
+	created, statErr := f.Stat()
+	cleanup := func() {
+		// Only the file this call created: one swapped in under the name
+		// since is somebody else's, and stays.
+		if statErr != nil {
+			return
+		}
+		if now, err := root.Lstat(id); err == nil && os.SameFile(created, now) {
+			_ = root.Remove(id)
+		}
+	}
+
+	sum := sha256.New()
+	head := &headBuffer{max: sniffBytes}
+	counted := &countingWriter{}
+	scrubbed := redact.NewWriter(io.MultiWriter(f, sum, head, counted), scrub)
+	read, err := io.Copy(scrubbed, io.LimitReader(src, limit+1))
+	if err == nil {
+		err = scrubbed.Flush()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = statErr
+	}
+	switch {
+	case err != nil:
+		cleanup()
+		return row, fmt.Errorf("attachments: store %q: %w", row.Name, err)
+	case read > limit:
+		cleanup()
+		return row, fmt.Errorf("%w: %q is over %s", ErrTooLarge, row.Name, HumanBytes(limit))
+	}
+	row.Size = counted.n
+	row.SHA256 = hex.EncodeToString(sum.Sum(nil))
+	row.MediaType = DetectType(row.Name, head.b)
+	if err := recordRow(db, row); err != nil {
+		cleanup()
+		if errors.Is(err, statedb.ErrAttachmentExists) {
+			return row, fmt.Errorf("%w: %s is already recorded", ErrExists, id)
+		}
+		return row, err
+	}
+	return row, nil
+}
+
+// clipID bounds an id quoted in an error: it came from somewhere else.
+func clipID(id string) string {
+	if len(id) > 64 {
+		return id[:64] + "…"
+	}
+	return id
+}
+
 // recordRow records a stored file's row. A variable so a test can make the
 // database fail the way a busy or full one does.
 var recordRow = (*statedb.DB).AddTaskAttachment
@@ -286,9 +383,15 @@ var recordRow = (*statedb.DB).AddTaskAttachment
 // run's file that its result had no room for — with why they are not. Its
 // size and digest are what the executor reported.
 func Record(db *statedb.DB, taskID int, meta Meta, size int64, sha256Hex, unavailable string) (statedb.AttachmentRow, error) {
-	id, err := newID()
-	if err != nil {
-		return statedb.AttachmentRow{}, err
+	id := meta.ID
+	if id == "" {
+		var err error
+		if id, err = newID(); err != nil {
+			return statedb.AttachmentRow{}, err
+		}
+	} else if !statedb.ValidAttachmentID(id) {
+		return statedb.AttachmentRow{}, fmt.Errorf("attachments: record %q: id %q is not 32 lower-case hex characters",
+			CleanName(meta.Name), clipID(id))
 	}
 	row := statedb.AttachmentRow{
 		ID: id, TaskID: taskID, Name: CleanName(meta.Name), MediaType: TypeByName(meta.Name),
@@ -341,6 +444,7 @@ func Add(db *statedb.DB, dbPath string, taskID int, path string, meta Meta) (sta
 	if err != nil {
 		return statedb.AttachmentRow{}, err
 	}
+	u.ProjectBytes += HeldBytes(dbPath)
 	if why := Room(u, info.Size()); why != "" {
 		return statedb.AttachmentRow{}, fmt.Errorf("%w: %s: %s", ErrQuota, filepath.Base(path), why)
 	}

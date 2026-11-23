@@ -120,6 +120,8 @@ func Ingest(db *statedb.DB, dbPath string, taskID int, opts IngestOptions) (Repo
 	if err != nil {
 		return rep, err
 	}
+	// What the hub holds for remote runs takes room too (Task 20513).
+	usage.ProjectBytes += HeldBytes(dbPath)
 	for _, c := range w.files {
 		name := CleanName(c.rel)
 		if why := Room(usage, c.info.Size()); why != "" {

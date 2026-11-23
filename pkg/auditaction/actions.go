@@ -62,6 +62,9 @@ const (
 	// ActionRunInputFetch records a run seeded into its sandbox fetching one
 	// of its tasks' input files from the hub with its session (Task 20511).
 	ActionRunInputFetch Action = "run.input_fetch"
+	// ActionRunResultUpload records a run seeded into its sandbox sending the
+	// hub a file it attached, with its session (Task 20513).
+	ActionRunResultUpload Action = "run.result_upload"
 	// ActionRunFirewallDenied records, when a run ends, what one deny path of
 	// its sandbox's firewall refused in all (Task 20437): one row per run and
 	// rule, never one per packet.
