@@ -12,6 +12,12 @@ schema and the hub's HTTP API may change in any release.
 
 ### Security
 
+- **The OpenTelemetry SDK is updated from v1.45.0 to v1.47.0.** In v1.45.0 a
+  span attribute made of U+FFFD runes passed the attribute value length limit
+  (GO-2026-6974), and cloop's tracing calls that code when tracing is enabled
+  (`pkg/tracing`). govulncheck flagged it once the advisory was published,
+  which turned the CI's vulnerability scan red for every commit (Task 20515).
+
 - **Two runs of different projects on one executor can no longer reach each
   other over the network.** A container executor with `network: bridge` and
   no egress filter started every project's sandbox on the engine's default
