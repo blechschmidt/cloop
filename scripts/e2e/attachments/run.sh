@@ -5,6 +5,12 @@
 #
 #   BIN=/path/to/static/cloop ./run.sh                 # the second agent on this host
 #   BIN=/path/to/static/cloop DEVICE=sgx ./run.sh      # the second agent on a device
+#   BIN=… RUN_BIN=/path/to/older/cloop ./run.sh        # the run's own cloop is another one
+#
+# RUN_BIN is the cloop the device runs the project with (`cloop run`, found on
+# the payload's PATH); the hub and the device's agent run BIN. It defaults to
+# BIN. Give it a build from before runs sent their files (Task 20513) to check
+# that the agent sends what such a run leaves behind (Task 20515).
 #
 # Everything runs under WORK (a fresh directory by default) with its own HOME
 # and CLOOP_HOME, and a hub of its own on 127.0.0.1:PORT. With DEVICE=local the
@@ -15,6 +21,7 @@
 set -euo pipefail
 
 BIN=${BIN:?BIN names the static cloop under test}
+RUN_BIN=${RUN_BIN:-$BIN}
 DEVICE=${DEVICE:-local}
 PORT=${PORT:-18513}
 FORGE_PORT=${FORGE_PORT:-18514}
@@ -108,6 +115,7 @@ fetch() { # fetch TASK NAME OUT — the bytes the hub serves for the file
 
 log "rig: hub $BASE, device $DEVICE (second agent under $RDIR), work $WORK"
 log "cloop under test: $("$BIN" version 2>/dev/null | head -1)"
+[ "$RUN_BIN" = "$BIN" ] || log "the device runs the project with: $("$RUN_BIN" version 2>/dev/null | head -1) ($RUN_BIN)"
 
 # ── the forge, the project and the hub ───────────────────────────────────────
 (cd "$KIT/../projectmove" && go build -o "$WORK/forge-bin" forge.go)
@@ -144,12 +152,14 @@ if [ "$DEVICE" != local ]; then
 fi
 (cd "$WORK/hub" && cl executor enroll --name rig-device --server "ws://127.0.0.1:$PORT/api/executors/connect" \
   --bundle-file "$WORK/bundle" >/dev/null)
-dev "rm -rf $RDIR && mkdir -p $RDIR/bin $RDIR/home $RDIR/work"
-put "$BIN" "$(dest "$RDIR/bin/cloop")"
+# The agent runs BIN from agent-bin; the run finds RUN_BIN as `cloop` in bin.
+dev "rm -rf $RDIR && mkdir -p $RDIR/bin $RDIR/agent-bin $RDIR/home $RDIR/work"
+put "$BIN" "$(dest "$RDIR/agent-bin/cloop")"
+put "$RUN_BIN" "$(dest "$RDIR/bin/cloop")"
 put "$KIT/claude" "$(dest "$RDIR/bin/claude")"
 put "$WORK/bundle" "$WORK/forge-ca.pem" "$(dest "$RDIR/")"
-dev "chmod 0755 $RDIR/bin/*; cd $RDIR && setsid -f sh -c 'echo \$\$ >$RDIR/agent.pid; exec env -i HOME=$RDIR/home \
-  PATH=$RDIR/bin:/usr/local/bin:/usr/bin:/bin GIT_SSL_CAINFO=$RDIR/forge-ca.pem $RDIR/bin/cloop executor agent \
+dev "chmod 0755 $RDIR/bin/* $RDIR/agent-bin/*; cd $RDIR && setsid -f sh -c 'echo \$\$ >$RDIR/agent.pid; exec env -i HOME=$RDIR/home \
+  PATH=$RDIR/bin:/usr/local/bin:/usr/bin:/bin GIT_SSL_CAINFO=$RDIR/forge-ca.pem $RDIR/agent-bin/cloop executor agent \
   --token-file $RDIR/bundle --credential $RDIR/agent.json --workdir-root $RDIR/work' >$RDIR/agent.log 2>&1 </dev/null"
 online() { api GET /api/executors | jq_ "[e['id'] for e in d['executors'] if e['name']=='rig-device' and e['status']=='online']" | grep -q "'"; }
 wait_for "the device's agent to connect" 60 online
@@ -174,7 +184,7 @@ attachments_of "$T" | jq_ "'\n'.join('%-16s %-6s %9s %s' % (a['name'], a.get('ro
   sed 's/^/    /' | tee -a "$RESULTS"
 python3 -c 'import random, sys; sys.stdout.buffer.write(random.Random(20513).randbytes(2 << 20))' >"$WORK/big.expected"
 fetch "$T" plots/big.bin "$WORK/big.got"
-check "plots/big.bin (2 MiB, over the 384 KiB a result carries) is on the hub" test "$(row_of "$T" plots/big.bin unavailable)" = ""
+check "plots/big.bin (2 MiB, more than a run's result carries) is on the hub" test "$(row_of "$T" plots/big.bin unavailable)" = ""
 check "the hub serves plots/big.bin byte for byte" cmp -s "$WORK/big.expected" "$WORK/big.got"
 fetch "$T" report.md "$WORK/report.got"
 check "report.md is on the hub" grep -q "Report of task $T" "$WORK/report.got"
@@ -194,6 +204,14 @@ log "the merge: $merged"
 check "the merge counted the files the run had already sent" sh -c "printf '%s' \"\$1\" | grep -q 'already sent while it ran'" _ "$merged"
 held=$( (find "$P/.cloop/attachments/held" -type f 2>/dev/null || true) | wc -l)
 check "nothing is left held on the hub ($held)" test "$held" = 0
+if [ "$RUN_BIN" != "$BIN" ]; then
+  # A run whose cloop predates sending sends nothing itself: every file on the
+  # hub came from the agent, once the run had ended.
+  agentlog=$(dev "cat $RDIR/agent.log" 2>/dev/null || true)
+  printf '%s\n' "$agentlog" | grep "attached files to the hub" | sed 's/^/    agent: /' | tee -a "$RESULTS"
+  check "the device's agent sent the four files the run left behind" \
+    sh -c "printf '%s' \"\$1\" | grep -q 'sent 4 of the run.s attached files to the hub'" _ "$agentlog"
+fi
 
 if [ "$FAILED" = 0 ]; then log "ALL PASSED"; else log "SOME CHECKS FAILED"; fi
 exit "$FAILED"

@@ -1456,6 +1456,28 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Files a remote run attaches no longer stay on the executor because its
+  result measured them by their raw size.** When a run on an edge device could
+  not send its files to the hub while it ran, they came back inside its result,
+  which counted each file's own bytes against 384 KiB. One such run attached
+  thirteen files, 726 KiB of logs, Markdown, an SVG and a PNG. Four of them
+  were recorded on the hub without their bytes ("left in the executor's
+  workspace: at 32.5 KiB it did not fit in what is left of the 384.0 KiB of
+  attachments a run's result carries"), although all thirteen take 310 KiB of
+  the compressed frame the result travels in. A result now carries files while
+  they fit either the room its run's steps and journal leave in the 640 KiB
+  frame, where each file counts by what it takes there compressed, or the
+  384 KiB counted by their own size that it always kept for them; at most 8 MiB
+  of files travel in one result. A result too large leaves out as few files as
+  it takes, where it used to drop every file at once, and it is kept under the
+  size the hub inflates a result to, so the hub never refuses one whole. The
+  files a run on a device or a pool runner did not send itself, because its
+  sandbox image's `cloop` predates sending or the hub could not take them while
+  it ran, are now sent by the device's agent once the run ends, with the run's
+  own session, before the run's outcome is reported; a stop cuts this short.
+  The run's log lists them. The agent needs this release; a run whose sandbox
+  has no network still brings its files back only in its result (Task 20515).
+
 - **The projects list shows a run on a remote executor as running.** A run on
   an executor that cannot read the hub's filesystem works on its own copy of
   the project, so until it ends the hub's copy still says how the previous run

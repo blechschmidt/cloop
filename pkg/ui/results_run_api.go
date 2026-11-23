@@ -10,9 +10,11 @@ package ui
 // files straight into the project's store. A run seeded into its sandbox — an
 // edge device, a Kubernetes Pod, a containerised feature — attaches them in its
 // own copy of the project, and its result, read back when the run is over,
-// carries at most 384 KiB of them. So every such run with a network is given
-// its run session for this too (knowledge_run.go, applyRunSession), and sends
-// each file when the attempt that made it ends.
+// carries only as many of them as fit its one transport frame. So every such
+// run with a network is given its run session for this too (knowledge_run.go,
+// applyRunSession), and sends each file when the attempt that made it ends;
+// the agent of a device sends, the same way and with the same session, what
+// the run did not send before it ended (Task 20515).
 //
 // What the hub does with one:
 //

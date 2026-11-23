@@ -77,12 +77,19 @@ func finishRun(src string) []string {
 // agent sent up to and including the terminal status.
 func startSeeded(t *testing.T, cp *controlPlane, version int, seed []byte, argv []string) []remote.Frame {
 	t.Helper()
+	return startSeededWith(t, cp, version, seed, argv, nil)
+}
+
+// startSeededWith is startSeeded for a workload dispatched with env.
+func startSeededWith(t *testing.T, cp *controlPlane, version int, seed []byte, argv, env []string) []remote.Frame {
+	t.Helper()
 	const handleID = "handle-seeded"
 	start, err := remote.NewFrameAt(version, remote.TypeStart, "start-1", handleID, remote.StartPayload{
 		HandleID: handleID,
 		Spec: executor.Spec{
 			WorkDir: "test-remote-executor-4009d014",
 			Argv:    argv,
+			Env:     env,
 			Labels:  map[string]string{executor.LabelRunID: "run_from_hub"},
 		},
 		ProjectSeed: seed,

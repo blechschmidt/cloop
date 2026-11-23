@@ -5,9 +5,9 @@ package knowledgerun
 //
 // A run whose project was seeded into its sandbox — an edge device, a
 // Kubernetes Pod, a containerised feature — attaches files in its own copy of
-// the project. Its result, read back once the run is over, carries at most
-// 384 KiB of them: it is one transport frame, and the plan, the steps and the
-// journal need room too. So the hub dispatches every such run that has a
+// the project. Its result, read back once the run is over, carries only as
+// many of them as fit beside the plan, the steps and the journal in one
+// transport frame. So the hub dispatches every such run that has a
 // network with its run session under EnvResultsURL and EnvResultsToken, and the
 // run sends each file it attaches as soon as the attempt that made it ends:
 //

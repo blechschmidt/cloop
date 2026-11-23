@@ -894,6 +894,9 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		// See projectresult.go.
 		wl.recordSeed(payload.ProjectSeed)
 		a.recordPlacement(wl, spec.WorkDir, spec)
+		// And the session the run sends its attached files with, for the
+		// ones it does not send itself. See runfiles.go.
+		wl.recordRunSession(spec.Env)
 	}
 
 	// Remember how to give the work back, before the Spec is rewritten below
@@ -1224,14 +1227,26 @@ func (a *Agent) pumpOutput(wl *workload) {
 		status = executor.Status{State: executor.StateFailed, Error: statusErr.Error()}
 	}
 	status.HandleID = wl.handleID
+	// The exit is recorded at once, so nothing that reads the workload's own
+	// record — a revoke, a terminal, a runner on its way out — takes it for
+	// running. A status request still answers "running" until the final
+	// status has gone out (draining).
 	wl.mu.Lock()
 	wl.status = status
-	wl.finished = true
 	wl.mu.Unlock()
 	// The sandbox is gone, so its forwarded devices are detached now rather
 	// than once the outcome has been delivered (Task 20430): a device must not
-	// stay attached to this host while the log tail and write-back go out.
+	// stay attached to this host while the run's files, the log tail and the
+	// write-back go out.
 	a.closeDevicesFor(wl.handleID, "the run ended")
+	// The files a seeded run attached and did not send the hub go now, over
+	// its own session, before the workload is marked finished: until then a
+	// reconnect does not report its end or read its result back, so neither
+	// can overtake them. See runfiles.go.
+	a.sendRunFiles(wl)
+	wl.mu.Lock()
+	wl.finished = true
+	wl.mu.Unlock()
 
 	// Flush before reporting terminal status: the control plane closes the
 	// log stream when the terminal status arrives, so any output sent after
@@ -1403,6 +1418,19 @@ func (a *Agent) handleSignal(ctx context.Context, sess *deviceSession, frame rem
 		a.cfg.logf("signal %s arrived during workspace provisioning; cancelling the fetch", frame.Handle)
 		a.reply(ctx, sess, remote.TypeStatus, frame.ID, frame.Handle, remote.StatusPayload{
 			Status: wl.snapshot(),
+		})
+		return
+	}
+	if st := wl.snapshot(); st.State.Terminal() {
+		// The process has exited; what is left is this agent's own work
+		// after it — the run's files, its result, its write-back. A stop
+		// cuts the files short, so the outcome goes out now (what was not
+		// sent comes back in the result), and is answered with the status
+		// the hub is to see until then.
+		wl.stopRunFiles()
+		st.HandleID = frame.Handle
+		a.reply(ctx, sess, remote.TypeStatus, frame.ID, frame.Handle, remote.StatusPayload{
+			Status: wl.draining(st),
 		})
 		return
 	}

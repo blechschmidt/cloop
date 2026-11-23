@@ -362,6 +362,15 @@ type workload struct {
 	// plane — or that this session's hub is too old to take one — so neither
 	// a reconnect nor the output pump sends it twice.
 	projectReturned bool
+	// results is the session a seeded run was dispatched with to send the
+	// hub the files it attaches, which this agent uses for the ones the run
+	// did not send (Task 20515). Nil when the hub gave the run none.
+	results *runSession
+	// stopFiles ends that sending early; set while it goes on, and called
+	// by a stop that arrives meanwhile. filesStopped records a stop, so one
+	// that comes before the sending starts still holds.
+	stopFiles    context.CancelFunc
+	filesStopped bool
 }
 
 // setSecrets records the credential files placed for this workload.

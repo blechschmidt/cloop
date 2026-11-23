@@ -6,9 +6,11 @@ package attachments
 // A run seeded into its sandbox sends each file it attaches to the hub over
 // its run session as soon as the attempt ends (pkg/orchestrator). Its result,
 // read back once the run is over, then describes such a file without carrying
-// its bytes: they are on the hub already, and the 384 KiB the result has for
+// its bytes: they are on the hub already, and the room the result has for
 // files is left to the ones that could not be sent. The run marks each file
-// it sent with an empty file named by the attachment's id,
+// it sent with an empty file named by the attachment's id — and so does the
+// agent of a device, which sends what the run did not once the run has ended
+// (Task 20515, pkg/executor/projectseed's SendAttachments) —
 //
 //	<store>/sent/<id>
 //

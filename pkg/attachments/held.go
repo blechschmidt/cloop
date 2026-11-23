@@ -6,7 +6,7 @@ package attachments
 // A run whose project was seeded into its sandbox — on an edge device, in a
 // Kubernetes Pod — attaches files in its own copy of the project. Until this
 // file, the only way those files reached the hub was inside the run's result,
-// one transport frame that carries at most 384 KiB of them; everything else
+// one transport frame with room for only so many of them; everything else
 // was recorded on the hub without its bytes. Now the run sends each file to
 // the hub as soon as it is attached, over its run session. The hub attaches it
 // to the task straight away when it can tell which task that is, and otherwise

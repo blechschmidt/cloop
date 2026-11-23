@@ -5,10 +5,11 @@ package orchestrator
 //
 // A run whose project was seeded into its sandbox — on an edge device, in a
 // Kubernetes Pod — attaches files in its own copy of the project
-// (attachments.go). Its result, read back once the run is over, brings at most
-// 384 KiB of them home; a report, a set of screenshots or a data export does
-// not fit, and on a Pod or an executor pool's runner the workspace it was left
-// in is gone with the run. So a run dispatched with a session for it
+// (attachments.go). Its result, read back once the run is over, brings home
+// only as many of them as fit beside the run's history in one transport frame;
+// a set of screenshots or a data export does not fit, and on a Pod or an
+// executor pool's runner the workspace it was left in is gone with the run.
+// So a run dispatched with a session for it
 // (knowledgerun.EnvResultsURL, EnvResultsToken) sends each file to the hub as
 // soon as it is attached, and marks it sent in its own store, so its result
 // describes the file without carrying it.

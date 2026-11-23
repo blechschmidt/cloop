@@ -377,8 +377,9 @@ func applyRunSession(spec executor.Spec, ex executor.Executor, workDir, runID, i
 		}
 	}
 	// The same runs send the hub the files their tasks attach, as each
-	// attempt ends (Task 20513): without the session those come back only in
-	// the run's result, which has room for 384 KiB of them.
+	// attempt ends (Task 20513), and the agent of a device sends the hub
+	// what the run did not (Task 20515): without the session those come back
+	// only in the run's result, as far as its one frame has room for them.
 	results := inputs
 	if !has && len(readOnly) == 0 && !inputs && !results {
 		return spec, nil

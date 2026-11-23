@@ -4,7 +4,7 @@ A run on a remote executor works on its own copy of the project. This kit
 checks, with real processes, that files reach the hub from such a run and the
 other way round: a task's input file gets to the agent on the device, and the
 files the agent attaches get back to the hub whole, even one far bigger than
-the 384 KiB a run's result can carry.
+a run's result can carry.
 
 [`run.sh`](run.sh) sets everything up and tears it down again:
 
@@ -26,7 +26,15 @@ the 384 KiB a run's result can carry.
 CGO_ENABLED=0 go build -o /tmp/cloop-static .
 cd /tmp && BIN=/tmp/cloop-static scripts/e2e/attachments/run.sh              # this host
 cd /tmp && BIN=/tmp/cloop-static DEVICE=sgx scripts/e2e/attachments/run.sh   # a device
+cd /tmp && BIN=/tmp/cloop-static RUN_BIN=/tmp/cloop-older scripts/e2e/attachments/run.sh
 ```
+
+`RUN_BIN` is the `cloop` the device runs the project with; the hub and the
+device's agent run `BIN`. Give it a build from before runs sent their files
+(any commit before bfe841eb) to play a sandbox image whose `cloop` is older
+than the agent: the run then sends nothing itself, and the agent has to send
+what it attached once the run ends. The rig then also checks the agent's log
+for that.
 
 Run it from a directory outside the repository: a cloop started in the
 repository's root opens and migrates the hub database there.
@@ -54,7 +62,25 @@ task's attachments.
 
 ## Last run
 
-2026-11-22, Task 20513, on this host (`DEVICE=local`; the sgx device was not
+2026-11-23, Task 20515, on this host (`DEVICE=local`; a real run was going on
+the sgx device). With `BIN` built from the working tree and `RUN_BIN` built
+from abb2f1c9, the commit before runs sent their files, every check passed and
+the agent's log said
+`sent 4 of the run's attached files to the hub in 193ms (0 not sent)`. With the
+same `RUN_BIN` and `BIN` built from a2d4de1d, before the agent sent anything,
+`plots/big.bin` was left behind exactly as on the device that prompted the
+change:
+
+```text
+    plots/big.bin    result   2097152 left in the executor's workspace: at 2.0 MiB it did not fit in what is left of the 384.0 KiB of attachments a run's result carries
+21:33:43 FAIL plots/big.bin (2 MiB, more than a run's result carries) is on the hub
+```
+
+With `BIN` alone (the run sends its own files) every check passed too.
+
+### 2026-11-22, Task 20513
+
+On this host (`DEVICE=local`; the sgx device was not
 reachable that day). The cloop built from the working tree before it was
 committed passed every check. The same rig with the build before the change
 (`git archive HEAD`) showed the gap the change closes:

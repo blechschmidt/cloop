@@ -175,11 +175,36 @@ What the hub does with a file a run sends:
   as the hub has that task under the title the run gave it. A file that can't
   be placed is dropped, and the project's **Event History** names it.
 
-A file the run could not send, because the hub was unreachable or refused it,
-comes back in the run's result instead. A result is a single transport frame,
-so it carries at most **384 KiB** of attachments in total. A file that doesn't
-fit is still recorded on the hub, without its bytes and with the reason ("left
-in the executor's workspace"), so the task shows that it exists.
+On an edge device or a pool runner, the cloop agent that ran the workload
+sends the files the run did not send itself. It does this once the run ends,
+before it reports the run's outcome, with the same run session and the same
+endpoint, so the hub checks these files like any other. This covers a sandbox
+image whose `cloop` was built before runs could send files, and a send the hub
+could not take while the run was going, for example while the hub restarted.
+The agent sends the smallest files first, and the run's log lists what it
+sent. It gives up after about three minutes, sooner if the hub can't be
+reached, refuses the session or keeps failing, and at once if the run is
+stopped.
+
+A file that still hasn't reached the hub comes back in the run's result. A
+result travels as a single transport frame of 640 KiB, compressed, together
+with the run's steps and journal. Files are taken in the order the run attached
+them, as long as they fit one of two allowances:
+
+- the room the rest of the result leaves in the frame, where each file counts
+  by what it takes there compressed: logs, Markdown and SVG shrink to a
+  fraction of their size, while images and archives take about what they
+  weigh;
+- 384 KiB of files counted by their own size, which a result keeps for files
+  however long the run's step output is. To make this room, the step output is
+  shortened and the journal's details are dropped.
+
+At most 8 MiB of files, counted by their own size, travel in one result. If the
+result is still too large, files are left out, as few as it takes. A file that
+doesn't fit is still recorded on the hub, without its bytes and with the reason
+("left in the executor's workspace"), so the task shows that it exists. On a
+device, such a file stays in the project's directory there only until the
+project's next run on that device starts.
 
 The hub checks every file a run sends or brings back:
 
@@ -200,8 +225,9 @@ The hub checks every file a run sends or brings back:
 A file kept on the device takes no space on the hub but counts toward the
 task's 100 files. Sending needs what input files need: the run's sandbox must
 have a network, and the hub must know its public address (`ui.external_url`).
-A run without either, or one whose `cloop` on the executor was built before
-this feature, brings its files back only in its result.
+A run without either brings its files back only in its result. So does a run
+on a device whose agent was built before agents sent files, when the run's own
+`cloop` is that old too.
 
 Input files go the other way. A run on the hub's host, or in a container that
 mounts the project, copies them from the project's own store. A run whose
@@ -261,7 +287,7 @@ own store inside its worktree's `.cloop/`.
 | One file | 32 MiB |
 | One task | 100 files, 128 MiB |
 | One project | 1 GiB |
-| Carried back in a remote run's result | 384 KiB in total |
+| Carried back in a remote run's result | the room its 640 KiB frame has left, compressed, or 384 KiB; at most 8 MiB in all |
 | Held on the hub for one remote run | 200 files |
 | Uploads in progress at once | 4 to a project, 16 to a hub process |
 | Files one remote run sends at once | 2, from 256 MiB that refills at 2 MiB a second |

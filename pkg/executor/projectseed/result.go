@@ -48,11 +48,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -102,17 +104,55 @@ const (
 
 	// maxResultAttachments bounds the files one result describes (Task 20428).
 	maxResultAttachments = 200
-	// attachmentCarryBytes is how much of a run's attached files travels in
-	// its result, all files together. The transport carries the whole result
-	// in one frame (executor.MaxProjectResultBytes, compressed), images and
-	// PDFs barely compress, and the plan, steps and journal need room too —
-	// so a file past this stays in the executor's workspace and the hub
-	// records that it did.
+	// attachmentCarryBytes is the room a result always keeps for the files a
+	// run attached, measured by their own bytes, whatever the rest of the
+	// result takes: the rest gives way to make it (encodeResult cuts step
+	// output and event details before it drops a file). It is the whole of
+	// what a result carried until Task 20515.
+	//
+	// A result also has the room the rest of it leaves free in its frame
+	// (executor.MaxProjectResultBytes), and there files are measured as they
+	// cost it: base64 in the document, compressed with it (carryCost). Files
+	// are carried while they fit either one, so a run's logs and reports —
+	// 726 KiB of them, a fifth of which this room alone used to leave in the
+	// executor's workspace with the frame half empty — come back whole, and
+	// no file pushes out more of the rest than one did before.
 	attachmentCarryBytes = 384 << 10
+	// resultFrameSlack is left free of files when they take the room the rest
+	// of the result leaves: each file's cost is measured on its own, and the
+	// document they are compressed into together comes out a little
+	// differently.
+	resultFrameSlack = 16 << 10
 	// maxAttachmentTextBytes bounds an attachment's name, task title and
 	// reason as they travel.
 	maxAttachmentTextBytes = 4 << 10
 )
+
+// maxWastedCarryBytes bounds the bytes carryAttachments reads, scrubs and
+// compresses of files that then do not fit. Past it, a file that could fit the
+// room left for files only by shrinking more than likelyBestRatio-fold is
+// described without being read: a run that attached a hundred logs too large
+// for its result does not hold its outcome back while each is compressed to
+// find out. A variable so a test need not read megabytes to reach it.
+var maxWastedCarryBytes int64 = 24 << 20
+
+// likelyBestRatio is how far, past maxWastedCarryBytes, a file is still
+// assumed to shrink in the frame: logs and text rarely do better than this,
+// so a file it rules out would very likely not have fit.
+const likelyBestRatio = 8
+
+// attachmentCarryRawBytes bounds the files a result carries by their own
+// bytes. The hub inflates a result under MaxResultInflatedBytes, where base64
+// makes each byte a third larger, and a log that compresses a hundredfold costs
+// the frame almost nothing; this keeps such files from filling the inflated
+// document, and bounds what the device reads. A variable so a test need not
+// compress megabytes to reach it.
+var attachmentCarryRawBytes int64 = 8 << 20
+
+// resultInflatedLimit is what encodeResult keeps a result under once
+// inflated: MaxResultInflatedBytes, which the hub refuses a document past.
+// A variable for the same reason.
+var resultInflatedLimit int64 = MaxResultInflatedBytes
 
 // ErrNoSeed reports that a workload was started without a seed. Such a
 // workload read its project from somewhere the hub can see (a bind mount), or
@@ -223,6 +263,11 @@ type Attachment struct {
 	// this merge. It is the run's word, and the hub believes it only as far
 	// as finding the file under ID.
 	Sent bool `json:"sent,omitempty"`
+
+	// cost is what Data takes in the compressed result, as carryCost
+	// measured it: what encodeResult frees by dropping the file. Never
+	// encoded.
+	cost int64
 }
 
 // Cost is one cost-ledger row. It carries no identity: who pays for a run is
@@ -312,30 +357,13 @@ func decodeSeed(seed []byte) (*state.ProjectState, error) {
 // set it builds a progress report instead: the plan, and nothing that costs a
 // second read of the database the run is still writing. See HarvestProgress.
 func collect(dir string, base *state.ProjectState, scrub func(string) string, interim bool) (*Result, error) {
-	cloopDir := filepath.Join(dir, seedDir)
-	info, err := os.Lstat(cloopDir)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return nil, fmt.Errorf("projectseed: %s is gone — the workload removed the project it was sent, "+
-			"so there is nothing to read back", cloopDir)
-	case err != nil:
-		return nil, fmt.Errorf("projectseed: inspect %s: %w", cloopDir, err)
-	case info.Mode()&os.ModeSymlink != 0:
-		return nil, fmt.Errorf("projectseed: %s was replaced by a symbolic link; refusing to follow it "+
-			"out of the workspace", cloopDir)
-	case !info.IsDir():
-		return nil, fmt.Errorf("projectseed: %s is not a directory", cloopDir)
-	}
-	for _, name := range staleDatabaseFiles {
-		p := filepath.Join(cloopDir, name)
-		if li, err := os.Lstat(p); err == nil && li.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("projectseed: %s is a symbolic link; refusing to read the project through it", p)
-		}
+	dbPath, err := workspaceDB(dir)
+	if err != nil {
+		return nil, err
 	}
 
 	r := &Result{Format: ResultFormat, BaseStep: base.CurrentStep, Interim: interim}
 
-	dbPath := filepath.Join(cloopDir, "state.db")
 	after, err := state.LoadDatabase(dbPath)
 	if errors.Is(err, statedb.ErrProjectNotFound) {
 		// The run never opened its project — it failed before that, or it
@@ -400,7 +428,11 @@ func collect(dir string, base *state.ProjectState, scrub func(string) string, in
 			"executor to make room for its recoveries", n))
 	}
 	r.Omitted = append(r.Omitted, notes...)
-	r.Attachments, notes, err = carryAttachments(dir, dbPath, base.Plan, after.Plan, scrub)
+	free, err := freeRoom(r)
+	if err != nil {
+		return nil, err
+	}
+	r.Attachments, notes, err = carryAttachments(dbPath, base.Plan, after.Plan, scrub, free)
 	if err != nil {
 		return nil, err
 	}
@@ -408,15 +440,59 @@ func collect(dir string, base *state.ProjectState, scrub func(string) string, in
 	return r, nil
 }
 
+// workspaceDB returns the path of the database the run left in dir, once dir's
+// .cloop is a real directory and none of the database's files is a link: the
+// workload could have replaced any of them, and whoever reads them here may be
+// able to read what the workload cannot.
+func workspaceDB(dir string) (string, error) {
+	cloopDir := filepath.Join(dir, seedDir)
+	info, err := os.Lstat(cloopDir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "", fmt.Errorf("projectseed: %s is gone — the workload removed the project it was sent, "+
+			"so there is nothing to read back", cloopDir)
+	case err != nil:
+		return "", fmt.Errorf("projectseed: inspect %s: %w", cloopDir, err)
+	case info.Mode()&os.ModeSymlink != 0:
+		return "", fmt.Errorf("projectseed: %s was replaced by a symbolic link; refusing to follow it "+
+			"out of the workspace", cloopDir)
+	case !info.IsDir():
+		return "", fmt.Errorf("projectseed: %s is not a directory", cloopDir)
+	}
+	for _, name := range staleDatabaseFiles {
+		p := filepath.Join(cloopDir, name)
+		if li, err := os.Lstat(p); err == nil && li.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("projectseed: %s is a symbolic link; refusing to read the project through it", p)
+		}
+	}
+	return filepath.Join(cloopDir, "state.db"), nil
+}
+
+// freeRoom is the room r's frame has left for files once the rest of the
+// result is in it, compressed: what files may take without anything else
+// giving way.
+func freeRoom(r *Result) (int64, error) {
+	out, _, err := encode(r)
+	if err != nil {
+		return 0, err
+	}
+	return max(int64(executor.MaxProjectResultBytes-len(out)-resultFrameSlack), 0), nil
+}
+
 // carryAttachments reads the files the run attached, in the order they were
-// attached, and carries each whose bytes fit what is left of
-// attachmentCarryBytes. The rest travel as a description.
+// attached, and carries each one while the files carried so far, it included,
+// fit either room a result has for them: free, the room the rest of the result
+// leaves, measured as each file costs the compressed frame (carryCost); or
+// attachmentCarryBytes of their own bytes, which the rest gives way to.
+// attachmentCarryRawBytes bounds them all by their own bytes. The rest travel
+// as a description.
 //
-// Every file is read through attachments.Open, rooted at dir: one the
-// workload replaced with a link, or with anything but a plain file, is
-// described as such rather than read. The agent reading this runs outside the
-// workload's sandbox and may be able to read what the workload cannot.
-func carryAttachments(dir, dbPath string, base, after *pm.Plan, scrub func(string) string) ([]Attachment, []string, error) {
+// Every file is read through attachments.Open, rooted at the store beside
+// dbPath: one the workload replaced with a link, or with anything but a plain
+// file, is described as such rather than read. The agent reading this runs
+// outside the workload's sandbox and may be able to read what the workload
+// cannot.
+func carryAttachments(dbPath string, base, after *pm.Plan, scrub func(string) string, free int64) ([]Attachment, []string, error) {
 	db, err := statedb.Open(dbPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("projectseed: open %s to read the run's attachments: %w", dbPath, err)
@@ -455,7 +531,10 @@ func carryAttachments(dir, dbPath string, base, after *pm.Plan, scrub func(strin
 		}
 		return ""
 	}
-	budget := int64(attachmentCarryBytes)
+	// Each room is charged for every file carried, so whichever is still
+	// not overdrawn is one the files carried so far fit.
+	floor, raw := int64(attachmentCarryBytes), attachmentCarryRawBytes
+	var wasted int64
 	out := make([]Attachment, 0, len(rows))
 	for _, row := range rows {
 		a := Attachment{ID: row.ID, TaskID: row.TaskID, TaskTitle: scrub(title(row.TaskID)), Name: scrub(row.Name),
@@ -467,26 +546,108 @@ func carryAttachments(dir, dbPath string, base, after *pm.Plan, scrub func(strin
 			a.Sent = true
 		case row.Unavailable != "":
 			a.Left = scrub(row.Unavailable)
-		case row.Size > budget:
-			a.Left = fmt.Sprintf("left in the executor's workspace: at %s it did not fit in what is left of the %s "+
-				"of attachments a run's result carries", attachments.HumanBytes(row.Size),
-				attachments.HumanBytes(attachmentCarryBytes))
+		case row.Size > raw:
+			a.Left = rawLeft(row.Size)
+		case row.Size > floor && free <= 0:
+			// Past the room kept for files, with none left in the frame.
+			a.Left = noRoomLeft(row.Size)
+		case row.Size > floor && wasted >= maxWastedCarryBytes && row.Size > free*likelyBestRatio:
+			// Too much read already of files that did not fit, and this one
+			// would fit only by shrinking more than files do.
+			a.Left = fmt.Sprintf("left in the executor's workspace: at %s it is too large for the room the run's "+
+				"result had left for files", attachments.HumanBytes(row.Size))
 		default:
 			data, err := readAttachment(dbPath, row)
 			if err != nil {
 				a.Left = "left in the executor's workspace: " + scrub(err.Error())
 				break
 			}
-			// Scrubbed like any text the run produced; the size and digest
-			// sent are of what is sent.
+			// Scrubbed like any text the run produced; the size, digest and
+			// cost are of what is sent.
 			data = []byte(scrub(string(data)))
+			size := int64(len(data))
+			var cost int64
+			fits := false
+			if free > 0 {
+				cost, fits = carryCost(data, free)
+			}
+			switch {
+			case size > raw:
+				a.Left = rawLeft(size)
+			case fits:
+			case size <= floor:
+				cost, _ = carryCost(data, math.MaxInt64)
+				fits = true
+			default:
+				a.Left = noRoomLeft(size)
+			}
+			if !fits || size > raw {
+				wasted += size
+				break
+			}
 			sum := sha256.Sum256(data)
-			a.Data, a.Size, a.SHA256 = data, int64(len(data)), hex.EncodeToString(sum[:])
-			budget -= a.Size
+			a.Data, a.Size, a.SHA256, a.cost = data, size, hex.EncodeToString(sum[:]), cost
+			free -= cost
+			floor -= size
+			raw -= size
 		}
 		out = append(out, a)
 	}
 	return out, notes, nil
+}
+
+// noRoomLeft is the reason a file of size bytes is not carried: neither room
+// a result has for files had enough of it left.
+func noRoomLeft(size int64) string {
+	return fmt.Sprintf("left in the executor's workspace: at %s it did not fit in what the run's result had "+
+		"left for files", attachments.HumanBytes(size))
+}
+
+// rawLeft is the reason a file of size bytes is not carried: the files a
+// result already carries leave less than that of attachmentCarryRawBytes.
+func rawLeft(size int64) string {
+	return fmt.Sprintf("left in the executor's workspace: at %s it did not fit in what is left of the %s "+
+		"of files a run's result carries", attachments.HumanBytes(size), attachments.HumanBytes(attachmentCarryRawBytes))
+}
+
+// carryCost reports what data costs a result's frame — its base64, as the
+// document holds it, compressed as encodeResult compresses the document — and
+// whether that is within limit. It stops once the cost passes limit, so a
+// large file that cannot fit costs little to find out about.
+func carryCost(data []byte, limit int64) (int64, bool) {
+	cw := &countingWriter{limit: limit}
+	zw, err := gzip.NewWriterLevel(cw, gzip.BestCompression)
+	if err != nil {
+		return 0, false
+	}
+	enc := base64.NewEncoder(base64.StdEncoding, zw)
+	_, err = enc.Write(data)
+	if err == nil {
+		err = enc.Close()
+	}
+	if err == nil {
+		err = zw.Close()
+	}
+	if err != nil || cw.n > limit {
+		return cw.n, false
+	}
+	return cw.n, true
+}
+
+// errPastLimit stops carryCost's compressor once the cost is known to be too
+// high.
+var errPastLimit = errors.New("past the limit")
+
+// countingWriter counts what is written to it, keeps none of it, and fails
+// once the count passes limit.
+type countingWriter struct{ n, limit int64 }
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.n += int64(len(p))
+	if w.n > w.limit {
+		return 0, errPastLimit
+	}
+	return len(p), nil
 }
 
 // readAttachment reads one stored attachment of the run, refusing what is not
@@ -791,9 +952,11 @@ func boundDetails(d string) string {
 	return d
 }
 
-// encodeResult compresses r, shrinking it in stages until it fits
-// executor.MaxProjectResultBytes. Each stage gives up something less important
-// than the one after it, and says what it gave up.
+// encodeResult compresses r, shrinking it in stages until it fits the
+// transport: executor.MaxProjectResultBytes compressed, and
+// MaxResultInflatedBytes once the hub inflates it — a document past either is
+// refused whole, the run's outcomes with it. Each stage gives up something
+// less important than the one after it, and says what it gave up.
 func encodeResult(r *Result) ([]byte, error) {
 	stages := []func(*Result) string{
 		func(*Result) string { return "" },
@@ -815,21 +978,9 @@ func encodeResult(r *Result) ([]byte, error) {
 			}
 			return "journal event details were dropped to fit the transport"
 		},
-		func(r *Result) string {
-			n := 0
-			for i := range r.Attachments {
-				if len(r.Attachments[i].Data) > 0 {
-					r.Attachments[i].Data = nil
-					r.Attachments[i].Left = "left in the executor's workspace: the run's result had no room for it"
-					n++
-				}
-			}
-			if n == 0 {
-				return ""
-			}
-			return fmt.Sprintf("%s attached by the run %s left in the executor's workspace to fit the transport",
-				plural(n, "file", "files"), map[bool]string{true: "was", false: "were"}[n == 1])
-		},
+		// The files the result carries go next: one at a time, by
+		// dropCarriedFiles, rather than all of them for the last few bytes.
+		nil,
 		func(r *Result) string {
 			if len(r.Steps) == 0 {
 				return ""
@@ -849,14 +1000,21 @@ func encodeResult(r *Result) ([]byte, error) {
 		},
 	}
 	for _, shrink := range stages {
+		if shrink == nil {
+			out, ok, err := dropCarriedFiles(r)
+			if err != nil || ok {
+				return out, err
+			}
+			continue
+		}
 		if note := shrink(r); note != "" {
 			r.Omitted = append(r.Omitted, note)
 		}
-		out, err := compress(r)
+		out, inflated, err := encode(r)
 		if err != nil {
 			return nil, err
 		}
-		if len(out) <= executor.MaxProjectResultBytes {
+		if fitsTransport(out, inflated) {
 			return out, nil
 		}
 	}
@@ -864,23 +1022,141 @@ func encodeResult(r *Result) ([]byte, error) {
 		"even without its step output and journal", len(r.Tasks), executor.MaxProjectResultBytes)
 }
 
+// leftForRoom is what a carried file that encodeResult had to drop says.
+const leftForRoom = "left in the executor's workspace: the run's result had no room for it"
+
+// dropCarriedFiles leaves files r carries in the executor's workspace until r
+// fits the transport or carries none — as few, and as little, as it takes: see
+// pickFile — and says in r.Omitted how many it left. It returns r encoded, and
+// whether that fits.
+func dropCarriedFiles(r *Result) ([]byte, bool, error) {
+	var carried []int
+	for i := range r.Attachments {
+		if len(r.Attachments[i].Data) > 0 {
+			carried = append(carried, i)
+		}
+	}
+	if len(carried) == 0 {
+		return nil, false, nil
+	}
+	out, inflated, err := encode(r)
+	if err != nil {
+		return nil, false, err
+	}
+	note, dropped := len(r.Omitted), 0
+	r.Omitted = append(r.Omitted, "")
+	for least := 1; len(carried) > 0; least *= 2 {
+		// Files enough to cover what the document is over by, as each costs
+		// it. The costs are estimates — files alike cost less together than
+		// each on its own — so the document is encoded again to see, and each
+		// round that falls short drops twice as many as the one before, so a
+		// handful of encodes settle it whatever the estimates missed.
+		over := int64(len(out)-executor.MaxProjectResultBytes) + dropSlack
+		overInflated := int64(inflated) - resultInflatedLimit
+		if overInflated > 0 {
+			overInflated += dropSlack
+		}
+		var freed, freedInflated int64
+		for n := 0; len(carried) > 0 && (n < least ||
+			(len(out) > executor.MaxProjectResultBytes && freed < over) ||
+			(overInflated > 0 && freedInflated < overInflated)); n++ {
+			i := pickFile(r, carried, over-freed, overInflated-freedInflated)
+			a := &r.Attachments[carried[i]]
+			carried = append(carried[:i], carried[i+1:]...)
+			freed += fileCost(a)
+			freedInflated += inflatedCost(a)
+			a.Data, a.cost, a.Left = nil, 0, leftForRoom
+			dropped++
+		}
+		r.Omitted[note] = fmt.Sprintf("%s attached by the run %s left in the executor's workspace to fit the transport",
+			plural(dropped, "file", "files"), map[bool]string{true: "was", false: "were"}[dropped == 1])
+		if out, inflated, err = encode(r); err != nil {
+			return nil, false, err
+		}
+		if fitsTransport(out, inflated) {
+			return out, true, nil
+		}
+	}
+	return out, false, nil
+}
+
+// dropSlack is added to what a result is over by when files are chosen to
+// cover it, for what their estimated costs miss.
+const dropSlack = 1 << 10
+
+// pickFile chooses which of the carried files — indexes into r.Attachments —
+// to leave behind next, given what the result is still over by, compressed and
+// inflated: the cheapest one that covers it alone, so a result a little too
+// large loses a little; or, when none does, the most costly by the measure the
+// result is over by.
+func pickFile(r *Result, carried []int, over, overInflated int64) int {
+	cost := func(i int) int64 { return fileCost(&r.Attachments[carried[i]]) }
+	inflated := func(i int) int64 { return inflatedCost(&r.Attachments[carried[i]]) }
+	best := -1
+	for i := range carried {
+		if (over <= 0 || cost(i) >= over) && (overInflated <= 0 || inflated(i) >= overInflated) &&
+			(best < 0 || cost(i) < cost(best)) {
+			best = i
+		}
+	}
+	if best >= 0 {
+		return best
+	}
+	best = 0
+	for i := range carried {
+		if (overInflated > 0 && inflated(i) > inflated(best)) || (overInflated <= 0 && cost(i) > cost(best)) {
+			best = i
+		}
+	}
+	return best
+}
+
+// inflatedCost is what dropping a carried file frees in the inflated result:
+// its base64.
+func inflatedCost(a *Attachment) int64 {
+	return int64(base64.StdEncoding.EncodedLen(len(a.Data)))
+}
+
+// fileCost is what dropping a carried file frees in the compressed result:
+// its measured cost, or — for a document not built by carryAttachments — its
+// size.
+func fileCost(a *Attachment) int64 {
+	if a.cost > 0 {
+		return a.cost
+	}
+	return int64(len(a.Data))
+}
+
+// fitsTransport reports whether a document encoded to out, inflating to
+// inflated bytes, is one the hub accepts.
+func fitsTransport(out []byte, inflated int) bool {
+	return len(out) <= executor.MaxProjectResultBytes && int64(inflated) <= resultInflatedLimit
+}
+
 func compress(r *Result) ([]byte, error) {
+	out, _, err := encode(r)
+	return out, err
+}
+
+// encode compresses r, and reports how large it is before compression: what
+// the hub inflates it to.
+func encode(r *Result) ([]byte, int, error) {
 	raw, err := json.Marshal(r)
 	if err != nil {
-		return nil, fmt.Errorf("projectseed: marshal result: %w", err)
+		return nil, 0, fmt.Errorf("projectseed: marshal result: %w", err)
 	}
 	var buf bytes.Buffer
 	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
-		return nil, fmt.Errorf("projectseed: open compressor: %w", err)
+		return nil, 0, fmt.Errorf("projectseed: open compressor: %w", err)
 	}
 	if _, err := zw.Write(raw); err != nil {
-		return nil, fmt.Errorf("projectseed: compress result: %w", err)
+		return nil, 0, fmt.Errorf("projectseed: compress result: %w", err)
 	}
 	if err := zw.Close(); err != nil {
-		return nil, fmt.Errorf("projectseed: finish compressing result: %w", err)
+		return nil, 0, fmt.Errorf("projectseed: finish compressing result: %w", err)
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), len(raw), nil
 }
 
 // DecodeResult parses the bytes a device sent back, refusing anything a
