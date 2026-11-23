@@ -512,6 +512,29 @@ func (s *restartScene) projectIdx(path string) int {
 	return -1
 }
 
+// assertListedRunning fails the test unless the hub's project list shows dir
+// as running while its seeded run is in flight on the device. The list was
+// built from the hub's copy alone, which says how the run before ended, so a
+// project whose run was working on a device showed as idle, or as paused by
+// whatever stopped the previous run (Task 20514).
+func (s *restartScene) assertListedRunning(dir, when string) {
+	s.t.Helper()
+	_, body := s.call("GET", "/api/projects", nil)
+	raw, _ := body["projects"].([]any)
+	for _, r := range raw {
+		m, ok := r.(map[string]any)
+		if !ok || m["path"] != dir {
+			continue
+		}
+		if m["status"] != "running" || m["health"] != "running" || m["running"] != true || m["pause_reason"] != nil {
+			s.t.Errorf("%s, the project list shows %s as status %v, health %v, running %v, pause %v; "+
+				"want it running", when, dir, m["status"], m["health"], m["running"], m["pause_reason"])
+		}
+		return
+	}
+	s.t.Errorf("%s, the project list does not list %s", when, dir)
+}
+
 func (s *restartScene) bind() {
 	s.t.Helper()
 	idx := s.projectIdx(s.proj)
@@ -759,6 +782,7 @@ func (s *restartScene) restartMidRun(sig syscall.Signal, dir string, whileDown f
 		t.Fatalf("the run's owner row names %d leases, want its one: %v", len(leases), meta)
 	}
 	r.lease = fmt.Sprint(leases[0])
+	s.assertListedRunning(dir, "with the harness running on the device")
 	if got := s.leaseHolder(r.lease); got != r.oldMember {
 		t.Fatalf("lease %s is recorded as held by %q, want the dispatching process %s", r.lease, got, r.oldMember)
 	}
@@ -787,6 +811,7 @@ func (s *restartScene) restartMidRun(sig syscall.Signal, dir string, whileDown f
 	})
 	r.newMember, meta = s.runOwner(dir)
 	t.Logf("run adopted by %s", r.newMember)
+	s.assertListedRunning(dir, "once the restarted hub adopted the run")
 
 	// The lease came with it: the same lease, recorded as the new process's,
 	// listed by it, and the takeover on the lease's own trail.

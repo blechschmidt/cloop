@@ -1456,6 +1456,19 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **The projects list shows a run on a remote executor as running.** A run on
+  an executor that cannot read the hub's filesystem works on its own copy of
+  the project, so until it ends the hub's copy still says how the previous run
+  ended. The project's Overview already showed such a run, but the projects
+  list, the project switcher, the feature chips and the glasses' list were built
+  from the hub's copy alone. A project whose last run had lost its executor
+  therefore showed as idle, with "Paused: executor … stopped answering and
+  nothing replaced the run" on its card, while a device was working through its
+  tasks. The list now shows such a run as running, drops the old pause, counts
+  the tasks of the plan the device reports, and pushes the card again whenever a
+  report changes those counts. The stored status is unchanged, so stale-run
+  detection still compares it with what is actually executing (Task 20514).
+
 - **A run on an edge device is no longer stopped because a process that
   cannot see the device says it is gone.** Before the hub gave up a run whose
   session a failover had claimed, it read only the session store. Any process

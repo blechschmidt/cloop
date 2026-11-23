@@ -37,6 +37,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/remote"
+	"github.com/blechschmidt/cloop/pkg/hubcluster"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/pm"
 	"github.com/blechschmidt/cloop/pkg/state"
@@ -130,22 +131,31 @@ func (s *Server) overlaySeededRunStatus(workDir string, ps *state.ProjectState) 
 	if ps == nil || workDir == "" || ps.Status == "running" || ps.Status == "evolving" {
 		return
 	}
-	// Another hub member may be the one streaming it (Task 20354): its owner
-	// row says so, and says whether it was carried out as a seed.
-	if o, meta, found := s.clusterRunOwner(workDir); found && !o.Self {
-		if meta.Seeded && s.peerRunExecuting(workDir) {
-			ps.Status = "running"
-			ps.PauseReason = nil
-		}
-		return
-	}
-	// The tracked handle, not the live-log flag: see seededRunInFlight, which
-	// is where the difference is explained.
-	if !s.seededRunInFlight(workDir) {
+	if _, live := s.seededRunLive(workDir); !live {
 		return
 	}
 	ps.Status = "running"
 	ps.PauseReason = nil
+}
+
+// seededRunLive reports whether a run carried out as a seed is in flight for
+// workDir, by whichever hub member follows it, and whether that member is this
+// one (self) — the member the device's reports reach. It is the one test of
+// the overlays on /api/state and on the projects list (Task 20514), so the
+// project's Overview and its card cannot disagree about whether it runs.
+func (s *Server) seededRunLive(workDir string) (self, live bool) {
+	if workDir == "" {
+		return false, false
+	}
+	// Another hub member may be the one streaming it (Task 20354): its owner
+	// row says so, and says whether it was carried out as a seed. Judged as
+	// peerRunExecuting judges it, on the row already read.
+	if o, meta, found := s.clusterRunOwner(workDir); found && !o.Self {
+		return false, meta.Seeded && hubcluster.RunClaimLive(o, time.Now(), orphanRunGrace)
+	}
+	// The tracked handle, not the live-log flag: see seededRunInFlight, which
+	// is where the difference is explained.
+	return true, s.seededRunInFlight(workDir)
 }
 
 // seededRunInFlight reports whether this member is following a run for workDir

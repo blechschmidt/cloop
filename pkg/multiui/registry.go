@@ -983,22 +983,36 @@ func GetStatusUsing(entry ProjectEntry, running bool) ProjectStatus {
 		ps.Feature.Innovate = st.InnovateMode
 	}
 
-	if st.Plan != nil {
-		for _, t := range st.Plan.Tasks {
-			ps.TotalTasks++
-			switch t.Status {
-			case pm.TaskDone:
-				ps.DoneTasks++
-			case pm.TaskFailed, pm.TaskTimedOut:
-				ps.FailedTasks++
-			case pm.TaskInProgress:
-				ps.ActiveTasks++
-			}
-		}
-	}
+	ps.CountTasks(st.Plan)
 
 	ps.Health = computeHealth(st, running)
 	return ps
+}
+
+// CountTasks sets ps's task counts from plan: every task, the done ones, the
+// failed or timed-out ones and the ones in progress. The one definition of
+// those counts, so a caller describing a plan other than the one on disk — the
+// hub's view of a run working on another machine's copy (Task 20514) — counts
+// exactly as the list does.
+func (ps *ProjectStatus) CountTasks(plan *pm.Plan) {
+	ps.TotalTasks, ps.DoneTasks, ps.FailedTasks, ps.ActiveTasks = 0, 0, 0, 0
+	if plan == nil {
+		return
+	}
+	for _, t := range plan.Tasks {
+		if t == nil {
+			continue
+		}
+		ps.TotalTasks++
+		switch t.Status {
+		case pm.TaskDone:
+			ps.DoneTasks++
+		case pm.TaskFailed, pm.TaskTimedOut:
+			ps.FailedTasks++
+		case pm.TaskInProgress:
+			ps.ActiveTasks++
+		}
+	}
 }
 
 // RefreshHealth recomputes Health from the fields the status already carries,

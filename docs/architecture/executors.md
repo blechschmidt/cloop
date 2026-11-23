@@ -2203,6 +2203,15 @@ Overview's Run button raises. A run started from the project grid, from
 `POST /api/projects/{idx}/run`, or adopted after a hub restart is described
 exactly like one started from the Overview.
 
+**The projects list shows it too.** `/api/projects`, its pushes, the project
+switcher, the feature chips and the glasses' list describe a project with a
+seeded run in flight the way `/api/state` does: running, without the pause the
+previous run recorded, and with the task counts of the plan merged from the
+newest report. The hub's own status cache keeps the stored record, because
+stale-run detection compares that record with what is executing. The view is
+laid over the cache whenever the list is read (`Server.seededRunViews`), and
+the project watcher pushes the list again when a report changes the counts.
+
 **It is a view, not a write.** The hub renders the newest report over its own
 copy of the project — the plan merged in memory, the record untouched — so the
 dashboard shows the tasks the device is working through with the hub's own

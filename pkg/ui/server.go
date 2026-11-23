@@ -775,6 +775,10 @@ type Server struct {
 	// projFlags caches which rows break the confinement invariant, for the
 	// Projects tab (Task 20418, project_confine.go).
 	projFlags projectFlagCache
+	// seededTallies counts the plans of seeded runs in flight for the
+	// projects list, which shows such a run over the status cache rather than
+	// in it (Task 20514, seeded_list.go).
+	seededTallies seededTallies
 
 	// Per-project chat conversation histories (keyed by resolved workDir path).
 	chatMu        sync.Mutex
@@ -6287,10 +6291,26 @@ func (s *Server) allProjectEntries() []multiui.ProjectEntry {
 // registry entries they were built from. Every per-recipient filter takes
 // both from here so the metadata always describes the statuses being
 // filtered.
+//
+// A project whose run is in flight on a machine that works on its own copy is
+// described as that run, as /api/state describes it (Task 20514,
+// seeded_list.go): over the cache, never in it, so every reader of the list —
+// the grid, the switcher, the feature chips, the glasses, the pushes — sees
+// the run, and stale-run detection, which reads the cache, still sees the
+// record.
 func (s *Server) cachedProjectView() ([]multiui.ProjectEntry, []multiui.ProjectStatus) {
+	entries, statuses, _ := s.projectView()
+	return entries, statuses
+}
+
+// projectView is cachedProjectView with the signature of what it says about
+// seeded runs in flight, which the project watcher compares between ticks.
+func (s *Server) projectView() ([]multiui.ProjectEntry, []multiui.ProjectStatus, string) {
 	s.projMu.RLock()
-	defer s.projMu.RUnlock()
-	return s.projEntries, s.projStatuses
+	entries, statuses := s.projEntries, s.projStatuses
+	s.projMu.RUnlock()
+	statuses, seeded := s.seededRunViews(statuses)
+	return entries, statuses, seeded
 }
 
 // entrySetChanged reports whether entries lists different projects, or the
@@ -6508,6 +6528,10 @@ type projectSweep struct {
 	// nextStat holds, per dormant project, the earliest time at which its
 	// state files are worth statting again. See statDue.
 	nextStat map[string]time.Time
+	// seeded is what the list last pushed by this sweep said about seeded
+	// runs in flight (projectView): a device's progress changes the list
+	// without any file here changing, so it is compared on every tick.
+	seeded string
 }
 
 func newProjectSweep() *projectSweep {
@@ -6659,9 +6683,11 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 		}
 	}
 	primaryAbs, _ := filepath.Abs(s.WorkDir)
+	pushed := false
 	if len(changedPaths) > 0 || listChanged || livenessMoved {
 		s.refreshProjectStatusesUsing(entries, live, changed)
-		s.broadcastProjectsUpdate()
+		sw.seeded = s.pushProjects()
+		pushed = true
 
 		// Task 20134: push a state_diff for every project whose state
 		// file changed so subscribers receive the delta over WebSocket
@@ -6710,6 +6736,16 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 		}
 		if ps, err := state.LoadLite(path); err == nil {
 			s.broadcastStateDiff(path, ps)
+		}
+	}
+
+	// The same is true of the projects list, whose card for such a project
+	// counts the plan the device reports and says the project is running
+	// (Task 20514): pushed when what the list says about seeded runs moved,
+	// whoever has it open, and not on a tick that pushed it already.
+	if !pushed {
+		if _, _, seeded := s.projectView(); seeded != sw.seeded {
+			sw.seeded = s.pushProjects()
 		}
 	}
 
@@ -6821,7 +6857,13 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 // per distinct visibility (not once per client). Clients that see the same
 // projects and have hidden the same ones share one payload.
 func (s *Server) broadcastProjectsUpdate() {
-	entries, statuses := s.cachedProjectView()
+	s.pushProjects()
+}
+
+// pushProjects is broadcastProjectsUpdate, returning the signature of what the
+// list it pushed said about seeded runs in flight (projectView).
+func (s *Server) pushProjects() (seeded string) {
+	entries, statuses, seeded := s.projectView()
 
 	anyHidden := entriesHaveHidden(entries)
 	payloads := make(map[string][]byte, 1)
@@ -6847,7 +6889,7 @@ func (s *Server) broadcastProjectsUpdate() {
 	// Pre-warm the unfiltered payload outside the client locks — it serves
 	// every client when OIDC is off (and all token/admin clients otherwise).
 	if payloadFor(nil, nil) == nil && !s.oidcEnabled() {
-		return
+		return seeded
 	}
 
 	// The payloads are worked out with no client lock held: filtering per
@@ -6897,6 +6939,7 @@ func (s *Server) broadcastProjectsUpdate() {
 		}
 	}
 	s.hubMu.Unlock()
+	return seeded
 }
 
 // handleQueue returns recent entries from the central work queue scoped
