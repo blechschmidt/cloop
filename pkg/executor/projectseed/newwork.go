@@ -32,6 +32,7 @@ package projectseed
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -91,7 +92,10 @@ func newWork(plan *pm.Plan, sent *SeedWork, created []int, reported map[int]bool
 			continue
 		}
 		if sent != nil {
-			if d, ok := sent.Startable[t.ID]; ok && d == TitleDigest(t.Title) {
+			// A title is no secret, but a digest is compared the way every
+			// digest here is (tests/security's timing gate).
+			if d, ok := sent.Startable[t.ID]; ok &&
+				subtle.ConstantTimeCompare([]byte(d), []byte(TitleDigest(t.Title))) == 1 {
 				continue
 			}
 		}
