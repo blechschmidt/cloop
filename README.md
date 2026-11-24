@@ -8,7 +8,10 @@ You tell it what you want: a one-line goal, a list of tasks, or a written
 specification. cloop splits the work into tasks and hands them, one after
 another, to a coding agent such as Claude Code, which writes the code in your
 repository and runs your tests. cloop keeps track of every task and its
-outcome, retries what fails, and keeps going until the job is done.
+outcome, retries what fails, and keeps going until the job is done. If you let
+it, cloop also comes up with new tasks once the plan is finished, from more
+tests and better documentation to new features and ideas of its own. It works
+on those too, so your software keeps evolving without you writing each task.
 
 You can read the task list before anything runs, change it while cloop is
 working, and look up afterwards what was done for each task.
@@ -123,8 +126,10 @@ implement, and with the requirements gate switched on, a task only counts as
 done once those requirements pass their tests.
 
 **It keeps going.** With `--auto-evolve`, cloop suggests new tasks once the plan
-is finished and works on them as well. They are added to the plan like any
-other task, so you can review or delete them.
+is finished and works on them as well. Add `--innovate` and it also looks for
+creative ideas and new capabilities. The new tasks are added to the plan like
+any other task, so you can review or delete them. In the dashboard, the Evolve
+Mode and Innovate Mode badges on the Overview tab switch the same options.
 
 **It picks up where it left off.** The plan and every task's result are stored
 in `.cloop/state.db`. If you stop a run with Ctrl+C, the next `cloop run`

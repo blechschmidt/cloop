@@ -6,7 +6,10 @@ You tell cloop what you want: a one-line goal, a list of tasks, or a written
 specification. cloop splits the work into tasks and hands them, one after
 another, to a coding agent such as Claude Code, which writes the code in your
 repository and runs your tests. cloop keeps track of every task and its
-outcome, retries what fails, and keeps going until the job is done.
+outcome, retries what fails, and keeps going until the job is done. If you let
+it, cloop also comes up with new tasks once the plan is finished, from more
+tests and better documentation to new features and ideas of its own. It works
+on those too, so your software keeps evolving without you writing each task.
 
 ```bash
 go install github.com/blechschmidt/cloop@latest
