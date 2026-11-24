@@ -3119,7 +3119,7 @@ func (s *Server) handleSteps(w http.ResponseWriter, r *http.Request) {
 // handleGetTasks returns tasks filtered by query params: q, status (csv), tags (csv), assignee, priority (1-4).
 // GET /api/tasks?q=text&status=pending,in_progress&tags=backend&assignee=alice&priority=1
 func (s *Server) handleGetTasks(w http.ResponseWriter, r *http.Request) {
-	ps, err := state.Load(s.resolveWorkDir(r))
+	ps, err := s.loadStateView(s.resolveWorkDir(r))
 	if err != nil || ps.Plan == nil {
 		jsonOK(w, map[string]interface{}{"tasks": []*pm.Task{}, "total": 0})
 		return
@@ -5321,7 +5321,7 @@ func (s *Server) handleTaskBlocker(w http.ResponseWriter, r *http.Request) {
 	}
 
 	workDir := s.resolveWorkDir(r)
-	ps, err := state.Load(workDir)
+	ps, err := s.loadStateView(workDir)
 	if err != nil {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
@@ -5451,7 +5451,10 @@ func (s *Server) handleTaskDetails(w http.ResponseWriter, r *http.Request) {
 	}
 
 	workDir := s.resolveWorkDir(r)
-	ps, err := state.Load(workDir)
+	// The task as the list shows it: while a run works through the project
+	// on another machine, its account of the task is newer than the hub's
+	// copy, and a task it created is in no copy here yet (Task 20518).
+	ps, err := s.loadStateView(workDir)
 	if err != nil {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
@@ -6741,7 +6744,12 @@ func (s *Server) sweepProjectsTick(sw *projectSweep, now time.Time) {
 			if _, hasSubs := subscribed[path]; hasSubs {
 				if ps, err := state.LoadLite(path); err == nil {
 					s.broadcastStateDiff(path, ps)
-					plan = ps.Plan
+					// The coverage of the plan the dashboard shows, as
+					// watchState pushes it for the primary project and the
+					// Requirements tab reads it (Task 20518).
+					view := *ps
+					s.overlaySeededRunPlan(path, &view)
+					plan = view.Plan
 				}
 			}
 			// The journal rows behind the same change (Task 20384), to
@@ -8422,7 +8430,7 @@ func (s *Server) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 // Each bar includes task metadata needed for the tooltip (assignee, estimated
 // vs actual minutes, depends_on).
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
-	ps, err := state.Load(s.resolveWorkDir(r))
+	ps, err := s.loadStateView(s.resolveWorkDir(r))
 	if err != nil || ps.Plan == nil {
 		jsonOK(w, map[string]interface{}{"bars": []struct{}{}, "planStart": time.Now().Format(time.RFC3339), "now": time.Now().Format(time.RFC3339)})
 		return
@@ -8507,7 +8515,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 // handleDeps returns nodes (id, title, status, priority) and edges (from, to)
 // for the task dependency graph. GET /api/deps
 func (s *Server) handleDeps(w http.ResponseWriter, r *http.Request) {
-	ps, err := state.Load(s.resolveWorkDir(r))
+	ps, err := s.loadStateView(s.resolveWorkDir(r))
 	if err != nil || ps.Plan == nil {
 		jsonOK(w, map[string]interface{}{"nodes": []struct{}{}, "edges": []struct{}{}})
 		return
@@ -8561,7 +8569,7 @@ func (s *Server) handleDeps(w http.ResponseWriter, r *http.Request) {
 // have risk_score and impact_score equal to 0.
 // GET /api/risk-matrix
 func (s *Server) handleRiskMatrix(w http.ResponseWriter, r *http.Request) {
-	ps, err := state.Load(s.resolveWorkDir(r))
+	ps, err := s.loadStateView(s.resolveWorkDir(r))
 	if err != nil || ps.Plan == nil {
 		jsonOK(w, map[string]interface{}{"entries": []struct{}{}, "goal": ""})
 		return
@@ -8631,7 +8639,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		Labels: []string{"Pending", "In Progress", "Done", "Failed", "Skipped", "Timed Out"},
 		Values: make([]int, 6),
 	}
-	ps, stateErr := state.Load(workDir)
+	ps, stateErr := s.loadStateView(workDir)
 	if stateErr == nil && ps.Plan != nil {
 		for _, t := range ps.Plan.Tasks {
 			switch t.Status {
@@ -8871,7 +8879,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEpics(w http.ResponseWriter, r *http.Request) {
 	workDir := s.resolveWorkDir(r)
 
-	ps, err := state.Load(workDir)
+	ps, err := s.loadStateView(workDir)
 	if err != nil || ps.Plan == nil {
 		jsonOK(w, map[string]interface{}{"epics": []interface{}{}})
 		return

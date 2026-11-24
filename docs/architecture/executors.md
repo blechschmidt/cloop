@@ -2237,7 +2237,7 @@ So while a seeded workload runs, the device also reports the plan as it stands.
 | --- | --- |
 | Built by | `projectseed.HarvestProgress`, on the device, every 15s while the workload lives |
 | Wire | the same `project_result` frame with `interim` set, protocol **v32** |
-| Rendered by | `Server.overlaySeededRunPlan`, over the state every reader of `/api/state` and of the state broadcasts receives |
+| Rendered by | `Server.overlaySeededRunPlan`, over the state every reader of `/api/state` and of the state broadcasts receives, and over every read-only view of a task (`Server.loadStateView`) |
 | Merged by | `projectseed.Apply`, only when a run ends without ever sending an outcome |
 
 **A report is the plan and nothing else.** No steps, no journal rows, no cost
@@ -2260,6 +2260,18 @@ newest report. The hub's own status cache keeps the stored record, because
 stale-run detection compares that record with what is executing. The view is
 laid over the cache whenever the list is read (`Server.seededRunViews`), and
 the project watcher pushes the list again when a report changes the counts.
+
+**So does every other view of a task.** A task's details, the glasses' task
+screens, `GET /api/tasks`, the blocker check, the Requirements tab and the
+Timeline, Dependencies, Risk, Analytics and Epics charts read the project
+through `Server.loadStateView`, which lays the newest report over the hub's
+copy in the same way. They used to read the hub's copy alone, so a task the
+list showed running or done opened as pending with nothing recorded, and a
+task the run had created could not be opened. `TestReadOnlyRoutesShowASeededRunsPlan`
+fails when the handler of a GET route reads the project without the report,
+unless the handler is listed with the reason its read is about the record:
+the steps journal, the goal, the instructions, and the review gate and
+knowledge retrieval settings.
 
 **It is a view, not a write.** The hub renders the newest report over its own
 copy of the project — the plan merged in memory, the record untouched — so the

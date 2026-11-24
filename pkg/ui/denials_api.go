@@ -24,7 +24,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/container"
 	"github.com/blechschmidt/cloop/pkg/pm"
-	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
 )
 
@@ -213,7 +212,7 @@ func (s *Server) handleTaskNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workDir := s.resolveWorkDir(r)
-	ps, err := state.Load(workDir)
+	ps, err := s.loadStateView(workDir)
 	if err != nil {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return

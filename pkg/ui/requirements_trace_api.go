@@ -99,7 +99,7 @@ func (s *Server) handleRequirementsTrace(w http.ResponseWriter, r *http.Request)
 	}
 	defer db.Close()
 	now := time.Now().UTC()
-	page, err := requirements.Trace(db, trace.MatrixPlan(workDir, planOf(workDir)), requirements.TraceRequest{
+	page, err := requirements.Trace(db, trace.MatrixPlan(workDir, s.planView(workDir)), requirements.TraceRequest{
 		Filter: filter, After: after, Limit: limit, Coverage: after == 0}, now)
 	if err != nil {
 		requirementErr(w, err)
@@ -141,7 +141,7 @@ func (s *Server) pushCoverage(workDir string, plan *pm.Plan) {
 	}
 	defer db.Close()
 	if plan == nil {
-		plan = planOf(workDir)
+		plan = s.planView(workDir)
 	}
 	page, err := requirements.Trace(db.AsProject(), trace.MatrixPlan(workDir, plan), requirements.TraceRequest{Coverage: true},
 		time.Now().UTC())

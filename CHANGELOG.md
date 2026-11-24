@@ -1462,6 +1462,21 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A task a remote run has finished no longer opens as pending.** While a run
+  works through a project on an executor that cannot read the hub's
+  filesystem, the hub's copy of the project keeps the status each task had when
+  the run was sent, until the run ends. The task list showed what the run
+  reported, but a task's details read the hub's copy. So did the glasses' task
+  screens, `GET /api/tasks`, the blocker check, the Requirements tab and the
+  Timeline, Dependencies, Risk, Analytics and Epics charts. A task the list
+  showed running or done therefore opened as pending with nothing recorded,
+  and a task the run had created could not be opened at all. On
+  sgx-rust-attestation, task #21 read pending in its details for the 38
+  minutes the device worked on it and after it was done. All of these views
+  now show what the run reports, as the task list does, and a test keeps every
+  read-only route on that view. What the run did is still written to the hub's
+  copy once, when the run ends (Task 20518).
+
 - **Finished tasks of a project on a remote device no longer come back as
   duplicates.** The Requirements tab reads the project's spec file when it
   opens, and Split, Revise, the blocker analysis, the plan assistant, feature

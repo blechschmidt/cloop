@@ -73,12 +73,15 @@ func tasksImplementing(plan *pm.Plan) map[int][]implementingTask {
 	return out
 }
 
-// planOf reads workDir's plan for the requirements views, or nil: a list of
-// requirements without the tasks that implement them is still the list.
-func planOf(workDir string) *pm.Plan {
+// planView reads workDir's plan for the requirements views, or nil: a list of
+// requirements without the tasks that implement them is still the list. It is
+// the plan the task list shows, a seeded run in flight folded in (Task 20518),
+// so a requirement's tasks have the statuses their own rows have.
+func (s *Server) planView(workDir string) *pm.Plan {
 	ps, err := state.LoadLite(workDir)
 	if err != nil {
 		return nil
 	}
+	s.overlaySeededRunPlan(workDir, ps)
 	return ps.Plan
 }

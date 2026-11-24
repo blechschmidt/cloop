@@ -93,7 +93,6 @@ import (
 	"github.com/blechschmidt/cloop/pkg/authz"
 	"github.com/blechschmidt/cloop/pkg/oidcauth"
 	"github.com/blechschmidt/cloop/pkg/pm"
-	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/tlsconf"
 )
 
@@ -832,7 +831,9 @@ type glassesTask struct {
 func (s *Server) handleGlassesTasks(w http.ResponseWriter, r *http.Request) {
 	dictation := s.dictationStatusFor(r)
 
-	ps, err := state.Load(s.resolveWorkDir(r))
+	// The plan as the dashboard shows it (Task 20518): a run working on
+	// another machine has the newest word on its tasks.
+	ps, err := s.loadStateView(s.resolveWorkDir(r))
 	if err != nil || ps.Plan == nil {
 		// Still answer with the capability block and the standing rows: a
 		// project whose plan has not been created yet is exactly one where
@@ -938,7 +939,7 @@ func (s *Server) handleGlassesTaskDetail(w http.ResponseWriter, r *http.Request)
 		apierror.WriteError(w, apierror.New(apierror.CodeInvalidInput, "a positive task id is required"))
 		return
 	}
-	ps, lerr := state.Load(s.resolveWorkDir(r))
+	ps, lerr := s.loadStateView(s.resolveWorkDir(r))
 	if lerr != nil || ps.Plan == nil {
 		apierror.WriteError(w, apierror.New(apierror.CodeNotFound, "no such task"))
 		return

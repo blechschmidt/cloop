@@ -229,7 +229,7 @@ func (s *Server) handleRequirementsList(w http.ResponseWriter, r *http.Request) 
 		out.Spec = &v
 	}
 	var done []time.Time
-	plan := planOf(workDir)
+	plan := s.planView(workDir)
 	if plan != nil {
 		for _, t := range plan.Tasks {
 			if t.Status == pm.TaskDone && t.CompletedAt != nil {
@@ -405,7 +405,7 @@ func (s *Server) handleRequirementChecks(w http.ResponseWriter, r *http.Request)
 	if checks == nil {
 		checks = []statedb.RequirementCheck{}
 	}
-	tasks := tasksImplementing(planOf(s.resolveWorkDir(r)))[id]
+	tasks := tasksImplementing(s.planView(s.resolveWorkDir(r)))[id]
 	if tasks == nil {
 		tasks = []implementingTask{}
 	}
