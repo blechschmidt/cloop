@@ -1462,6 +1462,25 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **A hub member stopped just after it adopted a run no longer loses the
+  run's git session.** A member that takes a run over restores the sessions
+  its lease feeds, and minting a GitHub App token for the git session takes a
+  moment. When the member was stopped during that moment, as a rolling update
+  that stops members one after another can do, its shutdown suspended the
+  lease's App tokens under the restore. The restore read that as a final
+  refusal and closed the session, so the member adopting the run next could
+  not restore it and the workload's next push was refused. If the restore
+  finished instead after the shutdown had closed the git proxy, its
+  `gitproxy.session_restored` row could not be written and was recorded as an
+  `audit.gap`. A stopping member now lets a restore in flight finish before it
+  closes or suspends anything, and starts no other; a session it had not
+  reached stays open for the next adopter. The upgrade rehearsal hit both
+  failures, on CI and in about one run in twenty locally, through two members
+  of the latest release, which still has the race; it now waits for the
+  member that adopted the run to restore its sessions before it stops that
+  member, and a failed rehearsal names its audit gaps: the chain, the actions
+  lost, why, and which process lost them (Task 20520).
+
 - **A task a remote run has finished no longer opens as pending.** While a run
   works through a project on an executor that cannot read the hub's
   filesystem, the hub's copy of the project keeps the status each task had when

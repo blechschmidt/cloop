@@ -43,8 +43,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
@@ -85,6 +87,88 @@ var errSessionLive = errors.New("session already served by this hub process")
 
 func refusedf(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errSessionRefused, fmt.Sprintf(format, args...))
+}
+
+// Restores stop before a hub process that is shutting down takes away what
+// they need (Task 20520).
+//
+// Shutdown closes the git proxy, and with it the handle its audit rows are
+// written through, and then suspends the GitHub App tokens of every lease the
+// process holds. A member stopped while it was still restoring the sessions of
+// a run it had just adopted, which a rolling update that stops members one
+// after another makes likely, lost the race either way: a restore whose App
+// token was suspended under it read that as a refusal for good and closed
+// the session, so the member adopting the run next could not restore it and
+// the workload's next push was refused; one that finished after the proxy had
+// closed restored into it, and its session_restored row, which could not be
+// written, became an audit.gap. The upgrade rehearsal found both, on CI and
+// in a local soak.
+//
+// So Shutdown first stops them: a restore in flight finishes, and none starts
+// after. What was not restored stays on record, open and held, for whichever
+// process adopts the run next.
+var sessionRestoreStops sync.Map // restoreStopKey(control plane) → struct{}
+
+// restoreStopKey is how a control plane's directory is compared here.
+func restoreStopKey(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return filepath.Clean(dir)
+}
+
+// stopSessionRestores ends session restores for the leases of the control
+// plane in dir: each lease's restore in flight is waited for, and none starts
+// once this has returned. Keyed by the control plane so a process serving
+// another one — tests run several hubs in one process — is not stopped with it.
+//
+// The wait ends with ctx, Shutdown's: a restore is bounded by
+// sessionRestoreTimeout, longer than a graceful stop may take, and a stop that
+// outlasts its deadline is ended by SIGKILL anyway, which leaves the record to
+// the next adopter just the same.
+func stopSessionRestores(ctx context.Context, dir string) {
+	key := restoreStopKey(dir)
+	sessionRestoreStops.Store(key, struct{}{})
+	for _, sl := range liveLeases.snapshot() {
+		if sl == nil || sl.lease == nil || restoreStopKey(sl.controlPlane) != key {
+			continue
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			sl.stopRestoring()
+		}()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "ui: stopping with a session restore of lease %s still in flight: %v\n",
+				sl.lease.ID, ctx.Err())
+			return
+		}
+	}
+}
+
+// resumeSessionRestores lets sessions be restored for dir's control plane
+// again, for a hub that starts serving it in a process where one stopped.
+func resumeSessionRestores(dir string) {
+	sessionRestoreStops.Delete(restoreStopKey(dir))
+}
+
+// restoresStopped reports whether the hub serving sl's control plane in this
+// process has begun to shut down.
+func (sl *secretLease) restoresStopped() bool {
+	_, stopped := sessionRestoreStops.Load(restoreStopKey(sl.controlPlane))
+	return stopped
+}
+
+// stopRestoring waits for a restore of sl's sessions in flight and lets go of
+// the ones awaiting a retry here: their records stay for the next adopter.
+func (sl *secretLease) stopRestoring() {
+	sl.restoreMu.Lock()
+	defer sl.restoreMu.Unlock()
+	sl.mu.Lock()
+	sl.pendingSessions = nil
+	sl.mu.Unlock()
 }
 
 // sessionRefusedForGood reports whether a restore failed for a reason that
@@ -158,9 +242,10 @@ func (sl *secretLease) restoreSession(row statedb.ProxySessionRow, origin string
 	sl.restoreMu.Lock()
 	defer sl.restoreMu.Unlock()
 	outcome := hubmetrics.RestoreLost
-	if sl.isHandedOver() || sl.isClosing() {
-		// The lease moved on, or its run ended: what it fed is not this
-		// process's to serve.
+	if sl.isHandedOver() || sl.isClosing() || sl.restoresStopped() {
+		// The lease moved on, or its run ended, or this process is shutting
+		// down: what it fed is not this process's to serve. Its record stays
+		// open, under whichever process holds it, for the next adopter.
 		sl.dropPending(row)
 	} else {
 		outcome = sl.tryRestoreSession(row, origin)

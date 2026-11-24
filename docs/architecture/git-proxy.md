@@ -1035,7 +1035,10 @@ happens, fenced on the holder.
 closing it: it stops serving the session and destroys the App token it
 presented, but writes no close row and leaves the record open. A SIGKILL leaves
 the same state, except that the token is not destroyed and lapses after
-GitHub's hour.
+GitHub's hour. A hub stopped while it is still restoring the sessions of a run
+it has just adopted lets that restore finish before it suspends anything, and
+starts no other. A session it had not reached stays open under the process
+that held it, and the member that adopts the run next restores it.
 
 **Restored.** When the agent reconnects and the new process adopts the run
 (`takeOverRunLeases`, `pkg/ui/session_restore.go`), each open session the run's

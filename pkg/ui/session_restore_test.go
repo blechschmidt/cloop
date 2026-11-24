@@ -1179,3 +1179,143 @@ func TestTakenOverLeaseRenewsItsAppTokenFile(t *testing.T) {
 		t.Fatalf("first valid %v, second valid %v", rh.gh.Valid(first), rh.gh.Valid(second))
 	}
 }
+
+// stallingGitHub is the fake GitHub with a mint that can be held at GitHub:
+// armed, the next CreateInstallationToken says so on minting and waits for
+// release before it answers.
+type stallingGitHub struct {
+	*secretbrokertest.GitHub
+	armed   atomic.Bool
+	minting chan struct{}
+	release chan struct{}
+}
+
+func (g *stallingGitHub) CreateInstallationToken(ctx context.Context, req secretbroker.InstallationTokenRequest) (secretbroker.InstallationToken, error) {
+	if g.armed.CompareAndSwap(true, false) {
+		close(g.minting)
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+			return secretbroker.InstallationToken{}, ctx.Err()
+		}
+	}
+	return g.GitHub.CreateInstallationToken(ctx, req)
+}
+
+// TestAStoppingHubLetsARestoreInFlightFinish is Task 20520: a member stopped
+// while it was still restoring the sessions of a run it had just adopted. Its
+// shutdown suspended the lease's App tokens under the restore, which read that
+// as a refusal for good and closed the git session, so the member adopting
+// the run next could not restore it; or the restore finished into the git
+// proxy the shutdown had closed, and its session_restored row was lost as an
+// audit.gap. Shutdown now stops restores first: the one in flight finishes,
+// and what the shutdown suspends after it is left open for the next adopter.
+func TestAStoppingHubLetsARestoreInFlightFinish(t *testing.T) {
+	r := newRestoreRig(t)
+	gh := &stallingGitHub{GitHub: r.gh, minting: make(chan struct{}), release: make(chan struct{})}
+	prevOpts := testBrokerOptions
+	testBrokerOptions = []secretbroker.Option{secretbroker.WithGitHubApp(gh), secretbroker.WithClock(r.clock.Now)}
+	t.Cleanup(func() { testBrokerOptions = prevOpts })
+	t.Cleanup(func() { resumeSessionRestores(r.dir) })
+	d := r.dispatch()
+	r.restart(d, "hub_new")
+
+	// The new process adopts the run, and its git session's restore mints an
+	// App token at GitHub, which holds the answer.
+	gh.armed.Store(true)
+	taken := make(chan *secretLease, 1)
+	go func() { taken <- r.takeOver(d) }()
+	select {
+	case <-gh.minting:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the adoption minted no App token for the git session")
+	}
+
+	// A stop past its deadline does not wait for the restore: Shutdown is
+	// bounded, and SIGKILL would end it anyway.
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	began := time.Now()
+	stopSessionRestores(expired, r.dir)
+	if waited := time.Since(began); waited > 5*time.Second {
+		t.Fatalf("a stop whose context had ended waited %s for the restore in flight", waited)
+	}
+
+	// The process begins to shut down. Stopping restores waits for the one
+	// in flight.
+	stopped := make(chan struct{})
+	go func() {
+		stopSessionRestores(context.Background(), r.dir)
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("restores were stopped while one was still minting its App token")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(gh.release)
+	select {
+	case <-stopped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("stopping restores did not return once the restore in flight finished")
+	}
+	sl := <-taken
+	if sl == nil {
+		t.Fatal("the adopting process does not hold the run's lease")
+	}
+	// The git session's restore, in flight when restores stopped, finished;
+	// the Kubernetes monitor session's, which would have started after it,
+	// never did.
+	if !activeGitProxy().reg.Known(d.gitID) {
+		t.Fatal("the restore in flight did not finish into this process's git proxy")
+	}
+	if len(r.auditRows(auditaction.ActionGitProxySessionRestored, d.gitID)) != 1 {
+		t.Fatal("no gitproxy.session_restored row for the restore that finished")
+	}
+	if activeKubeGuard().reg.Known(d.kubeID) || len(r.auditRows(auditaction.ActionKubeGuardSessionRestored, d.kubeID)) != 0 {
+		t.Fatal("a restore started after restores were stopped")
+	}
+
+	// The rest of the shutdown, in Shutdown's order: the git proxy goes, and
+	// the leases' App tokens are suspended. The proxy's Close closes its
+	// handle, the rig's: read on through a new one.
+	activeGitProxy().Close()
+	suspendLeaseTokensForShutdown()
+	db, err := statedb.Open(state.DBPath(r.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.db = db
+	// Both records stay open for the next adopter: the restored one held by
+	// the stopped process, the other by the one it was taken from.
+	for _, s := range []struct{ kind, id, holder string }{
+		{statedb.ProxySessionGit, d.gitID, "hub_new"}, {statedb.ProxySessionKube, d.kubeID, "hub_old"},
+	} {
+		row, ok := r.session(s.kind, s.id)
+		if !ok || !row.Open() || row.Holder != s.holder {
+			t.Fatalf("after the shutdown the %s session's record is %+v (found %v): it must stay open, "+
+				"held by %s, for the next adopter", s.kind, row, ok, s.holder)
+		}
+	}
+	if rows := r.auditRows(auditaction.ActionGitProxySessionClosed, d.gitID); len(rows) != 0 {
+		t.Fatalf("the shutdown closed the git session: %+v", rows)
+	}
+	if rows := r.auditRows(auditaction.ActionKubeGuardSessionClosed, d.kubeID); len(rows) != 0 {
+		t.Fatalf("the shutdown closed the Kubernetes monitor session: %+v", rows)
+	}
+
+	// No restore starts once they are stopped: one that would have is
+	// skipped, and leaves the record as it was.
+	row, _ := r.session(statedb.ProxySessionGit, d.gitID)
+	if got := sl.restoreSession(row, ""); got != hubmetrics.RestoreLost {
+		t.Fatalf("a restore after the stop: %s, want it skipped (%s)", got, hubmetrics.RestoreLost)
+	}
+	if after, _ := r.session(statedb.ProxySessionGit, d.gitID); !after.Open() || after.Holder != row.Holder {
+		t.Fatalf("a skipped restore changed the record: %+v → %+v", row, after)
+	}
+	for _, f := range statedb.AuditFailures() {
+		if f.Path == state.DBPath(r.dir) {
+			t.Fatalf("an audit append failed on the control plane: %+v", f)
+		}
+	}
+}

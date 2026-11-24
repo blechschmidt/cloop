@@ -1089,6 +1089,10 @@ func NewInCluster(workdir string, port int, token string, node *hubcluster.Node)
 	// installed first, so a container sandbox the bootstrap reattaches to is
 	// attributed again.
 	installDenialRecorder()
+	// A hub serving this control plane restores adopted runs' sessions,
+	// though one that served it in this process before stopped doing so as
+	// it shut down (stopSessionRestores, Task 20520).
+	resumeSessionRestores(workdir)
 	bootstrapExecutors(workdir, port)
 	srv := &Server{
 		Cluster:         node,
@@ -1812,6 +1816,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// And take no more failovers: the runs this server follows are being
 	// handed to whichever member adopts them.
 	unregisterRunServer(s)
+	// Nor restore the sessions of a run this member has just adopted: a
+	// restore in flight finishes now, before the git proxy closes and the
+	// leases' App tokens are suspended below, and none starts after, so
+	// nothing is closed or lost that the next adopter needs (Task 20520).
+	stopSessionRestores(ctx, s.WorkDir)
 	// And stop the periodic orphan sweep for the same reason: it is detached
 	// from the reconciliation pass that started it, so this is what owns it
 	// (Task 20281).
