@@ -132,6 +132,13 @@ func readModelCall(w http.ResponseWriter, out []byte, err error, prefix string, 
 	if perr == nil {
 		var failed modelCallFailure
 		if json.Unmarshal(payload, &failed) == nil && failed.Error != "" {
+			// A task the run's copy of the project does not have yet, when the
+			// call ran in a run's directory on a device (Task 20517): said so,
+			// as the conflict it is, rather than "task not found".
+			if why, ok := sharedRunTreeReason(failed.Error, err); ok {
+				jsonErr(w, prefix+why, http.StatusConflict)
+				return false
+			}
 			jsonErr(w, prefix+failed.Error, http.StatusBadGateway)
 			return false
 		}

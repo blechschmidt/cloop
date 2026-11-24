@@ -1648,7 +1648,29 @@ tree is sent. Three consequences:
   compares the two; without the removal, a task reset on the hub would stay
   failed on the device. Removing the database loses nothing, because the run
   that wrote it sent its outcome back when it ended
-  ([below](#the-project-comes-back-task-20339)).
+  ([below](#the-project-comes-back-task-20339)), and nothing prepares the
+  directory while a run is still working in it (next point).
+- **A run holds the directory until it ends.** The dashboard also runs short
+  cloop commands on the project's executor: the Requirements tab reads the
+  spec file when it opens, and Split, Revise, the blocker analysis, the plan
+  assistant, feature suggestions and requirement checks all start one. Each
+  dispatch carries the label `workload` (`executor.LabelWorkload`), set to
+  `run` for a run and to `helper` for these commands. While a run of the
+  project works in the directory on a device, the hub sends a helper there
+  without the seed and without a tree to fetch or a branch to build, so the
+  helper uses the directory as the run has it. An agent that knows the label
+  applies the same rule itself: it starts a helper beside a run without
+  placing anything in the directory, and refuses a second run there. It also
+  lets only one workload prepare a directory at a time: a start that arrives
+  while another workload is still fetching the tree or placing the project
+  waits for it to finish. A reproduction checks out the commit it reproduces,
+  so the hub refuses one until the run ends. Before this, a helper deleted the
+  run's database and put the hub's copy of the project in its place: the run
+  took the tasks added on the hub since it started for its own, ran them, and
+  the hub merged them back as duplicates. A helper beside a run sees the run's
+  copy of the project. Split and the blocker analysis read the task they are
+  about from that copy, so the hub refuses them for a task that was added or
+  changed after the run started, and says why.
 - **The seed is required.** On a `git` workspace, `.cloop/` may already be
   committed in the fetched repository, so an executor without seed support only
   degrades. Here nothing is fetched, so such an executor would start the harness

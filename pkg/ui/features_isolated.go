@@ -187,6 +187,7 @@ func applyFeatureWorkspace(spec executor.Spec, ex executor.Executor, workDir str
 	spec.ProjectSeed = seed
 	spec.HumanGates = about.gates
 	spec.SeedStartable = about.startable
+	spec.SeedTasks = about.tasks
 	if returnWork {
 		spec.WriteBack = executor.WriteBack{
 			Mode:           executor.WriteBackBundle,

@@ -770,6 +770,26 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		return
 	}
 	spec.WorkDir = workDir
+	// A run of this project may be working in the directory (Task 20517): a
+	// helper is then started on it as the run has it, and a second run is
+	// refused. See sharedtree.go.
+	var tree treeClaim
+	if !scratch {
+		tree = a.claimTree(ctx, wl, workDir, workloadRole(spec.Labels))
+		if tree.refusal != "" {
+			a.cfg.logf("start %s refused: %s", handleID, tree.refusal)
+			a.forget(handleID)
+			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+				HandleID: handleID,
+				Error:    tree.refusal,
+			})
+			return
+		}
+		if tree.share {
+			a.cfg.logf("workload %s: started on %s as run %s has it: nothing is fetched into it, no "+
+				"project state is placed and nothing is read back from it", handleID, workDir, tree.holder)
+		}
+	}
 	// A host-mode payload carrying its own environment gets a home beside its
 	// tree, not the tree itself; see payloadhome.go. A container's home is the
 	// image's, inside the container, and never the mounted tree.
@@ -832,18 +852,28 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 		branchFile = path
 	}
 
+	// A helper started beside a run takes the directory as the run has it
+	// (Task 20517): nothing is fetched into it and the hub's copy of the
+	// project is not placed over the run's. See sharedtree.go.
+	seed := payload.ProjectSeed
+	if tree.share {
+		seed = nil
+	}
+
 	// The tree has to be in place before the harness is, and only this device
 	// can put it there. A failure here fails the start rather than launching
 	// anyway: a harness started against an empty directory produces a run that
 	// looks healthy, streams a plausible transcript, and operated on no code —
 	// which is the exact outcome the workspace contract exists to remove.
-	if err := a.prepareWorkspace(ctx, wl, spec, payload.GitCredential(), branchFile); err != nil {
-		a.forget(handleID)
-		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
-			HandleID: handleID,
-			Error:    err.Error(),
-		})
-		return
+	if !tree.share {
+		if err := a.prepareWorkspace(ctx, wl, spec, payload.GitCredential(), branchFile); err != nil {
+			a.forget(handleID)
+			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
+				HandleID: handleID,
+				Error:    err.Error(),
+			})
+			return
+		}
 	}
 	// The tree is a clone of a source repository, which is not a cloop
 	// project. Place the hub's `.cloop/` into it before anything can read it.
@@ -860,7 +890,7 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// project does not do less work, it exits immediately with a message that
 	// blames the project, and the hub records a run that looks like a fast
 	// clean failure of the plan itself.
-	if err := projectseed.Write(spec.WorkDir, payload.ProjectSeed); err != nil {
+	if err := projectseed.Write(spec.WorkDir, seed); err != nil {
 		a.forget(handleID)
 		a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
 			HandleID: handleID,
@@ -877,7 +907,7 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 	// shipped branch was provisioned with it hidden already. Failing the start
 	// rather than continuing: a run that commits the plan into the user's
 	// repository is worse than one that did not start.
-	if len(payload.ProjectSeed) > 0 && spec.Workspace.Kind == executor.WorkspaceGit && spec.Workspace.Branch == nil {
+	if len(seed) > 0 && spec.Workspace.Kind == executor.WorkspaceGit && spec.Workspace.Branch == nil {
 		if err := gitprovision.HideControlDir(ctx, spec.WorkDir); err != nil {
 			a.forget(handleID)
 			a.reply(ctx, sess, remote.TypeStarted, frame.ID, handleID, remote.StartedPayload{
@@ -888,16 +918,19 @@ func (a *Agent) handleStart(ctx context.Context, sess *deviceSession, frame remo
 			return
 		}
 	}
-	if len(payload.ProjectSeed) > 0 {
+	if len(seed) > 0 {
 		// Kept to measure the run's changes against once it exits, and paired
 		// with a placement record so the run knows which executor it is on.
 		// See projectresult.go.
-		wl.recordSeed(payload.ProjectSeed)
+		wl.recordSeed(seed)
 		a.recordPlacement(wl, spec.WorkDir, spec)
 		// And the session the run sends its attached files with, for the
 		// ones it does not send itself. See runfiles.go.
 		wl.recordRunSession(spec.Env)
 	}
+	// The directory is ready: a start waiting on it goes on, and a helper may
+	// be started beside a run from here.
+	a.markTreeReady(wl)
 
 	// Remember how to give the work back, before the Spec is rewritten below
 	// and before the harness is allowed to touch the tree. Both orderings are
@@ -1308,9 +1341,16 @@ func (a *Agent) sendFinal(ctx context.Context, sess *deviceSession, wl *workload
 
 	wl.mu.Lock()
 	done, already, status := wl.finished, wl.reported, wl.status
+	readBack := wl.projectReturned || wl.seed == nil
 	wl.mu.Unlock()
 	if !done || already {
 		return false
+	}
+	// Its outcome read back and its work given back, a run is done with its
+	// directory: the hub may start the project's next run the moment this
+	// status arrives, before this agent forgets the workload (Task 20517).
+	if readBack {
+		a.releaseTree(wl)
 	}
 	// The sandbox's last refusals go first (Task 20437): the status closes
 	// the run's stream on the hub.
@@ -1613,6 +1653,11 @@ func (a *Agent) forget(handleID string) {
 	a.mu.Lock()
 	wl := a.workloads[handleID]
 	delete(a.workloads, handleID)
+	if wl != nil {
+		// Whatever it was preparing, it is not preparing any more: a start
+		// waiting for its directory goes on (Task 20517).
+		endPreparingLocked(wl)
+	}
 	if wl != nil && !started && a.cfg.Ephemeral && a.eph.startFailed == "" {
 		// A runner's one run that never started (Task 20484): its controller
 		// wipes the volume before the next run rather than hand back a tree

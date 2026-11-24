@@ -371,6 +371,18 @@ type workload struct {
 	// that comes before the sending starts still holds.
 	stopFiles    context.CancelFunc
 	filesStopped bool
+
+	// tree and role say which project directory this workload works in and
+	// what it is to the project there (Task 20517): a run, which holds the
+	// directory until its outcome has been read back, or a helper. preparing
+	// is open while the workload prepares the directory — fetches the tree,
+	// places the project — and closed once it is done, or the workload is
+	// gone; a start for the same directory waits on it. Guarded by Agent.mu
+	// rather than mu: claimTree reads them for every workload at once,
+	// deciding and recording a start under the one lock. See sharedtree.go.
+	tree      string
+	role      string
+	preparing chan struct{}
 }
 
 // setSecrets records the credential files placed for this workload.

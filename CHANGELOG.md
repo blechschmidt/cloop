@@ -1462,6 +1462,28 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Finished tasks of a project on a remote device no longer come back as
+  duplicates.** The Requirements tab reads the project's spec file when it
+  opens, and Split, Revise, the blocker analysis, the plan assistant, feature
+  suggestions and requirement checks also run a short cloop command on the
+  project's executor. On a device each of these prepared the project's
+  directory like a run: it put the hub's copy of the project there and deleted
+  the database it found. When a run was working in that directory, the
+  database was the run's. The run then picked up the tasks added on the hub
+  since it started, logged them as "added externally" and ran them, and the
+  hub merged them back as new tasks next to the originals, which were still
+  pending and ran again. The run's journal from before that point was lost,
+  and a project with a git checkout would have had the run's working tree
+  reset to the fetched commit. The hub now labels each dispatch as a `run` or
+  a `helper`. While a run works in a device's directory, a helper is sent
+  there without the project's state and without a tree to fetch, and uses the
+  directory as the run has it. An agent with this change applies the same
+  rule on its side and refuses a second run in the directory, and a start that
+  arrives while another workload is still preparing the directory waits for
+  it. A reproduction is refused until the run ends. Split and the blocker
+  analysis read their task from the run's copy, so they are refused, with the
+  reason, for a task added or changed after the run started (Task 20517).
+
 - **Tasks you add while a run works on a remote executor are run too.** A run
   on an executor that cannot read the hub's filesystem (an edge device, a Pod,
   a containerised feature) works through the copy of the plan it was sent. A

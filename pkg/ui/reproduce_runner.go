@@ -187,6 +187,11 @@ func (r *reproduceRunner) run(ctx context.Context, rs runSpec) (*taskreplay.RunO
 	if err != nil {
 		return nil, err
 	}
+	// Not into a directory a run of the project is working in (Task 20517):
+	// on a device the reproduction's checkout is that directory.
+	if err := refuseBesideRun(ex, rs.ProjectDir, "a reproduction"); err != nil {
+		return nil, err
+	}
 
 	// A reproduction is its own execution and gets its own run id, deliberately
 	// not the original's: it holds its own leases, and filing them under the run

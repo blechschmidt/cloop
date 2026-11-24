@@ -382,8 +382,10 @@ type Spec struct {
 	Env []string `json:"env,omitempty"`
 	// Labels carry routing and bookkeeping metadata (project path, task ID,
 	// requesting user). Drivers may surface them for observability; they
-	// never affect execution. See LabelRunID for the one a driver reads, and
-	// LabelPoolTenant for the one a pool runner checks before it starts.
+	// never affect execution. See LabelRunID for the one a driver reads,
+	// LabelPoolTenant for the one a pool runner checks before it starts, and
+	// LabelWorkload for the one a device reads to keep a run's directory
+	// from being prepared over while the run works in it.
 	Labels map[string]string `json:"labels,omitempty"`
 	// ResourceLimits bounds the workload where the driver supports it.
 	ResourceLimits ResourceLimits `json:"resource_limits,omitempty"`
@@ -587,6 +589,13 @@ type Spec struct {
 	// while it was out. Set with ProjectSeed, json:"-" like it: it describes
 	// the seed, and goes nowhere without it.
 	SeedStartable map[int]string `json:"-"`
+	// SeedTasks names every task of the plan in ProjectSeed by ID, each with
+	// a digest of its title and description (Task 20517;
+	// projectseed.SeedTasks). The hub keeps it with its record of a run's
+	// dispatch, to tell whether a model call made on the run's copy of the
+	// project while it works would read a task as the hub has it. Set with
+	// ProjectSeed, json:"-" like it.
+	SeedTasks map[int]string `json:"-"`
 
 	// BranchBundleFile names the git bundle Workspace.Branch describes, as a
 	// path on the control plane's host, for the driver to read while it
@@ -1127,6 +1136,30 @@ const LabelRunID = "run_id"
 // does not (an older build, or a fault). It decides only whether a start is
 // accepted, never how a workload runs.
 const LabelPoolTenant = "pool_tenant"
+
+// LabelWorkload says what a dispatch is to its project (Task 20517):
+// WorkloadRun for a run of it, which works in the project's directory until
+// its outcome has been read back, or WorkloadHelper for one of the short
+// commands the dashboard runs against the project — a spec file read, a
+// model call, a requirement check.
+//
+// It matters on an executor that keeps one directory per project and runs
+// every workload of the project there, which is what a remote agent does.
+// Preparing that directory for a helper — placing the hub's copy of the
+// project, fetching the tree — while a run works in it replaces the run's
+// database and resets its checkout under it: on the sgx-rust-attestation
+// project the run then took the hub's newer tasks for ones added on the
+// device, ran them, and the hub merged them back as duplicates. So a device
+// running a run in a directory starts a helper there on the directory as the
+// run has it, and refuses a second run. A workload without the label is
+// prepared as before.
+const LabelWorkload = "workload"
+
+// The values of LabelWorkload.
+const (
+	WorkloadRun    = "run"
+	WorkloadHelper = "helper"
+)
 
 // LabelHubCATrust and LabelHubCAUses record which of the hub's own CAs a
 // dispatch was told to trust, and on which paths (Task 20438): the serials,

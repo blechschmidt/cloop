@@ -279,6 +279,7 @@ func finishWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (
 		spec.ProjectSeed = seed
 		spec.HumanGates = about.gates
 		spec.SeedStartable = about.startable
+		spec.SeedTasks = about.tasks
 	case mustSeed && !seedable:
 		return spec, &workspaceSourceError{
 			ProjectPath:  workDir,
@@ -360,6 +361,10 @@ type seedFacts struct {
 	// 20516), for the record of the dispatch the run's outcome is merged
 	// under: work it was not given is carried on with when it comes back.
 	startable map[int]string
+	// tasks names every task the seed holds with a digest of its text (Task
+	// 20517): what a model call made on the run's copy while it works would
+	// read under each ID.
+	tasks map[int]string
 }
 
 // projectSeedWithGates is projectSeedFor, also reporting what the dispatch
@@ -392,7 +397,8 @@ func projectSeedWithGates(workDir string) ([]byte, seedFacts, error) {
 			Reason:      err.Error(),
 		}
 	}
-	return seed, seedFacts{gates: st.Plan.HasPendingGates(), startable: projectseed.StartableWork(st.Plan)}, nil
+	return seed, seedFacts{gates: st.Plan.HasPendingGates(), startable: projectseed.StartableWork(st.Plan),
+		tasks: projectseed.SeedTasks(st.Plan)}, nil
 }
 
 // seedRequirementsFor reads the requirements st's unfinished tasks implement

@@ -236,7 +236,7 @@ func newRestartSceneWith(t *testing.T, opt restartOptions) *restartScene {
 	if err := os.Chmod(filepath.Join(devBin, "claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(s.bin, filepath.Join(devBin, "cloop")); err != nil {
+	if err := os.Symlink(s.deviceBin(), filepath.Join(devBin, "cloop")); err != nil {
 		t.Fatal(err)
 	}
 	s.port = freePort(t)
@@ -302,7 +302,7 @@ func (s *restartScene) startAgent() {
 	server := strings.Replace(s.base, "http://", "ws://", 1) + "/api/executors/connect"
 	bundle := filepath.Join(s.root, "enroll.bundle")
 	s.cloop(s.hubDir, "executor", "enroll", "--name", "edge-restart", "--server", server, "--bundle-file", bundle)
-	cmd := exec.Command(s.bin, "executor", "agent",
+	cmd := exec.Command(s.deviceBin(), "executor", "agent",
 		"--token-file", bundle,
 		"--credential", filepath.Join(s.root, "agent.json"),
 		"--workdir-root", filepath.Join(s.root, "device"))
@@ -319,6 +319,16 @@ func (s *restartScene) startAgent() {
 	s.agent = cmd
 	s.mu.Unlock()
 	s.executorID = s.waitAgentOnline()
+}
+
+// deviceBin is the cloop the device runs, its agent and its workloads: the
+// one under test, or CLOOP_E2E_AGENT_BIN's for an A/B against another build
+// of the agent (Task 20517).
+func (s *restartScene) deviceBin() string {
+	if bin := strings.TrimSpace(os.Getenv("CLOOP_E2E_AGENT_BIN")); bin != "" {
+		return bin
+	}
+	return s.bin
 }
 
 // waitAgentOnline waits for the device to be connected to the current hub.

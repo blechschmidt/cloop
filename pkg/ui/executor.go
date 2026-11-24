@@ -486,6 +486,10 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 	// writes its own placement record beside a project seed stamps the run's
 	// tasks with the id the hub's audit trail joins on (Task 20339).
 	base.Labels[executor.LabelRunID] = runID
+	// A run holds its project's directory on a device until it is settled:
+	// the device starts no second run there and prepares nothing over it for
+	// a helper (Task 20517).
+	base.Labels[executor.LabelWorkload] = executor.WorkloadRun
 	// argv[0] is this hub's own binary, by an absolute path only this host
 	// has. Translated before anything else shapes the spec so that every step
 	// below — the audit rows, the persisted handle, the labels a remote agent
@@ -827,7 +831,7 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		// A pool runner's run: what it leaves waiting is queued for a runner
 		// only when someone starts it.
 		prov.Pooled = opts.poolRun
-		rememberSeededDispatch(ex, handle.ID, prov)
+		rememberSeededRun(ex, handle.ID, workDir, prov, spec.SeedTasks)
 		// And for a feature, where its work is landed when it comes back.
 		rememberFeatureReturn(ex, handle.ID, featureReturnFor(spec))
 	}
@@ -1093,6 +1097,9 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	// The run id rides the Spec here too, so the workload can be found by it
 	// should this process die while it runs (Task 20419).
 	base.Labels[executor.LabelRunID] = runID
+	// A helper: started beside a run of its project on a device, it takes the
+	// run's directory as it is (Task 20517; see shareRunTree below).
+	base.Labels[executor.LabelWorkload] = executor.WorkloadHelper
 	// Same translation as startWorkloadAs, and for the same reason: a helper
 	// subcommand is dispatched to the project's executor exactly like a
 	// harness is, so `cloop suggest` on an edge device needs the device's
@@ -1160,7 +1167,16 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 	// writes .cloop/ into a filesystem the hub will never read, while the hub
 	// registers the local path it just created. It now fails with a named
 	// error instead of appearing to succeed, which is the honest outcome.
-	spec, err = applyWorkspace(spec, ex, workDir)
+	//
+	// But not over a run working in that directory on a device (Task 20517):
+	// the helper then takes the directory as the run has it, and nothing is
+	// built for it — no seed, no fetch, no feature branch. See shared_tree.go.
+	spec, sharedWith := shareRunTree(spec, ex, workDir)
+	if sharedWith != "" {
+		err = executor.CheckSandboxSupport(ex, spec.SandboxRequirements(), workDir)
+	} else {
+		spec, err = applyWorkspace(spec, ex, workDir)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1221,6 +1237,11 @@ func runWorkloadEnvFor(ctx context.Context, workDir string, argv []string, envFo
 		runErr = fmt.Errorf("%w: `cloop %s` on executor %s lost part of its output on the way, or printed "+
 			"more than the hub keeps of a reply, so what arrived cannot be trusted",
 			errIncompleteOutput, subcommandName(argv), ex.ID())
+	}
+	if runErr != nil && sharedWith != "" {
+		// What it failed on may be the run's copy of the project rather than
+		// the hub's: readModelCall says so when that is why.
+		runErr = &runTreeSharedError{err: runErr, executor: ex.ID()}
 	}
 	return res.Output, runErr
 }

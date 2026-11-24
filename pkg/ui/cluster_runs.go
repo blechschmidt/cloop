@@ -680,7 +680,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		}
 		var merged projectseed.MergeReport
 		if meta.Seeded && meta.Provenance != nil {
-			rememberSeededDispatch(ex, meta.Handle, *meta.Provenance)
+			rememberSeededRun(ex, meta.Handle, workDir, *meta.Provenance, nil)
 			rememberFeatureReturn(ex, meta.Handle, meta.Feature)
 			merged, _ = s.collectRunResult(workDir, ex, meta.Handle, false)
 		}
@@ -711,7 +711,7 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		return
 	}
 	if meta.Seeded && meta.Provenance != nil {
-		rememberSeededDispatch(ex, meta.Handle, *meta.Provenance)
+		rememberSeededRun(ex, meta.Handle, workDir, *meta.Provenance, nil)
 		rememberFeatureReturn(ex, meta.Handle, meta.Feature)
 	}
 	// Before resumeRun, which rewrites the owner row from what this member

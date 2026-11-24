@@ -4564,6 +4564,12 @@ func (s *Server) handleTaskDecompose(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusConflict)
 		return
 	}
+	// Not on a run's copy of the project that may hold another task under
+	// this ID (Task 20517).
+	if why := runCopyDiffers(workDir, task, "the Split preview"); why != "" {
+		jsonErr(w, why, http.StatusConflict)
+		return
+	}
 
 	clear := s.harnessClearanceFor(r, workDir)
 	if s.refuseWithoutHarnessCredential(w, clear) {
@@ -5372,8 +5378,15 @@ func (s *Server) handleTaskBlockerAnalyze(w http.ResponseWriter, r *http.Request
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	if _, err := ps.RequireTask(id); err != nil {
+	task, err := ps.RequireTask(id)
+	if err != nil {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
+		return
+	}
+	// Not on a run's copy of the project that may hold another task under
+	// this ID (Task 20517).
+	if why := runCopyDiffers(workDir, task, "the blocker analysis"); why != "" {
+		jsonErr(w, why, http.StatusConflict)
 		return
 	}
 
@@ -5400,7 +5413,7 @@ func (s *Server) handleTaskBlockerAnalyze(w http.ResponseWriter, r *http.Request
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return
 	}
-	task, err := ps.RequireTask(id)
+	task, err = ps.RequireTask(id)
 	if err != nil {
 		jsonErr(w, err.Error(), statedb.HTTPStatus(err))
 		return

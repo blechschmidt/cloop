@@ -72,6 +72,29 @@ func TitleDigest(title string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// SeedTasks records every task of plan by ID with the digest of its title and
+// description (TaskDigest): what a run sent this plan has under each ID, so
+// the hub can tell whether a model call made on the run's copy of the project
+// would read the task as the hub has it (Task 20517). Never nil.
+func SeedTasks(plan *pm.Plan) map[int]string {
+	out := map[int]string{}
+	if plan == nil {
+		return out
+	}
+	for _, t := range plan.Tasks {
+		if t != nil {
+			out[t.ID] = TaskDigest(t)
+		}
+	}
+	return out
+}
+
+// TaskDigest identifies a task's title and description without carrying them.
+func TaskDigest(t *pm.Task) string {
+	sum := sha256.Sum256([]byte(t.Title + "\x00" + t.Description))
+	return hex.EncodeToString(sum[:8])
+}
+
 // newWork returns the tasks of plan a run starting now would start that the
 // run which came back could not have started: not among the tasks its seed
 // held startable, by ID and title, not created by the run, and not one the run

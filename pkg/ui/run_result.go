@@ -50,6 +50,16 @@ type seededDispatch struct {
 	// feature is set for a feature's run on an isolating executor: what its
 	// returned work is landed against (Task 20367).
 	feature *featureReturn
+	// workDir and device are the project the run works on and the device it
+	// works on it with, which keeps the run's directory there from being
+	// prepared over by a helper while the run works in it (Task 20517; see
+	// shared_tree.go). Empty for a record that does not name them.
+	workDir string
+	device  string
+	// tasks is what the run's seed held under each task ID (Task 20517;
+	// projectseed.SeedTasks): nil for a run this process adopted, whose seed
+	// it never saw.
+	tasks map[int]string
 }
 
 // maxSeededDispatches bounds the registry. An entry lives from dispatch to
@@ -68,13 +78,25 @@ func seededKey(executorID, handleID string) string { return executorID + "\x00" 
 
 // rememberSeededDispatch records that handleID on ex was sent the project.
 func rememberSeededDispatch(ex executor.Executor, handleID string, prov projectseed.Provenance) {
+	rememberSeededRun(ex, handleID, "", prov, nil)
+}
+
+// rememberSeededRun is rememberSeededDispatch for a run of the project at
+// workDir, which works in that project's directory on ex's device until it is
+// settled, sent the tasks seedTasks names — nil when that is not known
+// (Task 20517).
+func rememberSeededRun(ex executor.Executor, handleID, workDir string, prov projectseed.Provenance, seedTasks map[int]string) {
 	key := seededKey(ex.ID(), handleID)
+	device := ""
+	if workDir != "" {
+		device = deviceOfExecutor(ex).ID()
+	}
 	seededMu.Lock()
 	defer seededMu.Unlock()
 	if _, ok := seeded[key]; !ok {
 		seededOrder = append(seededOrder, key)
 	}
-	seeded[key] = seededDispatch{prov: prov}
+	seeded[key] = seededDispatch{prov: prov, workDir: workDir, device: device, tasks: seedTasks}
 	for len(seededOrder) > maxSeededDispatches {
 		delete(seeded, seededOrder[0])
 		seededOrder = seededOrder[1:]
