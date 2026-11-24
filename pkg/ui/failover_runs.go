@@ -563,14 +563,14 @@ func (s *Server) retireLostRun(workDir, executorID, handleID string, verdict run
 	// run is left exactly as it was before any of this, with its branch where
 	// the feature's own recovery expects it.
 	if settle && !seededFeatureRun(run.ex, run.handleID) {
-		s.collectRunResult(workDir, run.ex, run.handleID)
+		s.collectRunResult(workDir, run.ex, run.handleID, false)
 	}
 	s.letGoOfLostRun(run, verdict.Detail)
 	if settle {
 		s.reconcileDeadRun(workDir, verdict)
 	}
 	if s.untrackLostRun(workDir, handleID) && settle {
-		s.releaseRunClaim(workDir)
+		s.releaseClaimUnlessStarting(workDir)
 	}
 	// This member is no longer streaming it. A run another member relays
 	// here keeps its flag: the replacement's member may have announced

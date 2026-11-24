@@ -38,6 +38,10 @@ package projectseed
 //     is not consulted.
 //   - Spend is billed to whoever the hub billed the dispatch to, and priced
 //     from the hub's own table where it knows the model.
+//   - A run that reached the end of the plan it was sent says nothing about
+//     work the hub's plan gained while it was out. That work is carried on
+//     with: the project is paused work_added, and the hub starts a run for it
+//     (newwork.go).
 
 import (
 	"bytes"
@@ -126,6 +130,19 @@ type Provenance struct {
 	// ReadOnlyProjects are the other projects the run was given to read
 	// (Task 20501), written on each task.dispatch row with the rest.
 	ReadOnlyProjects []string `json:",omitempty"`
+
+	// Sent is what the plan the run was sent held for it to start (Task
+	// 20516), recorded as the hub built the seed. When the run comes back at
+	// the end of that plan, a task the hub's plan holds for a run to start
+	// that is not among these is work the run could not have started — added
+	// or reset on the hub while it was out — and the hub starts a run for it.
+	// Nil for a dispatch recorded by a build that predates it.
+	Sent *SeedWork `json:",omitempty"`
+	// Pooled says the run was given to an executor pool's runner (Task
+	// 20482). Such a project's runs are queued for a runner only when a
+	// person starts them, so work found when the run comes back waits for
+	// that person (Task 20516).
+	Pooled bool `json:",omitempty"`
 }
 
 // MergeReport says what folding a Result into the hub's project did.
@@ -184,6 +201,36 @@ type MergeReport struct {
 	// gateChecks are those verdicts, by the hub's task id, for Apply to
 	// record as the project's requirement checks.
 	gateChecks []gateCheck
+
+	// NewWork are the tasks the hub's plan holds for a run to start that the
+	// run could not have started — added or reset on the hub while it was out
+	// — when it came back at the end of the plan it was sent (Task 20516).
+	// The project is paused work_added, and the hub starts a run for them,
+	// unless HeldBy names why it does not.
+	NewWork []int
+	// HeldBy is why the hub does not start a run for NewWork: the run was
+	// asked to stop, or the project runs on an executor pool. Empty when it
+	// does.
+	HeldBy HeldBy
+	// ResumesAtOnce says the merge left the project paused for a reason the
+	// hub restarts at once (pausereason.Reason.ResumedAtOnce): work added while
+	// the run was out, or a readers change the run stopped for. It is this
+	// run's account, which is what decides whether the run that ended is
+	// followed by another; the pause stored before the run says nothing about
+	// how the run ended.
+	ResumesAtOnce bool
+	// reported are the hub's ids of the tasks the run reported on as tasks it
+	// was sent, whatever became of the report: none of them is work the run
+	// could not have seen.
+	reported map[int]bool
+	// PauseChanged records that the project's pause reason changed while its
+	// status did not: paused before the merge and paused after it, for
+	// another reason. The status alone would not say the project changed.
+	PauseChanged bool
+	// PausedFor is the reason the merge left the project paused for, when it
+	// paused it or changed why it is paused, as the journal row names it.
+	// Empty when NewWork says why.
+	PausedFor string
 }
 
 // gateCheck is one requirements gate verdict a run reached on a task.
@@ -194,7 +241,7 @@ type gateCheck struct {
 
 // Changed reports whether the merge altered the hub's project at all.
 func (m MergeReport) Changed() bool {
-	return len(m.Updated) > 0 || len(m.Added) > 0 || m.StatusTo != "" ||
+	return len(m.Updated) > 0 || len(m.Added) > 0 || m.StatusTo != "" || m.PauseChanged ||
 		m.Steps > 0 || m.Events > 0 || m.Costs > 0 || m.Attached > 0 || len(m.LeftBehind) > 0
 }
 
@@ -252,7 +299,32 @@ func (m MergeReport) Summary() string {
 		if from == "" {
 			from = "unset"
 		}
-		parts = append(parts, fmt.Sprintf("project status %s → %s", from, m.StatusTo))
+		change := fmt.Sprintf("project status %s → %s", from, m.StatusTo)
+		if m.PausedFor != "" {
+			change += " (" + m.PausedFor + ")"
+		}
+		parts = append(parts, change)
+	} else if m.PauseChanged && m.PausedFor != "" {
+		parts = append(parts, "project paused: "+m.PausedFor)
+	}
+	if len(m.NewWork) > 0 {
+		// Every task, not the badge's first few: this row is where a person
+		// looks for which ones (Task 20516).
+		them := "it"
+		if len(m.NewWork) > 1 {
+			them = "them"
+		}
+		added := fmt.Sprintf("%s added or reset here while the run was out (%s)",
+			plural(len(m.NewWork), "task was", "tasks were"), taskRefs(m.NewWork, len(m.NewWork)))
+		switch m.HeldBy {
+		case HeldByStop:
+			added += ", and the run was asked to stop, so the hub does not start another for " + them
+		case HeldByPool:
+			added += "; the project runs on an executor pool, so press Run to queue a run for " + them
+		default:
+			added += ", so the hub starts another run for " + them
+		}
+		parts = append(parts, added)
 	}
 	msg := "The run's results came back from the executor"
 	if m.Interim {
@@ -308,6 +380,19 @@ type Records struct {
 // hub redacts what it leased to the run rather than trusting the device to have
 // done it.
 func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string) string, now time.Time) (MergeReport, Records) {
+	return merge(st, r, prov, scrub, now, mergeOptions{})
+}
+
+// mergeOptions are what the hub knows about how the run ended, beside the
+// record of its dispatch.
+type mergeOptions struct {
+	// stopRequested: the hub was asked to stop the run. A run that finished
+	// before the stop reached it is not followed by another (Task 20516).
+	stopRequested bool
+}
+
+func merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string) string, now time.Time,
+	opt mergeOptions) (MergeReport, Records) {
 	if scrub == nil {
 		scrub = func(s string) string { return s }
 	}
@@ -340,6 +425,10 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 		}
 		after := keepUnstoredVerdict(tc.Before, tc.After)
 		id := after.ID
+		if rep.reported == nil {
+			rep.reported = map[int]bool{}
+		}
+		rep.reported[id] = true
 		h := byID[id]
 		switch {
 		case h == nil:
@@ -545,7 +634,7 @@ func Merge(st *state.ProjectState, r *Result, prov Provenance, scrub func(string
 	st.TotalOutputTokens = addBounded(st.TotalOutputTokens, boundedDelta(r.OutputTokens))
 	st.EvolveStep = addBounded(st.EvolveStep, boundedDelta(r.EvolveSteps))
 
-	mergeStatus(st, r, scrub, &rep)
+	mergeStatus(st, r, prov, scrub, &rep, now, opt)
 	return rep, rec
 }
 
@@ -571,7 +660,7 @@ func Apply(workDir string, r *Result, prov Provenance, scrub func(string) string
 		return MergeReport{}, fmt.Errorf("projectseed: the state at %s belongs to %s; not merging a run into it",
 			workDir, st.WorkDir)
 	}
-	rep, rec := Merge(st, r, prov, scrub, time.Now())
+	rep, rec := merge(st, r, prov, scrub, time.Now(), mergeOptions{stopRequested: o.stopRequested})
 	keepApprovedLinks(workDir, st.Plan, rep.Added)
 	// Before the plan is saved, so the trail reads dispatch, then outcome:
 	// the tasks were dispatched whatever becomes of the save.
@@ -634,6 +723,16 @@ type applyOptions struct {
 	// hasRedaction says it was given: a nil set scrubs nothing.
 	redaction    *redact.Set
 	hasRedaction bool
+	// stopRequested: the hub was asked to stop the run (WithStopRequested).
+	stopRequested bool
+}
+
+// WithStopRequested tells Apply the hub was asked to stop the run (Task
+// 20516): a run that finished the plan it was sent before the stop reached it
+// is recorded as stopped, and no run is started for work the hub's plan gained
+// while it was out.
+func WithStopRequested(stopped bool) ApplyOption {
+	return func(o *applyOptions) { o.stopRequested = stopped }
 }
 
 // WithRedaction gives Apply the redaction set the scrub function it is passed
@@ -1055,7 +1154,8 @@ func sameDir(stored, dir string) bool {
 // settle them — it resets the tasks the run stranded and pauses the project
 // with the executor's account of how the run ended. Adopting them hands that
 // machinery the case it was built for.
-func mergeStatus(st *state.ProjectState, r *Result, scrub func(string) string, rep *MergeReport) {
+func mergeStatus(st *state.ProjectState, r *Result, prov Provenance, scrub func(string) string, rep *MergeReport,
+	now time.Time, opt mergeOptions) {
 	if r.Interim {
 		// A progress report is not an account of how the run ended, because
 		// it has not ended (Task 50). Whoever settles the run says what
@@ -1063,20 +1163,26 @@ func mergeStatus(st *state.ProjectState, r *Result, scrub func(string) string, r
 		// was lost, which is a verdict only the hub can reach.
 		return
 	}
-	from := st.Status
+	from, fromPause := st.Status, st.PauseReason
 	switch r.Status {
 	case "complete":
-		if pending := unfinished(st.Plan); pending > 0 {
-			// The run finished the plan it was sent; the hub's plan has grown
-			// since. Calling that complete would hide work nobody has run.
-			st.SetPaused(pausereason.New(pausereason.CodeIdle, fmt.Sprintf(
-				"the run finished the plan it was sent, but %s here %s work left — added or reset on the hub while it was out",
-				plural(pending, "task", "tasks"), stillHave(pending))))
-		} else {
-			st.Status, st.PauseReason = "complete", nil
-		}
+		// The run finished the plan it was sent. The hub's plan may have
+		// grown since — tasks added or reset while the run was out — and a
+		// run here would have carried on with them: so does the hub (Task
+		// 20516). Calling the project complete would hide work nobody has
+		// run, and pausing it left that work waiting for someone to press Run.
+		finishPlan(st, nil, prov, rep, now, opt)
 	case "paused":
-		if r.PauseReason != nil && pausereason.Known(r.PauseReason.Code) {
+		// The other ordinary ends of a run: nothing left it could start, or a
+		// review gate it reached. Work added on the hub while it was out is
+		// carried on with all the same.
+		if ordinaryEnd(st, r.PauseReason) && finishPlan(st, r.PauseReason, prov, rep, now, opt) {
+			break
+		}
+		// work_added is the hub's own conclusion about its own plan, never a
+		// run's: a device reporting it would have the hub start runs on the
+		// say of the least trusted party here.
+		if r.PauseReason != nil && pausereason.Known(r.PauseReason.Code) && r.PauseReason.Code != pausereason.CodeWorkAdded {
 			pr := *r.PauseReason
 			pr.Detail = truncate(scrub(pr.Detail), maxPauseDetailBytes)
 			st.SetPaused(pr)
@@ -1094,7 +1200,23 @@ func mergeStatus(st *state.ProjectState, r *Result, scrub func(string) string, r
 	}
 	if st.Status != from {
 		rep.StatusFrom, rep.StatusTo = from, st.Status
+	} else if st.Status == "paused" && !samePause(fromPause, st.PauseReason) {
+		rep.PauseChanged = true
 	}
+	if st.Status == "paused" && (rep.StatusTo != "" || rep.PauseChanged) && len(rep.NewWork) == 0 {
+		rep.PausedFor = st.PauseReason.Label()
+	}
+	// Decided by this run's outcome, so the hub follows this run, and only
+	// this one, with another.
+	rep.ResumesAtOnce = st.Status == "paused" && st.PauseReason.ResumedAtOnce()
+}
+
+// samePause reports whether two pause reasons say the same thing.
+func samePause(a, b *pausereason.Reason) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Code == b.Code && a.Detail == b.Detail && a.TaskID == b.TaskID && sameTime(a.ResumesAt, b.ResumesAt)
 }
 
 // keepUnstoredVerdict gives back a TDD verdict the device dropped because it
@@ -1533,11 +1655,4 @@ func plural(n int, one, many string) string {
 		return "1 " + one
 	}
 	return fmt.Sprintf("%d %s", n, many)
-}
-
-func stillHave(n int) string {
-	if n == 1 {
-		return "still has"
-	}
-	return "still have"
 }

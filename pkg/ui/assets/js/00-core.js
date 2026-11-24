@@ -1068,6 +1068,7 @@ const pauseReasonLabels = {
   starter_unavailable: "starter's Claude account unavailable",
   pool_capacity: 'waiting for pool capacity',
   readers_changed: 'a project it reads stopped listing it',
+  work_added: 'work was added while it ran',
 };
 
 // pauseReasonText renders a pause reason as one line of prose:

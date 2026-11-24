@@ -330,7 +330,7 @@ func TestARunWithoutAResultKeepsTheFilesItSent(t *testing.T) {
 		t.Fatal(err)
 	}
 	rememberSeededDispatch(ex, "h-lost", projectseed.Provenance{RunID: runID, ExecutorID: ex.ID()})
-	f.srv.collectRunResult(f.alpha, ex, "h-lost")
+	f.srv.collectRunResult(f.alpha, ex, "h-lost", false)
 	var kept statedb.AttachmentRow
 	for _, r := range storedRows(t, f.alpha, 1) {
 		if r.Name == "kept.txt" {
@@ -476,7 +476,7 @@ func TestAnUnreadableResultKeepsTheFilesTheRunSent(t *testing.T) {
 		t.Fatal(err)
 	}
 	rememberSeededDispatch(ex, "h-garbled", projectseed.Provenance{RunID: runID, ExecutorID: ex.ID()})
-	f.srv.collectRunResult(f.alpha, ex, "h-garbled")
+	f.srv.collectRunResult(f.alpha, ex, "h-garbled", false)
 	found := false
 	for _, r := range storedRows(t, f.alpha, 1) {
 		found = found || (r.Name == "kept.txt" && r.Unavailable == "")

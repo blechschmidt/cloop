@@ -35,6 +35,7 @@ import (
 	"github.com/blechschmidt/cloop/pkg/cost"
 	"github.com/blechschmidt/cloop/pkg/executor"
 	"github.com/blechschmidt/cloop/pkg/executor/localprocess"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/reconcile"
 	"github.com/blechschmidt/cloop/pkg/state"
 	"github.com/blechschmidt/cloop/pkg/statedb"
@@ -816,8 +817,17 @@ func startWorkloadAs(envFor func(executor.Executor) []string, clear *harnessClea
 		if payer == "" {
 			payer = cost.IdentityLocal
 		}
-		rememberSeededDispatch(ex, handle.ID, seededProvenance(ex, handle, sandboxSpec, runID, payer,
-			lease.LeaseIDs(), readOnlyProjectsOf(spec)...))
+		prov := seededProvenance(ex, handle, sandboxSpec, runID, payer, lease.LeaseIDs(), readOnlyProjectsOf(spec)...)
+		// What the seed held for the run to start (Task 20516): work the
+		// hub's plan gains beyond it while the run is out is carried on with
+		// when the run comes back.
+		if spec.SeedStartable != nil {
+			prov.Sent = &projectseed.SeedWork{Startable: spec.SeedStartable}
+		}
+		// A pool runner's run: what it leaves waiting is queued for a runner
+		// only when someone starts it.
+		prov.Pooled = opts.poolRun
+		rememberSeededDispatch(ex, handle.ID, prov)
 		// And for a feature, where its work is landed when it comes back.
 		rememberFeatureReturn(ex, handle.ID, featureReturnFor(spec))
 	}
@@ -880,7 +890,11 @@ func (s *Server) recordingRunHolding(workDir, handler string, slot *heldSlot) di
 	return func(o *dispatchOptions) {
 		o.record = func(ex executor.Executor, handleID string) error {
 			slot.bind(ex.ID(), handleID)
-			return s.recordRunDispatch(workDir, handler, ex, handleID)
+			if err := s.recordRunDispatch(workDir, handler, ex, handleID); err != nil {
+				return err
+			}
+			s.retireDuePause(workDir, ex, handleID)
+			return nil
 		}
 	}
 }

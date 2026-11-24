@@ -122,7 +122,10 @@ func (s *Server) runAutoResumeSweep(ctx context.Context) {
 	// ui.auto_resume_on_cap_reset governs the restarts after a usage cap. A
 	// run a readers change stopped (Task 20501) is restarted whatever it
 	// says: it stopped only so that its next task would start in a run given
-	// what the readers lists name now, not because anything ran out.
+	// what the readers lists name now, not because anything ran out. So is
+	// one that finished the plan it was sent while work was added on the hub
+	// (Task 20516): it stopped only because it could not see that work. The
+	// sweep restarts either one runEnded could not hand to its resumer.
 	caps := s.autoResumeEnabled()
 	for _, e := range s.allProjectEntries() {
 		if ctx.Err() != nil {
@@ -143,7 +146,7 @@ func (s *Server) maybeAutoResumeFor(workDir string, caps bool) bool {
 	if err != nil || st == nil {
 		return false
 	}
-	if !caps && (st.PauseReason == nil || st.PauseReason.Code != pausereason.CodeReadersChanged) {
+	if !caps && !st.PauseReason.ResumedAtOnce() {
 		return false
 	}
 	acct, ok := s.autoResumeReady(workDir, st)
@@ -156,7 +159,7 @@ func (s *Server) maybeAutoResumeFor(workDir string, caps bool) bool {
 		if errors.Is(err, errResumeDeclined) {
 			return false
 		}
-		s.log().Warn(logger.EventSessionStart, 0, "auto-resume: could not restart cap-paused run",
+		s.log().Warn(logger.EventSessionStart, 0, "auto-resume: could not restart the paused run",
 			map[string]interface{}{"project": workDir, "error": err.Error()})
 		if errors.Is(err, errHostSandboxRefused) && acct != nil {
 			// The starter may no longer run this project on the hub's host
@@ -179,8 +182,11 @@ func (s *Server) maybeAutoResumeFor(workDir string, caps bool) bool {
 		fields[k] = v
 	}
 	what := "auto-resume: subscription window reopened, run restarted"
-	if reason != nil && reason.Code == pausereason.CodeReadersChanged {
+	switch {
+	case reason != nil && reason.Code == pausereason.CodeReadersChanged:
 		what = "auto-resume: a project the run read stopped listing it, run restarted with what the lists name now"
+	case reason != nil && reason.Code == pausereason.CodeWorkAdded:
+		what = "auto-resume: work was added on the hub while the run was out, run restarted with the plan as it stands now"
 	}
 	s.log().Info(logger.EventSessionStart, 0, what, fields)
 	s.auditAutoResume(workDir, reason, resumesAt, acct)
@@ -209,8 +215,10 @@ func (s *Server) autoResumeReady(workDir string, st *state.ProjectState) (*resum
 	// A project someone already restarted by hand needs no help, and starting
 	// a second harness in one working directory is the race handleRun refuses
 	// for the same reason: both schedule from the same plan and overwrite each
-	// other's status writes.
-	if s.projectExecuting(workDir) {
+	// other's status writes. Nor one whose run this member is settling: until
+	// runEnded is done, its result may not be in the plan the next run would
+	// be given (Task 20516).
+	if s.projectExecuting(workDir) || s.settlingRun(workDir) {
 		return nil, false
 	}
 	acct := s.resumeAccountFor(workDir)
@@ -426,8 +434,8 @@ func (s *Server) repauseForStarter(workDir string, su *starterUnavailableError) 
 	state.LogEventDetails(workDir, state.EventRow{
 		Type: state.EventSessionPaused,
 		Step: state.NoStep,
-		Message: fmt.Sprintf("Auto-resume held: the run is paused for a subscription window the hub restarts "+
-			"it after (%s), but %s. %s", prior, su.Error(), su.Remediation()),
+		Message: fmt.Sprintf("Auto-resume held: the hub would have started the run again by itself (%s), "+
+			"but %s. %s", prior, su.Error(), su.Remediation()),
 	}, details)
 	s.broadcastStateDiff(workDir, st)
 	s.refreshProjectStatuses()
@@ -531,6 +539,14 @@ func (s *Server) startAutoResumeRun(workDir string) error {
 
 	if owner, err := s.claimRun(workDir, "auto_resume"); err != nil {
 		return fmt.Errorf("%w (member %s)", err, owner.InstanceID)
+	}
+	// Asked again now that this holds the start: Stop, or a person's Run,
+	// may have settled the pause since the sweep or the resumer read it
+	// (Task 20516), and nothing can change it from here until the run is
+	// tracked.
+	if st, err := state.LoadLite(workDir); err != nil || !resumablePause(st, s.clock()) {
+		s.releaseRunClaim(workDir)
+		return errResumeDeclined
 	}
 
 	payer := s.runIdentity(nil, workDir)

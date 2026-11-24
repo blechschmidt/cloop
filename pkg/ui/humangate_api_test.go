@@ -306,9 +306,9 @@ func TestProjectSeedReportsPendingGates(t *testing.T) {
 	gate.ID, gate.Priority = 2, 2
 	dir := setupProjectDir(t, cloopGoal, []*pm.Task{{ID: 1, Title: "one", Priority: 1, Status: pm.TaskPending}, gate})
 
-	seed, gates, err := projectSeedWithGates(dir)
-	if err != nil || len(seed) == 0 || !gates {
-		t.Fatalf("projectSeedWithGates = %d bytes, gates=%v, %v; want a seed flagged as holding a gate", len(seed), gates, err)
+	seed, about, err := projectSeedWithGates(dir)
+	if err != nil || len(seed) == 0 || !about.gates {
+		t.Fatalf("projectSeedWithGates = %d bytes, gates=%v, %v; want a seed flagged as holding a gate", len(seed), about.gates, err)
 	}
 	ps, err := state.Load(dir)
 	if err != nil {
@@ -318,7 +318,7 @@ func TestProjectSeedReportsPendingGates(t *testing.T) {
 	if err := ps.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if _, gates, err := projectSeedWithGates(dir); err != nil || gates {
-		t.Fatalf("a passed gate still flags the seed: gates=%v, %v", gates, err)
+	if _, about, err := projectSeedWithGates(dir); err != nil || about.gates {
+		t.Fatalf("a passed gate still flags the seed: gates=%v, %v", about.gates, err)
 	}
 }

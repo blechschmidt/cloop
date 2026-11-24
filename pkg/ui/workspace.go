@@ -267,7 +267,7 @@ func applyWorkspaceFor(spec executor.Spec, ex executor.Executor, workDir string,
 // failure — a clean-looking run that did nothing — that this whole file exists
 // to remove, so it refuses instead, naming the upgrade.
 func finishWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (executor.Spec, error) {
-	seed, gates, err := projectSeedWithGates(workDir)
+	seed, about, err := projectSeedWithGates(workDir)
 	if err != nil {
 		return spec, err
 	}
@@ -277,7 +277,8 @@ func finishWorkspace(spec executor.Spec, ex executor.Executor, workDir string) (
 	switch {
 	case len(seed) > 0 && seedable:
 		spec.ProjectSeed = seed
-		spec.HumanGates = gates
+		spec.HumanGates = about.gates
+		spec.SeedStartable = about.startable
 	case mustSeed && !seedable:
 		return spec, &workspaceSourceError{
 			ProjectPath:  workDir,
@@ -349,16 +350,27 @@ func projectSeedFor(workDir string) ([]byte, error) {
 	return seed, err
 }
 
-// projectSeedWithGates is projectSeedFor, also reporting whether the plan it
-// carries holds a pending human review gate (Task 20477): a device whose cloop
-// predates gates would run one as a task, so the dispatch must know.
-func projectSeedWithGates(workDir string) ([]byte, bool, error) {
+// seedFacts is what a dispatch is told about the plan a seed carries.
+type seedFacts struct {
+	// gates says the plan holds a pending human review gate (Task 20477): a
+	// device whose cloop predates gates would run one as a task, so the
+	// dispatch must know.
+	gates bool
+	// startable names the tasks the run could start as it began (Task
+	// 20516), for the record of the dispatch the run's outcome is merged
+	// under: work it was not given is carried on with when it comes back.
+	startable map[int]string
+}
+
+// projectSeedWithGates is projectSeedFor, also reporting what the dispatch
+// needs to know about the plan it carries (seedFacts).
+func projectSeedWithGates(workDir string) ([]byte, seedFacts, error) {
 	st, err := state.LoadLite(workDir)
 	if err != nil {
 		if errors.Is(err, statedb.ErrProjectNotFound) {
-			return nil, false, nil
+			return nil, seedFacts{}, nil
 		}
-		return nil, false, &workspaceSourceError{
+		return nil, seedFacts{}, &workspaceSourceError{
 			ProjectPath: workDir,
 			Reason: fmt.Sprintf("could not read the project state to send to the executor: %v. "+
 				"The sandbox fetches the source tree but gets its goal, instructions and plan "+
@@ -375,12 +387,12 @@ func projectSeedWithGates(workDir string) ([]byte, bool, error) {
 	st.Model = resolveProjectModel(workDir, st.Provider, st)
 	seed, err := projectseed.BuildFull(st, seedRequirementsFor(workDir, st), seedRequirementStatusFor(workDir, st))
 	if err != nil {
-		return nil, false, &workspaceSourceError{
+		return nil, seedFacts{}, &workspaceSourceError{
 			ProjectPath: workDir,
 			Reason:      err.Error(),
 		}
 	}
-	return seed, st.Plan.HasPendingGates(), nil
+	return seed, seedFacts{gates: st.Plan.HasPendingGates(), startable: projectseed.StartableWork(st.Plan)}, nil
 }
 
 // seedRequirementsFor reads the requirements st's unfinished tasks implement

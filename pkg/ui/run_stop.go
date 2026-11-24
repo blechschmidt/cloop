@@ -37,6 +37,11 @@ type stopDelivery struct {
 	// ExecutorErr is why the executor running the project's workload could not
 	// be asked to stop it.
 	ExecutorErr error
+	// Finished says the run this hub follows had already ended and was still
+	// being settled: nothing was signalled, but the stop is noted for the
+	// settling to honour (Task 20516) — a run that finished its plan is not
+	// then followed by another.
+	Finished bool
 }
 
 // failure describes a stop that found something to stop and could not deliver
@@ -79,6 +84,14 @@ func (s *Server) interruptRun(workDir string) stopDelivery {
 		// signal to it as a delivery would tell the caller a run was stopped
 		// when the project may only be showing a stale status.
 		st, statusErr := run.ex.Status(ctx, run.handleID)
+		if statusErr == nil && st.State.Terminal() {
+			// Over, and not settled yet: the hub may be merging what a device
+			// brought back. Nothing to signal, but the stop is noted for the
+			// settling, which would otherwise follow a run that finished its
+			// plan with another for work added meanwhile (Task 20516).
+			s.noteStopRequested(workDir, run.handleID, true)
+			d.Finished = true
+		}
 		if statusErr != nil || !st.State.Terminal() {
 			// So that settling it counts a cancellation: an interrupted run
 			// pauses and exits zero, which alone reads as finished. Noted

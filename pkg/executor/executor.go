@@ -579,6 +579,14 @@ type Spec struct {
 	// json:"-" like ProjectSeed: it describes the seed, and goes nowhere
 	// without it.
 	HumanGates bool `json:"-"`
+	// SeedStartable names the tasks of the plan in ProjectSeed that a run
+	// could start as it began, by ID, each with a digest of its title (Task
+	// 20516; projectseed.StartableWork). The hub keeps it with its record of
+	// the dispatch, and when the run comes back at the end of that plan it
+	// tells the work the run was given from work added or reset on the hub
+	// while it was out. Set with ProjectSeed, json:"-" like it: it describes
+	// the seed, and goes nowhere without it.
+	SeedStartable map[int]string `json:"-"`
 
 	// BranchBundleFile names the git bundle Workspace.Branch describes, as a
 	// path on the control plane's host, for the driver to read while it

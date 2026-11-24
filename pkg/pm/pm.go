@@ -575,6 +575,50 @@ func (p *Plan) ReadyTasks() []*Task {
 	return SortByExecutionOrder(ready)
 }
 
+// StartableTasks returns the tasks a run starting now could start, in the
+// order it would start them: what the orchestrator's gate finds eligible once
+// the run has done what it does before it gates anything (Task 20516).
+//
+// That is ReadyTasks over the plan as such a run sees it. A task a run that
+// died left in progress is pending again (stale-task recovery), and a review
+// gate a person approved is passed, so the tasks behind it are not held by it
+// any more. A quarantined task is not startable: the gate holds it until
+// someone resets it.
+//
+// The plan is not modified. The tasks returned are the plan's own.
+func (p *Plan) StartableTasks() []*Task {
+	if p == nil {
+		return nil
+	}
+	view := Plan{Tasks: make([]*Task, 0, len(p.Tasks))}
+	own := make(map[*Task]*Task, len(p.Tasks))
+	for _, t := range p.Tasks {
+		if t == nil {
+			continue
+		}
+		v := t
+		switch {
+		case t.IsWork() && t.Status == TaskInProgress:
+			c := *t
+			c.Status = TaskPending
+			v = &c
+		case !t.IsWork() && t.Approved && t.Status == TaskPending:
+			c := *t
+			c.Status = TaskDone
+			v = &c
+		}
+		own[v] = t
+		view.Tasks = append(view.Tasks, v)
+	}
+	var out []*Task
+	for _, v := range view.ReadyTasks() {
+		if t := own[v]; !t.Quarantined() {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // IsComplete returns true if all tasks are done or skipped, or if remaining
 // pending tasks are permanently blocked (all their deps include a failed task).
 //

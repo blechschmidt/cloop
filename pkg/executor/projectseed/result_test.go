@@ -594,9 +594,14 @@ func TestMergeKeepsTheHubsDecisions(t *testing.T) {
 			{ID: 1, Title: "a", Status: pm.TaskPending},
 			{ID: 2, Title: "added while out", Status: pm.TaskPending},
 		}}}
-		rep, _ := Merge(st, &Result{Format: 1, Status: "complete", Tasks: []TaskChange{done(1, "a")}}, Provenance{}, nil, now)
-		if st.Status != "paused" || st.PauseReason == nil || st.PauseReason.Code != pausereason.CodeIdle {
-			t.Fatalf("status = %q (%+v), want paused/idle", st.Status, st.PauseReason)
+		sent := &SeedWork{Startable: map[int]string{1: TitleDigest("a")}}
+		rep, _ := Merge(st, &Result{Format: 1, Status: "complete", Tasks: []TaskChange{done(1, "a")}},
+			Provenance{Sent: sent}, nil, now)
+		// The hub carries on with it (Task 20516): paused for a moment, for a
+		// run it starts at once.
+		if st.Status != "paused" || st.PauseReason == nil || st.PauseReason.Code != pausereason.CodeWorkAdded ||
+			!st.PauseReason.AutoResumable(now) {
+			t.Fatalf("status = %q (%+v), want paused work_added, resumable now", st.Status, st.PauseReason)
 		}
 		if rep.StatusTo != "paused" {
 			t.Errorf("report status = %q", rep.StatusTo)

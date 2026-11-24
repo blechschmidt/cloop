@@ -2107,8 +2107,35 @@ finished. The orchestrator writes that decision to the task's verdict sidecar
 first, and the device applies it before reading the run back, so the hub hears
 "failed by the review gate" instead of "in progress", with the recovery in the
 journal. The device reads only the sidecars for this, refuses symbolic links in
-their path, and writes nothing. A run that finished the plan it was sent while
-the hub's plan grew is paused as *idle*, not marked complete.
+their path, and writes nothing.
+
+**Tasks added while a run is out are run too.** A run works through the copy of
+the plan it was sent, so it never sees a task that was added or reset on the hub
+after its seed was made. When the hub builds a seed it records which tasks a run
+could start: pending work whose dependencies are met, that no closed review gate
+holds and that isn't quarantined. When the run comes back at the end of its
+plan (complete, idle, or waiting at a review gate), the hub looks for tasks that
+a run could start now, that aren't on that record and that the run didn't
+report on. If there are any, it pauses the project as `work_added`, naming
+them, and starts a run of the plan as it is now straight away. That run acts
+for the person who started the first one, as an automatic resume does. Some
+cases are left for a person:
+
+- A task the run was sent and came back without starting, or one it reported
+  on, such as a task it set back to pending. Another run would only do the
+  same again.
+- A run someone pressed Stop on as it finished. The project is paused as
+  stopped. Stop on a project the hub is about to restart by itself also
+  cancels that restart.
+- A project bound to an executor pool. The hub doesn't queue a pool's runs by
+  itself, so the pause says to press Run.
+
+Only the run's own result decides whether the hub starts another one. When a
+seeded run is dispatched, a pause the hub would restart by itself is replaced
+with one saying the run hasn't reported back, so a run that ends without a
+result is not followed by another. When there is nothing left that a run could
+start, the project is complete, or paused at the review gate that holds the
+rest.
 
 **Like the seed, this degrades instead of refusing.** A v10–v12 agent runs a
 seeded project correctly but can't report the outcome. Refusing it placement

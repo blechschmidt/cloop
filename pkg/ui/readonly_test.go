@@ -15,6 +15,7 @@ import (
 
 	"github.com/blechschmidt/cloop/pkg/auditaction"
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/executor/readonlysnap"
 	"github.com/blechschmidt/cloop/pkg/knowledgerun"
 	"github.com/blechschmidt/cloop/pkg/multiui"
@@ -354,11 +355,11 @@ func TestARunPausedForAReadersChangeIsStartedAgainAtOnce(t *testing.T) {
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go srv.watchReadersResume(ctx)
+	go srv.watchResumeAtOnce(ctx)
 	waitFor(t, 5*time.Second, "the resumer to start", func() bool {
-		srv.readersResumeMu.Lock()
-		defer srv.readersResumeMu.Unlock()
-		return srv.readersResume != nil
+		srv.resumeNowMu.Lock()
+		defer srv.resumeNowMu.Unlock()
+		return srv.resumeNow != nil
 	})
 
 	pause := func(r pausereason.Reason) {
@@ -372,7 +373,7 @@ func TestARunPausedForAReadersChangeIsStartedAgainAtOnce(t *testing.T) {
 		}
 	}
 	pause(pausereason.New(pausereason.CodeOperator, "stopped"))
-	srv.resumeAfterReadersChanged(dir)
+	srv.resumeAtOnceAfter(dir, false, projectseed.MergeReport{}, time.Time{})
 	select {
 	case got := <-started:
 		t.Fatalf("an operator's stop was restarted: %s", got)
@@ -380,7 +381,7 @@ func TestARunPausedForAReadersChangeIsStartedAgainAtOnce(t *testing.T) {
 	}
 
 	pause(pausereason.NewUntil(pausereason.CodeReadersChanged, "bravo no longer lists this project", time.Now()))
-	srv.resumeAfterReadersChanged(dir)
+	srv.resumeAtOnceAfter(dir, false, projectseed.MergeReport{}, time.Time{})
 	select {
 	case got := <-started:
 		if got != dir {

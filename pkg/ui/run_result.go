@@ -222,15 +222,26 @@ func takeSeededDispatch(ex executor.Executor, handleID string) (seededDispatch, 
 // the hub's copy of workDir, and journals what happened. A run that was not
 // sent the project — every run on an executor that shares this filesystem —
 // has nothing to bring back and returns at once.
-func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID string) {
+//
+// stopped says the hub was asked to stop the run: one that finished before the
+// stop reached it is not followed by another (Task 20516).
+//
+// It returns what the merge did, and whether the run was carried out as a
+// seed: for such a run the report, not the project's stored status, says
+// whether the hub follows it with another (MergeReport.ResumesAtOnce). The
+// stored status is the previous run's until a merge replaces it, so a run that
+// brought nothing back would otherwise be followed by another, and that one by
+// another.
+func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID string, stopped bool) (rep projectseed.MergeReport, seeded bool) {
 	defer recoverGoroutine("collect run result: " + workDir)
 	if workDir == "" || ex == nil || handleID == "" {
-		return
+		return rep, false
 	}
 	d, ok := takeSeededDispatch(ex, handleID)
 	if !ok {
-		return
+		return rep, false
 	}
+	seeded = true
 	// A feature's commits come back beside its project state, and are landed
 	// whatever became of the state — deferred so every early return below
 	// still reaches it, and after the state merge so the journal reads in the
@@ -306,7 +317,8 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 		return
 	}
 
-	rep, err := projectseed.Apply(workDir, result, d.prov, res.Redact, redaction...)
+	rep, err = projectseed.Apply(workDir, result, d.prov, res.Redact,
+		append(redaction, projectseed.WithStopRequested(stopped))...)
 	details := map[string]any{
 		"updated": rep.Updated, "added": rep.Added, "kept": len(rep.Kept),
 		"steps": rep.Steps, "events": rep.Events, "costs": rep.Costs,
@@ -350,6 +362,7 @@ func (s *Server) collectRunResult(workDir string, ex executor.Executor, handleID
 		s.refreshProjectStatuses()
 		s.broadcastProjectsUpdate()
 	}
+	return rep, seeded
 }
 
 // claimHeldResults attaches the files a seeded run sent while it ran to the

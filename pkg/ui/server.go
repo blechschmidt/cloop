@@ -511,12 +511,13 @@ type Server struct {
 	// test can assert *which* projects would be resumed without starting a
 	// real workload. Nil means the real dispatch.
 	autoResumeStart func(workDir string) error
-	// readersResume carries the directories whose runs ended paused for a
-	// readers change (Task 20501) to watchReadersResume, guarded by
-	// readersResumeMu. Nil on a Server that was never Run: the auto-resume
-	// sweep restarts them instead.
-	readersResumeMu sync.Mutex
-	readersResume   chan string
+	// resumeNow carries the directories whose runs ended paused for a reason
+	// the hub restarts at once — a readers change (Task 20501), work added
+	// while the run was out (Task 20516) — to watchResumeAtOnce, guarded by
+	// resumeNowMu. Nil on a Server that was never Run: the auto-resume sweep
+	// restarts them instead.
+	resumeNowMu sync.Mutex
+	resumeNow   chan string
 
 	// autoResumeUsage replaces the Claude Code usage snapshot the same sweep
 	// reads for a pause recorded by an older build (Task 20440), so a test can
@@ -728,6 +729,10 @@ type Server struct {
 	// while this one was streaming them, until their consumer notices. Guarded
 	// by runHandleMu.
 	handedOverRuns map[string]bool
+	// runStarts are the projects whose run this member is starting: claimed
+	// (claimRun) and not yet tracked or given up, with when the start began
+	// (Task 20516). Guarded by runHandleMu. See run_start.go.
+	runStarts map[string]time.Time
 	// runSlots holds the tenants' concurrency slots this hub holds for the
 	// runs it streams, recorded on their owner rows (Task 20452). See
 	// run_quota_slot.go.
@@ -1619,10 +1624,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// whichever hub holds the instance lease. See autoresume.go.
 	s.runLeaderDuty(watcherCtx, "autoresume", s.watchAutoResume)
 	// Restarts at once a run that stopped because a project it read stopped
-	// listing it (Task 20501) — on every member, not only the leader: the
-	// member that followed the run settles it, and it should not wait for the
-	// next sweep. See readonly_resume.go.
-	go s.watchReadersResume(watcherCtx)
+	// listing it (Task 20501), or that finished the plan it was sent while
+	// work was added on the hub (Task 20516) — on every member, not only the
+	// leader: the member that followed the run settles it, and it should not
+	// wait for the next sweep. See readonly_resume.go.
+	go s.watchResumeAtOnce(watcherCtx)
 	// Pins the head of every audit chain off the database, so deleting the
 	// newest rows is detectable (Task 20404). A leader duty because the
 	// records are one per chain per window, cluster-wide; the window marker
@@ -4181,8 +4187,26 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if d.Signalled == 0 {
+		// A run the hub would start by itself — after a usage cap, a readers
+		// change, or for work added while a device's run was out (Task 20516)
+		// — is what Stop stops when nothing is running yet.
+		if s.holdForStop(workDir, true) {
+			jsonOK(w, map[string]interface{}{"ok": true,
+				"message": "cancelled the run the hub was about to start by itself"})
+			return
+		}
 		if s.reconcileDeadRun(workDir, runVerdict{}) {
 			jsonOK(w, map[string]interface{}{"ok": true, "message": "no running process found — cleared stale running status"})
+			return
+		}
+		if d.Finished {
+			jsonOK(w, map[string]interface{}{"ok": true,
+				"message": "the run had already finished; it is recorded as stopped, and the hub does not start another by itself"})
+			return
+		}
+		if s.runStarting(workDir) {
+			jsonOK(w, map[string]interface{}{"ok": false,
+				"message": "a run is being started for this project; stop it once it has started"})
 			return
 		}
 		jsonOK(w, map[string]interface{}{"ok": false, "message": "no running cloop process found"})
@@ -7636,11 +7660,23 @@ func (s *Server) handleProjectStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if d.Signalled == 0 {
+		// The run the hub would start by itself is what Stop stops when
+		// nothing runs yet (Task 20516), as /api/stop does.
+		if s.holdForStop(entry.Path, true) {
+			jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name,
+				"message": "cancelled the run the hub was about to start by itself"})
+			return
+		}
 		// Nothing running: if state still claims the project is running (the
 		// run died without writing a terminal status), clear it so the card
 		// stops offering a Stop button that can never succeed (Task 20153).
 		if s.reconcileDeadRun(entry.Path, runVerdict{}) {
 			jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name, "message": "no running process found — cleared stale running status"})
+			return
+		}
+		if d.Finished {
+			jsonOK(w, map[string]interface{}{"ok": true, "project": entry.Name,
+				"message": "the run had already finished; it is recorded as stopped, and the hub does not start another by itself"})
 			return
 		}
 		jsonOK(w, map[string]interface{}{"ok": false, "project": entry.Name, "message": "no running process found"})

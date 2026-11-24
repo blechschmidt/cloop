@@ -259,6 +259,64 @@ func TestGateTasks_MissingConditionEvaluatorIsLoud(t *testing.T) {
 	}
 }
 
+// TestGateTasks_RunsWhatStartableTasksSays: the hub decides whether a device's
+// run left work behind that a run starting now would start by asking
+// pm.Plan.StartableTasks (Task 20516). If the gate ran anything else — a
+// quarantined task, one held behind a closed review gate, one whose
+// dependency failed — the hub would start a run for work the run then
+// declines, and start another when that one came back, without end. So the
+// gate's eligible set (every runnable task, in parallel mode) has to be
+// exactly what StartableTasks names, for a plan a run starts on: one with no
+// task left in progress, which the run recovers before it gates anything.
+func TestGateTasks_RunsWhatStartableTasksSays(t *testing.T) {
+	quarantined := &pm.Task{ID: 3, Priority: 1, Status: pm.TaskPending,
+		Quarantine: &pm.TaskQuarantine{Kind: pm.QuarantineNodeKiller}}
+	approved := pm.NewHumanGate("", "")
+	approved.ID, approved.Priority, approved.Approved = 4, 2, true
+	closed := pm.NewHumanGate("", "")
+	closed.ID, closed.Priority = 7, 6
+	plans := map[string][]*pm.Task{
+		"plain": {
+			{ID: 1, Priority: 3, Status: pm.TaskPending},
+			{ID: 2, Priority: 1, Status: pm.TaskDone},
+		},
+		"quarantined, approved and closed gates, failed dependency": {
+			{ID: 1, Priority: 3, Status: pm.TaskPending},
+			{ID: 2, Priority: 1, Status: pm.TaskFailed},
+			quarantined,
+			approved,
+			{ID: 5, Priority: 3, Status: pm.TaskPending, DependsOn: []int{4}},
+			{ID: 6, Priority: 2, Status: pm.TaskPending, DependsOn: []int{2}},
+			closed,
+			{ID: 8, Priority: 9, Status: pm.TaskPending},
+		},
+		"only a quarantined task": {
+			{ID: 1, Priority: 1, Status: pm.TaskDone},
+			{ID: 3, Priority: 1, Status: pm.TaskPending, Quarantine: &pm.TaskQuarantine{Kind: pm.QuarantineNodeKiller}},
+		},
+	}
+	for name, tasks := range plans {
+		t.Run(name, func(t *testing.T) {
+			// Each side gets its own copy: the gate passes approved gates and
+			// skips blocked tasks in the plan it is handed.
+			clone := func() *pm.Plan {
+				p := &pm.Plan{}
+				for _, task := range tasks {
+					c := *task
+					p.Tasks = append(p.Tasks, &c)
+				}
+				return p
+			}
+			want := taskIDs(clone().StartableTasks())
+			got := taskIDs(GateTasks(context.Background(), clone(),
+				GateConfig{Parallel: true, EvalCondition: proceedAlways}).Runnable)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("the gate runs %v, StartableTasks says %v", got, want)
+			}
+		})
+	}
+}
+
 // TestGateTasks_NilPlanIsExhausted covers the degenerate input rather than
 // letting it panic inside a run loop.
 func TestGateTasks_NilPlanIsExhausted(t *testing.T) {

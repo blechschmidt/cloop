@@ -105,6 +105,13 @@ var errRunOwnedElsewhere = errors.New("a run for this project is in progress on 
 // errRunOwnedElsewhere, carrying the owner, when a live member already holds
 // it. A standalone hub always succeeds.
 func (s *Server) claimRun(workDir, handler string) (hubcluster.Owner, error) {
+	// One start at a time on this member, and none while runEnded settles the
+	// project's last run, which a start waits out for a moment (run_start.go).
+	// Ended by trackRunWithCancel or releaseRunClaim, which every start path
+	// reaches.
+	if workDir != "" && (!s.awaitSettled(workDir) || !s.beginRunStart(workDir)) {
+		return hubcluster.Owner{}, errRunStarting
+	}
 	n := s.clusterNode()
 	if n == nil || workDir == "" {
 		return hubcluster.Owner{}, nil
@@ -123,6 +130,7 @@ func (s *Server) claimRun(workDir, handler string) (hubcluster.Owner, error) {
 		return hubcluster.Owner{}, nil
 	}
 	if !ok {
+		s.endRunStart(workDir)
 		return o, errRunOwnedElsewhere
 	}
 	return o, nil
@@ -220,6 +228,7 @@ func (s *Server) writeRunRecord(n *hubcluster.Node, workDir string, ex executor.
 // releaseRunClaim gives up workDir's run. Fenced on this member, so a member
 // whose run was adopted elsewhere releases nothing.
 func (s *Server) releaseRunClaim(workDir string) {
+	s.endRunStart(workDir)
 	n := s.clusterNode()
 	if n == nil || workDir == "" {
 		return
@@ -669,10 +678,11 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		if stErr != nil {
 			verdict = runVerdict{Detail: "its hub member stopped and the workload could not be found on " + ex.ID()}
 		}
+		var merged projectseed.MergeReport
 		if meta.Seeded && meta.Provenance != nil {
 			rememberSeededDispatch(ex, meta.Handle, *meta.Provenance)
 			rememberFeatureReturn(ex, meta.Handle, meta.Feature)
-			s.collectRunResult(workDir, ex, meta.Handle)
+			merged, _ = s.collectRunResult(workDir, ex, meta.Handle, false)
 		}
 		// What the owner would have ended with the run (Task 20382): its
 		// leases, released, and its executor session, closed with how the
@@ -692,6 +702,12 @@ func (s *Server) adoptRun(o hubcluster.Owner, meta runOwnerMeta, why string) {
 		// Settled here, so counted here: the member that dispatched it, and
 		// counted its start, is gone, and the cluster's sum needs the end.
 		countRunSettled(ex, st, stErr, false, meta.Started)
+		// A run that came back paused for a reason the hub lifts at once —
+		// work added while it was out (Task 20516), a readers change — is
+		// followed by another now, as runEnded would have followed it.
+		if merged.ResumesAtOnce {
+			s.queueResumeAtOnce(workDir)
+		}
 		return
 	}
 	if meta.Seeded && meta.Provenance != nil {

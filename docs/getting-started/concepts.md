@@ -418,6 +418,12 @@ code there and a short-lived lease holding any credentials the task needs. When
 the sandbox doesn't share the hub's filesystem, a completed task records
 `write_back_branch` and `write_back_commit` so that you can find the work.
 
+Such a run works on a copy of the plan taken when it started, so tasks you add
+or reset on the hub while it works are not in its copy. When it reaches the end
+of its copy, the hub starts another run for them straight away, so you don't
+need to press Run again. The exceptions are a run you stopped and a project that
+runs on an executor pool; for those, press Run yourself.
+
 [The executor architecture](../architecture/executors.md) describes all of
 this: the `Executor` interface, the four backends, how an executor is chosen,
 how the code gets into the sandbox, health checks and failover.

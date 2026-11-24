@@ -1462,6 +1462,33 @@ schema and the hub's HTTP API may change in any release.
 
 ### Fixed
 
+- **Tasks you add while a run works on a remote executor are run too.** A run
+  on an executor that cannot read the hub's filesystem (an edge device, a Pod,
+  a containerised feature) works through the copy of the plan it was sent. A
+  task added on the hub after the copy was made, or reset there, was in no plan
+  that run could see, so the run finished its own plan and the project paused
+  with "the run finished the plan it was sent, but 1 task here still has work
+  left — added or reset on the hub while it was out". Someone had to press Run
+  again for every batch of tasks added while a device worked. The hub now
+  records which tasks a run could start when it builds the run's copy. When the
+  run comes back at the end of its plan with tasks waiting on the hub that it
+  could not have started, the project is paused as `work_added`, naming them,
+  and the hub starts a run of the plan as it is now straight away, acting for
+  the person who started the first run. A task the run was sent and came back
+  without starting, or one the run reported on, is still left for a person, so
+  the hub never keeps starting runs a device declines. A run that ends without
+  bringing a result back is not followed by another. A run someone pressed
+  Stop on as it finished is not started again, and Stop on a project the hub
+  is about to restart by itself cancels the restart. A project on an executor
+  pool is paused with the tasks named and asks you to press Run, because the
+  hub doesn't queue a pool's runs by itself. A start of a project's run now
+  waits for the project's last run to be settled, and is refused while another
+  start of the project is in progress on the same hub process, so the
+  automatic start and a person pressing Run can't put two runs in one project.
+  A finished run whose remaining tasks are blocked for good behind a failed
+  task now leaves the project complete, as a run on the hub would, and one
+  stopped by a review gate leaves it waiting for that gate (Task 20516).
+
 - **Files a remote run attaches no longer stay on the executor because its
   result measured them by their raw size.** When a run on an edge device could
   not send its files to the hub while it ran, they came back inside its result,

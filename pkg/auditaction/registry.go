@@ -169,7 +169,7 @@ var registry = []Entry{
 		Action:    ActionRunCapResumed,
 		Home:      HomeProject,
 		Entity:    "plan",
-		Trigger:   "The hub restarts a cap-paused run after its window rolled over, without a human — or, for the extra-usage pause an older build recorded as a spent budget, once the usage API shows the window open (no `resumes_at`).",
+		Trigger:   "The hub restarts a cap-paused run after its window rolled over, without a human — or, for the extra-usage pause an older build recorded as a spent budget, once the usage API shows the window open (no `resumes_at`). Also a run it restarts at once: one a readers change stopped, and one that finished the plan it was sent while tasks were added or reset on the hub (`paused_detail` names them).",
 		Payload:   []string{"project", "paused_detail", "resumes_at", "resumed_at", "acted_for", "acted_for_basis"},
 		Stability: StabilityStable,
 		Read:      authz.PermAuditRead,

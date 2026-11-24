@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/blechschmidt/cloop/pkg/executor"
+	"github.com/blechschmidt/cloop/pkg/executor/projectseed"
 	"github.com/blechschmidt/cloop/pkg/logger"
 	"github.com/blechschmidt/cloop/pkg/multiui"
 	"github.com/blechschmidt/cloop/pkg/pausereason"
@@ -99,6 +100,11 @@ type dispatchedRun struct {
 	// answering (Task 20396), between being given up and being forgotten. It
 	// is not executing, whatever its driver says.
 	lost bool
+	// settling is when runEnded began settling the run (Task 20516): over,
+	// its result possibly not merged yet. No run of the project starts until
+	// it is forgotten, or runSettleGrace has passed (run_start.go). Zero
+	// while nobody settles it.
+	settling time.Time
 }
 
 // trackRun remembers the workload dispatched for workDir.
@@ -118,6 +124,9 @@ func (s *Server) trackRunWithCancel(workDir string, ex executor.Executor, handle
 		s.runHandles = make(map[string]dispatchedRun)
 	}
 	s.runHandles[workDir] = dispatchedRun{ex: ex, handleID: handleID, cancel: cancel, tracked: time.Now()}
+	// The start that dispatched it, if any, is over: the tracked run answers
+	// for the project from here on (run_start.go).
+	delete(s.runStarts, workDir)
 }
 
 // noteStopRequested records whether the control plane asked handleID's run to
@@ -207,6 +216,12 @@ func (s *Server) trackedRun(workDir string) (dispatchedRun, bool) {
 // failoverReplacementWindow, so nobody starts a second run beside one that is
 // about to begin.
 func (s *Server) projectExecuting(workDir string) bool {
+	// A run this member is starting is one (Task 20516): nothing is tracked
+	// until its dispatch returns, and a second start in between would put a
+	// second harness in the project.
+	if s.runStarting(workDir) {
+		return true
+	}
 	if multiui.IsCloopRunningInDir(workDir) {
 		return true
 	}
@@ -333,6 +348,12 @@ func diskLimitPause(b executor.DiskLimitBreach) pausereason.Reason {
 // projectExecuting whether anything is still running the project, and a flag
 // left standing would answer yes about the very run being settled.
 func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string) {
+	// Nothing starts another run of the project while this one is settled:
+	// its result may not be in the plan yet (run_start.go). The mark goes
+	// with the run, or — should settling panic part-way — when this returns.
+	s.markRunSettling(workDir, handleID)
+	defer s.clearRunSettling(workDir, handleID)
+	stopAsked := false
 	// The run's egress session ends with it (Task 20378). The exit watcher
 	// closes it too; this is the same close from the path every settled run
 	// takes, including one adopted from another hub member, whose watcher —
@@ -346,12 +367,18 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// yet: recorded on the run as failed, the run having ended without them
 	// (Task 20451).
 	s.endRunTakeovers(ex, handleID, "the run ended", true)
+	// Whether the hub asked this run to stop, read before its result is
+	// merged: a run that finished before the stop reached it is recorded as
+	// stopped, not followed by another (Task 20516).
+	if run, ok := s.trackedRun(workDir); ok && run.handleID == handleID && run.stopRequested {
+		stopAsked = true
+	}
 	// First: a run on an executor that does not share this filesystem kept
 	// its outcomes in its own copy of the project, and everything below reads
 	// this hub's. Merging it before recovery means a task the run left in
 	// progress is recovered from the run's own account rather than from a plan
 	// that never heard it started (Task 20339).
-	s.collectRunResult(workDir, ex, handleID)
+	merged, seeded := s.collectRunResult(workDir, ex, handleID, stopAsked)
 	// Its firewall's last refusals recorded, and its summary and audit rows
 	// written (Task 20437) — after the merge above, so a device run's tasks
 	// have the times its refusals are matched to them by.
@@ -374,10 +401,20 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 		}
 	}
 	// Read before untrackRun forgets it: whether the hub asked this run to
-	// stop, and since when this member has been following it.
+	// stop — a stop pressed while its result was merged counts too — and
+	// since when this member has been following it.
 	run, _ := s.trackedRun(workDir)
-	stopped := run.handleID == handleID && run.stopRequested
-	s.untrackRun(workDir)
+	stopped := stopAsked || (run.handleID == handleID && run.stopRequested)
+	// A stop wins over any restart the hub would make by itself, and is
+	// recorded while this member still follows the run, so that nothing can
+	// start another for the project in between (Task 20516).
+	if stopped {
+		s.holdForStop(workDir, false)
+	}
+	if run.handleID != handleID {
+		run = dispatchedRun{} // another run's, started since: nothing of it is this one's
+	}
+	s.untrackSettledRun(workDir, handleID)
 	s.reconcileDeadRun(workDir, verdict)
 	reason := countRunSettled(ex, st, stErr, stopped, run.tracked)
 	if s.runSettledHook != nil && ex != nil {
@@ -390,32 +427,110 @@ func (s *Server) runEnded(workDir string, ex executor.Executor, handleID string)
 	// (Task 20482) — last, after everything above read what it had to from
 	// the runner.
 	s.retireEphemeralAfterRun(ex)
-	// A run that stopped at a task boundary because a project it read stopped
-	// listing it (Task 20501) starts again now, not at the next sweep: the
-	// run it starts is given what the readers lists name now.
-	s.resumeAfterReadersChanged(workDir)
+	// A run that ended paused for a reason the hub lifts at once is followed
+	// by another now, not at the next sweep: one that stopped at a task
+	// boundary because a project it read stopped listing it (Task 20501),
+	// given what the readers lists name now, and one that finished the plan
+	// it was sent while work was added on the hub (Task 20516), given the
+	// plan as it stands now. Not one the hub was asked to stop: it finished
+	// before the stop reached it, and the stop stands.
+	if !stopped {
+		s.resumeAtOnceAfter(workDir, seeded, merged, run.tracked)
+	}
 }
 
-// resumeAfterReadersChanged hands workDir to watchReadersResume when its run
-// ended paused for a readers change, for it to be restarted through the same
+// resumeAtOnceAfter hands workDir to watchResumeAtOnce when the run that just
+// ended left it paused for a reason the hub restarts at once
+// (pausereason.Reason.ResumedAtOnce), for it to be restarted through the same
 // checks and the same routing as the auto-resume sweep. A process that is not
 // watching, or has a backlog, leaves it to the sweep.
-func (s *Server) resumeAfterReadersChanged(workDir string) {
+//
+// For a run carried out as a seed that is the verdict of the run's own merge
+// (merged.ResumesAtOnce). The project's stored status is the previous run's
+// until a merge replaces it, so a run that brought nothing back would
+// otherwise be followed by another, and that one by another (Task 20516). A
+// run on this filesystem stores its own status as it ends — when it got that
+// far: a pause recorded before since, when this member began following the
+// run, is an earlier run's, left by one that failed before it wrote anything.
+func (s *Server) resumeAtOnceAfter(workDir string, seeded bool, merged projectseed.MergeReport, since time.Time) {
 	if workDir == "" {
 		return
 	}
-	st, err := state.LoadLite(workDir)
-	if err != nil || st == nil || st.Status != "paused" || st.PauseReason == nil ||
-		st.PauseReason.Code != pausereason.CodeReadersChanged {
+	if seeded {
+		if merged.ResumesAtOnce {
+			s.queueResumeAtOnce(workDir)
+		}
 		return
 	}
-	s.readersResumeMu.Lock()
-	ch := s.readersResume
-	s.readersResumeMu.Unlock()
+	st, err := state.LoadLite(workDir)
+	if err != nil || st == nil || st.Status != "paused" || !st.PauseReason.ResumedAtOnce() {
+		return
+	}
+	if !since.IsZero() && st.PauseReason.ResumesAt.Before(since) {
+		return
+	}
+	s.queueResumeAtOnce(workDir)
+}
+
+// queueResumeAtOnce hands workDir to watchResumeAtOnce, unless it is not
+// running or is backed up.
+func (s *Server) queueResumeAtOnce(workDir string) {
+	s.resumeNowMu.Lock()
+	ch := s.resumeNow
+	s.resumeNowMu.Unlock()
 	select {
 	case ch <- workDir:
 	default:
 	}
+}
+
+// holdForStop records a project the hub was asked to stop as stopped when it is
+// paused for a reason the hub would restart it for by itself, and reports
+// whether it was. Paused operator, as a run the stop reached is, so a person
+// starts the next one.
+//
+// Two stops meet such a pause. One reaches a run that finished — at the end of
+// its plan, at a task boundary, at a cap — before the stop did: runEnded calls
+// this while its member still follows the run, so no restart starts in
+// between. The other is Stop pressed while nothing runs (cancelled): the
+// restart is what it stops, unless a run is already on its way.
+func (s *Server) holdForStop(workDir string, cancelled bool) bool {
+	if cancelled {
+		// As a start would: not beside a start or a run, and no start while
+		// the pause is rewritten. A restart that won the race goes ahead and
+		// is the run Stop then stops; one that loses finds the pause gone
+		// (startAutoResumeRun asks again once it holds the start).
+		if s.projectExecuting(workDir) || !s.beginRunStart(workDir) {
+			return false
+		}
+		defer s.endRunStart(workDir)
+	}
+	st, err := state.LoadLite(workDir)
+	if err != nil || st == nil || st.Status != "paused" || !st.PauseReason.ResumedByHub() {
+		return false
+	}
+	prior := st.PauseReason.Label()
+	st.SetPaused(pausereason.New(pausereason.CodeOperator, "run stopped"))
+	if err := st.SaveDirect(); err != nil {
+		s.log().Warn(logger.EventCheckpoint, 0, "could not record a stopped run as stopped",
+			map[string]interface{}{"project": workDir, "error": err.Error()})
+		return false
+	}
+	msg := fmt.Sprintf("The run was asked to stop as it finished, so the hub does not start it again "+
+		"by itself (it would have: %s). Press Run to carry on.", prior)
+	if cancelled {
+		msg = fmt.Sprintf("Stop cancelled the run the hub was about to start by itself (%s). "+
+			"Press Run to carry on.", prior)
+	}
+	state.LogEventDetails(workDir, state.EventRow{
+		Type:    state.EventSessionPaused,
+		Step:    state.NoStep,
+		Message: msg,
+	}, map[string]any{"pause_code": string(pausereason.CodeOperator), "was": prior})
+	s.broadcastStateDiff(workDir, st)
+	s.refreshProjectStatuses()
+	s.broadcastProjectsUpdate()
+	return true
 }
 
 // errNoWorkload stands in for a Status nobody could ask for: no executor, or

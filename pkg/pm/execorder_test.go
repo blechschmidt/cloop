@@ -160,3 +160,45 @@ func TestNextTask_NilWhenNothingIsRunnable(t *testing.T) {
 		t.Errorf("NextTask = %v, want nil", got)
 	}
 }
+
+// StartableTasks is what a run starting now would start (Task 20516): the hub
+// asks it of a plan a device's run comes back to, to tell work the run could
+// not have started from work it was given. It sees the plan as the run would
+// once it has recovered an interrupted task and passed an approved gate, and
+// leaves the plan itself alone.
+func TestStartableTasks_SeesThePlanAsARunStartingNowWould(t *testing.T) {
+	t.Parallel()
+
+	interrupted := &Task{ID: 1, Priority: 3, Status: TaskInProgress}
+	approved := gate(2, 4)
+	approved.Approved = true
+	behindApproved := mk(3, 5, false)
+	behindApproved.DependsOn = []int{2}
+	quarantined := mk(4, 1, false)
+	quarantined.Quarantine = &TaskQuarantine{Kind: QuarantineNodeKiller}
+	closed := gate(5, 6)
+	heldByClosed := mk(6, 7, false)
+	blocked := mk(7, 2, false)
+	blocked.DependsOn = []int{8}
+	failed := &Task{ID: 8, Priority: 1, Status: TaskFailed}
+	ready := mk(9, 2, false)
+
+	p := &Plan{Tasks: []*Task{interrupted, approved, behindApproved, quarantined, closed, heldByClosed,
+		blocked, failed, ready}}
+	got := p.StartableTasks()
+	if want := []int{9, 1, 3}; !sameIDs(ids(got), want) {
+		t.Fatalf("StartableTasks = %v, want %v: the interrupted task recovered, the task behind the "+
+			"approved gate released, and nothing quarantined, held by the closed gate or blocked", ids(got), want)
+	}
+	for _, s := range got {
+		if s != p.TaskByID(s.ID) {
+			t.Errorf("StartableTasks returned a copy of task %d, not the plan's own", s.ID)
+		}
+	}
+	if interrupted.Status != TaskInProgress || approved.Status != TaskPending {
+		t.Errorf("StartableTasks changed the plan: task 1 %s, gate 2 %s", interrupted.Status, approved.Status)
+	}
+	if got := (*Plan)(nil).StartableTasks(); got != nil {
+		t.Errorf("a nil plan has startable tasks: %v", ids(got))
+	}
+}

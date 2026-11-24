@@ -303,6 +303,22 @@ func (s *Server) startQueuedPoolRun(q statedb.PoolQueueRow, ex executor.Executor
 		return
 	}
 	if owner, err := s.claimRun(workDir, q.Handler); err != nil {
+		if errors.Is(err, errRunStarting) && attempt < executorpool.MaxRunAttempts {
+			// Another start of the project is under way on this member, or
+			// its last run is being settled (Task 20516): back to the queue,
+			// its runner to waiting, rather than failed for good.
+			reason := "another start of the project was under way"
+			if moved, _ := store.DB().MovePoolQueueEntry(q.ID, []string{statedb.PoolQueueAssigned},
+				statedb.PoolQueueWaiting, reason, time.Now()); moved {
+				store.AuditQueue(q, "requeued", "system", reason)
+			}
+			_, _ = store.DB().MovePoolRunnerIdle(ex.ID())
+			return
+		}
+		if errors.Is(err, errRunStarting) {
+			failRun("another start of the project was under way each time a runner was ready")
+			return
+		}
 		failRun(fmt.Sprintf("the project's run is held by hub member %s", owner.InstanceID))
 		return
 	}

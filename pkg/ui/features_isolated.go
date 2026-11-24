@@ -168,7 +168,7 @@ func applyFeatureWorkspace(spec executor.Spec, ex executor.Executor, workDir str
 		}
 	}()
 
-	seed, gates, err := projectSeedWithGates(workDir)
+	seed, about, err := projectSeedWithGates(workDir)
 	if err != nil {
 		return spec, err
 	}
@@ -185,7 +185,8 @@ func applyFeatureWorkspace(spec executor.Spec, ex executor.Executor, workDir str
 	spec.Workspace = sh.Workspace(sizeLimit, grant)
 	spec.BranchBundleFile = sh.File
 	spec.ProjectSeed = seed
-	spec.HumanGates = gates
+	spec.HumanGates = about.gates
+	spec.SeedStartable = about.startable
 	if returnWork {
 		spec.WriteBack = executor.WriteBack{
 			Mode:           executor.WriteBackBundle,

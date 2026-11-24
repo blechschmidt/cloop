@@ -65,6 +65,9 @@ func TestAutoResumableOnlyForARolledOverUsageCap(t *testing.T) {
 		// A readers change resumes as soon as it is recorded (Task 20501).
 		{"readers changed", ptr(NewUntil(CodeReadersChanged, "/p/b no longer lists /p/a", past)), true},
 		{"readers changed with no resume time", ptr(New(CodeReadersChanged, "changed")), false},
+		// So does work added on the hub while a run was out (Task 20516).
+		{"work added", ptr(NewUntil(CodeWorkAdded, "task #4 was added here while the run was out", past)), true},
+		{"work added with no resume time", ptr(New(CodeWorkAdded, "added")), false},
 
 		// Every other code needs a human. Resuming these on a timer would
 		// override the very decision that stopped the run — which is the
@@ -155,6 +158,7 @@ func TestCodesOrder(t *testing.T) {
 		"idle", "operator", "stale", "state_not_persisted",
 		"uncommitted_work", "disk_low", "executor_lost", "disk_limit",
 		"starter_unavailable", "pool_capacity", "readers_changed",
+		"work_added",
 	}
 	got := Codes()
 	if len(got) != len(want) {
@@ -245,3 +249,28 @@ func TestRunWaitsOnlyForDiskLow(t *testing.T) {
 }
 
 func ptr(r Reason) *Reason { return &r }
+
+// TestResumedAtOnceIsTheHubsOwnRestarts: a readers change and work added while
+// a run was out are restarted as soon as the run is settled, whatever the
+// cap-resume setting says; a usage cap waits for its window and that setting
+// (Task 20516).
+func TestResumedAtOnceIsTheHubsOwnRestarts(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		r    *Reason
+		want bool
+	}{
+		{"nil", nil, false},
+		{"work added", ptr(NewUntil(CodeWorkAdded, "task #4 was added", now)), true},
+		{"readers changed", ptr(NewUntil(CodeReadersChanged, "changed", now)), true},
+		{"work added with no resume time", ptr(New(CodeWorkAdded, "added")), false},
+		{"usage cap", ptr(NewUntil(CodeUsageCap, "5-hour cap reached", now)), false},
+		{"idle", ptr(NewUntil(CodeIdle, "every runnable task is finished", now)), false},
+	}
+	for _, tc := range cases {
+		if got := tc.r.ResumedAtOnce(); got != tc.want {
+			t.Errorf("%s: ResumedAtOnce() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
