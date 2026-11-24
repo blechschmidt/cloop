@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/blechschmidt/cloop/internal/ssohubtest"
 	"github.com/blechschmidt/cloop/pkg/secretbroker"
 	"github.com/blechschmidt/cloop/pkg/secretbroker/secretbrokertest"
+	"github.com/blechschmidt/cloop/pkg/statedb"
 	"github.com/blechschmidt/cloop/pkg/version"
 )
 
@@ -482,6 +484,115 @@ type auditRow struct {
 	payload map[string]any
 }
 
+// waitRestoredFrom waits until the member that adopted the run has restored
+// the git proxy and Kubernetes monitor sessions m held when it stopped: each
+// has a session_restored row naming m as its holder until then. A session
+// closed instead fails the rehearsal at once, with the reason it was closed.
+//
+// The next member is not stopped before that. A release member stopped a few
+// milliseconds into restoring them loses a race v0.0.7 cannot be changed to
+// win (Task 20520): its shutdown suspended the lease's App tokens under the
+// restore, which read that as a refusal for good and closed the git session,
+// so no member could restore it after; or the restore finished into the git
+// proxy the shutdown had just closed, and its session_restored row was lost,
+// recorded as an audit.gap (CI run 45496252794 on d0e41040; locally two
+// rehearsals in 43). The build under test stops its restores before it
+// takes anything down, which pkg/ui's TestAStoppingHubLetsARestoreInFlightFinish
+// holds it to.
+func (s *scene) waitRestoredFrom(m *member, sessions [][]string) {
+	s.t.Helper()
+	action := map[string]string{"git": "gitproxy.session_restored", "kube": "kubeguard.session_restored"}
+	s.eventually("the run's sessions to be restored from "+m.String(), 60*time.Second, func() bool {
+		for _, row := range sessions {
+			kind, id := row[0], row[1]
+			restored := false
+			rows, _ := s.tryQuery(s.hubDir, `SELECT payload FROM audit_events WHERE event_type = ? AND entity_id = ?`,
+				action[kind], id)
+			for _, r := range rows {
+				if strings.Contains(r[0], "held until then by "+m.id) {
+					restored = true
+				}
+			}
+			if restored {
+				continue
+			}
+			closed, _ := s.tryQuery(s.hubDir, `SELECT close_reason FROM proxy_sessions
+				WHERE kind = ? AND session_id = ? AND closed_at != ''`, kind, id)
+			if len(closed) > 0 {
+				s.t.Fatalf("the run's %s session %s was closed instead of restored after %s stopped: %s",
+					kind, id, m, closed[0][0])
+			}
+			return false
+		}
+		return true
+	})
+}
+
+// auditGap is one audit.gap row: audit events some process could not append,
+// recorded in the chain they were lost from.
+type auditGap struct {
+	chain string // "control plane", "project", "second project"
+	id    int
+	statedb.AuditGapPayload
+	by []string // the processes that lost them, by name
+}
+
+func (g auditGap) String() string {
+	counts := func(cs []statedb.AuditGapCount) string {
+		var parts []string
+		for _, c := range cs {
+			parts = append(parts, fmt.Sprintf("%s ×%d", c.Name, c.Events))
+		}
+		return strings.Join(parts, ", ")
+	}
+	return fmt.Sprintf("audit.gap #%d in the %s, recorded %s: %d event(s) lost in %d append(s) between %s and %s "+
+		"(%s; %s) by %s", g.id, g.chain, g.Recorded, g.LostEvents, g.FailedAppends, clock(g.FirstFailedAt),
+		clock(g.LastFailedAt), counts(g.Actions), counts(g.Reasons), strings.Join(g.by, " and "))
+}
+
+// clock is the time of day an RFC 3339 timestamp names, or the timestamp.
+func clock(ts string) string {
+	if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+		return t.UTC().Format("15:04:05.000")
+	}
+	return ts
+}
+
+// auditGaps reads every audit.gap row of the three chains the rehearsal
+// writes, naming the processes that lost the events.
+func (s *scene) auditGaps() []auditGap {
+	var out []auditGap
+	for _, chain := range []struct{ name, dir string }{
+		{"control plane", s.hubDir}, {"project", s.proj}, {"second project", s.proj2},
+	} {
+		rows, err := s.tryQuery(chain.dir, `SELECT id, payload FROM audit_events WHERE event_type = 'audit.gap' ORDER BY id`)
+		if err != nil {
+			s.t.Errorf("read the %s's audit.gap rows: %v", chain.name, err)
+			continue
+		}
+		for _, r := range rows {
+			g := auditGap{chain: chain.name}
+			g.id, _ = strconv.Atoi(r[0])
+			if err := json.Unmarshal([]byte(r[1]), &g.AuditGapPayload); err != nil {
+				s.t.Errorf("audit.gap #%s in the %s does not parse: %v: %s", r[0], chain.name, err, r[1])
+				continue
+			}
+			for _, pid := range g.PIDs {
+				name := s.processName(pid)
+				if slices.Contains(g.AdoptedFrom, pid) {
+					name += ", which exited without recording them"
+				}
+				g.by = append(g.by, name)
+			}
+			if len(g.by) == 0 {
+				g.by = []string{"a process the row does not name"}
+			}
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 // ── the rehearsal ────────────────────────────────────────────────────────────
 
 func TestRollingUpgradeFromTheLatestRelease(t *testing.T) {
@@ -642,6 +753,9 @@ func TestRollingUpgradeFromTheLatestRelease(t *testing.T) {
 				o := cs.owner("run", s.proj)
 				return o != "" && o != m.id && cs.alive(o) && cs.owner("agent", s.executorID) == o
 			})
+		if held == m.id {
+			s.waitRestoredFrom(m, sessions)
+		}
 	}
 	st = s.waitCluster(c.url(), "the build under test to hold the run, the agent and the lead", func(cs clusterStatus) bool {
 		return cs.owner("run", s.proj) == c.id && cs.owner("agent", s.executorID) == c.id && cs.Leader == c.id && cs.live() == 1
@@ -843,10 +957,37 @@ func (s *scene) checkAuditChains(members map[string]string) {
 	if byBuild[buildRelease] == 0 || byBuild[buildMain] == 0 {
 		t.Errorf("the checkpoints were not written by both builds: %v", byBuild)
 	}
+	// What verify reports as GAPS, said in the test's own words first: a CI
+	// annotation keeps a test's report lines and drops what is printed under
+	// them, which on d0e41040 (run 45496252794) left a red rehearsal saying
+	// only "exit status 3".
+	gaps := s.auditGaps()
+	for _, g := range gaps {
+		t.Errorf("%s", g)
+		if g.FirstError != "" {
+			t.Logf("audit.gap #%d in the %s: first error %q, last %q", g.id, g.chain, g.FirstError, g.LastError)
+		}
+	}
+	if len(gaps) > 0 {
+		// And what each process said about it as it happened, a line each.
+		s.mu.Lock()
+		procs := append([]*proc(nil), s.procs...)
+		s.mu.Unlock()
+		for _, p := range procs {
+			for _, line := range strings.Split(readFile(p.log), "\n") {
+				if strings.Contains(line, "[audit]") || strings.Contains(line, "audit the end of") {
+					t.Logf("%s: %s", p.name, line)
+				}
+			}
+		}
+	}
 	for _, build := range []string{buildMain, buildRelease} {
 		out, err := s.cliErr(build, s.root, nil, "hub", "audit", "verify", "--hub", s.hubDir,
 			"--project", s.proj, "--checkpoints", s.checkpoints)
 		if err != nil {
+			if len(gaps) > 0 {
+				err = fmt.Errorf("%w (the %d audit.gap row(s) reported above)", err, len(gaps))
+			}
 			t.Errorf("%s `cloop hub audit verify` over the rehearsed trail failed: %v\n%s", build, err, out)
 			continue
 		}

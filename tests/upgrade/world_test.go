@@ -82,6 +82,9 @@ type world struct {
 	procs   []*proc
 	members []*member
 	agent   *proc
+	// clis names the CLI commands the rehearsal ran, by PID, so a record
+	// that names a process (an audit.gap row does) can be traced to one.
+	clis map[int]string
 }
 
 // proc is one process the world started, in a process group of its own.
@@ -342,8 +345,39 @@ func (w *world) cliErr(build, dir string, extra []string, args ...string) (strin
 	cmd.Env = append(w.hubSideEnv(filepath.Dir(bin)), extra...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	name := build + " `cloop"
+	for _, a := range args[:min(len(args), 3)] {
+		name += " " + a
+	}
+	w.mu.Lock()
+	if w.clis == nil {
+		w.clis = map[int]string{}
+	}
+	w.clis[cmd.Process.Pid] = name + "`"
+	w.mu.Unlock()
+	err := cmd.Wait()
+	return out.String(), err
+}
+
+// processName names the process the rehearsal knew by pid: a member, the
+// agent, or a CLI command it ran.
+func (w *world) processName(pid int) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, p := range w.procs {
+		if p.cmd.Process != nil && p.cmd.Process.Pid == pid {
+			return p.name
+		}
+	}
+	if name, ok := w.clis[pid]; ok {
+		return name
+	}
+	return fmt.Sprintf("pid %d, which the rehearsal did not start", pid)
 }
 
 // ── processes ────────────────────────────────────────────────────────────────
